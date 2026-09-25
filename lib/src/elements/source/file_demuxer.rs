@@ -258,10 +258,9 @@ pub struct FileDemuxer {
     parked_since_ns: Vec<Option<i64>>,
     /// When the packet last read is due, in nanoseconds of file time.
     read_ns: Option<i64>,
-    /// Whether a preroll is running. Any blocked pad is parked for then;
-    /// outside one, only while another branch is waiting on the read cursor
-    /// — see [`FileDemuxer::may_park`].
-    phase: crate::control::Phase,
+    /// The pipeline's playback state, which says whether a preroll is
+    /// running — see [`FileDemuxer::prerolling`].
+    state: Option<std::sync::Arc<crate::playback_state::PlaybackState>>,
     /// Whether a `Seek` has repositioned it since [`Self::linger`] began
     /// waiting at the end of the file.
     sought: bool,
@@ -316,6 +315,18 @@ fn duration_ns(duration: Duration) -> i64 {
 }
 
 impl FileDemuxer {
+    /// Whether a preroll is running. Any blocked pad is parked for then;
+    /// outside one, only while another branch is waiting on the read cursor
+    /// — see [`FileDemuxer::may_park`]. Never, for a demuxer no pipeline
+    /// has wired.
+    fn prerolling(&self) -> bool {
+        // Including the pause that ends one, until it reaches this source:
+        // what it parked stays parked — see `crate::playback_state`.
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.preroll().is_some())
+    }
+
     /// Opens the file and returns it alongside every stream it contains,
     /// so the caller can inspect them (count, media type, ...) before
     /// deciding which to use — each at its own `index`, which is the pad
@@ -371,7 +382,7 @@ impl FileDemuxer {
                 parked_per_pad: vec![0; pads.len()],
                 parked_since_ns: vec![None; pads.len()],
                 read_ns: None,
-                phase: crate::control::Phase::default(),
+                state: None,
                 sought: false,
                 pads,
                 pending: VecDeque::new(),
@@ -564,7 +575,7 @@ impl FileDemuxer {
     /// run away from playback and buffer the file here — 67 MB within 1.5 s
     /// of paced playback, when parking was not yet scoped at all.
     fn may_park(&mut self, index: usize) -> bool {
-        if self.phase.preroll().is_some() {
+        if self.prerolling() {
             return true;
         }
         let another_waiting = self
@@ -701,7 +712,7 @@ impl FileDemuxer {
         }
         // Outside a preroll, a pad held back past the interleave bound is
         // waited on: reading on would only park more for it.
-        if self.phase.preroll().is_none() && self.interleave_exceeded() {
+        if !self.prerolling() && self.interleave_exceeded() {
             return true;
         }
         const MAX_PENDING_PACKETS: usize = 4_096;
@@ -731,6 +742,10 @@ impl Element for FileDemuxer {
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
+    }
+
+    fn attach_context(&mut self, context: &std::sync::Arc<crate::element::Context>) {
+        self.state = Some(std::sync::Arc::clone(&context.state));
     }
 }
 
@@ -842,9 +857,6 @@ impl SourceElement for FileDemuxer {
 
     fn on_control(&mut self, msg: &crate::control::ControlMsg) {
         use crate::control::ControlMsg;
-        // Holding a blocked pad's packets is only correct while a preroll is
-        // running; see `deliver_or_park`.
-        self.phase.observe(msg);
         match msg {
             // Those packets were read from the timeline being left behind,
             // and this source is the only place they exist — every downstream
@@ -1791,9 +1803,19 @@ mod tests {
         );
         assert_eq!(seen.load(Ordering::SeqCst), 1);
 
-        demuxer.on_control(&crate::control::ControlMsg::Preroll(Arc::new(
-            crate::control::PrerollContext::new([]),
-        )));
+        // As a pipeline does it: its playback state first, then the message.
+        let context = Arc::new(crate::element::Context::for_test_with_clock(
+            Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::new(crate::clock::Clock::new()),
+        ));
+        demuxer.attach_context(&context);
+        let preroll =
+            crate::control::ControlMsg::Preroll(Arc::new(crate::control::PrerollContext::new([])));
+        context.state.observe(&preroll);
+        demuxer.on_control(&preroll);
         demuxer
             .deliver_or_park(packet_at(index, 40), &bus)
             .expect("preroll delivery");
@@ -1803,6 +1825,7 @@ mod tests {
             "preroll must hold a blocked pad's packet so its siblings keep flowing"
         );
 
+        context.state.observe(&crate::control::ControlMsg::Resume);
         demuxer.on_control(&crate::control::ControlMsg::Resume);
         demuxer.drain_pending(&bus).expect("drain while blocked");
         assert_eq!(demuxer.pending.len(), 1, "still owed to a pad that is full");

@@ -281,6 +281,7 @@ pub use core::{
 // `crate::schedule`/`crate::time` paths working for every internal caller
 // without also making them part of this crate's external API surface.
 pub(crate) use core::frame_size;
+pub(crate) use core::playback_state;
 pub(crate) use core::repeat;
 pub(crate) use core::timing::{schedule, time, timeline};
 #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]

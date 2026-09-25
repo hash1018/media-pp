@@ -241,6 +241,12 @@ impl Element for SwDecoder {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    /// The pipeline says when a seek's preroll starts and ends — see
+    /// `PrerollGate`.
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        self.preroll_gate.attach(&context.state);
+    }
 }
 
 impl Source for SwDecoder {
@@ -333,8 +339,8 @@ impl Sink for SwDecoder {
                 Kind::Video(decoder) => decoder.flush(),
                 Kind::Audio(decoder) => decoder.flush(),
             }
+            self.preroll_gate.reset();
         }
-        self.preroll_gate.observe(msg);
         Ok(())
     }
 }

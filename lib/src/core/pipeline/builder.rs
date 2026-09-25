@@ -44,7 +44,7 @@ pub struct PipelineBuilder {
     bus_rx: BusReceiver,
     clock: Arc<Clock>,
     playback_clock: Arc<PlaybackClock>,
-    timeline: Arc<crate::timeline::Timeline>,
+    state: Arc<crate::playback_state::PlaybackState>,
     graph: PipelineGraph,
     sources: Vec<SourceEntry>,
     control_pairs: Vec<(ControlSender, ControlReceiver)>,
@@ -74,7 +74,7 @@ impl PipelineBuilder {
             bus_rx,
             playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
             clock,
-            timeline: crate::timeline::Timeline::new(),
+            state: crate::playback_state::PlaybackState::new(),
             graph,
             sources: Vec::new(),
             control_pairs: Vec::new(),
@@ -122,7 +122,7 @@ impl PipelineBuilder {
             graph: self.graph.clone(),
             clock: self.clock.clone(),
             playback_clock: self.playback_clock.clone(),
-            timeline: Arc::clone(&self.timeline),
+            state: Arc::clone(&self.state),
             operation: Arc::clone(&self.operation),
             source_id,
             source_counters: Arc::clone(&counters),
@@ -135,7 +135,7 @@ impl PipelineBuilder {
         self.graph.register_counters(source_id, &counters);
         self.source_counters.push(counters);
         self.sources.push((source_id, Box::new(source)));
-        self.control_pairs.push(control::channel());
+        self.control_pairs.push(control::channel_in(&self.state));
         Ok((self, wired))
     }
 
@@ -160,7 +160,7 @@ impl PipelineBuilder {
             control_rxs: Mutex::new(Some(control_rxs)),
             clock: self.clock,
             playback_clock: self.playback_clock,
-            timeline: self.timeline,
+            state: self.state,
             bus_rx: self.bus_rx,
             running: Arc::new(AtomicUsize::new(0)),
             paused: AtomicBool::new(false),

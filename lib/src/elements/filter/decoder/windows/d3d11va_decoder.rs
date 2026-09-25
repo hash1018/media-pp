@@ -346,6 +346,12 @@ impl Element for D3d11Decoder {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    /// The pipeline says when a seek's preroll starts and ends — see
+    /// `PrerollGate`.
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        self.preroll_gate.attach(&context.state);
+    }
 }
 
 impl Source for D3d11Decoder {
@@ -403,8 +409,8 @@ impl Sink for D3d11Decoder {
         // catching up to it exist only to warm the codec.
         if *msg == ControlMsg::Flush {
             self.decoder.flush();
+            self.preroll_gate.reset();
         }
-        self.preroll_gate.observe(msg);
         Ok(())
     }
 }

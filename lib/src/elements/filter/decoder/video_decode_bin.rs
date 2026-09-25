@@ -37,7 +37,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    control::{ControlMsg, Phase},
+    control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     elements::{DecodeThreading, SwDecoder, filter::line::Line},
     error::{Error, Result},
@@ -301,9 +301,6 @@ struct Fallback {
     size: Option<(u32, u32)>,
     /// Every packet from the last keyframe on, the one that failed included.
     since_keyframe: Vec<MediaBuffer>,
-    /// Whether the line is in the middle of a preroll, which a new line has
-    /// to be armed with before it decodes anything — see `PrerollGate`.
-    phase: Phase,
 }
 
 /// Reads which way a [`VideoDecodeBin`] is decoding, from anywhere.
@@ -373,7 +370,6 @@ impl VideoDecodeBin {
                     params,
                     size: stream.size,
                     since_keyframe: Vec::new(),
-                    phase: Phase::default(),
                 };
                 (elements, Some(output), Some(fallback))
             }
@@ -543,10 +539,6 @@ impl VideoDecodeBin {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             DecodePath::Software(SoftwareReason::HardwareRefused);
 
-        if let Some(context) = fallback.phase.preroll() {
-            self.line
-                .control(&ControlMsg::Preroll(Arc::clone(context)))?;
-        }
         // One packet that fails does not keep the rest from being decoded,
         // as it would not have in the line being replaced either; the first
         // failure is what is answered.
@@ -631,14 +623,13 @@ impl Sink for VideoDecodeBin {
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         self.install();
-        // Mirrors what the decoder inside does with each, so a replacement
-        // can be put in the same state: armed for the preroll it is in, and
-        // without the packets a Flush or Stop told the decoder to forget.
-        if let Some(fallback) = &mut self.fallback {
-            fallback.phase.observe(msg);
-            if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-                fallback.since_keyframe.clear();
-            }
+        // A replacement line starts without the packets a Flush or Stop told
+        // the decoder to forget. The preroll it may be in, it reads from the
+        // pipeline as the decoder it replaces did.
+        if let Some(fallback) = &mut self.fallback
+            && matches!(msg, ControlMsg::Flush | ControlMsg::Stop)
+        {
+            fallback.since_keyframe.clear();
         }
         // Both, whatever the first answers — as a filter's pads all get a
         // message; the first failure is the answer.
@@ -1861,9 +1852,22 @@ mod tests {
             let frames = collect(&mut bin, None);
 
             // Frame 3 of five at 30 a second.
-            let preroll = PrerollContext::for_seek([], Duration::from_millis(100));
-            bin.control(&ControlMsg::Preroll(Arc::new(preroll)))
-                .unwrap();
+            // As a pipeline does it: its playback state first, then the
+            // message. The line inside reads the state through the bin.
+            let context = Arc::new(crate::element::Context::for_test_with_clock(
+                crate::bus::Bus::new().0,
+                "test",
+                crate::graph::PipelineGraph::new(),
+                crate::graph::ElementId::for_test(1),
+                Arc::new(crate::clock::Clock::new()),
+            ));
+            bin.attach_context(&context);
+            let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::for_seek(
+                [],
+                Duration::from_millis(100),
+            )));
+            context.state.observe(&preroll);
+            bin.control(&preroll).unwrap();
             for packet in packets {
                 bin.consume(MediaBuffer::Packet(Arc::new(packet))).unwrap();
             }

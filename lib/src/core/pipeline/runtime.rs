@@ -21,6 +21,7 @@ use crate::{
     error::{Result, ThreadSpawnError},
     graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
     playback_clock::PlaybackClock,
+    playback_state::{Phase, PlaybackState},
     stats::PipelineStats,
 };
 
@@ -134,9 +135,11 @@ pub struct Pipeline {
     pub(super) control_rxs: Mutex<Option<Vec<ControlReceiver>>>,
     pub(super) clock: Arc<Clock>,
     pub(super) playback_clock: Arc<PlaybackClock>,
-    /// Which timeline this pipeline is on; a seek starts the next — see
-    /// [`crate::timeline`].
-    pub(super) timeline: Arc<crate::timeline::Timeline>,
+    /// Where playback stands, for every element to read — see
+    /// [`crate::playback_state`]. This is the only thing that writes it,
+    /// and always before it sends the control message that goes with the
+    /// change.
+    pub(super) state: Arc<PlaybackState>,
     pub(super) bus_rx: BusReceiver,
     /// How many source threads are still running — `0` before `run()` and
     /// again once every source's thread has finished. `AtomicUsize` rather
@@ -398,6 +401,7 @@ impl Pipeline {
                 pp_log: &self.pp_log,
                 "event=control control=Pause phase=requested reason=start_paused"
             );
+            self.state.pause();
             self.clock.pause();
             pause_acks = self
                 .control_txs
@@ -412,7 +416,7 @@ impl Pipeline {
         {
             let bus = bus.for_element(source_id);
             let running = Arc::clone(&self.running);
-            let timeline = Arc::clone(&self.timeline);
+            let state = Arc::clone(&self.state);
             let thread_name = "pipeline:source".to_owned();
             let spawn_result = spawn(
                 thread_name.clone(),
@@ -426,7 +430,7 @@ impl Pipeline {
                     let _running = RunningSourceGuard::new(running);
                     // What this source makes is on the pipeline's timeline,
                     // and moves to each new one as it applies the `Seek`.
-                    crate::timeline::enter(&timeline);
+                    crate::timeline::enter(&state);
 
                     let source_name = source.name();
                     let source_type = source.element_type();
@@ -584,6 +588,7 @@ impl Pipeline {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=requested"
         );
+        self.state.pause();
         self.clock.pause();
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         pp_trace!(
@@ -618,6 +623,7 @@ impl Pipeline {
             "event=control control={msg:?} phase=requested"
         );
         self.clock.resume();
+        self.state.enter(Phase::Playing);
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         pp_trace!(
             pp_log: &self.pp_log,
@@ -747,6 +753,7 @@ impl Pipeline {
     fn stop_runtime(&self) {
         let msg = ControlMsg::Stop;
         self.paused.store(false, Ordering::Release);
+        self.state.enter(Phase::Stopped);
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=requested"
@@ -874,7 +881,7 @@ impl Pipeline {
         // Everything read from here on belongs to the new position, and a
         // queue drops whatever reaches it from the old one — what the
         // `Flush` below discards, and what it misses.
-        self.timeline.begin();
+        self.state.begin_timeline();
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         let graph = self.graph();
@@ -894,6 +901,7 @@ impl Pipeline {
         // queue behind it. Cleared on every exit below, including the error
         // one, so no later `stop` cancels a preroll that already finished.
         self.publish_preroll(&preroll);
+        self.state.enter(Phase::Prerolling(Arc::clone(&preroll)));
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Preroll(Arc::clone(&preroll))));
         let preroll_result = self.await_preroll(&preroll, PREROLL_TIMEOUT);
         self.retire_preroll();

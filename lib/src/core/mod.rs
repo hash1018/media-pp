@@ -31,6 +31,7 @@ pub(crate) mod frame_size;
 pub mod graph;
 pub mod pad;
 pub mod pipeline;
+pub(crate) mod playback_state;
 pub mod pool;
 pub mod queue;
 pub mod repeat;

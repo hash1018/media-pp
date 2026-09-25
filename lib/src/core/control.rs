@@ -29,6 +29,7 @@ use crate::{
     error::Result,
     graph::{ElementId, NodeInfo},
     pad::SrcPad,
+    playback_state::PlaybackState,
 };
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
@@ -87,67 +88,6 @@ impl PartialEq for ControlMsg {
 }
 
 impl Eq for ControlMsg {}
-
-/// Where playback stands, as the control messages one element has been
-/// handed say — for an element that behaves differently while a preroll
-/// runs, or while paused.
-///
-/// Kept by each such element and fed every message it is handed, rather
-/// than read from the pipeline: a message reaches an element in order with
-/// the data around it, so the phase says what is true of the buffer that
-/// element is holding, where a flag the pipeline shared would already say
-/// what is true of the next seek's. And messages become a phase in this
-/// one place, so a new way of letting data through a paused graph — a
-/// frame step — is taught here once, not to every element that waits,
-/// holds or gates.
-#[derive(Debug, Clone, Default)]
-pub(crate) enum Phase {
-    /// Data flows at the clock's pace. Where a graph starts.
-    #[default]
-    Playing,
-    /// Nothing flows until a `Resume` or a `Preroll`.
-    Paused,
-    /// Paused, but data flows, unpaced, until each terminal has its sample
-    /// — see [`PrerollContext`].
-    Prerolling(Arc<PrerollContext>),
-    /// Abandoned: nothing flows again.
-    Stopped,
-}
-
-impl Phase {
-    /// Moves on as `msg` says. A `Flush`, `CheckSeek` or `Seek` leaves the
-    /// phase as it was: a seek is a pause, a flush, a reposition and a
-    /// preroll, and only the pause and the preroll change what flows.
-    pub(crate) fn observe(&mut self, msg: &ControlMsg) {
-        *self = match msg {
-            ControlMsg::Pause => Self::Paused,
-            ControlMsg::Resume => Self::Playing,
-            ControlMsg::Preroll(context) => Self::Prerolling(Arc::clone(context)),
-            ControlMsg::Stop => Self::Stopped,
-            ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => return,
-        };
-    }
-
-    /// The phase `msg` would move this one to.
-    pub(crate) fn after(&self, msg: &ControlMsg) -> Self {
-        let mut next = self.clone();
-        next.observe(msg);
-        next
-    }
-
-    /// The preroll under way, if one is.
-    pub(crate) fn preroll(&self) -> Option<&Arc<PrerollContext>> {
-        match self {
-            Self::Prerolling(context) => Some(context),
-            Self::Playing | Self::Paused | Self::Stopped => None,
-        }
-    }
-
-    /// Whether nothing is to flow: paused with no preroll, or stopped.
-    pub(crate) fn holds(&self) -> bool {
-        matches!(self, Self::Paused | Self::Stopped)
-    }
-}
 
 /// Why one element refused a pipeline-wide seek check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,6 +398,11 @@ pub(crate) struct Request {
 #[derive(Clone)]
 pub struct ControlSender {
     tx: Sender<Request>,
+    /// The playback state the receiving end reads, which this moves on
+    /// with each message it sends where no pipeline does — see
+    /// [`channel`].
+    state: Arc<PlaybackState>,
+    writes_state: bool,
 }
 
 /// The receiving half — not `Clone` in spirit (only one thing should be
@@ -468,6 +413,7 @@ pub struct ControlSender {
 #[derive(Clone)]
 pub struct ControlReceiver {
     pub(crate) rx: Receiver<Request>,
+    state: Arc<PlaybackState>,
 }
 
 /// Creates a control channel.
@@ -476,9 +422,35 @@ pub struct ControlReceiver {
 /// backpressure on the data path — that is the whole reason control does not
 /// travel as data. [`Pipeline`](crate::pipeline::Pipeline) creates one per
 /// source; [`Queue`](crate::queue::Queue) creates one to reach its own worker.
+///
+/// One made here stands on its own: with no pipeline to say whether a
+/// paused receiver may go on, the sending half says so, moving the state
+/// the receiver reads on with each message before it sends it. A
+/// pipeline's own channels share the pipeline's state instead, which only
+/// the pipeline moves.
 pub fn channel() -> (ControlSender, ControlReceiver) {
+    channel_sharing(PlaybackState::new(), true)
+}
+
+/// A channel whose receiving end reads `state`, which whoever owns it moves
+/// on — a pipeline, for the channels to its sources and queues.
+pub(crate) fn channel_in(state: &Arc<PlaybackState>) -> (ControlSender, ControlReceiver) {
+    channel_sharing(Arc::clone(state), false)
+}
+
+fn channel_sharing(
+    state: Arc<PlaybackState>,
+    writes_state: bool,
+) -> (ControlSender, ControlReceiver) {
     let (tx, rx) = unbounded();
-    (ControlSender { tx }, ControlReceiver { rx })
+    (
+        ControlSender {
+            tx,
+            state: Arc::clone(&state),
+            writes_state,
+        },
+        ControlReceiver { rx, state },
+    )
 }
 
 impl ControlSender {
@@ -487,7 +459,16 @@ impl ControlSender {
     /// (returns immediately) if nothing is on the other end to receive it
     /// (e.g. the pipeline already finished).
     pub fn send(&self, msg: ControlMsg) {
+        self.moves_state(&msg);
         self.send_request(RequestKind::Control(msg));
+    }
+
+    /// Where no pipeline says what `msg` changes, says it — before the
+    /// message goes, as a pipeline does. See [`channel`].
+    fn moves_state(&self, msg: &ControlMsg) {
+        if self.writes_state {
+            self.state.observe(msg);
+        }
     }
 
     /// Queues `msg` without waiting for it to be handled, and returns what
@@ -495,6 +476,7 @@ impl ControlSender {
     /// end. For a message that has to be first in line before the receiver's
     /// thread exists: [`crate::pipeline::Pipeline::run`] starting paused.
     pub(crate) fn enqueue(&self, msg: ControlMsg) -> Option<Receiver<()>> {
+        self.moves_state(&msg);
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
         self.tx
             .send(Request {
@@ -534,6 +516,12 @@ impl ControlReceiver {
 
     pub(crate) fn recv(&self) -> Option<(RequestKind, Sender<()>)> {
         self.rx.recv().ok().map(|r| (r.kind, r.ack))
+    }
+
+    /// The playback state this end reads — a pipeline's, or the channel's
+    /// own; see [`channel`].
+    pub(crate) fn state(&self) -> &Arc<PlaybackState> {
+        &self.state
     }
 }
 
@@ -762,8 +750,9 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
             apply_finish(source, bus, &ack);
             return Ok(true);
         };
-        if !Phase::Paused.after(&msg).holds() {
-            // Data flows again — a `Resume`, a `Preroll`: see `Phase`.
+        if !control.state().holds() {
+            // Playback has moved on — to playing, or to a preroll — before
+            // this message came to say so; see `crate::playback_state`.
             // Downstream goes on first, then the source itself, and only
             // then is the request done — see `SourceElement::resuming`.
             apply_one_unacked(source, bus, &msg)?;
@@ -1401,47 +1390,6 @@ mod tests {
     /// An element failing to react to a message does not keep it from the
     /// elements after it: a `Pause` one element refuses still pauses the
     /// rest of the graph, and the caller still hears of the failure.
-    /// A phase moves only on what changes what flows, and a preroll is
-    /// what a pause is released into as much as a resume is.
-    #[test]
-    fn a_phase_follows_what_changes_what_flows() {
-        let context = Arc::new(PrerollContext::new([]));
-        let mut phase = Phase::default();
-        assert!(!phase.holds(), "a graph starts playing");
-
-        phase.observe(&ControlMsg::Pause);
-        assert!(phase.holds());
-        for unmoved in [
-            ControlMsg::Flush,
-            ControlMsg::Seek(Duration::from_secs(1)),
-            ControlMsg::CheckSeek(Arc::new(SeekCheckContext::new())),
-        ] {
-            phase.observe(&unmoved);
-            assert!(phase.holds(), "{unmoved:?} leaves it paused");
-        }
-
-        phase.observe(&ControlMsg::Preroll(Arc::clone(&context)));
-        assert!(!phase.holds(), "a preroll lets data through");
-        assert!(
-            phase
-                .preroll()
-                .is_some_and(|running| Arc::ptr_eq(running, &context))
-        );
-        assert!(
-            Phase::Paused
-                .after(&ControlMsg::Preroll(context))
-                .preroll()
-                .is_some()
-        );
-
-        phase.observe(&ControlMsg::Pause);
-        assert!(phase.preroll().is_none(), "a pause ends the preroll");
-        phase.observe(&ControlMsg::Resume);
-        assert!(!phase.holds());
-        phase.observe(&ControlMsg::Stop);
-        assert!(phase.holds(), "a stop holds for good");
-    }
-
     #[test]
     fn a_filter_that_fails_to_react_still_passes_the_message_on() {
         let mut filter = Refusing {

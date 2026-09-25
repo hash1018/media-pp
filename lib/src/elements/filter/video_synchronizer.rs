@@ -7,10 +7,11 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
-    control::{ControlMsg, Phase},
+    control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
+    playback_state::PlaybackState,
     time::{MediaTimestamp, TimeBase},
 };
 
@@ -77,9 +78,9 @@ pub struct VideoSynchronizer {
     /// why this is not something the caller supplies.
     playback_clock: Option<Arc<PlaybackClock>>,
     interrupt_epoch: u64,
-    /// A preroll forwards frames without waiting on the paused playback
-    /// clock.
-    phase: Phase,
+    /// The pipeline's playback state, given with the clock: a preroll
+    /// forwards frames without waiting on the paused playback clock.
+    state: Option<Arc<PlaybackState>>,
     /// The last frame's presentation time, in nanoseconds — kept in one
     /// unit rather than the frame's own, so a stream whose unit changes
     /// still measures its frame spacing correctly.
@@ -102,7 +103,7 @@ impl VideoSynchronizer {
             pp_log,
             playback_clock: None,
             interrupt_epoch: 0,
-            phase: Phase::default(),
+            state: None,
             last_ns: None,
             frame_duration: FALLBACK_FRAME_DURATION,
             pending: VecDeque::new(),
@@ -138,7 +139,11 @@ impl VideoSynchronizer {
     }
 
     fn wait_for(&mut self, frame_ns: i64) -> WaitOutcome {
-        if self.phase.preroll().is_some() {
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.is_prerolling())
+        {
             return WaitOutcome::Render;
         }
         self.observe_frame_duration(frame_ns);
@@ -226,6 +231,7 @@ impl Element for VideoSynchronizer {
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
         self.interrupt_epoch = context.playback_clock.interrupt_epoch();
         self.playback_clock = Some(Arc::clone(&context.playback_clock));
+        self.state = Some(Arc::clone(&context.state));
     }
 }
 
@@ -276,7 +282,6 @@ impl Sink for VideoSynchronizer {
         if let Some(playback_clock) = &self.playback_clock {
             self.interrupt_epoch = playback_clock.interrupt_epoch();
         }
-        self.phase.observe(msg);
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.pending.clear();
             self.last_ns = None;
@@ -434,10 +439,14 @@ mod tests {
         // Audio has primed nothing, so ordinary scheduling would hold here.
         assert!(matches!(sync.decision(ms(2_000)), Decision::Hold));
 
-        sync.control(&ControlMsg::Preroll(context))
-            .expect("preroll");
+        // As a pipeline does it: its playback state first, then the message.
+        let state = Arc::clone(sync.state.as_ref().expect("wired"));
+        let preroll = ControlMsg::Preroll(context);
+        state.observe(&preroll);
+        sync.control(&preroll).expect("preroll");
         assert!(matches!(sync.wait_for(ms(2_000)), WaitOutcome::Render));
 
+        state.observe(&ControlMsg::Resume);
         sync.control(&ControlMsg::Resume).expect("resume");
         assert!(matches!(sync.decision(ms(2_000)), Decision::Hold));
     }

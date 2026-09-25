@@ -7,10 +7,11 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
-    control::{ControlMsg, Phase},
+    control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::PlaybackClock,
+    playback_state::PlaybackState,
     time::{MediaTimestamp, TimeBase},
 };
 
@@ -121,9 +122,9 @@ pub struct Pacer {
     /// timeline that cannot restart — see
     /// [`Pacer::with_discontinuity_limit`].
     discontinuity_limit: Option<Duration>,
-    /// A preroll advances data without consulting the paused pipeline
-    /// clock.
-    phase: Phase,
+    /// The pipeline's playback state, given with the clock: a preroll
+    /// advances data without consulting the paused pipeline clock.
+    state: Option<Arc<PlaybackState>>,
     /// Buffers whose paced wait was interrupted before the owning worker
     /// could process pause/seek/stop. Pause retains them for resume; seek
     /// and stop discard them in `control()`.
@@ -152,7 +153,7 @@ impl Pacer {
             playback_clock: None,
             discontinuity_limit: None,
             interrupt_epoch: 0,
-            phase: Phase::default(),
+            state: None,
             pending: VecDeque::new(),
             pad,
         }
@@ -205,7 +206,11 @@ impl Pacer {
         if playback.interrupted_since(self.interrupt_epoch) {
             return Ok(false);
         }
-        if self.phase.preroll().is_some() {
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.is_prerolling())
+        {
             return Ok(true);
         }
         let (pts, time_base) = match timing {
@@ -303,6 +308,7 @@ impl Element for Pacer {
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
         self.interrupt_epoch = context.playback_clock.interrupt_epoch();
         self.playback_clock = Some(Arc::clone(&context.playback_clock));
+        self.state = Some(Arc::clone(&context.state));
     }
 }
 
@@ -346,7 +352,6 @@ impl Sink for Pacer {
         if let Some(playback) = &self.playback_clock {
             self.interrupt_epoch = playback.interrupt_epoch();
         }
-        self.phase.observe(msg);
         match msg {
             ControlMsg::Flush | ControlMsg::Stop => self.pending.clear(),
             ControlMsg::Seek(_) => {
@@ -620,10 +625,13 @@ mod tests {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
         let mut pacer = paced("pacer", &context);
-        let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
-        pacer
-            .control(&ControlMsg::Preroll(context))
-            .expect("preroll");
+        let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::for_seek(
+            [],
+            Duration::from_secs(2),
+        )));
+        // As a pipeline does it: its playback state first, then the message.
+        context.state.observe(&preroll);
+        pacer.control(&preroll).expect("preroll");
 
         let started = Instant::now();
         pacer.consume(packet(0)).expect("first preroll packet");

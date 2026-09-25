@@ -6,7 +6,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{InputContract, OutputContract},
-    control::{ControlMsg, Phase},
+    control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
     graph::{
@@ -14,6 +14,7 @@ use crate::{
         PortContracts, PortRef, ResolvedFlow,
     },
     pad::SrcPad,
+    playback_state::PlaybackState,
     queue::{OverflowPolicy, Queue},
     stats::ElementCounters,
 };
@@ -255,8 +256,8 @@ struct TerminalTracer {
     id: ElementId,
     inner: Box<dyn Sink>,
     /// Whether this terminal takes anything, and which preroll it reports
-    /// its sample to.
-    phase: Phase,
+    /// its sample to — the pipeline's to say.
+    state: Arc<PlaybackState>,
     counters: Arc<ElementCounters>,
     /// Told when this terminal ends, and when a seek flushes it, so the
     /// pipeline can say when every terminal has — see
@@ -288,7 +289,7 @@ impl Element for TerminalTracer {
 
 impl Sink for TerminalTracer {
     fn ready_consume(&mut self) -> bool {
-        if self.phase.holds() {
+        if self.state.holds() {
             return false;
         }
         // This terminal's own readiness, not the whole preroll's. Closing only
@@ -296,7 +297,7 @@ impl Sink for TerminalTracer {
         // first keep consuming for as long as the slowest one takes, leaving
         // the streams at different positions when preroll finally completes.
         if self
-            .phase
+            .state
             .preroll()
             .is_some_and(|context| context.is_ready(self.id))
         {
@@ -321,7 +322,7 @@ impl Sink for TerminalTracer {
         // into that sink's output path. This is the preroll completion point;
         // deliberately do not claim physical presentation has completed.
         if result.is_ok()
-            && let Some(context) = self.phase.preroll()
+            && let Some(context) = self.state.preroll()
         {
             if is_eos {
                 context.mark_eos(self.id);
@@ -370,15 +371,6 @@ impl Sink for TerminalTracer {
         // before it.
         if matches!(msg, ControlMsg::Flush) {
             self.completion.terminal_flushed(self.id);
-        }
-        if result.is_ok() {
-            // A preroll a stop cuts short has nobody left to wait for.
-            if *msg == ControlMsg::Stop
-                && let Some(context) = self.phase.preroll()
-            {
-                context.cancel();
-            }
-            self.phase.observe(msg);
         }
         match &result {
             Ok(()) => pp_trace!(
@@ -583,7 +575,7 @@ impl ChainBuilder {
             bus: self.context.bus.for_element(terminal_id),
             id: terminal_id,
             inner: terminal,
-            phase: Phase::default(),
+            state: Arc::clone(&self.context.state),
             counters: terminal_counters,
             completion: Arc::clone(&self.context.completion),
         });
@@ -794,7 +786,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{control::PrerollContext, element::element_pp_log};
+    use crate::{control::PrerollContext, element::element_pp_log, playback_state::Phase};
 
     struct CountingTerminal {
         count: Arc<AtomicUsize>,
@@ -826,7 +818,11 @@ mod tests {
         }
     }
 
-    fn terminal(id: ElementId, count: Arc<AtomicUsize>) -> TerminalTracer {
+    fn terminal(
+        id: ElementId,
+        state: &Arc<PlaybackState>,
+        count: Arc<AtomicUsize>,
+    ) -> TerminalTracer {
         let (bus, _rx) = Bus::new();
         TerminalTracer {
             bus: bus.for_element(id),
@@ -835,7 +831,7 @@ mod tests {
                 count,
                 pp_log: element_pp_log(ElementType::Other, "terminal", None),
             }),
-            phase: Phase::default(),
+            state: Arc::clone(state),
             counters: ElementCounters::new(),
             completion: crate::pipeline::completion::Completion::new(
                 crate::graph::PipelineGraph::new(),
@@ -848,24 +844,21 @@ mod tests {
     /// branch is done would let whichever reached the target first keep
     /// consuming for as long as the slowest takes, so the two streams would
     /// sit at different positions once preroll completed.
+    ///
+    /// Driven as the pipeline drives them: by what its playback state says,
+    /// which every terminal reads.
     #[test]
     fn terminal_readiness_closes_on_its_own_sample_not_the_whole_preroll() {
         let first = ElementId::for_test(1);
         let second = ElementId::for_test(2);
         let context = Arc::new(PrerollContext::new([first, second]));
-        let mut first_terminal = terminal(first, Arc::new(AtomicUsize::new(0)));
-        let mut second_terminal = terminal(second, Arc::new(AtomicUsize::new(0)));
+        let state = PlaybackState::new();
+        let mut first_terminal = terminal(first, &state, Arc::new(AtomicUsize::new(0)));
+        let mut second_terminal = terminal(second, &state, Arc::new(AtomicUsize::new(0)));
 
-        first_terminal
-            .control(&ControlMsg::Pause)
-            .expect("pause first terminal");
+        state.pause();
         assert!(!first_terminal.ready_consume());
-        first_terminal
-            .control(&ControlMsg::Preroll(Arc::clone(&context)))
-            .expect("preroll first terminal");
-        second_terminal
-            .control(&ControlMsg::Preroll(Arc::clone(&context)))
-            .expect("preroll second terminal");
+        state.enter(Phase::Prerolling(Arc::clone(&context)));
 
         first_terminal
             .consume(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))
@@ -887,9 +880,7 @@ mod tests {
         assert!(!first_terminal.ready_consume());
         assert!(!second_terminal.ready_consume());
 
-        first_terminal
-            .control(&ControlMsg::Resume)
-            .expect("resume first terminal");
+        state.enter(Phase::Playing);
         assert!(first_terminal.ready_consume());
     }
 }

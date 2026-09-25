@@ -7,7 +7,8 @@
 //! the flush went past, and old media is handed on after the new position's.
 //! So every buffer also carries the number of the timeline it was made on,
 //! and what is behind the pipeline's current one is dropped where it crosses
-//! a thread, whatever the cascade missed.
+//! a thread, whatever the cascade missed. The current number is part of the
+//! pipeline's [`PlaybackState`].
 //!
 //! # How a buffer gets its number
 //!
@@ -20,7 +21,7 @@
 //! handing it over and gives it to its worker's thread as the buffer goes
 //! on. No element, and no [`MediaBuffer`], has to know.
 //!
-//! A number means something only against the timeline that gave it, so a
+//! A number means something only against the pipeline that gave it, so a
 //! queue takes one only from a thread of its own pipeline. A thread nobody
 //! numbered — an element's own worker, a test driving elements by hand, a
 //! thread of another pipeline handing over to this one — hands buffers over
@@ -31,51 +32,19 @@
 //!
 //! Only the number, for now: what a timeline *is* — where it starts, at
 //! what rate and in which direction it runs — is what a rate or a reverse
-//! seek will add to it, and each buffer can then be read against its own.
+//! seek will add to the state beside it, and each buffer can then be read
+//! against its own.
 
 use std::{
     cell::{Cell, RefCell},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
 use crate::buffer::MediaBuffer;
+use crate::playback_state::PlaybackState;
 
 /// The number of a buffer made on a thread that no pipeline numbered.
 pub(crate) const UNNUMBERED: u64 = 0;
-
-/// A pipeline's current timeline, shared by every thread it runs on.
-#[derive(Debug)]
-pub(crate) struct Timeline {
-    current: AtomicU64,
-}
-
-impl Timeline {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            current: AtomicU64::new(UNNUMBERED + 1),
-        })
-    }
-
-    /// The number of the timeline the pipeline is on.
-    pub(crate) fn current(&self) -> u64 {
-        self.current.load(Ordering::Acquire)
-    }
-
-    /// Starts a new timeline, and answers its number. Everything numbered
-    /// before this is behind from now on.
-    pub(crate) fn begin(&self) -> u64 {
-        self.current.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
-    /// Whether a buffer made on timeline `number` is from a position the
-    /// pipeline has since left.
-    pub(crate) fn is_behind(&self, number: u64) -> bool {
-        number != UNNUMBERED && number < self.current()
-    }
-}
 
 /// A buffer and the number of the timeline it was made on — what a queue
 /// carries across a thread.
@@ -85,15 +54,15 @@ pub(crate) struct Numbered {
 }
 
 impl Numbered {
-    /// `buf`, numbered as this thread's buffers are on `timeline` — a
-    /// queue's own, `None` for one spawned by hand — or [`UNNUMBERED`] where
-    /// this thread is not one of that timeline's.
-    pub(crate) fn on(timeline: Option<&Arc<Timeline>>, buf: MediaBuffer) -> Self {
-        let number = timeline.map_or(UNNUMBERED, |timeline| {
-            let ours = TIMELINE.with(|slot| {
+    /// `buf`, numbered as this thread's buffers are in the pipeline whose
+    /// state is `state` — a queue's own, `None` for one spawned by hand — or
+    /// [`UNNUMBERED`] where this thread is not one of that pipeline's.
+    pub(crate) fn on(state: Option<&Arc<PlaybackState>>, buf: MediaBuffer) -> Self {
+        let number = state.map_or(UNNUMBERED, |state| {
+            let ours = PIPELINE.with(|slot| {
                 slot.borrow()
                     .as_ref()
-                    .is_some_and(|entered| Arc::ptr_eq(entered, timeline))
+                    .is_some_and(|entered| Arc::ptr_eq(entered, state))
             });
             if ours { current() } else { UNNUMBERED }
         });
@@ -102,23 +71,24 @@ impl Numbered {
 }
 
 thread_local! {
-    /// The timeline this thread's pipeline is on, for [`follow`].
-    static TIMELINE: RefCell<Option<Arc<Timeline>>> = const { RefCell::new(None) };
+    /// The state of the pipeline this thread runs for, for [`follow`].
+    static PIPELINE: RefCell<Option<Arc<PlaybackState>>> = const { RefCell::new(None) };
     /// The number this thread's buffers are made on.
     static NUMBER: Cell<u64> = const { Cell::new(UNNUMBERED) };
 }
 
-/// Makes this thread one of `timeline`'s, making buffers on its current
-/// number — what a source's thread does as it starts, and a queue's worker.
-pub(crate) fn enter(timeline: &Arc<Timeline>) {
-    TIMELINE.with(|slot| *slot.borrow_mut() = Some(Arc::clone(timeline)));
-    NUMBER.with(|number| number.set(timeline.current()));
+/// Makes this thread one of the pipeline's whose state is `state`, making
+/// buffers on its current timeline — what a source's thread does as it
+/// starts, and a queue's worker.
+pub(crate) fn enter(state: &Arc<PlaybackState>) {
+    PIPELINE.with(|slot| *slot.borrow_mut() = Some(Arc::clone(state)));
+    NUMBER.with(|number| number.set(state.timeline()));
 }
 
 /// Moves this thread onto its pipeline's current timeline — what a source
 /// does as it applies a `Seek`. Nothing, on a thread no pipeline entered.
 pub(crate) fn follow() {
-    let current = TIMELINE.with(|slot| slot.borrow().as_ref().map(|timeline| timeline.current()));
+    let current = PIPELINE.with(|slot| slot.borrow().as_ref().map(|state| state.timeline()));
     if let Some(current) = current {
         NUMBER.with(|number| number.set(current));
     }
@@ -142,21 +112,21 @@ mod tests {
 
     #[test]
     fn a_thread_follows_its_pipeline_onto_a_new_timeline_only_when_told() {
-        let timeline = Timeline::new();
+        let state = PlaybackState::new();
         std::thread::spawn({
-            let timeline = Arc::clone(&timeline);
+            let state = Arc::clone(&state);
             move || {
                 assert_eq!(current(), UNNUMBERED, "a thread nobody entered");
-                enter(&timeline);
+                enter(&state);
                 let first = current();
-                assert!(!timeline.is_behind(first));
+                assert!(!state.is_behind(first));
 
-                let second = timeline.begin();
+                let second = state.begin_timeline();
                 assert_eq!(current(), first, "until it follows, it is where it was");
-                assert!(timeline.is_behind(first));
+                assert!(state.is_behind(first));
                 follow();
                 assert_eq!(current(), second);
-                assert!(!timeline.is_behind(second));
+                assert!(!state.is_behind(second));
             }
         })
         .join()
@@ -164,27 +134,19 @@ mod tests {
     }
 
     #[test]
-    fn a_buffer_is_numbered_only_for_the_timeline_its_thread_is_on() {
-        let ours = Timeline::new();
-        let theirs = Timeline::new();
-        ours.begin();
+    fn a_buffer_is_numbered_only_for_the_pipeline_its_thread_is_in() {
+        let ours = PlaybackState::new();
+        let theirs = PlaybackState::new();
+        ours.begin_timeline();
         std::thread::spawn(move || {
             let eos = || MediaBuffer::Eos;
             assert_eq!(Numbered::on(Some(&ours), eos()).number, UNNUMBERED);
             enter(&ours);
-            assert_eq!(Numbered::on(Some(&ours), eos()).number, ours.current());
+            assert_eq!(Numbered::on(Some(&ours), eos()).number, ours.timeline());
             assert_eq!(Numbered::on(Some(&theirs), eos()).number, UNNUMBERED);
             assert_eq!(Numbered::on(None, eos()).number, UNNUMBERED);
         })
         .join()
         .unwrap();
-    }
-
-    #[test]
-    fn an_unnumbered_buffer_is_never_behind() {
-        let timeline = Timeline::new();
-        timeline.begin();
-        timeline.begin();
-        assert!(!timeline.is_behind(UNNUMBERED));
     }
 }

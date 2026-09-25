@@ -34,11 +34,12 @@ use crate::{
     bus::{Bus, BusEvent},
     clock::Clock,
     contract::InputContract,
-    control::{self, ControlMsg, ControlReceiver, ControlSender, Phase, RequestKind},
+    control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
+    playback_state::PlaybackState,
     stats::ElementCounters,
-    timeline::{Numbered, Timeline, UNNUMBERED},
+    timeline::{Numbered, UNNUMBERED},
 };
 
 /// Errors specific to `Queue`. Converts into the crate-wide `Error` via
@@ -217,9 +218,9 @@ pub struct Queue {
     /// How many `Eos` this queue has taken and not yet handed on or
     /// discarded — see [`Inbox::owes_an_end`].
     ends_owed: Arc<AtomicUsize>,
-    /// The pipeline's timeline, whose number a buffer is handed over with —
-    /// see [`crate::timeline`]. `None` for one spawned by hand.
-    timeline: Option<Arc<Timeline>>,
+    /// The pipeline's playback state, whose timeline a buffer is handed over
+    /// on — see [`crate::timeline`]. `None` for one spawned by hand.
+    state: Option<Arc<PlaybackState>>,
 }
 
 impl Queue {
@@ -300,7 +301,7 @@ impl Queue {
             Some(&context.pipeline_id),
             Some(counters),
             Some(Arc::clone(&context.clock)),
-            Some(Arc::clone(&context.timeline)),
+            Some(Arc::clone(&context.state)),
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
@@ -317,7 +318,7 @@ impl Queue {
         pipeline_id: Option<&str>,
         counters: Option<Arc<ElementCounters>>,
         clock: Option<Arc<Clock>>,
-        timeline: Option<Arc<Timeline>>,
+        state: Option<Arc<PlaybackState>>,
         spawn: impl FnOnce(
             String,
             Box<dyn FnOnce() + Send + 'static>,
@@ -330,7 +331,13 @@ impl Queue {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Queue, &name, pipeline_id);
         let (tx, rx) = bounded::<Numbered>(capacity);
-        let (control_tx, control_rx) = control::channel();
+        // The pipeline's state where there is a pipeline: it says when a
+        // paused worker may go on. One spawned by hand keeps its own, moved
+        // on by what `control` sends it.
+        let (control_tx, control_rx) = match &state {
+            Some(state) => control::channel_in(state),
+            None => control::channel(),
+        };
         let worker_name = name.clone();
         let worker_bus = bus.clone();
         let worker_pp_log = pp_log.clone();
@@ -346,7 +353,7 @@ impl Queue {
             data: rx,
             overflow: overflow.clone(),
             clock: clock.clone(),
-            timeline: timeline.clone(),
+            state: state.clone(),
             ends_owed: ends_owed.clone(),
         };
 
@@ -359,8 +366,8 @@ impl Queue {
             Box::new(move || {
                 // What this worker hands on is on the timeline of what it
                 // carries — see `crate::timeline::carry_on`.
-                if let Some(timeline) = &worker_inbox.timeline {
-                    crate::timeline::enter(timeline);
+                if let Some(state) = &worker_inbox.state {
+                    crate::timeline::enter(state);
                 }
                 worker_loop(
                     worker_inbox,
@@ -390,7 +397,7 @@ impl Queue {
             clock,
             overflow,
             ends_owed,
-            timeline,
+            state,
         })
     }
 }
@@ -446,7 +453,7 @@ impl Sink for Queue {
             // one that was not yet counted in.
             self.ends_owed.fetch_add(1, Ordering::AcqRel);
             let result = self
-                .hand_over(Numbered::on(self.timeline.as_ref(), buf), Duration::MAX)
+                .hand_over(Numbered::on(self.state.as_ref(), buf), Duration::MAX)
                 .map_err(|_| QueueError::ChannelClosed.into());
             if result.is_err() {
                 self.ends_owed.fetch_sub(1, Ordering::AcqRel);
@@ -470,7 +477,7 @@ impl Sink for Queue {
         }
         // Numbered as the thread handing it over is, and carried so: see
         // `crate::timeline`.
-        let buf = Numbered::on(self.timeline.as_ref(), buf);
+        let buf = Numbered::on(self.state.as_ref(), buf);
         let result = match self.policy {
             OverflowPolicy::Block(timeout) => {
                 // Timed only when it had to wait: a send into room is not
@@ -681,10 +688,10 @@ struct Inbox {
     data: Receiver<Numbered>,
     overflow: Overflow,
     clock: Option<Arc<Clock>>,
-    /// The pipeline's timeline, against which what is carried is judged
-    /// before it goes on — `None` for a queue spawned by hand, which
-    /// drops nothing for being old.
-    timeline: Option<Arc<Timeline>>,
+    /// The pipeline's playback state, against whose timeline what is
+    /// carried is judged before it goes on — `None` for a queue spawned by
+    /// hand, which drops nothing for being old.
+    state: Option<Arc<PlaybackState>>,
     /// Shared with the [`Queue`], which counts an `Eos` in as it takes one;
     /// the worker counts it out as it hands it on or a `Flush` discards it.
     ends_owed: Arc<AtomicUsize>,
@@ -916,9 +923,9 @@ fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_
     let Numbered { number, buf } = carried;
     if worker
         .inbox
-        .timeline
+        .state
         .as_deref()
-        .is_some_and(|timeline| timeline.is_behind(number))
+        .is_some_and(|state| state.is_behind(number))
     {
         // From a position the pipeline has since left — what a `Flush`
         // should have discarded and a thread's timing let past it.
@@ -1049,8 +1056,9 @@ fn apply_control(
         if is_stop {
             return true;
         }
-        if !Phase::Paused.after(&msg).holds() {
-            // Data flows again — a `Resume`, a `Preroll`: see `Phase`.
+        if !control_rx.state().holds() {
+            // Playback has moved on — to playing, or to a preroll — before
+            // this message came to say so; see `crate::playback_state`.
             return false;
         }
         // Another Pause while already paused: already forwarded above, keep waiting.

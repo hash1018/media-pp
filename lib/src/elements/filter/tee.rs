@@ -40,8 +40,6 @@ pub struct Tee {
     id: ElementId,
     name: Arc<str>,
     shared: Arc<TeeShared>,
-    /// Which preroll, if any, is holding the branches that have their sample.
-    phase: crate::control::Phase,
     /// What arrived for a branch — by its root — while a preroll held it,
     /// in order, owed to it once playback goes on. See [`Tee::consume`].
     owed: Vec<(ElementId, VecDeque<MediaBuffer>)>,
@@ -175,7 +173,6 @@ impl Tee {
                 name: name.clone(),
                 pp_log: pp_log.clone(),
                 shared: shared.clone(),
-                phase: crate::control::Phase::default(),
                 owed: Vec::new(),
             },
             TeeHandle {
@@ -603,6 +600,13 @@ impl Tee {
         kept.push_back(buf.clone());
     }
 
+    /// What a preroll kept for the branch rooted at `root`, taken to be
+    /// handed on.
+    fn take_owed(&mut self, root: ElementId) -> Option<VecDeque<MediaBuffer>> {
+        let index = self.owed.iter().position(|(owed, _)| *owed == root)?;
+        Some(self.owed.swap_remove(index).1)
+    }
+
     /// Pushes, in order, what a preroll kept for each branch still attached,
     /// isolating a failure to its own branch as `consume` does.
     fn hand_on_owed(&mut self) {
@@ -634,15 +638,17 @@ impl Tee {
 impl Sink for Tee {
     fn ready_consume(&mut self) -> bool {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
-        let graph = self
-            .phase
-            .preroll()
+        // The preroll, if one is running, holds the branches that have
+        // their sample — the pipeline's to say.
+        let preroll = self.shared.context.state.preroll();
+        let graph = preroll
+            .as_ref()
             .map(|_| self.shared.context.graph.snapshot());
         branches.into_iter().all(|branch| {
             if !branch.active.load(Ordering::Acquire) {
                 return true;
             }
-            if let (Some(context), Some(graph)) = (self.phase.preroll(), &graph) {
+            if let (Some(context), Some(graph)) = (&preroll, &graph) {
                 let terminals = graph.terminal_ids_from(branch.root_id);
                 if context.are_ready(&terminals) {
                     return true;
@@ -660,9 +666,11 @@ impl Sink for Tee {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
-        let graph = self
-            .phase
-            .preroll()
+        // The preroll, if one is running, holds the branches that have
+        // their sample — the pipeline's to say.
+        let preroll = self.shared.context.state.preroll();
+        let graph = preroll
+            .as_ref()
             .map(|_| self.shared.context.graph.snapshot());
         // One branch failing must not stop the buffer from reaching its
         // siblings — same "errors never kill anything, just get reported"
@@ -674,7 +682,7 @@ impl Sink for Tee {
             if !branch.active.load(Ordering::Acquire) {
                 continue;
             }
-            if let (Some(context), Some(graph)) = (self.phase.preroll(), &graph) {
+            if let (Some(context), Some(graph)) = (&preroll, &graph) {
                 let terminals = graph.terminal_ids_from(branch.root_id);
                 if context.are_ready(&terminals) {
                     // This branch has its sample and its siblings do not yet:
@@ -693,6 +701,10 @@ impl Sink for Tee {
                     continue;
                 }
             }
+            // Held back until now: what was kept for it goes first, so the
+            // branch has its stream in order however this learned the hold
+            // was over — from this buffer, or from the `Resume` behind it.
+            let owed = self.take_owed(branch.root_id);
             let mut pad = lock_unpoisoned(&branch.pad);
             // Detach may have won the race while this thread waited for a
             // previous push on the same branch to finish.
@@ -700,10 +712,18 @@ impl Sink for Tee {
                 continue;
             }
             let peer = pad.peer_identity();
-            let outcome = pad.push(buf.clone());
+            let mut failures = Vec::new();
+            for kept in owed.into_iter().flatten() {
+                if let Err(error) = pad.push(kept) {
+                    failures.push(error);
+                }
+            }
+            if let Err(error) = pad.push(buf.clone()) {
+                failures.push(error);
+            }
             drop(pad);
-            if let Err(error) = outcome {
-                self.report_branch_error(branch.root_id, peer, error);
+            for error in failures {
+                self.report_branch_error(branch.root_id, peer.clone(), error);
             }
         }
         Ok(())
@@ -729,7 +749,6 @@ impl Sink for Tee {
                 self.report_branch_error(branch.root_id, peer, error);
             }
         }
-        self.phase.observe(msg);
         match msg {
             // Playing again: every branch downstream has just been resumed,
             // so the `Eos` a preroll kept goes on behind it.
@@ -1665,5 +1684,107 @@ mod tests {
             bus_rx.iter().next().is_none(),
             "a retained TeeHandle must not keep the Bus sender alive"
         );
+    }
+    /// Notes the pts of every packet it takes, in order.
+    struct PtsSink {
+        pp_log: PpLog,
+        name: &'static str,
+        seen: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl Element for PtsSink {
+        fn name(&self) -> Arc<str> {
+            self.name.into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for PtsSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Packet(packet) = buf {
+                self.seen.lock().unwrap().push(packet.pts().unwrap_or(-1));
+            }
+            Ok(())
+        }
+    }
+
+    /// A branch a preroll held gets what was kept for it before anything
+    /// that follows, however the `Tee` learns the hold is over. When a seek
+    /// made while playing is done, the pipeline says so before its `Resume`
+    /// reaches the source, and the source reads on meanwhile: the next
+    /// packet can reach the `Tee` before the `Resume` does, and handed on
+    /// at once it went ahead of those kept for the branch.
+    #[test]
+    fn what_a_preroll_kept_goes_before_what_follows_it() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
+        let early = Arc::new(Mutex::new(Vec::new()));
+        let late = Arc::new(Mutex::new(Vec::new()));
+        let branch = |name: &'static str, seen: &Arc<Mutex<Vec<i64>>>| {
+            context
+                .branch()
+                .to(PtsSink {
+                    pp_log: element_pp_log(ElementType::Other, name, None),
+                    name,
+                    seen: Arc::clone(seen),
+                })
+                .unwrap()
+        };
+        let tee_branch = context
+            .tee("tee")
+            .branch(branch("early", &early))
+            .branch(branch("late", &late))
+            .build()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+        let packet_at = |pts: i64| {
+            let mut packet = ffmpeg_next::Packet::empty();
+            packet.set_pts(Some(pts));
+            MediaBuffer::Packet(Arc::new(packet))
+        };
+
+        // A preroll in which the early branch already has its sample.
+        let snapshot = context.graph.snapshot();
+        let terminals = snapshot.terminal_ids();
+        let early_terminal = *terminals
+            .iter()
+            .find(|&&id| snapshot.node(id).is_some_and(|node| &*node.name == "early"))
+            .expect("the early branch's terminal");
+        let preroll = Arc::new(crate::control::PrerollContext::new(terminals));
+        preroll.mark_ready(early_terminal);
+        context
+            .state
+            .enter(crate::playback_state::Phase::Prerolling(preroll));
+        upstream.push(packet_at(1)).unwrap();
+        upstream.push(packet_at(2)).unwrap();
+        assert!(
+            early.lock().unwrap().is_empty(),
+            "held while the other catches up"
+        );
+
+        // Done and playing, as the pipeline says it first; no `Resume` yet.
+        context.state.enter(crate::playback_state::Phase::Playing);
+        upstream.push(packet_at(3)).unwrap();
+
+        assert_eq!(
+            *early.lock().unwrap(),
+            [1, 2, 3],
+            "what was kept, then what followed"
+        );
+        assert_eq!(*late.lock().unwrap(), [1, 2, 3]);
     }
 }

@@ -167,11 +167,16 @@ final source of truth when documentation and implementation differ.
   thread, `Tee` to its branches, a bin to the line inside it — sends it on
   from its hook. A Queue control failure is reported without leaving the
   control cascade permanently blocked.
-- An element that behaves differently while paused or while a preroll runs
-  keeps a `control::Phase`, feeds it every message, and reads it; it does
-  not match `Pause`, `Resume`, `Preroll` and `Stop` itself. Messages become
-  a phase in that one place, so a new way of letting data through a paused
-  graph is taught there once.
+- Where playback stands — paused, prerolling and for which seek, which
+  timeline is current — is the pipeline's `PlaybackState`, given to every
+  element in `attach_context` and written only by the pipeline, before the
+  message that announces the change. An element that behaves differently
+  while paused or while a preroll runs reads it there; it does not work the
+  phase out from the `Pause`, `Resume` and `Preroll` it is handed, which
+  remain for what an element does about a change — stopping a device,
+  dropping a timeline's leftovers. Whatever an element holds back during a
+  phase it hands on, in order, as soon as it sees the phase is over: from
+  the next buffer as much as from the message behind it.
 - Dropping a running `Pipeline`, driver, Queue, or owned helper process must stop
   and join/collect the worker it owns. Retained handles must not accidentally
   keep an unrelated pipeline bus, graph, sink, or worker alive.

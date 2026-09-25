@@ -3,7 +3,8 @@ use ffmpeg_next::{self as ffmpeg, Rescale};
 use std::sync::Arc;
 
 use crate::buffer::MediaBuffer;
-use crate::control::{ControlMsg, Phase, PrerollContext};
+use crate::control::PrerollContext;
+use crate::playback_state::PlaybackState;
 
 const NANOS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
 #[cfg(any(test, feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
@@ -69,26 +70,42 @@ pub(super) struct PrerollGate {
     /// instant, and EOF uses the same candidate as its last-presentable
     /// fallback.
     candidate: Option<MediaBuffer>,
-    /// Which preroll, if any, the decoder is in — what arms and opens this.
-    phase: Phase,
+    /// The pipeline's playback state, which says when a preroll starts and
+    /// ends — `None` for a decoder wired into no pipeline, which never
+    /// gates.
+    state: Option<Arc<PlaybackState>>,
+    /// The preroll this is armed for, to tell a new one from it.
+    armed: Option<Arc<PrerollContext>>,
 }
 
 impl PrerollGate {
-    /// Follows `msg`: a `Flush` forgets what the stream taught the gate,
-    /// a preroll starting arms it, and a preroll ending — whatever ends
-    /// it — opens it again. What a decoder's `control` hands every message
-    /// to.
-    pub(super) fn observe(&mut self, msg: &ControlMsg) {
-        if *msg == ControlMsg::Flush {
-            self.reset();
-        }
-        let before = self.phase.preroll().map(Arc::as_ptr);
-        self.phase.observe(msg);
-        match self.phase.preroll().cloned() {
-            Some(context) if before != Some(Arc::as_ptr(&context)) => self.begin(&context),
-            Some(_) => {}
-            None if before.is_some() => self.clear(),
-            None => {}
+    /// Reads from `state` when a preroll starts and ends — what a decoder's
+    /// `attach_context` hands on.
+    pub(super) fn attach(&mut self, state: &Arc<PlaybackState>) {
+        self.state = Some(Arc::clone(state));
+    }
+
+    /// Catches up with the pipeline: armed for a preroll that has started
+    /// since this last looked, open again once none is running — whatever
+    /// ended it. Called wherever the gate is about to decide.
+    fn follow_state(&mut self) {
+        let running = self.state.as_ref().and_then(|state| state.preroll());
+        match running {
+            Some(context) => {
+                if !self
+                    .armed
+                    .as_ref()
+                    .is_some_and(|armed| Arc::ptr_eq(armed, &context))
+                {
+                    self.begin(&context);
+                    self.armed = Some(context);
+                }
+            }
+            None => {
+                if self.armed.take().is_some() {
+                    self.clear();
+                }
+            }
         }
     }
 
@@ -132,7 +149,8 @@ impl PrerollGate {
     /// whose preroll finished well before its sibling's — the sound, while a
     /// slow picture caught up — was fed and emptied its whole stream in that
     /// time: nothing of it was left to play once the seek was done.
-    pub(super) fn holding(&self) -> bool {
+    pub(super) fn holding(&mut self) -> bool {
+        self.follow_state();
         self.active && self.delivered
     }
 
@@ -140,6 +158,7 @@ impl PrerollGate {
     /// `FileDemuxer` stamps every packet with its stream's time base, so this
     /// is available before the first frame comes back out.
     pub(super) fn observe_packet(&mut self, packet: &ffmpeg::Packet) {
+        self.follow_state();
         let time_base = packet.time_base();
         if time_base.numerator() > 0 && time_base.denominator() > 0 {
             self.time_base = Some(time_base);
@@ -227,6 +246,7 @@ impl PrerollGate {
         mut buffer: MediaBuffer,
         push: impl FnOnce(MediaBuffer) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.follow_state();
         self.describe(&mut buffer);
         if let Some(buffer) = self.admit(buffer) {
             push(buffer)?;
@@ -290,6 +310,7 @@ impl PrerollGate {
         &mut self,
         push: impl FnOnce(MediaBuffer) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.follow_state();
         if let Some(candidate) = self.finish_on_eos() {
             push(candidate)?;
             self.commit_delivery();
