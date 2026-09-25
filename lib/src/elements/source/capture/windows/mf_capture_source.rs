@@ -1,4 +1,4 @@
-use std::{ptr, sync::Arc, time::Duration};
+use std::{ptr, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
@@ -96,10 +96,6 @@ pub enum MfCaptureSourceError {
         /// Bytes the sample actually carried.
         got: usize,
     },
-
-    /// Seeking was requested on a live camera.
-    #[error("MfCaptureSource doesn't support seeking a live capture")]
-    SeekUnsupported,
 }
 
 /// Construction-time options for [`MfCaptureSource::open`].
@@ -668,10 +664,6 @@ impl SourceElement for MfCaptureSource {
         Ok(())
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let _apartment = ComApartment::new().map_err(MfCaptureSourceError::from)?;
@@ -696,10 +688,6 @@ impl SourceElement for MfCaptureSource {
             crate::buffer::set_time_base(&mut frame, self.time_base());
             self.push_frame(frame, bus);
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(MfCaptureSourceError::SeekUnsupported.into())
     }
 }
 
@@ -745,6 +733,7 @@ fn describe_color(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// One frame as it arrived, which is what the contract below is checked
     /// against.

@@ -172,10 +172,6 @@ impl SourceElement for SeekLoopSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
             if drain_control(control, self, bus)?.stopped {
@@ -189,6 +185,12 @@ impl SourceElement for SeekLoopSource {
         }
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn crate::element::SeekableSource> {
+        Some(self)
+    }
+}
+
+impl crate::element::SeekableSource for SeekLoopSource {
     fn seek(&mut self, target: Duration) -> Result<Duration> {
         self.seeks.fetch_add(1, Ordering::SeqCst);
         Ok(target)
@@ -778,10 +780,6 @@ impl SourceElement for MuteAfterSeekSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
             if drain_control(control, self, bus)?.stopped {
@@ -795,6 +793,12 @@ impl SourceElement for MuteAfterSeekSource {
         }
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn crate::element::SeekableSource> {
+        Some(self)
+    }
+}
+
+impl crate::element::SeekableSource for MuteAfterSeekSource {
     fn seek(&mut self, target: Duration) -> Result<Duration> {
         self.sought.store(true, Ordering::Release);
         Ok(target)
@@ -988,10 +992,6 @@ impl SourceElement for EndingSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
             if drain_control(control, self, bus)?.stopped {
@@ -1009,6 +1009,12 @@ impl SourceElement for EndingSource {
         }
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn crate::element::SeekableSource> {
+        Some(self)
+    }
+}
+
+impl crate::element::SeekableSource for EndingSource {
     fn seek(&mut self, target: Duration) -> Result<Duration> {
         self.owed = true;
         Ok(target)
@@ -1637,10 +1643,6 @@ impl SourceElement for UnpausingSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
             while let Some((request, ack)) = control.try_recv() {
@@ -1657,6 +1659,12 @@ impl SourceElement for UnpausingSource {
         }
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn crate::element::SeekableSource> {
+        Some(self)
+    }
+}
+
+impl crate::element::SeekableSource for UnpausingSource {
     fn seek(&mut self, target: Duration) -> Result<Duration> {
         Ok(target)
     }
@@ -1985,10 +1993,6 @@ impl SourceElement for ReadingOnSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
             while let Some((request, ack)) = control.try_recv() {
@@ -2008,6 +2012,12 @@ impl SourceElement for ReadingOnSource {
         }
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn crate::element::SeekableSource> {
+        Some(self)
+    }
+}
+
+impl crate::element::SeekableSource for ReadingOnSource {
     fn seek(&mut self, target: Duration) -> Result<Duration> {
         self.at_ms = target.as_millis() as i64;
         Ok(target)

@@ -119,7 +119,7 @@ impl PipelineBuilder {
         if source.is_live() {
             self.graph
                 .refuse_seek(source_id, crate::control::SeekRejectReason::LiveSource);
-        } else if !source.is_seekable() {
+        } else if source.as_seekable().is_none() {
             self.graph.refuse_seek(
                 source_id,
                 crate::control::SeekRejectReason::SourceNotSeekable,

@@ -7,5 +7,5 @@
 mod audio;
 mod video;
 
-pub use audio::{TestAudioOptions, TestAudioSource, TestAudioSourceError};
-pub use video::{TestVideoOptions, TestVideoSource, TestVideoSourceError};
+pub use audio::{TestAudioOptions, TestAudioSource};
+pub use video::{TestVideoOptions, TestVideoSource};

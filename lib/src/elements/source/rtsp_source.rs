@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
@@ -24,9 +24,6 @@ pub enum RtspSourceError {
     /// FFmpeg rejected connection setup, stream reading, or shutdown.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
-    /// Seeking was requested on a live RTSP stream.
-    #[error("RtspSource doesn't support seeking a live stream")]
-    SeekUnsupported,
     /// The session has no stream of the kind asked for — see
     /// [`RtspSource::best`].
     #[error("the RTSP session has no {0:?} stream")]
@@ -163,10 +160,6 @@ impl SourceElement for RtspSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {
@@ -223,15 +216,11 @@ impl SourceElement for RtspSource {
         pp_info!(self, "event=eos phase=source_completed outcome=ok");
         Ok(())
     }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(RtspSourceError::SeekUnsupported.into())
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 

@@ -91,7 +91,4 @@ pub use rtsp_source::{RtspSource, RtspSourceError};
 pub use shared_texture::{
     D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,
 };
-pub use synthetic::{
-    TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,
-    TestVideoSourceError,
-};
+pub use synthetic::{TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource};

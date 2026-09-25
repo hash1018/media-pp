@@ -150,7 +150,7 @@ impl Pipeline {
     /// operation is serialized against lifecycle controls and internally runs
     /// `Pause -> Flush -> Seek -> Preroll -> Pause`, and `Resume` after that if it
     /// was playing — see its four stages below. Every source repositions (see
-    /// [`crate::element::SourceElement::seek`]) and every downstream element
+    /// [`crate::element::SeekableSource::seek`]) and every downstream element
     /// reacts before preroll begins. Once every terminal in the starting
     /// topology snapshot has
     /// accepted a first sample (or EOS), a paused pipeline remains paused and

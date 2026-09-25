@@ -55,10 +55,6 @@ impl SourceElement for EndingSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
             if drain_control(control, self, bus)?.stopped {
@@ -76,6 +72,12 @@ impl SourceElement for EndingSource {
         }
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn crate::element::SeekableSource> {
+        Some(self)
+    }
+}
+
+impl crate::element::SeekableSource for EndingSource {
     fn seek(&mut self, target: Duration) -> Result<Duration> {
         self.owed = true;
         Ok(target)

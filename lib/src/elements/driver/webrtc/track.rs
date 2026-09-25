@@ -937,10 +937,6 @@ impl SourceElement for WebRtcTrackSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     /// Identical shape to [`crate::elements::AppSource::run`]: selects on
     /// `control` and its own data channel together, so `Stop`/`Pause`
     /// never wait behind a remote peer that's gone quiet. The data channel
@@ -1010,12 +1006,5 @@ impl SourceElement for WebRtcTrackSource {
             let _ = ack.send(());
         }
         self.pad.push_eos(&self.pp_log)
-    }
-
-    /// No timeline of its own — same reasoning as
-    /// [`crate::elements::AppSource::seek`]: a WebRTC connection has
-    /// nothing to reposition.
-    fn seek(&mut self, target: Duration) -> Result<Duration> {
-        Ok(target)
     }
 }

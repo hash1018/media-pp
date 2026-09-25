@@ -74,10 +74,6 @@ impl SourceElement for BurstSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         for _ in 0..self.buffers {
             self.pad
@@ -90,10 +86,6 @@ impl SourceElement for BurstSource {
             }
             thread::yield_now();
         }
-    }
-
-    fn seek(&mut self, target: Duration) -> Result<Duration> {
-        Ok(target)
     }
 }
 

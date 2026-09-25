@@ -90,8 +90,7 @@ use crate::{
         FileMuxerError, FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError,
         RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError,
         SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
-        SwTextLayerError, SwVideoCompositorError, SwVideoEffectError, TestAudioSourceError,
-        TestVideoSourceError, VideoSynchronizerError,
+        SwTextLayerError, SwVideoCompositorError, SwVideoEffectError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -266,14 +265,6 @@ pub enum Error {
     /// An RTSP source operation failed.
     #[error(transparent)]
     RtspSourceError(#[from] RtspSourceError),
-
-    /// A synthetic video source rejected an operation.
-    #[error(transparent)]
-    TestVideoSourceError(#[from] TestVideoSourceError),
-
-    /// A synthetic audio source rejected an operation.
-    #[error(transparent)]
-    TestAudioSourceError(#[from] TestAudioSourceError),
 
     /// A software decoder operation failed.
     #[error(transparent)]

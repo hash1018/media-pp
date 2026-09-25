@@ -39,10 +39,6 @@ pub enum AudioMixerError {
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg_next::Error),
 
-    /// Seeking was requested on a live mixer with no stored timeline.
-    #[error("AudioMixer doesn't support seeking a live mix")]
-    SeekUnsupported,
-
     /// An input sink received a buffer other than decoded audio or end-of-stream.
     #[error("AudioMixer inputs only accept Audio or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
@@ -733,10 +729,6 @@ impl SourceElement for AudioMixer {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut timeline = ActiveTimeline::new(Instant::now());
@@ -750,10 +742,6 @@ impl SourceElement for AudioMixer {
             thread::sleep(TICK_INTERVAL);
             self.mix_tick(timeline.elapsed(Instant::now()), bus);
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(AudioMixerError::SeekUnsupported.into())
     }
 }
 

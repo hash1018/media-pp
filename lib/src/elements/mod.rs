@@ -166,8 +166,8 @@ pub use source::{
     RtspSourceError, StreamInfo, SwTextLayerError, SwTextLayerHandle, SwVideoCompositor,
     SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
     SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions, TestAudioSource,
-    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer,
-    VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
+    TestVideoOptions, TestVideoSource, TextLayer, VideoCompositorOptions, VideoFit, VideoInputId,
+    VideoLayer, VideoRect, VideoSourceRect,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{

@@ -23,7 +23,6 @@
 //! to 640x480, which is not the mode the user picked.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
@@ -436,10 +435,6 @@ impl SourceElement for V4l2CaptureSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {
@@ -470,10 +465,6 @@ impl SourceElement for V4l2CaptureSource {
         pp_info!(self, "event=eos phase=source_completed outcome=ok");
         Ok(())
     }
-
-    fn seek(&mut self, _target: Duration) -> std::result::Result<Duration, crate::error::Error> {
-        Err(ffmpeg::Error::from(ffi::AVERROR(libc::ENOSYS)).into())
-    }
 }
 
 #[cfg(test)]
@@ -483,6 +474,7 @@ mod tests {
     use crate::control::{ControlMsg, channel};
     use crate::element::Sink;
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     /// One camera, one test at a time.
     ///

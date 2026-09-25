@@ -12,6 +12,28 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A source that can be sought is a `SeekableSource`;
+  `SourceElement::is_seekable` and `SourceElement::seek` are gone.** Every
+  source had to write both, and all but `FileDemuxer` answered `false` and
+  wrote a `seek` that refused, each with a `SeekUnsupported` error of its
+  own. `seek` is now the one method of `SeekableSource`, and a source says
+  it is one from `SourceElement::as_seekable`, `None` by default — as it
+  says it is a `ReversibleSource`, which extends it, for playing
+  backwards. To migrate, a source that answered `is_seekable() == false`
+  deletes `is_seekable` and `seek`; one that answered `true` deletes
+  `is_seekable`, moves `seek` into `impl SeekableSource for YourSource`,
+  and adds `fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
+  Some(self) }`. `SeekUnsupported` is gone from `AudioMixerError`,
+  `RtspSourceError`, `PipelineBridgeError`, the capture errors
+  (`DxgiCaptureSourceError`, `WgcCaptureSourceError`, `MfCaptureSourceError`,
+  `WasapiCaptureSourceError`, `PipeWireAudioCaptureSourceError`,
+  `PipeWireScreenCaptureSourceError`) and the compositor errors (`SwVideoCompositorError`,
+  `D3d11VideoCompositorError`, `CudaVideoCompositorError`);
+  `TestVideoSourceError` and `TestAudioSourceError`, which had nothing
+  else, are gone with their `Error` variants. A pipeline refuses to seek
+  such a source as before, from `Pipeline::check_seek`; one driven by hand
+  and sent a `Seek` answers a `SeekError` naming `SourceNotSeekable`.
+
 - **`SeekRejectReason` has two more variants: `SourceNotReversible` and
   `DecoderNotReversible`.** They are why `Pipeline::check_reverse` refuses
   to play backwards — see `Pipeline::set_rate` under Added. A `match` on
@@ -711,7 +733,8 @@ compile error with no explanation.
   middle of a stretch — and hands the picture on in *stretches*: a span of
   the media read from the keyframe before it, what is outside the span
   marked `AV_PKT_FLAG_DISCARD`, each span the one before the last, down to
-  the start. An element that turns a picture's packets into pictures
+  the start — `ReversibleSource` extends `SeekableSource`, since a
+  turn is a seek. An element that turns a picture's packets into pictures
   implements `ReversibleDecoder` — `begin_stretch` and `end_stretch`, between
   which it holds its pictures and at the end hands them on last first; the
   pipeline tells it where each stretch begins and ends. Each says it is one

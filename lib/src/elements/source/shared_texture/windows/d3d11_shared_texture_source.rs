@@ -1,7 +1,6 @@
 use std::{
     ffi::c_void,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use ffmpeg_next as ffmpeg;
@@ -463,18 +462,8 @@ impl SourceElement for D3d11SharedTextureSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         self.inner.run(control, bus)
-    }
-
-    /// No-op, as [`AppSource::seek`] is: there is no timeline here to
-    /// reposition — what comes next is whatever the producer paints next.
-    fn seek(&mut self, target: Duration) -> Result<Duration> {
-        self.inner.seek(target)
     }
 }
 

@@ -61,7 +61,7 @@ pub enum BusEvent {
         name: Arc<str>,
     },
     /// Posted by [`crate::control::drain_control`] once
-    /// [`crate::element::SourceElement::seek`] returns — `requested` is
+    /// [`crate::element::SeekableSource::seek`] returns — `requested` is
     /// whatever [`crate::pipeline::Pipeline::seek`] was called with;
     /// `landed` is where the source actually ended up, which the source
     /// itself has to resolve (e.g. `FileDemuxer` can only reposition to a

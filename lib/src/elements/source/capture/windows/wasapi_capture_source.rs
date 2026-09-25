@@ -92,10 +92,6 @@ pub enum WasapiCaptureSourceError {
     #[error("AUDCLNT_E_DEVICE_INVALIDATED — audio device needs to be reopened")]
     DeviceInvalidated,
 
-    /// Seeking was requested on a live audio capture.
-    #[error("WasapiCaptureSource doesn't support seeking a live capture")]
-    SeekUnsupported,
-
     /// The endpoint mix format cannot be represented by [`AudioFormat`](crate::elements::AudioFormat).
     #[error("unsupported WASAPI mix format: format_tag={format_tag}, bits_per_sample={bits}")]
     UnsupportedMixFormat {
@@ -599,10 +595,6 @@ impl SourceElement for WasapiCaptureSource {
         Ok(())
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
 
@@ -622,10 +614,6 @@ impl SourceElement for WasapiCaptureSource {
             pp_error!(self, "Stop failed: {error}");
         }
         result
-    }
-
-    fn seek(&mut self, _target: std::time::Duration) -> Result<std::time::Duration> {
-        Err(WasapiCaptureSourceError::SeekUnsupported.into())
     }
 }
 

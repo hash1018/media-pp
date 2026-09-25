@@ -6,7 +6,6 @@ use std::{
 
 use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
-use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
@@ -18,15 +17,6 @@ use crate::{
     pool::UnboundObjectPool,
     schedule::PeriodicSchedule,
 };
-
-/// Errors specific to `TestVideoSource`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
-#[derive(Debug, ThisError)]
-pub enum TestVideoSourceError {
-    /// Seeking was requested on an unbounded generated stream.
-    #[error("TestVideoSource doesn't support seeking a generated stream")]
-    SeekUnsupported,
-}
 
 /// Construction-time options for [`TestVideoSource::new`].
 #[derive(Debug, Clone, Copy)]
@@ -227,10 +217,6 @@ impl SourceElement for TestVideoSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
@@ -267,10 +253,6 @@ impl SourceElement for TestVideoSource {
             // through uncapped before the next iteration ever notices.
             schedule.advance_after_tick(Instant::now());
         }
-    }
-
-    fn seek(&mut self, _target: std::time::Duration) -> crate::error::Result<std::time::Duration> {
-        Err(TestVideoSourceError::SeekUnsupported.into())
     }
 }
 
@@ -373,9 +355,9 @@ mod tests {
     }
 
     #[test]
-    fn seek_is_explicitly_unsupported() {
+    fn a_generated_stream_cannot_be_sought() {
         let mut source = TestVideoSource::new("test-video", TestVideoOptions::default());
-        assert!(source.seek(Duration::from_secs(1)).is_err());
+        assert!(source.as_seekable().is_none());
     }
 
     /// Records the wall-clock `Instant` each frame arrives at, rather than

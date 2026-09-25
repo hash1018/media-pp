@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::pp_log::{PpLog, pp_info};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
@@ -42,8 +42,8 @@ pub enum AppSourceError {
 /// [`AppSourceHandle`] clone — either ends `run` the same way, pushing
 /// exactly one `Eos` of its own to `src_pads()`.
 ///
-/// Has no timeline of its own, so [`SourceElement::seek`] is a no-op that
-/// reports back whatever was requested as where it "landed" — nothing to
+/// Has no timeline of its own, so it is not a
+/// [`SeekableSource`](crate::element::SeekableSource): there is nothing to
 /// reposition when the app, not a file offset, decides what comes next.
 pub struct AppSource {
     pp_log: PpLog,
@@ -164,10 +164,6 @@ impl SourceElement for AppSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {
@@ -227,15 +223,6 @@ impl SourceElement for AppSource {
         }
         self.pad.push_eos(&self.pp_log)
     }
-
-    /// No-op: `AppSource` has nothing of its own to reposition — whatever
-    /// comes next is whatever the app pushes next, not a position in a
-    /// file. Reports `target` back as where it "landed" so downstream
-    /// (e.g. a [`crate::elements::Pacer`] resetting its clock offset)
-    /// still sees a consistent [`crate::bus::BusEvent::Seeked`].
-    fn seek(&mut self, target: Duration) -> Result<Duration> {
-        Ok(target)
-    }
 }
 
 #[cfg(test)]
@@ -243,6 +230,7 @@ mod tests {
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
         thread,
+        time::Duration,
     };
 
     use super::*;

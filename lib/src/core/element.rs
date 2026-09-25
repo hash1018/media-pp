@@ -3,8 +3,9 @@
 //! [`Sink`] consumes buffers, [`Source`] owns the [`SrcPad`](crate::pad::SrcPad)s
 //! they leave through, and [`Filter`] is simply both. [`SourceElement`] adds
 //! the one thing a graph needs exactly once: a `run` loop that drives the
-//! whole pipeline. [`ReversibleSource`] and [`ReversibleDecoder`] are what a
-//! source and a decoder add to play backwards.
+//! whole pipeline. [`SeekableSource`] is what a source adds to be sought,
+//! and [`ReversibleSource`] and [`ReversibleDecoder`] what a source and a
+//! decoder add to play backwards.
 //!
 //! [`Element`] itself is the identity half — an element's type and its
 //! caller-chosen name, which every log record and every
@@ -569,13 +570,16 @@ pub trait SourceElement: Source {
     /// style preroll behavior.
     fn is_live(&self) -> bool;
 
-    /// Whether this source can reposition its own input timeline through
-    /// [`Self::seek`].
-    ///
-    /// This only describes the source's capability. A seekable source does
-    /// not imply that every downstream branch can accept a pipeline seek;
-    /// that must be validated across the complete graph before mutation.
-    fn is_seekable(&self) -> bool;
+    /// This source as a [`SeekableSource`], where it is one — asked as it is
+    /// wired, and for each seek. An implementation of [`SeekableSource`]
+    /// answers `Some(self)`, or `None` where what it was opened on cannot
+    /// be repositioned. `None` by default: a capture, a generator, anything
+    /// fed from outside has no timeline of its own to move, and a pipeline
+    /// with such a source refuses to seek — see
+    /// [`crate::pipeline::Pipeline::check_seek`].
+    fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
+        None
+    }
 
     /// This source as a [`ReversibleSource`], where it is one — asked as it
     /// is wired, and for each seek and finish while playing backwards. An
@@ -605,7 +609,7 @@ pub trait SourceElement: Source {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()>;
 
     /// Reacts to one control message before it is forwarded to this source's
-    /// own pads — the same ordering [`Self::seek`] gets, and for the same
+    /// own pads — the same ordering [`SeekableSource::seek`] gets, and for the same
     /// reason: whatever this source holds must already reflect the message by
     /// the time downstream elements see it.
     ///
@@ -640,7 +644,16 @@ pub trait SourceElement: Source {
     fn resuming(&mut self) -> Result<()> {
         Ok(())
     }
+}
 
+/// A source that can reposition its own input timeline — what
+/// [`crate::pipeline::Pipeline::seek`] asks of every source. It says it is
+/// one through [`SourceElement::as_seekable`].
+///
+/// This is only the source's side. A seekable source does not mean every
+/// branch after it can follow a seek; that is asked of the whole graph as
+/// it is wired — see [`Sink::accepts_seek`].
+pub trait SeekableSource: SourceElement {
     /// Repositions this source to `target`, an absolute position from the
     /// start of the media (e.g. `av_seek_frame` for
     /// [`crate::elements::FileDemuxer`]). Called by
@@ -679,10 +692,10 @@ pub trait SourceElement: Source {
 /// [`ReversibleDecoder`] after it is told one is complete. What the source has
 /// besides the picture it does not hand on: the sound is not played
 /// backwards.
-pub trait ReversibleSource: SourceElement {
+pub trait ReversibleSource: SeekableSource {
     /// Repositions this source to read backwards from `target`, the first
     /// stretch ending with the picture at or before it. Called in place of
-    /// [`SourceElement::seek`] for each seek while the pipeline plays
+    /// [`SeekableSource::seek`] for each seek while the pipeline plays
     /// backwards, in the same order with the messages around it, and
     /// answers where it landed as that does.
     fn seek_backwards(&mut self, target: Duration) -> Result<Duration>;

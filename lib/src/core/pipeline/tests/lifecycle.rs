@@ -151,16 +151,8 @@ impl SourceElement for FailingSource {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
         Err(crate::Error::Other("the source went away".into()))
-    }
-
-    fn seek(&mut self, target: Duration) -> Result<Duration> {
-        Ok(target)
     }
 }
 

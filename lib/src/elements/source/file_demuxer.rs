@@ -17,7 +17,10 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
     control::{ControlReceiver, RequestKind, drain_control, handle_request},
-    element::{Element, ElementType, ReversibleSource, Source, SourceElement, element_pp_log},
+    element::{
+        Element, ElementType, ReversibleSource, SeekableSource, Source, SourceElement,
+        element_pp_log,
+    },
     pad::SrcPad,
 };
 
@@ -227,7 +230,7 @@ impl FileDemuxerHandle {
 /// Run by hand, [`run`](crate::element::SourceElement::run) returns at that
 /// point only once its control sender is gone.
 ///
-/// [`FileDemuxer::seek`]: crate::element::SourceElement::seek
+/// [`FileDemuxer::seek`]: crate::element::SeekableSource::seek
 pub struct FileDemuxer {
     pp_log: PpLog,
     name: Arc<str>,
@@ -893,10 +896,6 @@ impl SourceElement for FileDemuxer {
         false
     }
 
-    fn is_seekable(&self) -> bool {
-        true
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         pp_info!(self, "started");
         // Deliberately re-creates `self.input.packets()` fresh every
@@ -1018,6 +1017,12 @@ impl SourceElement for FileDemuxer {
         }
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
+        Some(self)
+    }
+}
+
+impl SeekableSource for FileDemuxer {
     fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
         self.backwards = None;
         self.reposition(target)

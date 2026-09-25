@@ -217,10 +217,6 @@ pub enum D3d11VideoCompositorError {
     )]
     UnsupportedBuffer(&'static str),
 
-    /// Seeking was requested on a live compositor with no stored timeline.
-    #[error("D3d11VideoCompositor doesn't support seeking a live composition")]
-    SeekUnsupported,
-
     /// The compositor this handle belongs to has stopped, so there is nothing
     /// left to add to. Returned by the handle's `add_*` methods in place of
     /// an input nothing would ever read.
@@ -1355,10 +1351,6 @@ impl SourceElement for D3d11VideoCompositor {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
@@ -1391,10 +1383,6 @@ impl SourceElement for D3d11VideoCompositor {
                 ticks.missed(missed);
             }
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(D3d11VideoCompositorError::SeekUnsupported.into())
     }
 }
 

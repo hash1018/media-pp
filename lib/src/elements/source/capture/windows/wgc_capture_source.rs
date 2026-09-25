@@ -145,9 +145,6 @@ pub enum WgcCaptureSourceError {
     /// The frame callback disappeared while the capture session was still live.
     #[error("Windows Graphics Capture frame notifications stopped unexpectedly")]
     FrameNotificationsStopped,
-    /// Seeking was requested on a live window capture.
-    #[error("WgcCaptureSource doesn't support seeking a live capture")]
-    SeekUnsupported,
 }
 
 /// Construction options for [`WgcCaptureSource::open`].
@@ -539,10 +536,6 @@ impl SourceElement for WgcCaptureSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         let _apartment = WinRtApartment::initialize()?;
         let hwnd = HWND(self.hwnd as *mut _);
@@ -640,10 +633,6 @@ impl SourceElement for WgcCaptureSource {
             }
             schedule.advance_after_tick(Instant::now());
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(WgcCaptureSourceError::SeekUnsupported.into())
     }
 }
 

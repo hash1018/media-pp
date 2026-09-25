@@ -154,10 +154,6 @@ pub enum SwVideoCompositorError {
     )]
     UnsupportedBuffer(&'static str),
 
-    /// Seeking was requested on a live compositor with no stored timeline.
-    #[error("SwVideoCompositor doesn't support seeking a live composition")]
-    SeekUnsupported,
-
     /// The compositor this handle belongs to has stopped, so there is nothing
     /// left to add to. Returned by the handle's `add_*` methods in place of
     /// an input nothing would ever read.
@@ -959,10 +955,6 @@ impl SourceElement for SwVideoCompositor {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
@@ -995,10 +987,6 @@ impl SourceElement for SwVideoCompositor {
                 ticks.missed(missed);
             }
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(SwVideoCompositorError::SeekUnsupported.into())
     }
 }
 

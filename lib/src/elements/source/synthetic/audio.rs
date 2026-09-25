@@ -7,7 +7,6 @@ use std::{
 
 use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
-use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
@@ -25,15 +24,6 @@ use crate::{
 /// [`crate::elements::WasapiCaptureSource`]'s own `POLL_INTERVAL`/
 /// [`crate::elements::AudioMixer`]'s `TICK_INTERVAL`.
 const TICK_INTERVAL: Duration = Duration::from_millis(20);
-
-/// Errors specific to `TestAudioSource`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
-#[derive(Debug, ThisError)]
-pub enum TestAudioSourceError {
-    /// Seeking was requested on an unbounded generated stream.
-    #[error("TestAudioSource doesn't support seeking a generated stream")]
-    SeekUnsupported,
-}
 
 /// Construction-time options for [`TestAudioSource::new`].
 #[derive(Debug, Clone, Copy)]
@@ -203,10 +193,6 @@ impl SourceElement for TestAudioSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut timeline = ActiveTimeline::new(Instant::now());
@@ -240,10 +226,6 @@ impl SourceElement for TestAudioSource {
                 );
             }
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(TestAudioSourceError::SeekUnsupported.into())
     }
 }
 
@@ -349,9 +331,9 @@ mod tests {
     }
 
     #[test]
-    fn seek_is_explicitly_unsupported() {
+    fn a_generated_stream_cannot_be_sought() {
         let mut source = TestAudioSource::new("test-audio", TestAudioOptions::default());
-        assert!(source.seek(Duration::from_secs(1)).is_err());
+        assert!(source.as_seekable().is_none());
     }
 
     /// Regression test for the pause/resume timing bug: `start.elapsed()`

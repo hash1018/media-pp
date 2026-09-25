@@ -46,11 +46,6 @@ pub enum PipelineBridgeError {
     #[error("the bridge did not take a buffer within {0:?}")]
     SendTimedOut(Duration),
 
-    /// Seeking was asked of a bridge. The timeline belongs to whatever feeds
-    /// it, in a pipeline this one has no authority over.
-    #[error("a PipelineBridge cannot seek what another pipeline is producing")]
-    SeekUnsupported,
-
     /// The bridge's own pipeline has finished, so there is nothing on the
     /// other side any more.
     ///
@@ -156,7 +151,7 @@ impl Default for PipelineBridgeOptions {
 ///
 /// What does not cross is control itself, with one exception: see
 /// [`Sink::control`] on the input this hands out. Seeking is refused here
-/// outright ([`SourceElement::is_seekable`] is `false`) — the timeline
+/// outright — it is not a [`crate::element::SeekableSource`] — the timeline
 /// belongs to whatever feeds the bridge, and an application holding both
 /// pipelines seeks the one that owns it.
 ///
@@ -492,16 +487,6 @@ impl SourceElement for PipelineBridge {
     /// something this can see.
     fn is_live(&self) -> bool {
         true
-    }
-
-    /// The timeline belongs to whatever is upstream, in a pipeline this one
-    /// has no authority over.
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(PipelineBridgeError::SeekUnsupported.into())
     }
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {

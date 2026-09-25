@@ -115,10 +115,6 @@ pub enum DxgiCaptureSourceError {
     #[error("failed to reference the captured picture (code {0})")]
     FrameRef(i32),
 
-    /// Seeking was requested on a live desktop capture.
-    #[error("DxgiCaptureSource doesn't support seeking a live capture")]
-    SeekUnsupported,
-
     /// [`DxgiCaptureOptions::frame_rate`]'s numerator or denominator is not
     /// positive. Refused before any device or duplication is created.
     #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
@@ -1755,10 +1751,6 @@ impl SourceElement for DxgiCaptureSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
@@ -1829,10 +1821,6 @@ impl SourceElement for DxgiCaptureSource {
             // identical correction for why the placement matters.
             schedule.advance_after_tick(Instant::now());
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(DxgiCaptureSourceError::SeekUnsupported.into())
     }
 }
 

@@ -111,9 +111,6 @@ pub enum PipeWireScreenCaptureSourceError {
     #[error("the captured source is gone: {0}")]
     SourceGone(String),
 
-    #[error("PipeWireScreenCaptureSource doesn't support seeking a live capture")]
-    SeekUnsupported,
-
     /// [`PipeWireScreenCaptureOptions::frame_rate`]'s numerator or
     /// denominator is not positive. Refused before the portal is asked for
     /// anything, so no dialog is shown for a capture that could not run.
@@ -1174,10 +1171,6 @@ impl SourceElement for PipeWireScreenCaptureSource {
         true
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
@@ -1252,10 +1245,6 @@ impl SourceElement for PipeWireScreenCaptureSource {
             // `TestVideoSource::run`'s identical correction.
             schedule.advance_after_tick(Instant::now());
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(PipeWireScreenCaptureSourceError::SeekUnsupported.into())
     }
 }
 
@@ -2818,21 +2807,5 @@ mod tests {
         let second = source.emit_frame().expect("the first capture after it");
         assert_ne!(picture_id(&first), picture_id(&second));
         assert_eq!(second.data(0)[0], 0x33);
-    }
-
-    #[test]
-    fn seek_is_rejected_as_a_typed_error() {
-        // `open` needs a portal dialog, so the rejection is asserted against
-        // the error itself rather than through a constructed element.
-        let error: crate::Error = PipeWireScreenCaptureSourceError::SeekUnsupported.into();
-        assert!(
-            matches!(
-                error,
-                crate::Error::PipeWireScreenCaptureSourceError(
-                    PipeWireScreenCaptureSourceError::SeekUnsupported
-                )
-            ),
-            "seek failures must reach callers as a typed variant, not a stringly error"
-        );
     }
 }

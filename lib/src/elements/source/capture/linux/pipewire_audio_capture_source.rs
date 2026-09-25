@@ -79,9 +79,6 @@ pub enum PipeWireAudioCaptureSourceError {
     #[error("PipeWire negotiated an empty audio format ({rate}Hz, {channels} channel(s))")]
     EmptyFormat { rate: u32, channels: u32 },
 
-    #[error("PipeWireAudioCaptureSource doesn't support seeking a live capture")]
-    SeekUnsupported,
-
     #[error("the PipeWire audio capture stream ended")]
     StreamEnded,
 }
@@ -547,10 +544,6 @@ impl SourceElement for PipeWireAudioCaptureSource {
         self.set_active(true)
     }
 
-    fn is_seekable(&self) -> bool {
-        false
-    }
-
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {
@@ -609,10 +602,6 @@ impl SourceElement for PipeWireAudioCaptureSource {
                 );
             }
         }
-    }
-
-    fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(PipeWireAudioCaptureSourceError::SeekUnsupported.into())
     }
 }
 
@@ -1450,18 +1439,5 @@ mod tests {
             !nodes[1].is_default,
             "a source sharing the name must not be flagged from the sink's default"
         );
-    }
-
-    #[test]
-    fn seek_is_rejected_as_a_typed_error() {
-        // `open` needs a live daemon, so the rejection is asserted against the
-        // error itself rather than through a constructed element.
-        let error: crate::Error = PipeWireAudioCaptureSourceError::SeekUnsupported.into();
-        assert!(matches!(
-            error,
-            crate::Error::PipeWireAudioCaptureSourceError(
-                PipeWireAudioCaptureSourceError::SeekUnsupported
-            )
-        ));
     }
 }

@@ -123,8 +123,10 @@ final source of truth when documentation and implementation differ.
 - Whether a seek can be followed is declared the same way, at wiring: a
   sink whose output is a record of the stream as it ran — a file being
   written, a replay window — returns false from `Sink::accepts_seek`, and a
-  source says so through `is_live` and `is_seekable`. `Pipeline::check_seek`
-  answers from what the graph holds; nothing asks the running elements.
+  source that can reposition its input is a `SeekableSource`, saying so
+  from `as_seekable`; one that cannot writes no `seek` at all. A live one
+  also says so through `is_live`. `Pipeline::check_seek` answers from what
+  the graph holds; nothing asks the running elements.
   Playing backwards likewise: a source that can is a `ReversibleSource`,
   and an element that turns a picture's packets into pictures a
   `ReversibleDecoder`, each saying so from `as_reversible`; the pipeline tells

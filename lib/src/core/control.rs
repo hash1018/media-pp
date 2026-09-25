@@ -62,7 +62,7 @@ pub enum ControlMsg {
     /// every expected terminal reports its first new-timeline sample.
     Preroll(Arc<PrerollContext>),
     /// Jump to an absolute position from the start of the media.
-    /// The source repositions via [`crate::element::SourceElement::seek`]
+    /// The source repositions via [`crate::element::SeekableSource::seek`]
     /// before this is forwarded downstream. Timeline state is discarded by
     /// the preceding `Flush`, not implicitly by this message.
     Seek(Duration),
@@ -839,7 +839,7 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
 }
 
 /// `Seek`'s source-specific half of `drain_control` — repositions
-/// `source` (see [`SourceElement::seek`]) and reports where it actually
+/// `source` (see [`crate::element::SeekableSource::seek`]) and reports where it actually
 /// landed via [`BusEvent::Seeked`], since that can differ from what was
 /// requested. No-op for every other [`ControlMsg`].
 /// Hands `msg` to `filter` and then on through each of its pads — what a
@@ -897,7 +897,20 @@ fn apply_seek<S: SourceElement>(
                 }
             }
         } else {
-            source.seek(*target)?
+            let (element_type, name) = (source.element_type(), source.name());
+            match source.as_seekable() {
+                Some(source) => source.seek(*target)?,
+                None => {
+                    return Err(SeekError {
+                        rejections: vec![SeekRejection {
+                            element_type,
+                            name,
+                            reason: SeekRejectReason::SourceNotSeekable,
+                        }],
+                    }
+                    .into());
+                }
+            }
         };
         bus.post(
             source.pp_log(),
@@ -979,10 +992,6 @@ mod tests {
             false
         }
 
-        fn is_seekable(&self) -> bool {
-            false
-        }
-
         fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
             unreachable!("not exercised by these tests")
         }
@@ -993,13 +1002,19 @@ mod tests {
             }
         }
 
+        fn as_reversible(&mut self) -> Option<&mut dyn crate::element::ReversibleSource> {
+            if self.reversible { Some(self) } else { None }
+        }
+
+        fn as_seekable(&mut self) -> Option<&mut dyn crate::element::SeekableSource> {
+            Some(self)
+        }
+    }
+
+    impl crate::element::SeekableSource for DummySource {
         fn seek(&mut self, target: Duration) -> Result<Duration> {
             self.sought.push((target, false));
             Ok(target)
-        }
-
-        fn as_reversible(&mut self) -> Option<&mut dyn crate::element::ReversibleSource> {
-            if self.reversible { Some(self) } else { None }
         }
     }
 
@@ -1044,6 +1059,31 @@ mod tests {
             SeekRejectReason::SourceNotReversible
         );
         assert!(source.sought.is_empty(), "and not sought at all");
+    }
+
+    /// A source that is not a `SeekableSource` has no `seek` to call: sent a
+    /// `Seek` by hand, it answers a typed error naming it, rather than
+    /// anything a source of its own wrote.
+    #[test]
+    fn a_seek_to_a_source_that_cannot_be_sought_is_refused() {
+        let (bus, _bus_rx) = Bus::new();
+        let mut source = TwoPads {
+            pp_log: element_pp_log(ElementType::Other, "two-pads", None),
+            pads: [SrcPad::new("video"), SrcPad::new("audio")],
+        };
+        let refused = apply_one_unacked(
+            &mut source,
+            &bus,
+            &ControlMsg::Seek(Duration::from_secs(1)),
+            false,
+        );
+        let Err(crate::Error::SeekError(error)) = refused else {
+            panic!("refused with a seek error: {refused:?}");
+        };
+        assert_eq!(
+            error.rejections()[0].reason,
+            SeekRejectReason::SourceNotSeekable
+        );
     }
 
     /// A source that holds data of its own — `FileDemuxer` parks packets for a
@@ -1108,10 +1148,6 @@ mod tests {
             true
         }
 
-        fn is_seekable(&self) -> bool {
-            false
-        }
-
         fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
             unreachable!("driven through drain_control directly")
         }
@@ -1124,10 +1160,6 @@ mod tests {
         fn resuming(&mut self) -> Result<()> {
             self.order.lock().unwrap().push("source starts".into());
             Ok(())
-        }
-
-        fn seek(&mut self, target: Duration) -> Result<Duration> {
-            Ok(target)
         }
     }
 
@@ -1551,16 +1583,8 @@ mod tests {
             false
         }
 
-        fn is_seekable(&self) -> bool {
-            false
-        }
-
         fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
             unreachable!("not exercised by these tests")
-        }
-
-        fn seek(&mut self, target: Duration) -> Result<Duration> {
-            Ok(target)
         }
     }
 
