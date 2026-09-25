@@ -16,7 +16,9 @@
 //! - paused means nothing new reaches a terminal, except the one picture a
 //!   seek's preroll asks for;
 //! - after a seek, what a terminal is handed is from the new position on,
-//!   and goes forward — nothing from before the seek arrives after it;
+//!   and goes forward — nothing from before the seek arrives after it —
+//!   with nothing missing in between: no step between two samples much
+//!   wider than the stream's own spacing, where nothing drops by design;
 //! - resumed away from the end, it flows again;
 //! - played to the end, the pipeline says [`BusEvent::Finished`];
 //! - and nothing reports an error.
@@ -80,6 +82,9 @@ struct Recorder {
     /// Used where a frame does not say its own time base.
     fallback: ffmpeg::Rational,
     log: Arc<Mutex<Vec<Entry>>>,
+    /// How long it takes over each buffer — a slower terminal than its
+    /// siblings, so one branch prerolls after the other.
+    delay: Duration,
 }
 
 impl Recorder {
@@ -91,9 +96,15 @@ impl Recorder {
                 name: name.into(),
                 fallback,
                 log: Arc::clone(&log),
+                delay: Duration::ZERO,
             },
             log,
         )
+    }
+
+    fn slowed(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     fn pts(&self, frame: &ffmpeg::Frame) -> Option<Duration> {
@@ -126,6 +137,7 @@ impl Element for Recorder {
 
 impl Sink for Recorder {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        thread::sleep(self.delay);
         let entry = match &buf {
             MediaBuffer::Video(frame) => Entry::Data {
                 pts: self.pts(frame),
@@ -163,6 +175,20 @@ enum Shape {
     /// The picture timed by a `VideoSynchronizer` rather than a `Pacer` —
     /// how a player shows it, dropping what is late.
     Synchronized,
+    /// The file's packets fanned out before they are decoded, to two
+    /// branches of their own, one slower to take a picture than the other
+    /// — so one prerolls while the other is still catching up.
+    TeeOfPackets,
+}
+
+impl Shape {
+    /// Whether every sample a terminal is handed after a seek must follow
+    /// the one before it. Not for a `VideoSynchronizer`, which drops a
+    /// picture that is late by design, nor a live source, which skips the
+    /// ticks a starved thread missed.
+    fn lossless(self) -> bool {
+        !matches!(self, Shape::Synchronized | Shape::Live)
+    }
 }
 
 /// A built pipeline and what its terminals recorded.
@@ -216,6 +242,26 @@ impl Rig {
         let mut terminals = Vec::new();
         let name = format!("conformance-{shape:?}").to_lowercase();
         let (pipeline, ()) = Pipeline::new(name, source, |source, ctx| {
+            if let Shape::TeeOfPackets = shape {
+                let mut tee = ctx.tee("tee");
+                for (name, delay) in [("screen", 0), ("second-screen", 20)] {
+                    let (recorder, log) = Recorder::new(name, video.time_base);
+                    terminals.push((name, log));
+                    tee = tee.branch(
+                        ctx.branch()
+                            .queue(format!("{name}-packets"), packets)
+                            .pipe(SwDecoder::new(
+                                format!("{name}-decoder"),
+                                video.parameters.clone(),
+                            )?)
+                            .queue(format!("{name}-frames"), frames)
+                            .pipe(Pacer::new(format!("{name}-pacer")))
+                            .to(recorder.slowed(Duration::from_millis(delay)))?,
+                    );
+                }
+                ctx.attach(source, video.index, tee.build()?)?;
+                return Ok(());
+            }
             let decoder = SwDecoder::new("video-decoder", video.parameters.clone())?;
             let picture = ctx
                 .branch()
@@ -677,7 +723,13 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
     }
     let landings = bus.landings();
     for (name, log) in &rig.terminals {
-        if let Err(why) = judge(&log.lock().unwrap(), &model.seeks, &landings, rig.duration) {
+        if let Err(why) = judge(
+            &log.lock().unwrap(),
+            &model.seeks,
+            &landings,
+            rig.duration,
+            shape.lossless(),
+        ) {
             return fail(&history, format!("{name}: {why}"));
         }
     }
@@ -695,7 +747,13 @@ fn judge(
     seeks: &[(Duration, SeekMode)],
     landings: &[Duration],
     duration: Option<Duration>,
+    lossless: bool,
 ) -> std::result::Result<(), String> {
+    // The widest step allowed between two samples in a row: a few of the
+    // stream's own, so a picture or a packet of sound gone missing shows,
+    // and one a timestamp rounded differently does not.
+    let widest = typical_spacing(log)
+        .map(|spacing| (spacing * 5 / 2).max(spacing + Duration::from_millis(20)));
     let mut paused = false;
     // How many samples a preroll has let through while paused, not yet
     // taken: one per `Preroll`, which is what a preroll asks each terminal
@@ -763,11 +821,46 @@ fn judge(
                         "entry {at}: {pts:?} after {last:?} — going backwards"
                     ));
                 }
+                if let (true, Some(last), Some(widest)) = (lossless, last, widest)
+                    && pts - last > widest
+                {
+                    return Err(format!(
+                        "entry {at}: {pts:?} after {last:?} — {:?} missing between them",
+                        pts - last
+                    ));
+                }
                 last = Some(pts);
             }
         }
     }
     Ok(())
+}
+
+/// How far apart a terminal's samples usually are: the median step
+/// between two in a row, not counting across a seek. `None` for a record
+/// too short to say.
+fn typical_spacing(log: &[Entry]) -> Option<Duration> {
+    let mut steps = Vec::new();
+    let mut last: Option<Duration> = None;
+    for entry in log {
+        match entry {
+            Entry::Control(ControlMsg::Seek(_)) => last = None,
+            Entry::Data { pts: Some(pts) } => {
+                if let Some(last) = last
+                    && *pts > last
+                {
+                    steps.push(*pts - last);
+                }
+                last = Some(*pts);
+            }
+            _ => {}
+        }
+    }
+    if steps.len() < 5 {
+        return None;
+    }
+    steps.sort();
+    Some(steps[steps.len() / 2])
 }
 
 /// Writes the crate's log where `MEDIA_PP_CONTROL_TRACE` says, once for
@@ -843,4 +936,9 @@ fn a_live_source_keeps_its_control_promises() {
 #[test]
 fn a_synchronized_picture_keeps_its_control_promises() {
     conform(Shape::Synchronized);
+}
+
+#[test]
+fn packets_fanned_out_before_decoding_keep_their_control_promises() {
+    conform(Shape::TeeOfPackets);
 }

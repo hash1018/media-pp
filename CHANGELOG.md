@@ -1561,13 +1561,15 @@ compile error with no explanation.
   and a paced wait wakes the moment it is raised rather than at the end of
   a polling slice.
 
-- **A `Tee` no longer drops the end of the stream during a seek.** While a
-  seek's preroll runs, a `Tee` stops feeding a branch that has taken its
-  picture, and it stopped the `Eos` along with the pictures — dropped, not
-  kept. A seek past the end of a file, whose last picture and `Eos` arrive
-  together, left every branch without an end, and nothing after it could
-  give them one. The `Eos` is now kept for the branch and handed on when
-  playback resumes.
+- **A `Tee` loses nothing while a seek's other branches catch up.** While
+  a seek's preroll runs, a `Tee` stops feeding a branch that has taken its
+  sample, so the branches stay level — and it dropped what came for that
+  branch meanwhile rather than keeping it. In front of the decoders that
+  was packets: a branch lost a third of a second of them, and the pictures
+  that depended on them, whenever a sibling was slower to preroll. And a
+  seek past the end of a file, whose last picture and `Eos` arrive
+  together, left every branch without an end. What arrives for a held
+  branch is now kept, in order, and handed on when playback resumes.
 
 - **`Pipeline::finish` of a playing file hands its terminals their `Eos`.**
   Two things lost it. `finish` interrupts the clock, and a `Pacer` or

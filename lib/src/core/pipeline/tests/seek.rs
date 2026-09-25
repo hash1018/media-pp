@@ -1692,3 +1692,158 @@ fn a_seek_keeps_the_sound_that_prerolled_before_the_picture() {
         "the sound jumped from {first:?} to {next:?} across the resume"
     );
 }
+
+/// A branch of a `Tee` that prerolls first loses nothing while its sibling
+/// catches up: after the seek it goes on from the sample it prerolled on,
+/// not from wherever the source had got to meanwhile.
+#[test]
+fn a_tee_branch_that_prerolls_first_misses_nothing() {
+    use crate::elements::AppSink;
+
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("the fixture has a picture")
+        .clone();
+    let shown: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let screen = {
+        let shown = Arc::clone(&shown);
+        AppSink::new("screen", move |buffer| {
+            if let MediaBuffer::Video(frame) = buffer
+                && let Some(pts) = frame.pts()
+            {
+                shown.lock().unwrap().push(pts);
+            }
+            Ok(())
+        })
+    };
+    // Slow to take a picture, so its preroll finishes well after the other
+    // branch's.
+    let slow = AppSink::new("slow-screen", |_| {
+        thread::sleep(Duration::from_millis(150));
+        Ok(())
+    });
+    let (pipeline, ()) = Pipeline::new("tee-preroll-gap", source, |source, ctx| {
+        let fast = ctx.branch().queue("fast", 2).to(screen)?;
+        let slow = ctx.branch().queue("slow", 2).to(slow)?;
+        let tee = ctx.tee("tee").branch(fast).branch(slow).build()?;
+        let picture = ctx
+            .branch()
+            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .queue("video-frames", 4)
+            .to_branch(tee)?;
+        ctx.attach(source, video.index, picture)?;
+        Ok(())
+    })
+    .expect("wire the pipeline");
+    pipeline.run().unwrap();
+    pipeline.pause();
+    pipeline
+        .seek(Duration::from_secs(2), SeekMode::Accurate)
+        .expect("a file accepts a seek");
+    let from = shown.lock().unwrap().len() - 1;
+    pipeline.resume();
+    let waited = Instant::now();
+    while shown.lock().unwrap().len() < from + 10 {
+        assert!(
+            waited.elapsed() < Duration::from_secs(10),
+            "playback stalled"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    pipeline.stop();
+
+    let shown = shown.lock().unwrap();
+    let after: Vec<i64> = shown[from..].to_vec();
+    let step = after
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .min()
+        .unwrap_or(1)
+        .max(1);
+    assert!(
+        after.windows(2).all(|pair| pair[1] - pair[0] <= step),
+        "pictures went missing after the seek: {after:?}"
+    );
+}
+
+/// The same with the `Tee` in front of the decoders, fanning out packets —
+/// where a branch that lost some would lose the pictures that depend on
+/// them too.
+#[test]
+fn a_tee_of_packets_whose_branch_prerolls_first_misses_nothing() {
+    use crate::elements::AppSink;
+
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("the fixture has a picture")
+        .clone();
+    let shown: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let screen = {
+        let shown = Arc::clone(&shown);
+        AppSink::new("screen", move |buffer| {
+            if let MediaBuffer::Video(frame) = buffer
+                && let Some(pts) = frame.pts()
+            {
+                shown.lock().unwrap().push(pts);
+            }
+            Ok(())
+        })
+    };
+    let slow = AppSink::new("slow-screen", |_| {
+        thread::sleep(Duration::from_millis(150));
+        Ok(())
+    });
+    let (pipeline, ()) = Pipeline::new("tee-packets-preroll-gap", source, |source, ctx| {
+        let fast = ctx
+            .branch()
+            .queue("fast-packets", 8)
+            .pipe(SwDecoder::new("fast-decoder", video.parameters.clone())?)
+            .queue("fast", 2)
+            .to(screen)?;
+        let slow = ctx
+            .branch()
+            .queue("slow-packets", 8)
+            .pipe(SwDecoder::new("slow-decoder", video.parameters.clone())?)
+            .queue("slow", 2)
+            .to(slow)?;
+        let tee = ctx.tee("tee").branch(fast).branch(slow).build()?;
+        ctx.attach(source, video.index, tee)?;
+        Ok(())
+    })
+    .expect("wire the pipeline");
+    pipeline.run().unwrap();
+    pipeline.pause();
+    pipeline
+        .seek(Duration::from_secs(2), SeekMode::Accurate)
+        .expect("a file accepts a seek");
+    let from = shown.lock().unwrap().len() - 1;
+    pipeline.resume();
+    let waited = Instant::now();
+    while shown.lock().unwrap().len() < from + 10 {
+        assert!(
+            waited.elapsed() < Duration::from_secs(10),
+            "playback stalled"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    pipeline.stop();
+
+    let shown = shown.lock().unwrap();
+    let after: Vec<i64> = shown[from..].to_vec();
+    let step = after
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .min()
+        .unwrap_or(1)
+        .max(1);
+    assert!(
+        after.windows(2).all(|pair| pair[1] - pair[0] <= step),
+        "pictures went missing after the seek: {after:?}"
+    );
+}

@@ -1,10 +1,11 @@
+use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex, MutexGuard, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread::{self, JoinHandle};
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 
 use crate::{
     buffer::MediaBuffer,
@@ -40,10 +41,19 @@ pub struct Tee {
     name: Arc<str>,
     shared: Arc<TeeShared>,
     preroll: Option<Arc<crate::control::PrerollContext>>,
-    /// Branches an `Eos` arrived for while a preroll held them — by their
-    /// root — owed it once playback goes on. See [`Tee::consume`].
-    owed_eos: Vec<ElementId>,
+    /// What arrived for a branch — by its root — while a preroll held it,
+    /// in order, owed to it once playback goes on. See [`Tee::consume`].
+    owed: Vec<(ElementId, VecDeque<MediaBuffer>)>,
 }
+
+/// The most a `Tee` keeps for one branch while a preroll holds it. A
+/// preroll lasts until its slowest branch has its sample, which the seek
+/// gives up on after a few seconds; a branch fed decoded pictures is owed
+/// next to nothing, the decoder in front having stopped at its own sample.
+/// Past this the branch is being starved rather than held, and what arrives
+/// is dropped as it used to be — with a warning, since that branch will
+/// show a gap.
+const MAX_OWED: usize = 512;
 
 struct TeeShared {
     branches: Mutex<Vec<Arc<TeeBranch>>>,
@@ -165,7 +175,7 @@ impl Tee {
                 pp_log: pp_log.clone(),
                 shared: shared.clone(),
                 preroll: None,
-                owed_eos: Vec::new(),
+                owed: Vec::new(),
             },
             TeeHandle {
                 id,
@@ -570,25 +580,51 @@ impl Element for Tee {
 impl Tee {
     /// Pushes the `Eos` a preroll kept for each branch still attached,
     /// isolating a failure to its own branch as `consume` does.
-    fn hand_on_owed_eos(&mut self) {
-        if self.owed_eos.is_empty() {
+    /// Keeps `buf` for the branch rooted at `root`, which a preroll holds.
+    fn owe(&mut self, root: ElementId, buf: &MediaBuffer) {
+        let index = match self.owed.iter().position(|(owed, _)| *owed == root) {
+            Some(index) => index,
+            None => {
+                self.owed.push((root, VecDeque::new()));
+                self.owed.len() - 1
+            }
+        };
+        let kept = &mut self.owed[index].1;
+        if kept.len() >= MAX_OWED && !buf.is_eos() {
+            if kept.len() == MAX_OWED {
+                pp_warn!(
+                    self,
+                    "a preroll held branch {root:?} past {MAX_OWED} buffers; dropping what follows"
+                );
+            }
             return;
         }
-        let owed = std::mem::take(&mut self.owed_eos);
+        kept.push_back(buf.clone());
+    }
+
+    /// Pushes, in order, what a preroll kept for each branch still attached,
+    /// isolating a failure to its own branch as `consume` does.
+    fn hand_on_owed(&mut self) {
+        if self.owed.is_empty() {
+            return;
+        }
+        let owed = std::mem::take(&mut self.owed);
         let branches = lock_unpoisoned(&self.shared.branches).clone();
-        for branch in branches {
-            if !owed.contains(&branch.root_id) || !branch.active.load(Ordering::Acquire) {
+        for (root, kept) in owed {
+            let Some(branch) = branches.iter().find(|branch| branch.root_id == root) else {
                 continue;
-            }
-            let mut pad = lock_unpoisoned(&branch.pad);
-            if !branch.active.load(Ordering::Acquire) {
-                continue;
-            }
-            let peer = pad.peer_identity();
-            let outcome = pad.push(MediaBuffer::Eos);
-            drop(pad);
-            if let Err(error) = outcome {
-                self.report_branch_error(branch.root_id, peer, error);
+            };
+            for buf in kept {
+                if !branch.active.load(Ordering::Acquire) {
+                    break;
+                }
+                let mut pad = lock_unpoisoned(&branch.pad);
+                let peer = pad.peer_identity();
+                let outcome = pad.push(buf);
+                drop(pad);
+                if let Err(error) = outcome {
+                    self.report_branch_error(branch.root_id, peer, error);
+                }
             }
         }
     }
@@ -640,17 +676,19 @@ impl Sink for Tee {
             if let (Some(context), Some(graph)) = (&self.preroll, &graph) {
                 let terminals = graph.terminal_ids_from(branch.root_id);
                 if context.are_ready(&terminals) {
-                    // The end of the stream is not skipped like the pictures
-                    // after the one the preroll took: it was dropped here, and
-                    // that branch then never ended — a seek past the end of a
-                    // file left its terminals without an `Eos` for good, and a
-                    // `finish` after it could not give them one either. It is
-                    // kept for the branch instead, and handed on once
-                    // playback goes on; pushing it now could block this
-                    // thread on a branch that is waiting for exactly that.
-                    if buf.is_eos() && !self.owed_eos.contains(&branch.root_id) {
-                        self.owed_eos.push(branch.root_id);
-                    }
+                    // This branch has its sample and its siblings do not yet:
+                    // what comes meanwhile is kept for it, and handed on once
+                    // playback goes on. It was dropped, which kept the
+                    // branches level but cost this one whatever came while
+                    // the others caught up — packets, where the `Tee` is in
+                    // front of the decoders, and the pictures that depended
+                    // on them; the `Eos` too, where a seek past the end of a
+                    // file delivered it with the last picture, so the branch
+                    // never ended at all. Pushing it now instead could block
+                    // this thread on a branch that is waiting for exactly
+                    // the preroll to end.
+                    let root = branch.root_id;
+                    self.owe(root, &buf);
                     continue;
                 }
             }
@@ -698,10 +736,10 @@ impl Sink for Tee {
         match &msg {
             // Playing again: every branch downstream has just been resumed,
             // so the `Eos` a preroll kept goes on behind it.
-            ControlMsg::Resume => self.hand_on_owed_eos(),
+            ControlMsg::Resume => self.hand_on_owed(),
             // A new timeline, or none at all: the end of the old one is not
             // owed to anybody now.
-            ControlMsg::Flush | ControlMsg::Stop => self.owed_eos.clear(),
+            ControlMsg::Flush | ControlMsg::Stop => self.owed.clear(),
             ControlMsg::Pause
             | ControlMsg::Preroll(_)
             | ControlMsg::CheckSeek(_)
