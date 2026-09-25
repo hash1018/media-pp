@@ -16,7 +16,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -212,6 +212,9 @@ pub struct Queue {
     /// Buffers handed over while the channel was full and an interrupt
     /// was out — see [`Overflow`].
     overflow: Overflow,
+    /// How many `Eos` this queue has taken and not yet handed on or
+    /// discarded — see [`Inbox::owes_an_end`].
+    ends_owed: Arc<AtomicUsize>,
 }
 
 impl Queue {
@@ -330,10 +333,12 @@ impl Queue {
         }
         let worker_counters = counters.clone();
         let overflow = Overflow::default();
+        let ends_owed = Arc::new(AtomicUsize::new(0));
         let worker_inbox = Inbox {
             data: rx,
             overflow: overflow.clone(),
             clock: clock.clone(),
+            ends_owed: ends_owed.clone(),
         };
 
         // `Builder::name` panics on interior NULs. Queue names are caller
@@ -370,6 +375,7 @@ impl Queue {
             counters,
             clock,
             overflow,
+            ends_owed,
         })
     }
 }
@@ -421,9 +427,15 @@ impl Sink for Queue {
         // does not apply to this send.
         if buf.is_eos() {
             pp_trace!(pp_log: &self.pp_log, "event=eos phase=received");
+            // Counted before it can be taken, so the worker never counts out
+            // one that was not yet counted in.
+            self.ends_owed.fetch_add(1, Ordering::AcqRel);
             let result = self
                 .hand_over(buf, Duration::MAX)
                 .map_err(|_| QueueError::ChannelClosed.into());
+            if result.is_err() {
+                self.ends_owed.fetch_sub(1, Ordering::AcqRel);
+            }
             match &result {
                 Ok(()) => pp_trace!(
                     pp_log: &self.pp_log,
@@ -513,7 +525,10 @@ impl Sink for Queue {
         // What was held over is part of the backlog these discard, and this
         // thread is the only one that adds to it.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.overflow.lock().clear();
+            let mut overflow = self.overflow.lock();
+            let ends = overflow.iter().filter(|buf| buf.is_eos()).count();
+            overflow.clear();
+            self.ends_owed.fetch_sub(ends, Ordering::AcqRel);
         }
         self.control.send(msg.clone());
         pp_trace!(
@@ -648,6 +663,9 @@ struct Inbox {
     data: Receiver<MediaBuffer>,
     overflow: Overflow,
     clock: Option<Arc<Clock>>,
+    /// Shared with the [`Queue`], which counts an `Eos` in as it takes one;
+    /// the worker counts it out as it hands it on or a `Flush` discards it.
+    ends_owed: Arc<AtomicUsize>,
 }
 
 impl Inbox {
@@ -658,6 +676,25 @@ impl Inbox {
     /// drains what it holds as it always has.
     fn held_back(&self, stop: &AtomicBool) -> bool {
         self.clock.as_deref().is_some_and(Clock::interrupt_pending) && !stop.load(Ordering::Relaxed)
+    }
+
+    /// Whether an `Eos` handed over is still here, on its way.
+    ///
+    /// What decides whether the drop of this queue is an ending or an
+    /// abandonment. A source that has finished put an `Eos` behind the last
+    /// of its stream, and everything up to it is owed downstream — so the
+    /// worker stays until it has gone, however busy downstream is for now.
+    /// A branch detached, or a pipeline dropped mid-stream, sent none: what
+    /// is queued then is abandoned, and a downstream that will never take
+    /// it — a wedged one, which is why a branch gets detached — must not
+    /// keep the drop waiting.
+    fn owes_an_end(&self) -> bool {
+        self.ends_owed.load(Ordering::Acquire) > 0
+    }
+
+    /// Counts out `ends` `Eos` that will not be handed on from here.
+    fn discarded(&self, ends: usize) {
+        self.ends_owed.fetch_sub(ends, Ordering::AcqRel);
     }
 
     /// The next buffer held over, once the channel has nothing older.
@@ -705,6 +742,7 @@ fn worker_loop(
     };
     let worker = Worker {
         bus: &bus,
+        inbox: &inbox,
         name: &name,
         pp_log: &pp_log,
         counters: counters.as_deref(),
@@ -717,7 +755,7 @@ fn worker_loop(
                 continue;
             };
             if apply_control(
-                &inbox.data,
+                &inbox,
                 &mut downstream,
                 msg,
                 &ack,
@@ -748,7 +786,7 @@ fn worker_loop(
                         continue;
                     };
                     if apply_control(
-                        &inbox.data,
+                        &inbox,
                         &mut downstream,
                         msg,
                         &request.ack,
@@ -761,9 +799,15 @@ fn worker_loop(
                     }
                 }
                 // Held back, it looks again rather than ending: `stop` set
-                // since then means draining what is here, as ever.
+                // since then means draining what is here, as ever. So does
+                // a downstream that is only full for now — a `Pacer` behind
+                // it letting pictures go at their time — while an `Eos` is
+                // still queued: see `Inbox::owes_an_end`. Ending here
+                // regardless dropped the end of the stream, which is what a
+                // `finish` of a playing file lost: the source ends, its
+                // queue is dropped, and the worker found its downstream busy.
                 Err(RecvTimeoutError::Timeout) => {
-                    if !held_back && stop.load(Ordering::Relaxed) {
+                    if !held_back && stop.load(Ordering::Relaxed) && !inbox.owes_an_end() {
                         pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
                         return;
                     }
@@ -787,7 +831,7 @@ fn worker_loop(
                             continue;
                         };
                         if apply_control(
-                            &inbox.data,
+                            &inbox,
                             &mut downstream,
                             msg,
                             &req.ack,
@@ -833,6 +877,7 @@ fn worker_loop(
 /// goes to.
 struct Worker<'a> {
     bus: &'a Bus,
+    inbox: &'a Inbox,
     name: &'a Arc<str>,
     pp_log: &'a PpLog,
     counters: Option<&'a ElementCounters>,
@@ -849,6 +894,10 @@ fn forward(downstream: &mut Box<dyn Sink>, buf: MediaBuffer, worker: &Worker<'_>
     let result = downstream.consume(buf);
     if let Some(call) = call {
         call.end(result.is_ok());
+    }
+    if is_eos {
+        // Handed on, taken or refused: either way it is no longer here.
+        worker.inbox.discarded(1);
     }
     match result {
         Ok(()) => {
@@ -891,7 +940,7 @@ fn forward(downstream: &mut Box<dyn Sink>, buf: MediaBuffer, worker: &Worker<'_>
 /// touching `data_rx`) until `Resume`/`Preroll`/`Stop`. Returns `true` once `Stop`
 /// has been handled, meaning the caller (`worker_loop`) should exit.
 fn apply_control(
-    data_rx: &Receiver<MediaBuffer>,
+    inbox: &Inbox,
     downstream: &mut Box<dyn Sink>,
     msg: ControlMsg,
     ack: &Sender<()>,
@@ -903,7 +952,7 @@ fn apply_control(
         pp_log: error_reporter.pp_log,
         "event=control control={msg:?} phase=forwarding"
     );
-    discard_stale_data(data_rx, &msg);
+    inbox.discarded(discard_stale_data(&inbox.data, &msg));
     forward_control(downstream, msg.clone(), error_reporter);
     let is_stop = msg == ControlMsg::Stop;
     let _ = ack.send(());
@@ -945,7 +994,7 @@ fn apply_control(
             pp_log: error_reporter.pp_log,
             "event=control control={msg:?} phase=forwarding"
         );
-        discard_stale_data(data_rx, &msg);
+        inbox.discarded(discard_stale_data(&inbox.data, &msg));
         forward_control(downstream, msg.clone(), error_reporter);
         let is_stop = msg == ControlMsg::Stop;
         let _ = ack.send(());
@@ -1031,10 +1080,15 @@ fn forward_control(
 /// `Pause`/`Resume`/`Stop` leave `data_rx` alone — see the type-level
 /// docs on why that's safe (nothing feeds a paused/stopped queue in the
 /// first place).
-fn discard_stale_data(data_rx: &Receiver<MediaBuffer>, msg: &ControlMsg) {
+/// Empties the channel on `Flush`, and says how many `Eos` went with it.
+fn discard_stale_data(data_rx: &Receiver<MediaBuffer>, msg: &ControlMsg) -> usize {
+    let mut ends = 0;
     if *msg == ControlMsg::Flush {
-        while data_rx.try_recv().is_ok() {}
+        while let Ok(buf) = data_rx.try_recv() {
+            ends += usize::from(buf.is_eos());
+        }
     }
+    ends
 }
 
 #[cfg(test)]
@@ -1219,6 +1273,143 @@ mod tests {
 
         assert_eq!(count.load(Ordering::SeqCst), 10);
         assert!(!bus_rx.iter().any(|e| matches!(e, BusEvent::Dropped { .. })));
+    }
+
+    /// Refuses to take anything until it is let go, then counts what it
+    /// takes and whether an `Eos` came — a downstream that is only full for
+    /// now, as a `Queue` in front of a `Pacer` is while pictures wait their
+    /// turn.
+    struct Gated {
+        pp_log: PpLog,
+        open: Arc<AtomicBool>,
+        count: Arc<AtomicUsize>,
+        ended: Arc<AtomicBool>,
+    }
+
+    impl Element for Gated {
+        fn name(&self) -> Arc<str> {
+            "gated".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Gated {
+        fn ready_consume(&mut self) -> bool {
+            self.open.load(Ordering::SeqCst)
+        }
+
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            match buf {
+                MediaBuffer::Eos => self.ended.store(true, Ordering::SeqCst),
+                _ => {
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A queue dropped while its downstream is only busy still hands over
+    /// everything it was given, the `Eos` last — dropping is what ends a
+    /// finished source's queue, and what that source put in it is the end
+    /// of its stream.
+    ///
+    /// The worker used to take the drop as the end whenever it found its
+    /// downstream not ready at that moment, and returned with the rest still
+    /// queued: a `finish` of a playing file lost its `Eos` whenever the
+    /// queue in front of a `Pacer` was full. Found by the conformance
+    /// sequences.
+    #[test]
+    fn dropping_hands_over_everything_once_a_busy_downstream_takes_it() {
+        let open = Arc::new(AtomicBool::new(false));
+        let count = Arc::new(AtomicUsize::new(0));
+        let ended = Arc::new(AtomicBool::new(false));
+        let sink = Gated {
+            pp_log: element_pp_log(ElementType::Other, "gated", None),
+            open: open.clone(),
+            count: count.clone(),
+            ended: ended.clone(),
+        };
+        let (bus, _bus_rx) = Bus::new();
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        )
+        .unwrap();
+        for _ in 0..5 {
+            queue.consume(packet()).unwrap();
+        }
+        queue.consume(MediaBuffer::Eos).unwrap();
+        // Busy for longer than the worker's idle wait, so it has seen the
+        // drop before anything can go.
+        let opener = {
+            let open = open.clone();
+            thread::spawn(move || {
+                thread::sleep(STOP_POLL_INTERVAL * 4);
+                open.store(true, Ordering::SeqCst);
+            })
+        };
+        drop(queue);
+        opener.join().unwrap();
+
+        assert_eq!(count.load(Ordering::SeqCst), 5, "what was queued arrived");
+        assert!(ended.load(Ordering::SeqCst), "and the Eos behind it");
+    }
+
+    /// The other half: a queue dropped with no `Eos` in it is abandoned, and
+    /// a downstream that will never take what is queued does not keep the
+    /// drop waiting. This is how a wedged branch is detached from a `Tee`.
+    #[test]
+    fn dropping_without_an_end_abandons_what_a_wedged_downstream_will_not_take() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = Gated {
+            pp_log: element_pp_log(ElementType::Other, "gated", None),
+            open: Arc::new(AtomicBool::new(false)),
+            count: count.clone(),
+            ended: Arc::new(AtomicBool::new(false)),
+        };
+        let (bus, _bus_rx) = Bus::new();
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        )
+        .unwrap();
+        for _ in 0..5 {
+            queue.consume(packet()).unwrap();
+        }
+        let (dropped, done) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(queue);
+            let _ = dropped.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the drop waited on a downstream that will never take anything"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
     #[test]

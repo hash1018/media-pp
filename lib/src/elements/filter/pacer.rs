@@ -201,7 +201,7 @@ impl Pacer {
     /// wrong by however far that rate differs.
     fn wait_for(&mut self, timing: Timing) -> Result<bool, PacerError> {
         let playback = self.playback_clock.clone().ok_or(PacerError::NotAttached)?;
-        if playback.interrupt_epoch() != self.interrupt_epoch {
+        if playback.interrupted_since(self.interrupt_epoch) {
             return Ok(false);
         }
         if self.prerolling {
@@ -228,7 +228,7 @@ impl Pacer {
             return Err(PacerError::UnpaceableTimestamp { pts });
         }
         loop {
-            if playback.interrupt_epoch() != self.interrupt_epoch {
+            if playback.interrupted_since(self.interrupt_epoch) {
                 return Ok(false);
             }
             let remaining = playback.remaining(pts_ns);

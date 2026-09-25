@@ -1,0 +1,817 @@
+//! Control conformance: random sequences of pause, resume, seek and stop,
+//! run against the shapes of pipeline this crate is used in, and judged
+//! against what every terminal was handed.
+//!
+//! # Why random, and why judged afterwards
+//!
+//! The control bugs this crate has had were not in one message but in an
+//! order of them: a seek the moment a file ended, a pause in the last second
+//! of it, a seek while paused at its end. Each was found by a user or a slow
+//! CI runner and then pinned by a test of that one order. What they share is
+//! a small set of promises a pipeline makes whatever the order, so these
+//! tests make the orders and check the promises:
+//!
+//! - every call returns — a control call that does not, within
+//!   [`OP_TIMEOUT`], fails the sequence with its history;
+//! - paused means nothing new reaches a terminal, except the one picture a
+//!   seek's preroll asks for;
+//! - after a seek, what a terminal is handed is from the new position on,
+//!   and goes forward — nothing from before the seek arrives after it;
+//! - resumed away from the end, it flows again;
+//! - played to the end, the pipeline says [`BusEvent::Finished`];
+//! - and nothing reports an error.
+//!
+//! The terminal records every buffer and control message it is handed, in
+//! order, and the promises about data are judged from that record once the
+//! sequence is over. Nothing here times a picture against a clock, so a slow
+//! machine makes a run slower rather than wrong — which matters, because a
+//! slow machine is what these are for.
+//!
+//! # Running them harder
+//!
+//! By default each shape runs a few fixed sequences, so an ordinary test run
+//! is deterministic. `MEDIA_PP_CONTROL_ITERS` runs more,
+//! `MEDIA_PP_CONTROL_RANDOM=1` seeds them from the clock instead, and
+//! `MEDIA_PP_CONTROL_SEED` replays one seed a failure printed, and
+//! `MEDIA_PP_CONTROL_TRACE=<directory>` writes this crate's log there at
+//! `Trace`, every control message at every element, for reading what the
+//! replay did. The races
+//! these look for show when threads are short of cores, so CI runs them
+//! pinned to two: `taskset -c 0,1` on Linux, a two-core affinity mask on
+//! Windows. That is how the seek-at-the-end deadlock of 208af56 was
+//! reproduced, where a free machine never showed it.
+
+use super::*;
+
+use crate::buffer::time_base;
+use crate::control::ControlMsg;
+
+/// How long any one control call may take before the sequence is failed as
+/// hung. Generous, so a loaded two-core runner is never mistaken for a
+/// deadlock: a real one does not return at all.
+const OP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How far before a seek's target a sample may start and still be the one
+/// covering it: a frame or an audio packet's worth, and some.
+const LANDING_TOLERANCE: Duration = Duration::from_millis(100);
+
+/// How far before the end of the file its last picture or sound may start.
+/// An accurate seek at or past the end shows the last of the file rather than
+/// nothing — see the decoders' preroll gate — so that is where such a seek's
+/// data may begin.
+const LAST_SAMPLE: Duration = Duration::from_millis(200);
+
+/// How long a resumed pipeline, away from the end, may take to hand every
+/// terminal something new.
+const FLOW_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// What one terminal was handed, in the order it was handed it.
+#[derive(Debug, Clone)]
+enum Entry {
+    Data { pts: Option<Duration> },
+    Eos,
+    Control(ControlMsg),
+}
+
+/// A terminal that records rather than presents.
+struct Recorder {
+    pp_log: PpLog,
+    name: Arc<str>,
+    /// Used where a frame does not say its own time base.
+    fallback: ffmpeg::Rational,
+    log: Arc<Mutex<Vec<Entry>>>,
+}
+
+impl Recorder {
+    fn new(name: &str, fallback: ffmpeg::Rational) -> (Self, Arc<Mutex<Vec<Entry>>>) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                pp_log: element_pp_log(ElementType::Other, name, None),
+                name: name.into(),
+                fallback,
+                log: Arc::clone(&log),
+            },
+            log,
+        )
+    }
+
+    fn pts(&self, frame: &ffmpeg::Frame) -> Option<Duration> {
+        let base = time_base(frame).unwrap_or(self.fallback);
+        let pts = frame.pts()?;
+        Some(Duration::from_nanos(
+            pts.rescale(base, ffmpeg::Rational::new(1, 1_000_000_000))
+                .max(0) as u64,
+        ))
+    }
+}
+
+impl Element for Recorder {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for Recorder {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        let entry = match &buf {
+            MediaBuffer::Video(frame) => Entry::Data {
+                pts: self.pts(frame),
+            },
+            MediaBuffer::Audio(frame) => Entry::Data {
+                pts: self.pts(frame),
+            },
+            MediaBuffer::Eos => Entry::Eos,
+            _ => Entry::Data { pts: None },
+        };
+        self.log.lock().unwrap().push(entry);
+        Ok(())
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        self.log.lock().unwrap().push(Entry::Control(msg));
+        Ok(())
+    }
+}
+
+/// The shapes of pipeline the sequences run against.
+#[derive(Debug, Clone, Copy)]
+enum Shape {
+    /// A file's picture, decoded, queued and paced — a player's video half.
+    Video,
+    /// Picture and sound off one demuxer, each paced — a whole player.
+    AudioVideo,
+    /// One decoded picture fanned out to two paced branches.
+    Tee,
+    /// The picture with every queue one deep, so backpressure is felt at
+    /// every step — where a thread blocked handing data on meets control.
+    Tight,
+    /// A live source, which cannot be sought and never ends.
+    Live,
+    /// The picture timed by a `VideoSynchronizer` rather than a `Pacer` —
+    /// how a player shows it, dropping what is late.
+    Synchronized,
+}
+
+/// A built pipeline and what its terminals recorded.
+struct Rig {
+    pipeline: Arc<Pipeline>,
+    duration: Option<Duration>,
+    terminals: Vec<(&'static str, Arc<Mutex<Vec<Entry>>>)>,
+}
+
+impl Rig {
+    fn build(shape: Shape) -> Option<Self> {
+        if let Shape::Live = shape {
+            let (recorder, log) = Recorder::new("screen", ffmpeg::Rational::new(1, 30));
+            let source = TestVideoSource::new(
+                "live",
+                TestVideoOptions {
+                    width: 64,
+                    height: 48,
+                    frame_rate: ffmpeg::Rational::new(30, 1),
+                },
+            );
+            let (pipeline, ()) = Pipeline::new("conformance-live", source, |source, ctx| {
+                let branch = ctx.branch().queue("frames", 4).to(recorder)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the live pipeline");
+            return Some(Self {
+                pipeline,
+                duration: None,
+                terminals: vec![("screen", log)],
+            });
+        }
+
+        let path = try_test_video()?;
+        let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+        let duration = source.duration().expect("the fixture says how long it is");
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .expect("the fixture has a picture")
+            .clone();
+        let audio = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+            .cloned();
+        let (packets, frames) = match shape {
+            Shape::Tight => (1, 1),
+            _ => (8, 4),
+        };
+        let mut terminals = Vec::new();
+        let name = format!("conformance-{shape:?}").to_lowercase();
+        let (pipeline, ()) = Pipeline::new(name, source, |source, ctx| {
+            let decoder = SwDecoder::new("video-decoder", video.parameters.clone())?;
+            let picture = ctx
+                .branch()
+                .queue("video-packets", packets)
+                .pipe(decoder)
+                .queue("video-frames", frames);
+            let picture = match shape {
+                Shape::Tee => {
+                    let mut branches = Vec::new();
+                    for name in ["screen", "second-screen"] {
+                        let (recorder, log) = Recorder::new(name, video.time_base);
+                        terminals.push((name, log));
+                        branches.push(
+                            ctx.branch()
+                                .queue(format!("{name}-frames"), 2)
+                                .pipe(Pacer::new(format!("{name}-pacer")))
+                                .to(recorder)?,
+                        );
+                    }
+                    let mut tee = ctx.tee("tee");
+                    for branch in branches {
+                        tee = tee.branch(branch);
+                    }
+                    picture.to_branch(tee.build()?)?
+                }
+                Shape::Synchronized => {
+                    let (recorder, log) = Recorder::new("screen", video.time_base);
+                    terminals.push(("screen", log));
+                    picture
+                        .pipe(VideoSynchronizer::new("video-sync"))
+                        .to(recorder)?
+                }
+                _ => {
+                    let (recorder, log) = Recorder::new("screen", video.time_base);
+                    terminals.push(("screen", log));
+                    picture.pipe(Pacer::new("video-pacer")).to(recorder)?
+                }
+            };
+            ctx.attach(source, video.index, picture)?;
+
+            if let (Shape::AudioVideo, Some(audio)) = (shape, &audio) {
+                let (recorder, log) = Recorder::new("speakers", audio.time_base);
+                terminals.push(("speakers", log));
+                let sound = ctx
+                    .branch()
+                    .queue("audio-packets", packets)
+                    .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+                    .queue("audio-frames", frames)
+                    .pipe(Pacer::new("audio-pacer"))
+                    .to(recorder)?;
+                ctx.attach(source, audio.index, sound)?;
+            }
+            Ok(())
+        })
+        .expect("wire the file pipeline");
+        Some(Self {
+            pipeline,
+            duration: Some(duration),
+            terminals,
+        })
+    }
+
+    fn data_counts(&self) -> Vec<usize> {
+        self.terminals
+            .iter()
+            .map(|(_, log)| {
+                log.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|entry| matches!(entry, Entry::Data { .. }))
+                    .count()
+            })
+            .collect()
+    }
+}
+
+/// One step of a sequence.
+#[derive(Debug, Clone, Copy)]
+enum Op {
+    Pause,
+    Resume,
+    /// To this position, in this mode.
+    Seek(Duration, SeekMode),
+    /// Let it run, or stay paused, this long.
+    Wait(Duration),
+    /// To just short of the end, playing, and on until it finishes.
+    PlayToEnd,
+}
+
+/// A small, seedable generator — enough to spread sequences over the
+/// orders that matter, and to replay one exactly.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        // xorshift64*
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+}
+
+fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
+    let Some(duration) = duration else {
+        return match rng.below(4) {
+            0 => Op::Pause,
+            1 => Op::Resume,
+            2 => Op::Seek(Duration::from_secs(1), SeekMode::Accurate),
+            _ => Op::Wait(Duration::from_millis(rng.below(300))),
+        };
+    };
+    let mode = if rng.below(3) == 0 {
+        SeekMode::Keyframe
+    } else {
+        SeekMode::Accurate
+    };
+    match rng.below(10) {
+        0 | 1 => Op::Pause,
+        2 | 3 => Op::Resume,
+        4 => {
+            // Anywhere in the file.
+            let at = duration.mul_f64(rng.below(1_000) as f64 / 1_000.0);
+            Op::Seek(at, mode)
+        }
+        5 => {
+            // Near the end, where the source reaches its end a queue's depth
+            // before the picture does.
+            let back = Duration::from_millis(rng.below(1_500));
+            Op::Seek(duration.saturating_sub(back), mode)
+        }
+        6 => {
+            // At the start, or past the end.
+            if rng.below(2) == 0 {
+                Op::Seek(Duration::ZERO, mode)
+            } else {
+                Op::Seek(duration + Duration::from_millis(500), mode)
+            }
+        }
+        7 => Op::PlayToEnd,
+        _ => Op::Wait(Duration::from_millis(rng.below(400))),
+    }
+}
+
+/// Runs `call` on a thread of its own and waits at most [`OP_TIMEOUT`] for
+/// it: a call that never returns is the failure this is looking for, and it
+/// cannot be interrupted, only abandoned.
+fn within<T: Send + 'static>(call: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(call());
+    });
+    finished.recv_timeout(OP_TIMEOUT).ok()
+}
+
+/// Everything the bus says while a sequence runs, collected off it as it
+/// comes so that `Finished` can be waited on and errors are all seen.
+struct BusLog {
+    events: Arc<Mutex<Vec<BusEvent>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl BusLog {
+    fn start(pipeline: &Arc<Pipeline>) -> Self {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let pipeline = Arc::clone(pipeline);
+            let events = Arc::clone(&events);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    match pipeline.bus().recv_timeout(Duration::from_millis(20)) {
+                        Ok(event) => events.lock().unwrap().push(event),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            })
+        };
+        Self {
+            events,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.events.lock().unwrap().len()
+    }
+
+    fn finished_since(&self, from: usize) -> bool {
+        self.events.lock().unwrap()[from..]
+            .iter()
+            .any(|event| matches!(event, BusEvent::Finished))
+    }
+
+    fn landings(&self) -> Vec<Duration> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                BusEvent::Seeked { landed, .. } => Some(*landed),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn errors(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .map(|event| format!("{event:?}"))
+            .collect()
+    }
+}
+
+impl Drop for BusLog {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What the harness knows of where playback is, to decide which promises
+/// apply after each step.
+#[derive(Default)]
+struct Model {
+    paused: bool,
+    /// Whether playback is far enough from the end that a resume must be
+    /// seen to flow — cleared once it has played long enough to be near it.
+    far_from_end: bool,
+    /// How long it has played since the last seek.
+    played: Duration,
+    /// The seeks that succeeded, in order: what each terminal's `Seek`
+    /// controls are matched against.
+    seeks: Vec<(Duration, SeekMode)>,
+}
+
+impl Model {
+    fn sought(&mut self, target: Duration, duration: Option<Duration>) {
+        self.played = Duration::ZERO;
+        self.far_from_end =
+            duration.is_some_and(|duration| target + Duration::from_secs(3) < duration);
+    }
+
+    fn waited(&mut self, wait: Duration) {
+        if !self.paused {
+            self.played += wait;
+            if self.played > Duration::from_millis(1_500) {
+                self.far_from_end = false;
+            }
+        }
+    }
+}
+
+/// Runs one sequence against a fresh pipeline of `shape`, and says what it
+/// broke, if anything.
+fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<(), String> {
+    let Some(rig) = Rig::build(shape) else {
+        return Ok(());
+    };
+    let rig = Arc::new(rig);
+    let mut rng = Rng(seed.max(1));
+    let mut history: Vec<String> = Vec::new();
+    let fail = |history: &[String], why: String| {
+        Err(format!(
+            "{shape:?} seed {seed}: {why}\n  after: {}",
+            history.join(" → ")
+        ))
+    };
+
+    let bus = BusLog::start(&rig.pipeline);
+    let mut model = Model {
+        far_from_end: rig.duration.is_some(),
+        ..Model::default()
+    };
+    model.sought(Duration::ZERO, rig.duration);
+    if rig.duration.is_none() {
+        model.far_from_end = true;
+    }
+    {
+        let pipeline = Arc::clone(&rig.pipeline);
+        match within(move || pipeline.run()) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => return fail(&history, format!("run failed: {error}")),
+            None => return fail(&history, "run did not return".into()),
+        }
+    }
+
+    for _ in 0..steps {
+        let step = op(&mut rng, rig.duration);
+        history.push(format!("{step:?}"));
+        let before = rig.data_counts();
+        match step {
+            Op::Pause => {
+                let pipeline = Arc::clone(&rig.pipeline);
+                if within(move || pipeline.pause()).is_none() {
+                    return fail(&history, "pause did not return".into());
+                }
+                model.paused = true;
+            }
+            Op::Resume => {
+                let pipeline = Arc::clone(&rig.pipeline);
+                if within(move || pipeline.resume()).is_none() {
+                    return fail(&history, "resume did not return".into());
+                }
+                model.paused = false;
+            }
+            Op::Seek(target, mode) => {
+                let pipeline = Arc::clone(&rig.pipeline);
+                match within(move || pipeline.seek(target, mode)) {
+                    None => return fail(&history, "seek did not return".into()),
+                    Some(Ok(())) => {
+                        model.seeks.push((target, mode));
+                        model.sought(target, rig.duration);
+                    }
+                    Some(Err(error)) if rig.duration.is_none() => {
+                        // A live source refuses, and nothing else changes.
+                        if !matches!(error, crate::Error::SeekError(_)) {
+                            return fail(&history, format!("live seek refused oddly: {error}"));
+                        }
+                    }
+                    Some(Err(error)) => return fail(&history, format!("seek failed: {error}")),
+                }
+            }
+            Op::Wait(wait) => {
+                thread::sleep(wait);
+                model.waited(wait);
+            }
+            Op::PlayToEnd => {
+                let Some(duration) = rig.duration else {
+                    continue;
+                };
+                let target = duration.saturating_sub(Duration::from_millis(400));
+                let from = bus.len();
+                let pipeline = Arc::clone(&rig.pipeline);
+                match within(move || pipeline.seek(target, SeekMode::Accurate)) {
+                    None => return fail(&history, "seek to the end did not return".into()),
+                    Some(Err(error)) => {
+                        return fail(&history, format!("seek to the end failed: {error}"));
+                    }
+                    Some(Ok(())) => model.seeks.push((target, SeekMode::Accurate)),
+                }
+                let pipeline = Arc::clone(&rig.pipeline);
+                if within(move || pipeline.resume()).is_none() {
+                    return fail(&history, "resume did not return".into());
+                }
+                model.paused = false;
+                model.sought(target, rig.duration);
+                let deadline = Instant::now() + OP_TIMEOUT;
+                while !bus.finished_since(from) {
+                    if Instant::now() > deadline {
+                        return fail(&history, "played to the end, never Finished".into());
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                model.far_from_end = false;
+            }
+        }
+        // Resumed away from the end: every terminal must be handed something
+        // new, or playback has stalled.
+        let resumed = matches!(step, Op::Resume) || (matches!(step, Op::Seek(..)) && !model.paused);
+        if resumed && model.far_from_end {
+            let deadline = Instant::now() + FLOW_TIMEOUT;
+            loop {
+                let now = rig.data_counts();
+                if now.iter().zip(&before).all(|(now, before)| now > before) {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    return fail(
+                        &history,
+                        format!(
+                            "resumed away from the end, but nothing flowed: {before:?} → {now:?}"
+                        ),
+                    );
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    // Ended either way a caller ends one: abandoned, or finished in order —
+    // which has to leave every terminal with an `Eos` after its last data.
+    let finishing = rng.below(2) == 0;
+    let pipeline = Arc::clone(&rig.pipeline);
+    if finishing {
+        history.push("Finish".into());
+        if within(move || pipeline.finish()).is_none() {
+            return fail(&history, "finish did not return".into());
+        }
+        for (name, log) in &rig.terminals {
+            let ended = log
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|entry| matches!(entry, Entry::Data { .. } | Entry::Eos))
+                .is_none_or(|entry| matches!(entry, Entry::Eos));
+            if !ended {
+                return fail(
+                    &history,
+                    format!(
+                        "{name}: finished without an Eos after its data; it ended {:?}",
+                        tail(&log.lock().unwrap())
+                    ),
+                );
+            }
+        }
+    } else {
+        history.push("Stop".into());
+        if within(move || pipeline.stop()).is_none() {
+            return fail(&history, "stop did not return".into());
+        }
+    }
+    let errors = bus.errors();
+    if !errors.is_empty() {
+        return fail(&history, format!("errors on the bus: {errors:?}"));
+    }
+    let landings = bus.landings();
+    for (name, log) in &rig.terminals {
+        if let Err(why) = judge(&log.lock().unwrap(), &model.seeks, &landings, rig.duration) {
+            return fail(&history, format!("{name}: {why}"));
+        }
+    }
+    Ok(())
+}
+
+/// The last few things a terminal was handed, for a failure to show.
+fn tail(log: &[Entry]) -> &[Entry] {
+    &log[log.len().saturating_sub(8)..]
+}
+
+/// Checks one terminal's record against the promises about data.
+fn judge(
+    log: &[Entry],
+    seeks: &[(Duration, SeekMode)],
+    landings: &[Duration],
+    duration: Option<Duration>,
+) -> std::result::Result<(), String> {
+    let mut paused = false;
+    // How many samples a preroll has let through while paused, not yet
+    // taken: one per `Preroll`, which is what a preroll asks each terminal
+    // for.
+    let mut prerolls = 0usize;
+    let mut flushed = false;
+    let mut seek = 0usize;
+    let mut floor: Option<Duration> = None;
+    let mut last: Option<Duration> = None;
+    for (at, entry) in log.iter().enumerate() {
+        match entry {
+            Entry::Control(ControlMsg::Pause) => {
+                paused = true;
+                prerolls = 0;
+            }
+            Entry::Control(ControlMsg::Resume) => paused = false,
+            Entry::Control(ControlMsg::Preroll(_)) if paused => prerolls += 1,
+            Entry::Control(ControlMsg::Flush) => flushed = true,
+            Entry::Control(ControlMsg::Seek(target)) => {
+                flushed = false;
+                last = None;
+                let (asked, mode) = seeks
+                    .get(seek)
+                    .copied()
+                    .unwrap_or((*target, SeekMode::Accurate));
+                if asked != *target {
+                    return Err(format!(
+                        "entry {at}: seek {seek} was for {asked:?}, this terminal was told {target:?}"
+                    ));
+                }
+                floor = Some(match mode {
+                    SeekMode::Accurate => duration.map_or(*target, |duration| {
+                        (*target).min(duration.saturating_sub(LAST_SAMPLE))
+                    }),
+                    SeekMode::Keyframe => landings.get(seek).copied().unwrap_or(Duration::ZERO),
+                });
+                seek += 1;
+            }
+            Entry::Control(ControlMsg::Stop) => break,
+            Entry::Control(_) | Entry::Eos => {}
+            Entry::Data { pts } => {
+                if paused {
+                    if prerolls == 0 {
+                        return Err(format!("entry {at}: data while paused, {pts:?}"));
+                    }
+                    prerolls -= 1;
+                }
+                if flushed {
+                    return Err(format!(
+                        "entry {at}: data between a flush and its seek, {pts:?}"
+                    ));
+                }
+                let Some(pts) = *pts else { continue };
+                if let Some(floor) = floor
+                    && pts + LANDING_TOLERANCE < floor
+                {
+                    return Err(format!(
+                        "entry {at}: {pts:?} after a seek to {floor:?} — from before it"
+                    ));
+                }
+                if let Some(last) = last
+                    && pts < last
+                {
+                    return Err(format!(
+                        "entry {at}: {pts:?} after {last:?} — going backwards"
+                    ));
+                }
+                last = Some(pts);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes the crate's log where `MEDIA_PP_CONTROL_TRACE` says, once for
+/// the whole test binary — the logger can only be installed once.
+fn trace_if_asked() {
+    static GUARD: std::sync::OnceLock<Option<crate::log::LogGuard>> = std::sync::OnceLock::new();
+    GUARD.get_or_init(|| {
+        let directory = std::env::var("MEDIA_PP_CONTROL_TRACE").ok()?;
+        crate::log::init("conformance", directory, crate::log::Level::Trace, 7).ok()
+    });
+}
+
+/// The sequences to run: fixed ones by default, so an ordinary run is the
+/// same every time; more, or clock-seeded ones, when asked.
+fn seeds(shape: Shape) -> Vec<u64> {
+    if let Ok(seed) = std::env::var("MEDIA_PP_CONTROL_SEED") {
+        return vec![seed.parse().expect("MEDIA_PP_CONTROL_SEED is a number")];
+    }
+    let iterations: u64 = std::env::var("MEDIA_PP_CONTROL_ITERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2);
+    let base = if std::env::var_os("MEDIA_PP_CONTROL_RANDOM").is_some() {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |since| since.as_nanos() as u64)
+    } else {
+        (shape as u64 + 1) * 1_000
+    };
+    (0..iterations)
+        .map(|index| base.wrapping_add(index))
+        .collect()
+}
+
+fn conform(shape: Shape) {
+    trace_if_asked();
+    let steps = std::env::var("MEDIA_PP_CONTROL_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(12);
+    for seed in seeds(shape) {
+        if let Err(failure) = run_sequence(shape, seed, steps) {
+            panic!("{failure}");
+        }
+    }
+}
+
+#[test]
+fn a_file_picture_keeps_its_control_promises() {
+    conform(Shape::Video);
+}
+
+#[test]
+fn a_file_with_sound_keeps_its_control_promises() {
+    conform(Shape::AudioVideo);
+}
+
+#[test]
+fn a_fanned_out_picture_keeps_its_control_promises() {
+    conform(Shape::Tee);
+}
+
+#[test]
+fn one_deep_queues_keep_their_control_promises() {
+    conform(Shape::Tight);
+}
+
+#[test]
+fn a_live_source_keeps_its_control_promises() {
+    conform(Shape::Live);
+}
+
+#[test]
+fn a_synchronized_picture_keeps_its_control_promises() {
+    conform(Shape::Synchronized);
+}

@@ -148,6 +148,25 @@ jobs:
         shell: pwsh
         run: cargo test -p media-pp
 
+      # Random orders of pause, seek, finish and stop, on two cores. The
+      # races these look for — a seek meeting a full queue, a finish meeting
+      # a picture waiting its turn — show when threads are short of cores,
+      # which a free runner is not; a slow one found the first of them. The
+      # affinity mask is inherited by cargo and the test binary it starts.
+      # Seeded from the clock, so every run tries new orders, and a failure
+      # prints the seed that replays it: see
+      # `lib/src/core/pipeline/tests/conformance.rs`. One statement besides
+      # the test, and a .NET property that throws rather than a native
+      # command whose failure the wrapper would swallow — see above.
+      - name: Control conformance (two cores)
+        shell: pwsh
+        env:
+          MEDIA_PP_CONTROL_ITERS: "10"
+          MEDIA_PP_CONTROL_RANDOM: "1"
+        run: |
+          [System.Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity = [IntPtr]3
+          cargo test -p media-pp --lib -- conformance
+
       - name: Test (Windows backends)
         shell: pwsh
         run: cargo test -p media-pp --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer
@@ -251,6 +270,13 @@ jobs:
 
       - name: Test (no features)
         run: cargo test -p media-pp
+
+      # See the same step on Windows.
+      - name: Control conformance (two cores)
+        env:
+          MEDIA_PP_CONTROL_ITERS: "10"
+          MEDIA_PP_CONTROL_RANDOM: "1"
+        run: taskset -c 0,1 cargo test -p media-pp --lib -- conformance
 
       # Runs without a GPU: the Vulkan loader is opened at run time, the
       # tests that need a device skip where there is none, and what is left —

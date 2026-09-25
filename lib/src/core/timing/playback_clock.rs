@@ -199,6 +199,24 @@ impl PlaybackClock {
         self.wall_clock.interrupt_epoch()
     }
 
+    /// Whether a wait that last answered the interrupt numbered `answered`
+    /// must let go now: a later interrupt has been raised and the pipeline
+    /// has not yet settled it.
+    ///
+    /// Both halves, because each alone is wrong. Without the first, an
+    /// element that has already taken the control behind an interrupt would
+    /// keep giving up until the rest of the graph caught up. Without the
+    /// second — which is how `Pacer` and `VideoSynchronizer` used to read it
+    /// — only a control message of the element's own could answer an
+    /// interrupt, and `Pipeline::finish` raises one and sends none
+    /// downstream: its `Eos` travels as data. Every wait after it then gave
+    /// up, the picture being waited on was kept for good, and the `Eos`
+    /// behind it never left. See [`Clock::interrupt_pending`] on why settling
+    /// is the pipeline's to say.
+    pub(crate) fn interrupted_since(&self, answered: u64) -> bool {
+        self.wall_clock.interrupt_epoch() != answered && self.wall_clock.interrupt_pending()
+    }
+
     /// Establishes a wall-clock media origin if no stream owns one yet.
     /// Returns the current position after doing so.
     #[cfg(test)]

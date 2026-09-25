@@ -1533,6 +1533,29 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A `Tee` no longer drops the end of the stream during a seek.** While a
+  seek's preroll runs, a `Tee` stops feeding a branch that has taken its
+  picture, and it stopped the `Eos` along with the pictures — dropped, not
+  kept. A seek past the end of a file, whose last picture and `Eos` arrive
+  together, left every branch without an end, and nothing after it could
+  give them one. The `Eos` is now kept for the branch and handed on when
+  playback resumes.
+
+- **`Pipeline::finish` of a playing file hands its terminals their `Eos`.**
+  Two things lost it. `finish` interrupts the clock, and a `Pacer` or
+  `VideoSynchronizer` in a wait gave up and kept its picture — then took
+  the interrupt as answered only by a control message of its own, which
+  `finish` sends none of, so every wait after it gave up too and the
+  `Eos` stayed behind the picture for good. And the queues a finished
+  source owns are dropped as it ends: a worker that found its downstream
+  busy at that moment — a queue in front of a `Pacer` usually is — ended
+  there, dropping what it held and the `Eos` with it. A waiting element
+  now lets go only while an interrupt is outstanding, and a dropped queue
+  still holding an `Eos` hands everything up to it on first; one holding
+  none, as a detached branch's does, is abandoned as before. A muxer at the
+  end of a paced branch had never written its trailer on `finish`. Found by
+  the new control conformance sequences — see `CONTRIBUTING.md`.
+
 - **A seek the moment a file has ended no longer hangs or plays nothing.**
   A `FileDemuxer` waiting at the end of its file passed a `Pause` on
   without pausing itself, and a pipeline pauses around every seek — so a

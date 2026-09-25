@@ -40,6 +40,9 @@ pub struct Tee {
     name: Arc<str>,
     shared: Arc<TeeShared>,
     preroll: Option<Arc<crate::control::PrerollContext>>,
+    /// Branches an `Eos` arrived for while a preroll held them — by their
+    /// root — owed it once playback goes on. See [`Tee::consume`].
+    owed_eos: Vec<ElementId>,
 }
 
 struct TeeShared {
@@ -162,6 +165,7 @@ impl Tee {
                 pp_log: pp_log.clone(),
                 shared: shared.clone(),
                 preroll: None,
+                owed_eos: Vec::new(),
             },
             TeeHandle {
                 id,
@@ -563,6 +567,33 @@ impl Element for Tee {
     }
 }
 
+impl Tee {
+    /// Pushes the `Eos` a preroll kept for each branch still attached,
+    /// isolating a failure to its own branch as `consume` does.
+    fn hand_on_owed_eos(&mut self) {
+        if self.owed_eos.is_empty() {
+            return;
+        }
+        let owed = std::mem::take(&mut self.owed_eos);
+        let branches = lock_unpoisoned(&self.shared.branches).clone();
+        for branch in branches {
+            if !owed.contains(&branch.root_id) || !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let mut pad = lock_unpoisoned(&branch.pad);
+            if !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let peer = pad.peer_identity();
+            let outcome = pad.push(MediaBuffer::Eos);
+            drop(pad);
+            if let Err(error) = outcome {
+                self.report_branch_error(branch.root_id, peer, error);
+            }
+        }
+    }
+}
+
 impl Sink for Tee {
     fn ready_consume(&mut self) -> bool {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
@@ -609,6 +640,17 @@ impl Sink for Tee {
             if let (Some(context), Some(graph)) = (&self.preroll, &graph) {
                 let terminals = graph.terminal_ids_from(branch.root_id);
                 if context.are_ready(&terminals) {
+                    // The end of the stream is not skipped like the pictures
+                    // after the one the preroll took: it was dropped here, and
+                    // that branch then never ended — a seek past the end of a
+                    // file left its terminals without an `Eos` for good, and a
+                    // `finish` after it could not give them one either. It is
+                    // kept for the branch instead, and handed on once
+                    // playback goes on; pushing it now could block this
+                    // thread on a branch that is waiting for exactly that.
+                    if buf.is_eos() && !self.owed_eos.contains(&branch.root_id) {
+                        self.owed_eos.push(branch.root_id);
+                    }
                     continue;
                 }
             }
@@ -652,6 +694,18 @@ impl Sink for Tee {
             ControlMsg::Preroll(context) => self.preroll = Some(Arc::clone(context)),
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll = None,
             ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
+        }
+        match &msg {
+            // Playing again: every branch downstream has just been resumed,
+            // so the `Eos` a preroll kept goes on behind it.
+            ControlMsg::Resume => self.hand_on_owed_eos(),
+            // A new timeline, or none at all: the end of the old one is not
+            // owed to anybody now.
+            ControlMsg::Flush | ControlMsg::Stop => self.owed_eos.clear(),
+            ControlMsg::Pause
+            | ControlMsg::Preroll(_)
+            | ControlMsg::CheckSeek(_)
+            | ControlMsg::Seek(_) => {}
         }
         Ok(())
     }

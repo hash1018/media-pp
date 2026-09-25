@@ -150,7 +150,7 @@ impl VideoSynchronizer {
             return WaitOutcome::Render;
         };
         loop {
-            if playback_clock.interrupt_epoch() != self.interrupt_epoch {
+            if playback_clock.interrupted_since(self.interrupt_epoch) {
                 return WaitOutcome::Interrupted;
             }
             match self.decision_without_observing(frame_ns) {

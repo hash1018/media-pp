@@ -249,6 +249,12 @@ final source of truth when documentation and implementation differ.
   less audio than it was given then only fills a queue more slowly. See
   `audio_mixer.rs`'s `against_a_file` tests, where removing the `Pacer` makes a
   test that reproduces an 8% shortfall pass against the bug.
+- A change to how control travels — a new `ControlMsg`, a source loop, an
+  element that waits on the clock, a `Queue` or `Tee` path — runs the control
+  conformance sequences pinned to two cores, a few hundred of them, before it
+  lands (see `CONTRIBUTING.md`). A new element that waits, holds buffers, or
+  has a source loop of its own gets a shape there too. These races do not
+  show on a free machine.
 - For stress tests, leak investigations, fitted-slope interpretation, or new
   per-cycle resource coverage, apply the repository skill
   `media-pp-soak-analysis`. Its hardware, fixture, and portal prerequisites must

@@ -28,6 +28,7 @@ use crate::{
 };
 
 mod completion;
+mod conformance;
 mod contracts;
 mod graph;
 mod lifecycle;

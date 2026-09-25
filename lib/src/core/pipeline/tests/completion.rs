@@ -299,3 +299,144 @@ fn a_seek_after_the_end_finishes_again_at_the_new_end() {
         "and the pipeline finished again: {second:?}"
     );
 }
+
+/// Finishing a pipeline while it plays hands every terminal its `Eos`, paced
+/// or synchronized alike.
+///
+/// It did not: `finish` interrupts the clock so a long wait lets go of its
+/// thread, a `Pacer` or `VideoSynchronizer` in one gave up and kept its
+/// picture, and each took an interrupt as answered only by a control message
+/// of its own. `finish` sends none downstream — its `Eos` travels as data —
+/// so every wait after it counted as interrupted, the kept picture never
+/// went, and the `Eos` stayed behind it. A muxer at the end of such a branch
+/// never wrote its trailer. Found by the conformance sequences.
+#[test]
+fn finishing_while_playing_delivers_eos_through_a_timed_branch() {
+    use crate::elements::AppSink;
+
+    for synchronized in [false, true] {
+        let Some(path) = try_test_video() else { return };
+        let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .expect("the fixture has a picture")
+            .clone();
+        let pictures = Arc::new(AtomicUsize::new(0));
+        let ended = Arc::new(AtomicBool::new(false));
+        let screen = {
+            let pictures = Arc::clone(&pictures);
+            let ended = Arc::clone(&ended);
+            AppSink::new("screen", move |buffer| {
+                match buffer {
+                    MediaBuffer::Eos => ended.store(true, Ordering::SeqCst),
+                    _ => {
+                        pictures.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                Ok(())
+            })
+        };
+        let (pipeline, ()) = Pipeline::new("finish-while-timed", source, |source, ctx| {
+            let decoded = ctx
+                .branch()
+                .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+                .queue("video-frames", 4);
+            let branch = if synchronized {
+                decoded
+                    .pipe(VideoSynchronizer::new("video-sync"))
+                    .to(screen)?
+            } else {
+                decoded.pipe(Pacer::new("video-pacer")).to(screen)?
+            };
+            ctx.attach(source, video.index, branch)?;
+            Ok(())
+        })
+        .expect("wire the pipeline");
+        pipeline.run().unwrap();
+        // Playing, with a picture waiting for its turn.
+        let waited = Instant::now();
+        while pictures.load(Ordering::SeqCst) < 3 {
+            assert!(
+                waited.elapsed() < Duration::from_secs(10),
+                "playback never started"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        pipeline.finish();
+        assert!(
+            ended.load(Ordering::SeqCst),
+            "finished with {} pictures shown and no Eos (synchronized: {synchronized})",
+            pictures.load(Ordering::SeqCst)
+        );
+    }
+}
+
+/// A seek past the end of a file, through a `Tee`, ends every branch.
+///
+/// The seek's preroll takes the file's last picture on each branch; the
+/// `Eos` right behind it reached the `Tee` once both branches had theirs,
+/// and a `Tee` skips a branch whose preroll is done — the `Eos` along with
+/// the pictures. It was dropped, not kept, so neither branch ever ended, and
+/// a `finish` afterwards could not end them either. Found by the conformance
+/// sequences.
+#[test]
+fn a_seek_past_the_end_through_a_tee_ends_every_branch() {
+    use crate::elements::AppSink;
+
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+    let duration = source.duration().expect("the fixture says how long it is");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("the fixture has a picture")
+        .clone();
+    let ended: Vec<Arc<AtomicBool>> = (0..2).map(|_| Arc::new(AtomicBool::new(false))).collect();
+    let sinks: Vec<_> = ended
+        .iter()
+        .enumerate()
+        .map(|(index, ended)| {
+            let ended = Arc::clone(ended);
+            AppSink::new(format!("screen-{index}"), move |buffer| {
+                if buffer.is_eos() {
+                    ended.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            })
+        })
+        .collect();
+    let (pipeline, ()) = Pipeline::new("seek-past-end-tee", source, |source, ctx| {
+        let mut tee = ctx.tee("tee");
+        for (index, sink) in sinks.into_iter().enumerate() {
+            tee = tee.branch(ctx.branch().queue(format!("branch-{index}"), 2).to(sink)?);
+        }
+        let branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .queue("video-frames", 4)
+            .to_branch(tee.build()?)?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .expect("wire the pipeline");
+    pipeline.run().unwrap();
+    pipeline
+        .seek(duration + Duration::from_millis(500), SeekMode::Accurate)
+        .expect("a seek past the end");
+
+    let waited = Instant::now();
+    while !ended.iter().all(|ended| ended.load(Ordering::SeqCst)) {
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "a branch never ended: {:?}",
+            ended
+                .iter()
+                .map(|ended| ended.load(Ordering::SeqCst))
+                .collect::<Vec<_>>()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    pipeline.stop();
+}

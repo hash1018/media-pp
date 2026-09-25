@@ -14,6 +14,29 @@ sources and encoders, so every machine tests the same file. A backend's tests
 run under its feature (`--features d3d11,d3d12,cuda`, or the Linux ones) and
 skip, saying why, on a machine without the hardware.
 
+## Control sequences
+
+`core::pipeline::tests::conformance` runs random orders of pause, resume,
+seek, finish and stop against the shapes of pipeline this crate is used in,
+and checks what every terminal was handed: nothing new while paused, nothing
+from before a seek after it, an `Eos` after a finish, and no call that fails
+to return. An ordinary test run plays a few fixed sequences. The races these
+are for show when threads are short of cores, so CI also runs them pinned to
+two, seeded from the clock:
+
+```sh
+MEDIA_PP_CONTROL_ITERS=10 MEDIA_PP_CONTROL_RANDOM=1 taskset -c 0,1 cargo test -p media-pp --lib -- conformance
+```
+
+On Windows, set the shell's own affinity first —
+`[System.Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity = 3` —
+and cargo and the tests inherit it. A failure prints its seed and the steps
+it took; `MEDIA_PP_CONTROL_SEED=<seed>` replays exactly that sequence, and
+`MEDIA_PP_CONTROL_TRACE=<directory>` writes the crate's log there at `Trace`,
+every control message at every element, for reading what it did. A change to
+how control travels — a new message, a new element that waits, a new source
+loop — should pass a few hundred of these before it lands.
+
 ## Stress and leak scenarios
 
 The scenarios in `lib/tests/soak.rs` run for tens of seconds and are
