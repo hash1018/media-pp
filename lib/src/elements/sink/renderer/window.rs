@@ -110,7 +110,9 @@ pub enum Key {
     Up,
     /// Down arrow.
     Down,
-    /// A letter (lowercase) or a digit.
+    /// A letter (lowercase), a digit, or the full stop, comma or minus — the
+    /// three punctuation keys every keyboard layout has a key of its own
+    /// for, and what a player steps and zooms with.
     Char(char),
     /// Any other key, by the platform's own code for it — on Windows, the
     /// virtual-key code; on Linux, the X11 keysym.
@@ -131,6 +133,11 @@ impl Key {
             0x28 => Self::Down,
             0x30..=0x39 => Self::Char(char::from(code as u8)),
             0x41..=0x5A => Self::Char(char::from(code as u8).to_ascii_lowercase()),
+            // VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD: the one virtual-key
+            // codes Windows defines as the same key on every layout.
+            0xBC => Self::Char(','),
+            0xBD => Self::Char('-'),
+            0xBE => Self::Char('.'),
             other => Self::Other(other),
         }
     }
@@ -148,6 +155,9 @@ impl Key {
             0xFF54 => Self::Down,
             0x0030..=0x0039 | 0x0061..=0x007A => Self::Char(char::from(keysym as u8)),
             0x0041..=0x005A => Self::Char(char::from(keysym as u8).to_ascii_lowercase()),
+            // The same three punctuation keys as on Windows, and no more, so a
+            // program reads the same keys on both.
+            0x002C..=0x002E => Self::Char(char::from(keysym as u8)),
             other => Self::Other(other),
         }
     }
@@ -241,6 +251,11 @@ mod tests {
         assert_eq!(Key::from_keysym(0x66), Key::Char('f'));
         assert_eq!(Key::from_keysym(0x46), Key::Char('f'));
         assert_eq!(Key::from_keysym(0x31), Key::Char('1'));
+        // A player's frame step keys.
+        assert_eq!(Key::from_keysym(0x2E), Key::Char('.'));
+        assert_eq!(Key::from_keysym(0x2C), Key::Char(','));
+        assert_eq!(Key::from_keysym(0x2D), Key::Char('-'));
+        assert_eq!(Key::from_keysym(0x2F), Key::Other(0x2F));
         assert_eq!(Key::from_keysym(0xFFBE), Key::Other(0xFFBE));
     }
 
@@ -253,6 +268,11 @@ mod tests {
         assert_eq!(Key::from_virtual_key(0x1B), Key::Escape);
         assert_eq!(Key::from_virtual_key(0x46), Key::Char('f'));
         assert_eq!(Key::from_virtual_key(0x31), Key::Char('1'));
+        // A player's frame step keys.
+        assert_eq!(Key::from_virtual_key(0xBE), Key::Char('.'));
+        assert_eq!(Key::from_virtual_key(0xBC), Key::Char(','));
+        assert_eq!(Key::from_virtual_key(0xBD), Key::Char('-'));
+        assert_eq!(Key::from_virtual_key(0xBB), Key::Other(0xBB));
         assert_eq!(Key::from_virtual_key(0x70), Key::Other(0x70));
     }
 }

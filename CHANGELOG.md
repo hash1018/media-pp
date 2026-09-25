@@ -1606,6 +1606,16 @@ compile error with no explanation.
 
 ### Fixed
 
+- **The full stop and the comma step a `Player`'s picture from the
+  keyboard.** `respond_to` steps on `Key::Char('.')` and `Key::Char(',')`,
+  and no window renderer produced them: Windows' virtual-key codes and X11's
+  keysyms mapped letters and digits to `Char` and everything else to
+  `Other`, so the keys did nothing while the tests, which hand `respond_to`
+  the `Char` directly, passed. Both now map the full stop, the comma and
+  the minus — the three punctuation keys Windows defines as one key on
+  every layout — to `Char`, and no more, so a program reads the same keys
+  on both.
+
 - **An accurate seek to just before a keyframe shows the picture there, not
   the keyframe.** A file is sought by when its keyframes are decoded, and
   with B-frames that is before they are shown: the pictures shown just
