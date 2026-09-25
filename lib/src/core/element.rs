@@ -477,6 +477,20 @@ pub trait Sink: Element {
         InputContract::Unknown
     }
 
+    /// Whether this element can follow its pipeline across a seek — asked
+    /// once, as it is wired, like [`Self::input_contract`], and kept with
+    /// the graph so the pipeline knows before it asks anything running;
+    /// see [`crate::pipeline::Pipeline::check_seek`].
+    ///
+    /// Nearly everything can: what it holds from the old position goes on
+    /// the `Flush`, and the new position's arrives as ordinary data. What
+    /// cannot is an element whose output is a record of the stream as it
+    /// ran — a file being written, a replay window — into which a jump in
+    /// the timeline would be written. The default is yes.
+    fn accepts_seek(&self) -> bool {
+        true
+    }
+
     /// Reacts to a [`ControlMsg`] — drops what belongs to the timeline a
     /// `Flush` ends, arms for a `Preroll`, lets go of a device on `Stop` —
     /// on the thread delivering it, in order with the data around it.
@@ -687,6 +701,10 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
 
     fn input_contract(&self) -> InputContract {
         (**self).input_contract()
+    }
+
+    fn accepts_seek(&self) -> bool {
+        (**self).accepts_seek()
     }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {

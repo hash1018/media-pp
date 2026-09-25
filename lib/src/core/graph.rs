@@ -20,6 +20,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     contract::{InputContract, LinkCheck, OutputContract, PortContract, check_link},
+    control::{SeekRejectReason, SeekRejection},
     element::ElementType,
     log::{Level, enabled},
     pp_log::{PpLog, pp_info},
@@ -422,6 +423,9 @@ pub(crate) enum Incoming {
 pub(crate) struct PortContracts {
     pub input: InputContract,
     pub output: OutputContract,
+    /// Whether the element can follow a seek — see
+    /// [`crate::element::Sink::accepts_seek`].
+    pub accepts_seek: bool,
 }
 
 #[derive(Debug)]
@@ -547,6 +551,9 @@ struct GraphState {
     /// exists — which can be longer than it is in `nodes`. See
     /// [`crate::stats`] for why a removed element is still reported.
     counters: HashMap<ElementId, Registered>,
+    /// Why each attached element that cannot follow a seek cannot — what
+    /// [`crate::pipeline::Pipeline::check_seek`] answers from.
+    refusals: HashMap<ElementId, SeekRejectReason>,
 }
 
 impl GraphState {
@@ -635,6 +642,30 @@ impl PipelineGraph {
         let mut state = self.0.lock().unwrap();
         state.next_element_id += 1;
         ElementId(state.next_element_id)
+    }
+
+    /// Records that the source `id` cannot be sought, and why — what its
+    /// wiring knows as it adds it.
+    pub(crate) fn refuse_seek(&self, id: ElementId, reason: SeekRejectReason) {
+        self.0.lock().unwrap().refusals.insert(id, reason);
+    }
+
+    /// Every attached element that would refuse a seek, and why — the graph
+    /// as it stands, so a branch attached since the last look counts and
+    /// one detached does not.
+    pub(crate) fn seek_rejections(&self) -> Vec<SeekRejection> {
+        let state = self.0.lock().unwrap();
+        state
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                state.refusals.get(&node.id).map(|&reason| SeekRejection {
+                    element_type: node.element_type,
+                    name: node.name.clone(),
+                    reason,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn add_source(&self, element_type: ElementType, name: Arc<str>) -> ElementId {
@@ -727,6 +758,17 @@ impl PipelineGraph {
                 );
             }
         }
+        for node in &plan.nodes {
+            if plan
+                .contracts
+                .get(&node.id)
+                .is_some_and(|contracts| !contracts.accepts_seek)
+            {
+                state
+                    .refusals
+                    .insert(node.id, SeekRejectReason::ElementNotSeekable);
+            }
+        }
         state.nodes.extend(plan.nodes);
         state.edges.extend(edges);
         state.branches.insert(
@@ -781,6 +823,9 @@ impl PipelineGraph {
             .retain(|edge| !removed_branches.contains(&edge.branch_id));
         state
             .outgoing
+            .retain(|element, _| !removed_nodes.contains(element));
+        state
+            .refusals
             .retain(|element, _| !removed_nodes.contains(element));
         // Not this branch's entries — its elements are still alive, handed
         // back to the caller to drop outside this lock — but any earlier

@@ -886,7 +886,6 @@ where
             // Repositioning costs this nothing — the buffered audio is
             // dropped and the next chunk fills from wherever the source
             // lands — so there is no reason to refuse one.
-            ControlMsg::CheckSeek(_) => {}
             // A decoder's business: preroll waits for terminals to report a
             // first sample of the new timeline, and the gate that does the
             // reporting lives upstream of every terminal.

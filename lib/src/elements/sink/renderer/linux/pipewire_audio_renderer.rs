@@ -917,7 +917,7 @@ impl Sink for PipeWireAudioRenderer {
                 self.flush()?;
                 self.timeline = None;
             }
-            ControlMsg::Seek(_) | ControlMsg::CheckSeek(_) | ControlMsg::Preroll(_) => {}
+            ControlMsg::Seek(_) | ControlMsg::Preroll(_) => {}
         }
         Ok(())
     }

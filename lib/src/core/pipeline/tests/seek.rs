@@ -3,6 +3,111 @@
 
 use super::*;
 
+/// Refuses to follow a seek, as a recording does.
+struct Recording {
+    name: Arc<str>,
+    pp_log: PpLog,
+}
+
+impl Element for Recording {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for Recording {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        Ok(())
+    }
+
+    fn accepts_seek(&self) -> bool {
+        false
+    }
+}
+
+/// Whether a seek would be refused is known from the wiring alone: before
+/// the pipeline runs, with nothing running asked, and naming what refuses.
+#[test]
+fn whether_a_seek_would_be_refused_is_known_before_running() {
+    let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+    let (pipeline, ()) = Pipeline::new("check-live", camera, |source, ctx| {
+        let branch = ctx.branch().to(NoOpSink {
+            name: "noop".into(),
+            pp_log: element_pp_log(ElementType::Other, "noop", None),
+        })?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    let error = pipeline
+        .check_seek()
+        .expect_err("a live source cannot be sought");
+    assert_eq!(error.rejections().len(), 1);
+    assert_eq!(&*error.rejections()[0].name, "camera");
+    assert_eq!(
+        error.rejections()[0].reason,
+        crate::control::SeekRejectReason::LiveSource
+    );
+}
+
+/// A branch that cannot follow a seek refuses one from the moment it is
+/// attached until it is detached — the graph as it stands, not as it was
+/// built.
+#[test]
+fn a_branch_that_cannot_follow_a_seek_refuses_only_while_attached() {
+    let source = SeekLoopSource {
+        pp_log: element_pp_log(ElementType::Other, "seek-loop", None),
+        pad: SrcPad::new("src"),
+        seeks: Arc::new(AtomicUsize::new(0)),
+    };
+    let (pipeline, tee) = Pipeline::new("check-branch", source, |source, ctx| {
+        let (branch, tee) = ctx.tee("tee").build_dynamic()?;
+        ctx.attach(source, 0, branch)?;
+        Ok(tee)
+    })
+    .expect("pipeline wiring");
+    assert!(pipeline.check_seek().is_ok(), "nothing refuses yet");
+
+    let recording = tee
+        .attach(
+            tee.branch()
+                .expect("the tee is there")
+                .to(Recording {
+                    name: "recording".into(),
+                    pp_log: element_pp_log(ElementType::Other, "recording", None),
+                })
+                .expect("a branch"),
+        )
+        .expect("attach");
+    let error = pipeline
+        .check_seek()
+        .expect_err("a recording cannot follow a seek");
+    assert_eq!(&*error.rejections()[0].name, "recording");
+    assert_eq!(
+        error.rejections()[0].reason,
+        crate::control::SeekRejectReason::ElementNotSeekable
+    );
+
+    tee.detach(recording).expect("detach");
+    assert!(
+        pipeline.check_seek().is_ok(),
+        "and does not once it has gone"
+    );
+}
+
 #[test]
 fn seek_check_rejects_a_live_source_before_flushing() {
     let source = TestVideoSource::new("live", TestVideoOptions::default());
@@ -127,7 +232,6 @@ impl Sink for ControlRecordingSink {
             ControlMsg::Resume => "resume",
             ControlMsg::Stop => "stop",
             ControlMsg::Flush => "flush",
-            ControlMsg::CheckSeek(_) => "check-seek",
             ControlMsg::Preroll(context) => {
                 self.preroll_targets.lock().unwrap().push(context.target());
                 "preroll"
@@ -178,7 +282,7 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
     assert_eq!(count.load(Ordering::SeqCst), after_preroll);
     assert_eq!(
         controls.lock().unwrap().as_slice(),
-        ["check-seek", "flush", "seek", "preroll", "pause"]
+        ["flush", "seek", "preroll", "pause"]
     );
     assert_eq!(
         preroll_targets.lock().unwrap().as_slice(),
@@ -196,7 +300,7 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
     assert_eq!(count.load(Ordering::SeqCst), after_keyframe_preroll);
     assert_eq!(
         controls.lock().unwrap().as_slice(),
-        ["check-seek", "flush", "seek", "preroll", "pause"]
+        ["flush", "seek", "preroll", "pause"]
     );
     assert_eq!(preroll_targets.lock().unwrap().as_slice(), [None]);
 
@@ -248,16 +352,8 @@ fn playing_seek_uses_an_internal_pause_then_resumes() {
     // nothing is let go before its `Resume` reaches it — see
     // `crate::playback_state`.
     assert_eq!(
-        controls.lock().unwrap()[..7],
-        [
-            "check-seek",
-            "pause",
-            "flush",
-            "seek",
-            "preroll",
-            "pause",
-            "resume"
-        ]
+        controls.lock().unwrap()[..6],
+        ["pause", "flush", "seek", "preroll", "pause", "resume"]
     );
     pipeline.stop();
 }

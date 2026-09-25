@@ -58,10 +58,6 @@ pub enum ControlMsg {
     /// before `Seek`; keeping the two controls separate lets paused preroll
     /// and future timeline operations compose the same flush boundary.
     Flush,
-    /// Ask every reachable element whether it can participate in a seek.
-    /// Rejections are collected without mutating playback state; the caller
-    /// inspects the shared context after the synchronous cascade returns.
-    CheckSeek(Arc<SeekCheckContext>),
     /// Temporarily lets paused source and queue workers process data until
     /// every expected terminal reports its first new-timeline sample.
     Preroll(Arc<PrerollContext>),
@@ -80,7 +76,6 @@ impl PartialEq for ControlMsg {
             | (Self::Stop, Self::Stop)
             | (Self::Flush, Self::Flush) => true,
             (Self::Seek(left), Self::Seek(right)) => left == right,
-            (Self::CheckSeek(left), Self::CheckSeek(right)) => Arc::ptr_eq(left, right),
             (Self::Preroll(left), Self::Preroll(right)) => Arc::ptr_eq(left, right),
             _ => false,
         }
@@ -111,54 +106,6 @@ pub struct SeekRejection {
     pub reason: SeekRejectReason,
 }
 
-/// Shared result accumulator carried by [`ControlMsg::CheckSeek`].
-#[derive(Debug, Default)]
-pub struct SeekCheckContext {
-    rejections: Mutex<Vec<SeekRejection>>,
-}
-
-impl SeekCheckContext {
-    /// Creates an empty accumulator for one synchronous seek check cascade.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Records an element refusal. Repeated visits to the same graph path do
-    /// not make the public result noisy with identical entries.
-    pub fn reject(&self, element_type: ElementType, name: Arc<str>, reason: SeekRejectReason) {
-        let rejection = SeekRejection {
-            element_type,
-            name,
-            reason,
-        };
-        let mut rejections = self
-            .rejections
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !rejections.contains(&rejection) {
-            rejections.push(rejection);
-        }
-    }
-
-    /// Returns a snapshot of every distinct rejection collected so far.
-    pub fn rejections(&self) -> Vec<SeekRejection> {
-        self.rejections
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// Succeeds when every visited element accepted the seek check.
-    pub fn result(&self) -> std::result::Result<(), SeekError> {
-        let rejections = self.rejections();
-        if rejections.is_empty() {
-            Ok(())
-        } else {
-            Err(SeekError { rejections })
-        }
-    }
-}
-
 /// A pipeline-wide seek check found at least one incompatible element.
 #[derive(Debug, Error)]
 #[error("pipeline seek rejected by {rejections:?}")]
@@ -167,6 +114,15 @@ pub struct SeekError {
 }
 
 impl SeekError {
+    /// `Ok` where nothing refused, and otherwise an error naming what did.
+    pub(crate) fn from_rejections(rejections: Vec<SeekRejection>) -> std::result::Result<(), Self> {
+        if rejections.is_empty() {
+            Ok(())
+        } else {
+            Err(Self { rejections })
+        }
+    }
+
     /// Elements that rejected the attempted pipeline seek.
     pub fn rejections(&self) -> &[SeekRejection] {
         &self.rejections
@@ -705,7 +661,6 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
         "event=control control={msg:?} phase=received"
     );
     let result: Result<bool> = (|| {
-        apply_seek_check(source, msg);
         source.on_control(msg);
         let sought = apply_seek(source, bus, msg);
         if matches!(msg, ControlMsg::Seek(_)) {
@@ -772,22 +727,6 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
 /// `source` (see [`SourceElement::seek`]) and reports where it actually
 /// landed via [`BusEvent::Seeked`], since that can differ from what was
 /// requested. No-op for every other [`ControlMsg`].
-fn apply_seek_check<S: SourceElement>(source: &S, msg: &ControlMsg) {
-    let ControlMsg::CheckSeek(context) = msg else {
-        return;
-    };
-    let reason = if source.is_live() {
-        Some(SeekRejectReason::LiveSource)
-    } else if !source.is_seekable() {
-        Some(SeekRejectReason::SourceNotSeekable)
-    } else {
-        None
-    };
-    if let Some(reason) = reason {
-        context.reject(source.element_type(), source.name(), reason);
-    }
-}
-
 /// Hands `msg` to `filter` and then on through each of its pads — what a
 /// graph does for every filter in it, for code that drives one by hand: a
 /// bin of your own passing control to the elements it holds, a test.
@@ -927,7 +866,6 @@ mod tests {
             ControlMsg::Pause,
             ControlMsg::Resume,
             ControlMsg::Seek(Duration::from_secs(1)),
-            ControlMsg::CheckSeek(Arc::new(SeekCheckContext::new())),
         ] {
             apply_one_unacked(&mut source, &bus, &msg).expect("control applies");
         }
@@ -1139,32 +1077,6 @@ mod tests {
         assert!(
             stopped,
             "a dropped ControlSender must be treated the same as an explicit Stop"
-        );
-    }
-
-    #[test]
-    fn seek_check_collects_a_non_seekable_source_without_mutating_it() {
-        let context = Arc::new(SeekCheckContext::new());
-        let (ack, _ack_rx) = crossbeam_channel::bounded(1);
-        let (bus, _bus_rx) = Bus::new();
-        let mut source = DummySource::new();
-
-        apply_one(
-            &mut source,
-            &bus,
-            &ControlMsg::CheckSeek(Arc::clone(&context)),
-            &ack,
-        )
-        .expect("capability checks must not fail the control cascade");
-
-        let error = context.result().expect_err("dummy source is not seekable");
-        assert_eq!(
-            error.rejections(),
-            [SeekRejection {
-                element_type: ElementType::Other,
-                name: "dummy".into(),
-                reason: SeekRejectReason::SourceNotSeekable,
-            }]
         );
     }
 

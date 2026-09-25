@@ -13,7 +13,7 @@ use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
-    control::{ControlMsg, SeekRejectReason},
+    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
@@ -631,14 +631,13 @@ impl Sink for SegmentedTrackSink {
         }
     }
 
+    /// A recording, cut into files as it runs: a jump in the timeline would
+    /// be written into one.
+    fn accepts_seek(&self) -> bool {
+        false
+    }
+
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if let ControlMsg::CheckSeek(context) = &msg {
-            context.reject(
-                self.element_type(),
-                self.name(),
-                SeekRejectReason::ElementNotSeekable,
-            );
-        }
         if *msg == ControlMsg::Stop {
             self.group.finish_stop(self.track_index)?;
         }

@@ -93,7 +93,7 @@ pub(crate) enum Phase {
 
 impl Phase {
     /// Moves on as `msg` says — for a control channel with no pipeline to
-    /// say it, see the module docs. A `Flush`, `CheckSeek` or `Seek` leaves
+    /// say it, see the module docs. A `Flush` or `Seek` leaves
     /// the phase as it was: a seek is a pause, a flush, a reposition and a
     /// preroll, and only the pause and the preroll change what flows.
     pub(crate) fn observe(&mut self, msg: &ControlMsg) {
@@ -102,7 +102,7 @@ impl Phase {
             ControlMsg::Resume => Self::Playing,
             ControlMsg::Preroll(context) => Self::Prerolling(Arc::clone(context)),
             ControlMsg::Stop => Self::Stopped,
-            ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => return,
+            ControlMsg::Flush | ControlMsg::Seek(_) => return,
         };
     }
 
@@ -365,7 +365,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::control::SeekCheckContext;
 
     /// A phase moves only on what changes what flows, and a preroll is
     /// what a pause is released into as much as a resume is.
@@ -377,11 +376,7 @@ mod tests {
 
         state.observe(&ControlMsg::Pause);
         assert!(state.holds());
-        for unmoved in [
-            ControlMsg::Flush,
-            ControlMsg::Seek(Duration::from_secs(1)),
-            ControlMsg::CheckSeek(Arc::new(SeekCheckContext::new())),
-        ] {
+        for unmoved in [ControlMsg::Flush, ControlMsg::Seek(Duration::from_secs(1))] {
             state.observe(&unmoved);
             assert!(state.holds(), "{unmoved:?} leaves it paused");
         }

@@ -14,9 +14,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
-    control::{
-        ControlMsg, ControlReceiver, ControlSender, PrerollContext, PrerollError, SeekCheckContext,
-    },
+    control::{ControlMsg, ControlReceiver, ControlSender, PrerollContext, PrerollError},
     element::{Context, SourceElement},
     error::{Result, ThreadSpawnError},
     graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
@@ -836,10 +834,10 @@ impl Pipeline {
     /// that in-flight frame is
     /// out of the way.
     ///
-    /// Before changing anything, a synchronous `CheckSeek` cascade verifies
-    /// every source and branch. A live/non-seekable source or recording muxer
-    /// returns [`crate::control::SeekError`] without flushing the current
-    /// timeline.
+    /// Before changing anything, [`Self::check_seek`] asks the graph whether
+    /// every source and branch can follow: a live or non-seekable source, or
+    /// a recording muxer, returns [`crate::control::SeekError`] without
+    /// flushing the current timeline.
     ///
     /// `mode` chooses whether decoding stops at the preceding keyframe or
     /// advances to the sample covering `target`.
@@ -848,6 +846,21 @@ impl Pipeline {
     /// according to [`Sink::consume`](crate::element::Sink::consume). For a
     /// video renderer that includes installing or submitting the preview
     /// frame, but not waiting for physical display scanout.
+    /// Whether a [`Self::seek`] would be refused, and by what — without
+    /// seeking, and without asking anything running.
+    ///
+    /// Answered from the graph as it stands: a source that is live or cannot
+    /// reposition, and a sink that cannot follow a jump in the timeline (see
+    /// [`Sink::accepts_seek`](crate::element::Sink::accepts_seek)), say so as
+    /// they are wired. So this works before [`Self::run`] and after the
+    /// sources have stopped, costs a lock rather than a round trip through
+    /// every thread, and changes as branches come and go — a recording
+    /// attached to a `Tee` refuses from the moment it is attached until it is
+    /// detached. What a player needs to decide whether to offer a seek bar.
+    pub fn check_seek(&self) -> std::result::Result<(), crate::control::SeekError> {
+        crate::control::SeekError::from_rejections(self.graph.seek_rejections())
+    }
+
     pub fn seek(&self, target: Duration, mode: SeekMode) -> Result<()> {
         const PREROLL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -858,15 +871,7 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return Err(PipelineError::NotRunning.into());
         }
-        // Interrupting, not just asking: an element waiting on the clock —
-        // a `VideoSynchronizer` holding a frame the audio has not reached —
-        // is inside a `Queue` worker's `consume`, and that worker takes
-        // control only between buffers. The audio it waits for comes from a
-        // source that is about to stop and wait for this very question to
-        // be answered, so without the interrupt neither ever moves.
-        let check = Arc::new(SeekCheckContext::new());
-        self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::CheckSeek(Arc::clone(&check))));
-        check.result()?;
+        self.check_seek()?;
         let restore_paused = self.paused.load(Ordering::Acquire);
         if !restore_paused {
             self.pause_runtime();

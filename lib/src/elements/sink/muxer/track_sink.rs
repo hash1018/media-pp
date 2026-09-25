@@ -24,7 +24,7 @@ use super::tracks::{MuxerId, MuxerSinks};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
-    control::{ControlMsg, SeekRejectReason},
+    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::{Error, Result},
     pp_log::{PpLog, pp_error, pp_info},
@@ -303,16 +303,15 @@ impl<M: Muxer> Sink for TrackSink<M> {
         }
     }
 
+    /// Only a track made with a timeline of its own, which carries what it
+    /// writes across a seek; the rest record the stream as it ran.
+    fn accepts_seek(&self) -> bool {
+        self.timeline.is_some()
+    }
+
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Terminal, so nothing is forwarded.
         match msg {
-            ControlMsg::CheckSeek(context) if self.timeline.is_none() => {
-                context.reject(
-                    self.element_type(),
-                    self.name(),
-                    SeekRejectReason::ElementNotSeekable,
-                );
-            }
             ControlMsg::Seek(_) => {
                 if let Some(timeline) = &mut self.timeline {
                     timeline.seeked();
@@ -339,7 +338,6 @@ impl<M> Drop for TrackSink<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::SeekCheckContext;
     use crate::elements::{AudioCodec, FileMuxerError, SwAudioEncoder, SwAudioEncoderOptions};
 
     /// A file muxer in all but name, so the options can be varied freely.
@@ -400,10 +398,7 @@ mod tests {
     }
 
     fn seek_refused(sink: &mut Box<dyn Sink>) -> bool {
-        let context = Arc::new(SeekCheckContext::new());
-        sink.control(&ControlMsg::CheckSeek(Arc::clone(&context)))
-            .expect("a seek check is answered, not failed");
-        context.result().is_err()
+        !sink.accepts_seek()
     }
 
     /// Whether the file has its trailer: an MP4 is unreadable until then.

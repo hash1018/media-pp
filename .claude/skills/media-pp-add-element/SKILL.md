@@ -38,6 +38,9 @@ name.
   combination is what keeps a contract propagating to the elements downstream.
   An element whose output depends on something it cannot know at construction
   stays `Unknown`.
+- A sink that records the stream as it runs — a file, a replay window —
+  returns false from `Sink::accepts_seek`, so a seek is refused before it
+  starts rather than written into the recording.
 - Keep backend-specific public names prefixed. An unprefixed type must have a
   deliberately backend-independent contract.
 - Expose only construction and runtime controls required by the current use

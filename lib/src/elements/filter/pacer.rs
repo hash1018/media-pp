@@ -375,10 +375,7 @@ impl Sink for Pacer {
                     playback.reset_for_seek();
                 }
             }
-            ControlMsg::Pause
-            | ControlMsg::Resume
-            | ControlMsg::Preroll(_)
-            | ControlMsg::CheckSeek(_) => {}
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Preroll(_) => {}
         }
         Ok(())
     }

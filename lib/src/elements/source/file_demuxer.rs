@@ -871,11 +871,7 @@ impl SourceElement for FileDemuxer {
                 self.read_ns = None;
             }
             ControlMsg::Seek(_) => self.sought = true,
-            ControlMsg::Pause
-            | ControlMsg::Resume
-            | ControlMsg::Preroll(_)
-            | ControlMsg::Stop
-            | ControlMsg::CheckSeek(_) => {}
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Preroll(_) | ControlMsg::Stop => {}
         }
     }
 

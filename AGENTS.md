@@ -120,6 +120,11 @@ final source of truth when documentation and implementation differ.
   starts. Both sides default to `Unknown`,
   which always links, so an element with a genuinely runtime-dependent contract
   simply leaves it alone rather than guessing.
+- Whether a seek can be followed is declared the same way, at wiring: a
+  sink whose output is a record of the stream as it ran — a file being
+  written, a replay window — returns false from `Sink::accepts_seek`, and a
+  source says so through `is_live` and `is_seekable`. `Pipeline::check_seek`
+  answers from what the graph holds; nothing asks the running elements.
 - Preserve media metadata across transforms unless the element intentionally
   creates a new timeline: PTS, duration, packet `time_base`, and video
   color-space/range are part of the buffer contract, not optional decoration.

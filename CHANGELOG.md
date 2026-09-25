@@ -12,6 +12,16 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A sink that cannot follow a seek says so with `Sink::accepts_seek`;
+  `ControlMsg::CheckSeek` and `SeekCheckContext` are gone.** Whether a seek
+  would be refused was asked by sending `CheckSeek` down the running graph
+  and collecting refusals in a `SeekCheckContext`. Everything that refuses
+  decides it as it is built — a live or non-seekable source, a recording —
+  so the answer is now taken as each element is wired and kept with the
+  graph; see `Pipeline::check_seek` under Added. A sink of your own that
+  refused `CheckSeek` returns `false` from `accepts_seek` instead, and a
+  `match` on `ControlMsg` loses the arm.
+
 - **`Sink::control` is an element's own reaction; the graph passes the
   message on.** It took a `ControlMsg`, had no default, and every filter
   ended it by forwarding to its own pad — so a filter that forgot, or
@@ -678,6 +688,14 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **`Pipeline::check_seek` says whether a seek would be refused, and by
+  what, without seeking.** Answered from the graph as it stands, not by
+  asking anything running: it works before `run` and after the sources
+  have stopped, costs a lock, and follows branches as they come and go — a
+  recording attached to a `Tee` refuses from its attach to its detach.
+  What a player needs to decide whether to offer a seek bar. `seek` asks
+  it first, as it asked the `CheckSeek` cascade before.
 
 - **`SourceElement::pausing` and `SourceElement::resuming`**, called as a
   pause begins — before the `Pause` goes downstream — and as it ends —

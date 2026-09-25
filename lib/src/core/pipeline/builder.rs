@@ -113,6 +113,18 @@ impl PipelineBuilder {
         *source.pp_log_mut() =
             element_pp_log(source.element_type(), &source.name(), Some(&self.id));
         let source_id = self.graph.add_source(source.element_type(), source.name());
+        // A source follows a seek by repositioning itself; whether it can is
+        // settled now, and a seek it cannot follow is refused before
+        // anything is asked of it — see `Pipeline::check_seek`.
+        if source.is_live() {
+            self.graph
+                .refuse_seek(source_id, crate::control::SeekRejectReason::LiveSource);
+        } else if !source.is_seekable() {
+            self.graph.refuse_seek(
+                source_id,
+                crate::control::SeekRejectReason::SourceNotSeekable,
+            );
+        }
         // Made before the context, which carries them to a source that
         // records its own ticks.
         let counters = ElementCounters::new();

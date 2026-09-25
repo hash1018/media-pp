@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::buffer::MediaBuffer;
     use crate::contract::{InputContract, MediaKind, PortContract};
-    use crate::control::{ControlMsg, SeekCheckContext, SeekRejectReason};
+    use crate::control::ControlMsg;
     use crate::element::{Sink, Source};
     use crate::elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions};
 
@@ -346,17 +346,7 @@ mod tests {
             .expect("open muxer")
             .take(audio)
             .expect("the muxer's own track");
-        let context = Arc::new(SeekCheckContext::new());
-
-        sink.control(&ControlMsg::CheckSeek(Arc::clone(&context)))
-            .expect("check control");
-
-        let error = context.result().expect_err("muxer must reject seek");
-        assert_eq!(error.rejections().len(), 1);
-        assert_eq!(
-            error.rejections()[0].reason,
-            SeekRejectReason::ElementNotSeekable
-        );
+        assert!(!sink.accepts_seek(), "muxer must reject seek");
         sink.control(&ControlMsg::Stop).expect("finalize muxer");
         std::fs::remove_file(path).ok();
     }

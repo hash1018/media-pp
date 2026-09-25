@@ -52,7 +52,7 @@ use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
-    control::{ControlMsg, SeekRejectReason},
+    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
     pp_log::{PpLog, pp_error, pp_info},
@@ -620,13 +620,6 @@ impl Sink for ReplayTrackSink {
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Terminal, so nothing is forwarded.
         match msg {
-            // A window measured across a jump in the timeline would hold
-            // the wrong stretch and let go of it at the wrong time.
-            ControlMsg::CheckSeek(context) => context.reject(
-                self.element_type(),
-                self.name(),
-                SeekRejectReason::ElementNotSeekable,
-            ),
             // What is held belongs to the timeline being discarded.
             ControlMsg::Flush => self.shared.window.lock().unwrap().clear(),
             // Nothing to finalize and nothing to pause: what is held stays

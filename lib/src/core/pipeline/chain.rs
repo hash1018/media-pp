@@ -41,6 +41,7 @@ struct PlannedNode {
     output_port: Arc<str>,
     input: InputContract,
     output: OutputContract,
+    accepts_seek: bool,
     /// Held strongly by the stage once it is built; the plan hands the
     /// registry a weak reference — see [`crate::stats`].
     counters: Arc<ElementCounters>,
@@ -132,6 +133,10 @@ impl<T: Filter> Sink for FlowTracer<T> {
 
     fn input_contract(&self) -> InputContract {
         self.inner.input_contract()
+    }
+
+    fn accepts_seek(&self) -> bool {
+        self.inner.accepts_seek()
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -310,6 +315,10 @@ impl Sink for TerminalTracer {
         self.inner.input_contract()
     }
 
+    fn accepts_seek(&self) -> bool {
+        self.inner.accepts_seek()
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let is_eos = buf.is_eos();
         if is_eos {
@@ -451,6 +460,7 @@ impl ChainBuilder {
             output_port,
             input: element.input_contract(),
             output,
+            accepts_seek: element.accepts_seek(),
             counters: Arc::clone(&counters),
         });
         self.elements.push(Box::new(DirectStage(element, counters)));
@@ -489,6 +499,7 @@ impl ChainBuilder {
             // sink directly and so has no pad to carry it.
             input: InputContract::Any,
             output: OutputContract::Passthrough,
+            accepts_seek: true,
             counters: Arc::clone(&counters),
         });
         self.elements.push(Box::new(QueueStage {
@@ -538,6 +549,7 @@ impl ChainBuilder {
                     PortContracts {
                         input: node.input,
                         output: node.output,
+                        accepts_seek: node.accepts_seek,
                     },
                 )
             })
@@ -547,6 +559,7 @@ impl ChainBuilder {
             PortContracts {
                 input: terminal.input_contract(),
                 output: OutputContract::Unknown,
+                accepts_seek: terminal.accepts_seek(),
             },
         );
 
@@ -660,6 +673,7 @@ impl ChainBuilder {
                 PortContracts {
                     input: node.input,
                     output: node.output,
+                    accepts_seek: node.accepts_seek,
                 },
             );
             plan.counters

@@ -756,10 +756,7 @@ impl Sink for Tee {
             // A new timeline, or none at all: the end of the old one is not
             // owed to anybody now.
             ControlMsg::Flush | ControlMsg::Stop => self.owed.clear(),
-            ControlMsg::Pause
-            | ControlMsg::Preroll(_)
-            | ControlMsg::CheckSeek(_)
-            | ControlMsg::Seek(_) => {}
+            ControlMsg::Pause | ControlMsg::Preroll(_) | ControlMsg::Seek(_) => {}
         }
         Ok(())
     }

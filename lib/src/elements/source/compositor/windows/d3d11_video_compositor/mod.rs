@@ -563,7 +563,6 @@ impl Sink for D3d11VideoCompositorInputSink {
             ControlMsg::Pause
             | ControlMsg::Resume
             | ControlMsg::Seek(_)
-            | ControlMsg::CheckSeek(_)
             | ControlMsg::Preroll(_) => {}
         }
         Ok(())
