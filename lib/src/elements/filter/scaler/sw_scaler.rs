@@ -6,7 +6,10 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
-    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
+    contract::{
+        InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
+        PortContract, check_link,
+    },
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -155,6 +158,45 @@ impl SwScaler {
         flags: ffmpeg::software::scaling::Flags,
     ) -> Self {
         Self::with_output(name, dst_format, OutputSize::OfTheInput, flags)
+    }
+
+    /// What a software decode of `params` needs in front of `sink` for
+    /// `sink` to take it: nothing where it decodes to a layout `sink` takes
+    /// — YUV420P, as most streams do, in front of a window renderer — and
+    /// otherwise a scaler to the first of YUV420P, NV12 and BGRA that `sink`
+    /// does take, at the frames' own size: a 10-bit or a 4:4:4 decode in
+    /// front of a window, say.
+    ///
+    /// Asked of `sink`'s own input contract, so what it takes is said in one
+    /// place, the sink. `None` as well where it takes none of the three: the
+    /// link is left to refuse, and to say why.
+    pub fn if_needed(
+        name: impl Into<String>,
+        params: &ffmpeg::codec::Parameters,
+        sink: &(impl Sink + ?Sized),
+    ) -> Result<Option<Self>> {
+        let decoded = ffmpeg::codec::context::Context::from_parameters(params.clone())?
+            .decoder()
+            .video()?
+            .format();
+        let accepted = sink.input_contract();
+        let takes = |format: ffmpeg::format::Pixel| {
+            let produced = OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(PixelLayoutSet::of(PixelLayout::of(format))),
+            );
+            !check_link(&produced, &accepted).is_refused()
+        };
+        if takes(decoded) {
+            return Ok(None);
+        }
+        use ffmpeg::format::Pixel;
+        Ok([Pixel::YUV420P, Pixel::NV12, Pixel::BGRA]
+            .into_iter()
+            .find(|&format| takes(format))
+            .map(|format| {
+                Self::to_format(name, format, ffmpeg::software::scaling::Flags::BILINEAR)
+            }))
     }
 
     fn with_output(
@@ -842,6 +884,99 @@ mod tests {
         assert!(
             scaler.consume(audio).is_err(),
             "Audio must be rejected, not silently accepted"
+        );
+    }
+
+    /// A sink that takes system-memory video in `layouts` and nothing else.
+    struct Takes {
+        layouts: PixelLayoutSet,
+        pp_log: PpLog,
+    }
+
+    impl Takes {
+        fn only(layouts: &[PixelLayout]) -> Self {
+            Self {
+                layouts: PixelLayoutSet::from_slice(layouts),
+                pp_log: element_pp_log(ElementType::Other, "takes", None),
+            }
+        }
+    }
+
+    impl Element for Takes {
+        fn name(&self) -> Arc<str> {
+            "takes".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Takes {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+        fn input_contract(&self) -> InputContract {
+            InputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(self.layouts),
+            )
+        }
+    }
+
+    /// The parameters of an H.264 stream that decodes to `format`.
+    fn decoding_to(format: ffmpeg::format::Pixel) -> ffmpeg::codec::Parameters {
+        let mut params = ffmpeg::codec::Parameters::new();
+        // SAFETY: `params` is this function's own, freshly allocated, and only
+        // plain fields of it are set.
+        unsafe {
+            let raw = params.as_mut_ptr();
+            (*raw).codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*raw).codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_H264;
+            (*raw).format = ffmpeg::ffi::AVPixelFormat::from(format) as i32;
+            (*raw).width = 64;
+            (*raw).height = 48;
+        }
+        params
+    }
+
+    /// Nothing where the sink takes what the stream decodes to; otherwise
+    /// the first of YUV420P, NV12 and BGRA it does take; and nothing where
+    /// it takes none of them, for the link to refuse.
+    #[test]
+    fn a_scaler_goes_in_only_where_the_sink_refuses_the_decode() {
+        use ffmpeg::format::Pixel;
+        crate::ensure_ffmpeg();
+        let window = Takes::only(&[PixelLayout::Nv12, PixelLayout::Yuv420p, PixelLayout::Bgra]);
+        let scaled_to = |params, sink: &Takes| {
+            SwScaler::if_needed("fit", &params, sink)
+                .expect("the parameters open")
+                .map(|scaler| scaler.dst_format)
+        };
+        assert_eq!(scaled_to(decoding_to(Pixel::YUV420P), &window), None);
+        assert_eq!(
+            scaled_to(decoding_to(Pixel::YUV444P), &window),
+            Some(Pixel::YUV420P)
+        );
+        assert_eq!(
+            scaled_to(
+                decoding_to(Pixel::YUV420P),
+                &Takes::only(&[PixelLayout::Nv12])
+            ),
+            Some(Pixel::NV12)
+        );
+        assert_eq!(
+            scaled_to(
+                decoding_to(Pixel::YUV420P),
+                &Takes::only(&[PixelLayout::Rgb24])
+            ),
+            None,
+            "none of the three is taken: the link is left to say so"
         );
     }
 }

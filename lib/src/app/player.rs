@@ -28,11 +28,6 @@ use crate::elements::{
 use crate::elements::{WasapiRenderer as AudioOut, WasapiRendererOptions as AudioOutOptions};
 use crate::{
     bus::BusEvent,
-    contract::{
-        MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet, PortContract,
-        check_link,
-    },
-    element::Sink,
     elements::{
         AudioFormat, AudioResampler, AudioVolume, AudioVolumeError, AudioVolumeHandle,
         AudioWaveform, AudioWaveformOptions, DecodePath, DecodeTarget, DecodeThreadKind,
@@ -340,7 +335,7 @@ impl Player {
         let to_drawable = if on_gpu {
             None
         } else {
-            to_drawable(&video.parameters, &screen)?
+            SwScaler::if_needed("to-drawable", &video.parameters, &screen)?
         };
         let handle = decoder.handle();
 
@@ -738,32 +733,6 @@ fn open_output() -> Result<(AudioOut, AudioFormat), PlayerError> {
         .find(|device| device.is_default)
         .ok_or_else(|| PlayerError::Audio("no default output device".into()))?;
     AudioOut::open("speakers", AudioOutOptions { device }).map_err(audio)
-}
-
-/// A scaler to YUV420P where the software decode of `params` is in a
-/// layout the window does not draw — a 10-bit or a 4:4:4 one — asked of the
-/// window's own input contract.
-fn to_drawable(
-    params: &ffmpeg::codec::Parameters,
-    screen: &VideoWindow,
-) -> crate::Result<Option<SwScaler>> {
-    let decoder = ffmpeg::codec::context::Context::from_parameters(params.clone())?
-        .decoder()
-        .video()?;
-    let decoded = OutputContract::Fixed(
-        PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-            .with_layouts(PixelLayoutSet::of(PixelLayout::of(decoder.format()))),
-    );
-    if !check_link(&decoded, &screen.input_contract()).is_refused() {
-        return Ok(None);
-    }
-    Ok(Some(SwScaler::new(
-        "to-yuv420p",
-        ffmpeg::format::Pixel::YUV420P,
-        decoder.width(),
-        decoder.height(),
-        ffmpeg::software::scaling::Flags::BILINEAR,
-    )))
 }
 
 // Built wherever `Player` is — Windows with a D3D renderer and WASAPI, Linux

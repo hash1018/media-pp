@@ -722,6 +722,15 @@ compile error with no explanation.
 
 ### Added
 
+- **`SwScaler::if_needed`: a software decode fitted to what takes it.**
+  Given a stream's parameters and the sink it is to reach, it answers
+  nothing where the sink takes what the stream decodes to, and otherwise a
+  scaler to the first of YUV420P, NV12 and BGRA the sink does take, at the
+  frames' own size — asked of the sink's input contract, so what a sink
+  takes is said in one place. `Player` and the examples each had a copy of
+  this that always chose YUV420P at the stream's opening size; they use
+  this one now, which also follows a stream that changes size.
+
 - **A video decoder decodes less while its pictures come too late.** A
   `Pacer` or `VideoSynchronizer` says how late each picture it hands on
   is, and every video decoder here reads that before each packet: while

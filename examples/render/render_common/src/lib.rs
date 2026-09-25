@@ -5,14 +5,12 @@
 //! window the renderer opens itself — `D3d11WindowRenderer` or
 //! `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux — and all
 //! of them report that window through the library's one `WindowEvents`, so
-//! [`stop_on_close`] and [`Shutdown`] are the same on both platforms, and so
-//! is [`to_drawable`], which fits a software decode to whichever renderer's
-//! input: all three take system-memory YUV420P, NV12 and BGRA.
+//! [`stop_on_close`] and [`Shutdown`] are the same on both platforms. What
+//! fits a software decode to a renderer's input is the library's own,
+//! `SwScaler::if_needed`.
 
-mod drawable;
 mod shutdown;
 mod window;
 
-pub use drawable::to_drawable;
 pub use shutdown::Shutdown;
 pub use window::stop_on_close;

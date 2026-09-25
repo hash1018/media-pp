@@ -117,7 +117,11 @@ mod windows_example {
             },
         )?;
         let shutdown = render_common::stop_on_close([window]);
-        let to_drawable = render_common::to_drawable(&streams.video_params, &renderer)?;
+        let to_drawable = media_pp::elements::SwScaler::if_needed(
+            "to-drawable",
+            &streams.video_params,
+            &renderer,
+        )?;
 
         let (pipeline, audio_tee_handle) =
             Pipeline::new("av-playback", source, |source, context| {

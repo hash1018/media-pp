@@ -52,7 +52,7 @@ mod example {
             },
         )?;
         let shutdown = render_common::stop_on_close([window]);
-        let to_drawable = render_common::to_drawable(&params, &screen)?;
+        let to_drawable = media_pp::elements::SwScaler::if_needed("to-drawable", &params, &screen)?;
 
         let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let mut branch = ctx

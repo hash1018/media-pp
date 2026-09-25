@@ -69,7 +69,8 @@ mod windows_example {
             },
         )?;
         let shutdown = render_common::stop_on_close([window]);
-        let to_drawable = render_common::to_drawable(&params, &renderer)?;
+        let to_drawable =
+            media_pp::elements::SwScaler::if_needed("to-drawable", &params, &renderer)?;
 
         let (pipeline, ()) = Pipeline::new("seek-render", source, |source, ctx| {
             let mut branch = ctx
@@ -222,7 +223,8 @@ mod linux_example {
             },
         )?;
         let shutdown = render_common::stop_on_close([window]);
-        let to_drawable = render_common::to_drawable(&params, &renderer)?;
+        let to_drawable =
+            media_pp::elements::SwScaler::if_needed("to-drawable", &params, &renderer)?;
 
         let (pipeline, ()) = Pipeline::new("seek-render", source, |source, ctx| {
             let mut branch = ctx
