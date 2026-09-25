@@ -183,6 +183,9 @@ pub(crate) struct PlaybackState {
     pictures: Mutex<HashMap<ElementId, Picture>>,
     /// Whether the current timeline runs backwards — see [`Self::backwards`].
     backwards: AtomicBool,
+    /// How late, in nanoseconds of wall time, the last picture handed on
+    /// was — see [`Self::picture_late`].
+    picture_late_ns: AtomicU64,
 }
 
 /// The picture one terminal last took.
@@ -210,6 +213,7 @@ impl PlaybackState {
             listeners: Mutex::new(Vec::new()),
             pictures: Mutex::new(HashMap::new()),
             backwards: AtomicBool::new(false),
+            picture_late_ns: AtomicU64::new(0),
         })
     }
 
@@ -367,6 +371,22 @@ impl PlaybackState {
     /// call, before [`Self::begin_timeline`].
     pub(crate) fn set_backwards(&self, backwards: bool) {
         self.backwards.store(backwards, Ordering::Release);
+    }
+
+    /// Records how late a picture was as it was handed on to be shown —
+    /// kept by what paces pictures, a `Pacer` or a `VideoSynchronizer`,
+    /// and zero for one on time. A decoder reads it to decode less while
+    /// pictures come too late to be shown in time; see the decoders' `qos`.
+    /// The last one said is what is read, whichever branch said it; a seek
+    /// starts again from zero.
+    pub(crate) fn picture_late(&self, late: Duration) {
+        let ns = u64::try_from(late.as_nanos()).unwrap_or(u64::MAX);
+        self.picture_late_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// How late the last picture handed on was — see [`Self::picture_late`].
+    pub(crate) fn picture_lateness(&self) -> Duration {
+        Duration::from_nanos(self.picture_late_ns.load(Ordering::Relaxed))
     }
 
     /// Starts a new timeline, and answers its number. Everything numbered

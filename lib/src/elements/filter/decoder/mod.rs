@@ -12,6 +12,7 @@ mod cuda;
 ))]
 mod hw_decoder;
 mod preroll_gate;
+mod qos;
 mod sw_decoder;
 mod video_decode_bin;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]

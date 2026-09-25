@@ -722,6 +722,19 @@ compile error with no explanation.
 
 ### Added
 
+- **A video decoder decodes less while its pictures come too late.** A
+  `Pacer` or `VideoSynchronizer` says how late each picture it hands on
+  is, and every video decoder here reads that before each packet: while
+  pictures keep coming late it stops decoding pictures nothing refers
+  to — the B-frames, commonly — then all but keyframes, and it goes back a
+  step once they have come on time for a while. What is shown stays at
+  the right place in time. A preroll decodes everything, since a seek or
+  a step asks for one particular picture. Playing backwards is where it
+  counts: each stretch is decoded from the keyframe before it, so on a
+  recording with a keyframe every five seconds a software decoder that
+  fell to 2.3 times the speed at -4 now holds -4, showing fewer pictures,
+  and it does not touch one that keeps up.
+
 - **A negative `Pipeline::set_rate` plays backwards.** From the picture
   shown, from a quarter of the speed to four times it
   (`Pipeline::REVERSE_RATE` is the media's own): turning round, everything

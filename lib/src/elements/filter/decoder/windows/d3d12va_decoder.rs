@@ -20,6 +20,7 @@ use crate::{
 use super::super::backwards::Stretch;
 use super::super::hw_decoder::{CopyFrames, NegotiationRefusal, capable_decoder};
 use super::super::preroll_gate::PrerollGate;
+use super::super::qos::Qos;
 use super::d3d12_copier::D3d12Copier;
 use crate::elements::filter::is_codec_drain_boundary;
 
@@ -95,6 +96,8 @@ pub struct D3d12Decoder {
     /// — copies of them, since the surfaces they were decoded to are a pool
     /// the rest of the stretch is decoded into.
     stretch: Stretch,
+    /// What it leaves undecoded while pictures come too late — see `Qos`.
+    qos: Qos,
     /// The device, for the copier.
     gpu: D3d12Gpu,
     /// Where those copies come from, on this decoder's device.
@@ -187,6 +190,7 @@ impl D3d12Decoder {
             preroll_gate: PrerollGate::default(),
             refused,
             stretch: Stretch::default(),
+            qos: Qos::default(),
             gpu: gpu.clone(),
             copies: CopyFrames::default(),
             copier: None,
@@ -308,6 +312,7 @@ impl Element for D3d12Decoder {
     /// `PrerollGate`.
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
         self.preroll_gate.attach(&context.state);
+        self.qos.attach(&context.state);
     }
 }
 
@@ -338,6 +343,7 @@ impl Sink for D3d12Decoder {
             MediaBuffer::Packet(packet) => {
                 // Decoded frames carry a `pts` but not the unit it is in.
                 self.preroll_gate.observe_packet(&packet);
+                self.qos.follow(&mut self.decoder, &self.pp_log);
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
@@ -374,6 +380,7 @@ impl Sink for D3d12Decoder {
         // catching up to it exist only to warm the codec.
         if *msg == ControlMsg::Flush {
             self.decoder.flush();
+            self.qos.reset(&mut self.decoder);
             self.preroll_gate.reset();
             self.stretch.reset();
         }

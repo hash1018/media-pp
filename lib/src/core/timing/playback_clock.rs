@@ -329,6 +329,28 @@ impl PlaybackClock {
         Duration::from_nanos((ahead as f64 / rate.abs()) as u64)
     }
 
+    /// How far playback has gone past `media_ns`, as the wall time that
+    /// took at this rate: what a picture due there, handed on now, is late
+    /// by. Zero where it is not yet due, or nothing says where playback is.
+    pub(crate) fn late_by(&self, media_ns: i64) -> Duration {
+        let state = self.state.lock().unwrap();
+        let rate = self.rate();
+        let Some(position) = position_at(*state, self.wall_clock.elapsed(), rate) else {
+            return Duration::ZERO;
+        };
+        // Past it in the direction playback goes: later media forwards,
+        // earlier media in reverse.
+        let behind = if rate < 0.0 {
+            media_ns.saturating_sub(position)
+        } else {
+            position.saturating_sub(media_ns)
+        };
+        if behind <= 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_nanos((behind as f64 / rate.abs()) as u64)
+    }
+
     /// Establishes the origin at `media_ns` where nothing has yet — the first
     /// stream to ask speaks for the pipeline — and, playing in reverse,
     /// where an audio master is waiting to prime: in reverse there is no
@@ -844,6 +866,36 @@ mod tests {
     /// what lies below it, and an audio master waiting to prime — there is
     /// no sound in reverse — does not hold the picture up: the wall clock
     /// takes over from the first picture.
+    #[test]
+    fn late_by_is_how_far_playback_has_gone_past_as_wall_time() {
+        let playback = Arc::new(PlaybackClock::new(Arc::new(Clock::new())));
+        playback.reset_for_seek();
+        assert_eq!(playback.remaining(1_000_000_000), Duration::ZERO, "anchors");
+        assert_eq!(playback.late_by(2_000_000_000), Duration::ZERO, "not due");
+        thread::sleep(Duration::from_millis(100));
+        let late = playback.late_by(1_000_000_000);
+        assert!(
+            (Duration::from_millis(90)..Duration::from_millis(400)).contains(&late),
+            "{late:?}"
+        );
+        // At twice the rate the same media behind took half the time.
+        playback.set_rate(2.0);
+        let late = playback.late_by(1_000_000_000);
+        let behind = playback.position_ns().unwrap() - 1_000_000_000;
+        assert!(
+            late.as_nanos().abs_diff(behind as u128 / 2) < 5_000_000,
+            "{late:?} for {behind} ns behind"
+        );
+
+        // Backwards, past is below.
+        playback.set_rate(-1.0);
+        playback.reset_for_seek();
+        assert_eq!(playback.remaining(5_000_000_000), Duration::ZERO, "anchors");
+        thread::sleep(Duration::from_millis(100));
+        assert!(playback.late_by(5_000_000_000) >= Duration::from_millis(90));
+        assert_eq!(playback.late_by(4_000_000_000), Duration::ZERO, "not due");
+    }
+
     #[test]
     fn in_reverse_the_position_goes_down_on_the_wall_clock() {
         let wall = Arc::new(Clock::new());

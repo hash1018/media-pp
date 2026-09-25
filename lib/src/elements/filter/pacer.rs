@@ -129,6 +129,9 @@ pub struct Pacer {
     /// could process pause/seek/stop. Pause retains them for resume; seek
     /// and stop discard them in `control()`.
     pending: VecDeque<MediaBuffer>,
+    /// How late the buffer the last wait let go was — zero for one on
+    /// time, untimed, or let through by a preroll.
+    late: Duration,
     pad: SrcPad,
 }
 
@@ -155,6 +158,7 @@ impl Pacer {
             interrupt_epoch: 0,
             state: None,
             pending: VecDeque::new(),
+            late: Duration::ZERO,
             pad,
         }
     }
@@ -202,6 +206,7 @@ impl Pacer {
     /// advances at the device's rate and a deadline named up front would be
     /// wrong by however far that rate differs.
     fn wait_for(&mut self, timing: Timing) -> Result<bool, PacerError> {
+        self.late = Duration::ZERO;
         let playback = self.playback_clock.clone().ok_or(PacerError::NotAttached)?;
         let state = self.state.clone().ok_or(PacerError::NotAttached)?;
         // Before the interrupt, not after it: a preroll waits for nothing,
@@ -242,6 +247,7 @@ impl Pacer {
             }
             let remaining = playback.remaining(pts_ns);
             if remaining.is_zero() {
+                self.late = playback.late_by(pts_ns);
                 return Ok(true);
             }
             if let Some(limit) = self.discontinuity_limit
@@ -356,6 +362,14 @@ impl Sink for Pacer {
             if !ready && !ends {
                 self.pending.push_front(buf);
                 return Ok(());
+            }
+            // How late a picture is goes to the decoder before it, which
+            // decodes less while pictures come too late — see
+            // `PlaybackState::picture_late`.
+            if let (MediaBuffer::Video(_), Some(state)) = (&buf, &self.state)
+                && !state.is_prerolling()
+            {
+                state.picture_late(self.late);
             }
             self.pad.push(buf)?;
             handed_on = true;
@@ -711,6 +725,42 @@ mod tests {
     /// deliver a preview sample. Suppressing pre-target media is *not* its
     /// job: that needs the time base a decoder has on every decoded branch,
     /// and a `Pacer` is only on some of them.
+    #[test]
+    fn a_late_picture_says_how_late_and_sound_does_not() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", &context);
+        let unit = ffmpeg::Rational::new(1, 1000);
+        let picture = |pts: i64| {
+            let pool = crate::pool::UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+            let mut frame = pool.get();
+            frame.set_pts(Some(pts));
+            crate::buffer::set_time_base(&mut frame, unit);
+            MediaBuffer::Video(Arc::new(frame))
+        };
+        let sound = |pts: i64| {
+            let mut frame = ffmpeg::frame::Audio::empty();
+            frame.set_pts(Some(pts));
+            crate::buffer::set_time_base(&mut frame, unit);
+            MediaBuffer::Audio(Arc::new(frame))
+        };
+        pacer.consume(picture(0)).expect("anchors");
+        assert!(
+            context.state.picture_lateness() < Duration::from_millis(10),
+            "on time"
+        );
+        thread::sleep(Duration::from_millis(150));
+        pacer.consume(picture(10)).expect("late");
+        let late = context.state.picture_lateness();
+        assert!(late >= Duration::from_millis(100), "{late:?}");
+        pacer.consume(sound(0)).expect("later still");
+        assert_eq!(
+            context.state.picture_lateness(),
+            late,
+            "the sound says nothing of pictures"
+        );
+    }
+
     #[test]
     fn preroll_forwards_without_waiting_out_the_presentation_time() {
         let clock = Arc::new(Clock::new());

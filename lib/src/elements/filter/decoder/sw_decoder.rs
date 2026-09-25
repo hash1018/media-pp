@@ -15,6 +15,7 @@ use crate::{
 
 use super::backwards::Stretch;
 use super::preroll_gate::PrerollGate;
+use super::qos::Qos;
 use crate::elements::filter::is_codec_drain_boundary;
 
 /// Errors specific to `SwDecoder`. Converts into the crate-wide `Error`
@@ -111,6 +112,8 @@ pub struct SwDecoder {
     /// Holds a stretch's pictures to hand on last first, playing backwards
     /// — see [`ReversibleDecoder`].
     stretch: Stretch,
+    /// What it leaves undecoded while pictures come too late — see `Qos`.
+    qos: Qos,
 }
 
 impl SwDecoder {
@@ -212,6 +215,7 @@ impl SwDecoder {
             pool,
             preroll_gate: PrerollGate::default(),
             stretch: Stretch::default(),
+            qos: Qos::default(),
         })
     }
 }
@@ -251,6 +255,7 @@ impl Element for SwDecoder {
     /// `PrerollGate`.
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
         self.preroll_gate.attach(&context.state);
+        self.qos.attach(&context.state);
     }
 }
 
@@ -295,6 +300,7 @@ impl Sink for SwDecoder {
                 self.preroll_gate.observe_packet(&packet);
                 match &mut self.kind {
                     Kind::Video(decoder) => {
+                        self.qos.follow(decoder, &self.pp_log);
                         decoder
                             .send_packet(&*packet)
                             .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
@@ -363,7 +369,10 @@ impl Sink for SwDecoder {
         // codec and must not be forwarded.
         if *msg == ControlMsg::Flush {
             match &mut self.kind {
-                Kind::Video(decoder) => decoder.flush(),
+                Kind::Video(decoder) => {
+                    decoder.flush();
+                    self.qos.reset(decoder);
+                }
                 Kind::Audio(decoder) => decoder.flush(),
             }
             self.preroll_gate.reset();

@@ -260,6 +260,7 @@ impl Pipeline {
         // queue drops whatever reaches it from the old one — what the
         // `Flush` below discards, and what it misses.
         self.state.set_backwards(self.rate() < 0.0);
+        self.state.picture_late(Duration::ZERO);
         self.state.begin_timeline();
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));

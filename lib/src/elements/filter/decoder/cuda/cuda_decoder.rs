@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::super::backwards::Stretch;
 use super::super::hw_decoder::{CopyFrames, NegotiationRefusal, capable_decoder};
 use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
+use super::super::qos::Qos;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
@@ -88,6 +89,8 @@ pub struct CudaDecoder {
     /// — copies of them, since NVDEC's surfaces are a fixed pool the rest
     /// of the stretch is decoded into.
     stretch: Stretch,
+    /// What it leaves undecoded while pictures come too late — see `Qos`.
+    qos: Qos,
     /// Where those copies come from, on this decoder's device.
     copies: CopyFrames,
     /// What the copies travel in.
@@ -195,6 +198,7 @@ impl CudaDecoder {
             preroll_gate: PrerollGate::default(),
             refused,
             stretch: Stretch::default(),
+            qos: Qos::default(),
             copies: CopyFrames::default(),
             copy_wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         })
@@ -319,6 +323,7 @@ impl Element for CudaDecoder {
     /// `PrerollGate`.
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
         self.preroll_gate.attach(&context.state);
+        self.qos.attach(&context.state);
     }
 }
 
@@ -345,6 +350,7 @@ impl Sink for CudaDecoder {
             MediaBuffer::Packet(packet) => {
                 // Decoded frames carry a `pts` but not the unit it is in.
                 self.preroll_gate.observe_packet(&packet);
+                self.qos.follow(&mut self.decoder, &self.pp_log);
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
@@ -377,6 +383,7 @@ impl Sink for CudaDecoder {
         // catching up to it exist only to warm the codec.
         if *msg == ControlMsg::Flush {
             self.decoder.flush();
+            self.qos.reset(&mut self.decoder);
             self.preroll_gate.reset();
             self.stretch.reset();
         }

@@ -166,14 +166,43 @@ impl VideoSynchronizer {
                 return WaitOutcome::Interrupted;
             }
             match self.decision_without_observing(frame_ns) {
-                Decision::Render => return WaitOutcome::Render,
-                Decision::Drop => return WaitOutcome::Drop,
+                Decision::Render => {
+                    state.picture_late(self.late_by(frame_ns));
+                    return WaitOutcome::Render;
+                }
+                Decision::Drop => {
+                    state.picture_late(self.late_by(frame_ns));
+                    return WaitOutcome::Drop;
+                }
                 Decision::Wait(wait) => {
                     state.sleep_unless_interrupted(wait.min(INTERRUPT_POLL_INTERVAL));
                 }
                 Decision::Hold => state.sleep_unless_interrupted(INTERRUPT_POLL_INTERVAL),
             }
         }
+    }
+
+    /// How late `frame_ns` is, as wall time, against the position the
+    /// decision was made from — what the decoder before this reads to decode
+    /// less while pictures come too late; see `PlaybackState::picture_late`.
+    fn late_by(&self, frame_ns: i64) -> Duration {
+        let Some(playback_clock) = &self.playback_clock else {
+            return Duration::ZERO;
+        };
+        let (_, position) = playback_clock.video_snapshot(frame_ns);
+        let Some(position_ns) = position else {
+            return Duration::ZERO;
+        };
+        let rate = playback_clock.rate();
+        let behind = if rate < 0.0 {
+            frame_ns.saturating_sub(position_ns)
+        } else {
+            position_ns.saturating_sub(frame_ns)
+        };
+        if behind <= 0 {
+            return Duration::ZERO;
+        }
+        ns_duration((behind as f64 / rate.abs()) as i64)
     }
 
     fn decision_without_observing(&self, frame_ns: i64) -> Decision {
@@ -468,6 +497,31 @@ mod tests {
 
     /// Each frame is read in its own unit: the same count in milliseconds
     /// and in seconds is two very different times.
+    /// What it hands on or drops late says how late, for the decoder
+    /// before it.
+    #[test]
+    fn a_late_picture_says_how_late() {
+        let context = Arc::new(crate::element::Context::for_test_with_clock(
+            crate::bus::Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::new(Clock::new()),
+        ));
+        let mut sync = VideoSynchronizer::new("sync");
+        sync.attach_context(&context);
+        let unit = ffmpeg::Rational::new(1, 1000);
+        sync.consume(frame(0, unit)).expect("anchors");
+        assert!(
+            context.state.picture_lateness() < Duration::from_millis(10),
+            "on time"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        sync.consume(frame(10, unit)).expect("late");
+        let late = context.state.picture_lateness();
+        assert!(late >= Duration::from_millis(100), "{late:?}");
+    }
+
     #[test]
     fn a_frame_is_read_in_the_unit_it_carries() {
         let in_ms = frame(1_500, ffmpeg::Rational::new(1, 1_000));
