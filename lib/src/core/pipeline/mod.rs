@@ -15,11 +15,14 @@
 mod builder;
 pub(crate) mod chain;
 pub(crate) mod completion;
+mod lifecycle;
 mod runtime;
+mod seek;
 
 pub use builder::PipelineBuilder;
 pub use chain::{ChainBuilder, DetachedBranch};
-pub use runtime::{Pipeline, PipelineError, SeekMode};
+pub use runtime::{Pipeline, PipelineError};
+pub use seek::SeekMode;
 
 #[cfg(test)]
 use crate::pp_log::PpLog;

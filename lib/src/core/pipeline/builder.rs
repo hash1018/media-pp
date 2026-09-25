@@ -15,7 +15,7 @@ use crate::{
     stats::ElementCounters,
 };
 
-use super::{Pipeline, completion::Completion, runtime::PrerollSlot};
+use super::{Pipeline, completion::Completion, seek::PrerollSlot};
 
 pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
 
