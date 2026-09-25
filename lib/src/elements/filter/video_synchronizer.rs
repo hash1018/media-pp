@@ -184,13 +184,23 @@ impl VideoSynchronizer {
         // Media ahead is waited out as the time it takes to play it: at twice
         // the rate, half as long.
         let rate = playback_clock.rate();
-        let wait = |ahead_ns: i64| Decision::Wait(ns_duration((ahead_ns as f64 / rate) as i64));
+        let wait =
+            |ahead_ns: i64| Decision::Wait(ns_duration((ahead_ns as f64 / rate.abs()) as i64));
+        // How far `frame_ns` lies ahead of `position_ns` in the direction
+        // playback goes — below it, in reverse.
+        let ahead = |frame_ns: i64, position_ns: i64| {
+            if rate < 0.0 {
+                position_ns.saturating_sub(frame_ns)
+            } else {
+                frame_ns.saturating_sub(position_ns)
+            }
+        };
         match master {
             PlaybackMaster::Unavailable => Decision::Render,
             PlaybackMaster::AudioPriming => Decision::Hold,
             PlaybackMaster::Wall => match position {
-                Some(position_ns) if frame_ns > position_ns => {
-                    wait(frame_ns.saturating_sub(position_ns))
+                Some(position_ns) if ahead(frame_ns, position_ns) > 0 => {
+                    wait(ahead(frame_ns, position_ns))
                 }
                 _ => Decision::Render,
             },
@@ -206,9 +216,9 @@ impl VideoSynchronizer {
                 let delay_ns =
                     (duration_ns(playback_clock.presentation_delay()) as f64 * rate) as i64;
                 let frame_ns = frame_ns.saturating_sub(delay_ns);
-                if frame_ns > position_ns {
-                    wait(frame_ns.saturating_sub(position_ns))
-                } else if position_ns.saturating_sub(frame_ns) > duration_ns(self.frame_duration) {
+                if ahead(frame_ns, position_ns) > 0 {
+                    wait(ahead(frame_ns, position_ns))
+                } else if -ahead(frame_ns, position_ns) > duration_ns(self.frame_duration) {
                     Decision::Drop
                 } else {
                     Decision::Render
@@ -402,6 +412,23 @@ mod tests {
             matches!(sync.decision(ms(2_035)), Decision::Render),
             "35 ms ahead, inside the 40 the delay covers at twice the rate"
         );
+    }
+
+    /// In reverse a frame below the position is ahead and waits; one above
+    /// it is past.
+    #[test]
+    fn in_reverse_a_frame_below_the_position_waits() {
+        let (mut sync, playback) = synchronizer();
+        playback.set_rate(-1.0);
+        assert!(matches!(sync.decision(ms(5_000)), Decision::Render));
+        let Decision::Wait(wait) = sync.decision(ms(4_900)) else {
+            panic!("a frame below waits");
+        };
+        assert!(
+            (Duration::from_millis(80)..=Duration::from_millis(100)).contains(&wait),
+            "{wait:?}"
+        );
+        assert!(matches!(sync.decision(ms(5_100)), Decision::Render));
     }
 
     /// With a renderer that takes 20 ms to show a picture, a frame due 15 ms

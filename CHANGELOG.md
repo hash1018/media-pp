@@ -12,6 +12,12 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`SeekRejectReason` has two more variants: `SourceNotReversible` and
+  `ElementNotReversible`.** They are why `Pipeline::check_reverse` refuses
+  to play backwards — see `Pipeline::set_rate` under Added. A `match` on
+  `SeekRejectReason` needs the two arms; `check_seek` never answers with
+  them.
+
 - **A sink that cannot follow a seek says so with `Sink::accepts_seek`;
   `ControlMsg::CheckSeek` and `SeekCheckContext` are gone.** Whether a seek
   would be refused was asked by sending `CheckSeek` down the running graph
@@ -688,6 +694,36 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **`Pipeline::set_rate(Pipeline::REVERSE_RATE)` plays backwards.** At the
+  media's own speed, from the picture shown: everything is sought there and
+  prerolled, as a seek is, and the same turning forwards again with any
+  forward rate. The sound is not played — nothing reaches it, and the
+  playback clock goes on the wall, so a `Pacer` or `VideoSynchronizer` paces
+  the picture as it does forwards. At the start of the file the stream ends
+  and the pipeline says `Finished`. A seek or a step while backwards stays
+  backwards; a step on is the picture before.
+
+  Two new traits say what playing backwards asks of an element, and
+  `Pipeline::check_reverse` answers, as the pipeline is wired, whether its
+  elements have them. A source implements `ReversibleSource` —
+  `seek_backwards`, and `finish_stretch` for a `finish` that comes in the
+  middle of a stretch — and hands the picture on in *stretches*: a span of
+  the media read from the keyframe before it, what is outside the span
+  marked `AV_PKT_FLAG_DISCARD`, each span the one before the last, down to
+  the start. An element that turns a picture's packets into pictures
+  implements `ReversibleSink` — `begin_stretch` and `end_stretch`, between
+  which it holds its pictures and at the end hands them on last first; the
+  pipeline tells it where each stretch begins and ends. Each says it is one
+  from `as_reversible`, on `SourceElement` and on `Sink`, which is `None` by
+  default: a source that is not refuses to play backwards, and so does an
+  element whose contracts take a picture's packets and hand on pictures.
+  `FileDemuxer` is a `ReversibleSource` for a file with a picture, reading a
+  second at a time, and `SwDecoder` and `D3d11Decoder` are
+  `ReversibleSink`s — and `VideoDecodeBin` on the software and D3D11 paths,
+  not yet on D3D12 or CUDA. What a decoder holds is a second of pictures,
+  D3D11's as copies of its fixed surfaces. `Player`'s `respond_to` plays
+  backwards and forwards again on R.
 
 - **`Pipeline::set_rate` plays faster or slower, the sound at its own
   pitch.** From a quarter of the speed to four times it

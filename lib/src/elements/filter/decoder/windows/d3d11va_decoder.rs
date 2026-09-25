@@ -6,24 +6,33 @@ use std::sync::{
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
-use windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE;
+use windows::Win32::Graphics::{
+    Direct3D11::{
+        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+        ID3D11Texture2D,
+    },
+    Dxgi::Common::DXGI_SAMPLE_DESC,
+};
 
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, ReversibleSink, Sink, Source, element_pp_log},
     error::D3d11SharedDeviceError,
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         windows::d3d11::protect_shared_device,
         windows::d3d11_gpu::D3d11Gpu,
-        windows::d3d11va::{create_hw_device_ctx, or_frames_bind_flags},
+        windows::d3d11va::{
+            create_hw_device_ctx, d3d11va_texture, or_frames_bind_flags, wrap_d3d11_texture,
+        },
     },
     pool::UnboundObjectPool,
 };
 
+use super::super::backwards::Stretch;
 use super::super::hw_decoder::{NegotiationRefusal, capable_decoder};
 use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use crate::elements::filter::is_codec_drain_boundary;
@@ -35,6 +44,10 @@ pub enum D3d11DecoderError {
     /// The selected stream is not video.
     #[error("unsupported media type: {0:?} (D3D11VA decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
+    /// Copying a decoded picture out of the surface pool to play it
+    /// backwards failed.
+    #[error("copying a decoded picture to play it backwards failed: {0}")]
+    Copy(windows::core::Error),
     /// No decoder this FFmpeg build has for the codec can decode through
     /// D3D11VA — see [`D3d11Decoder::supports`].
     #[error("no decoder in this FFmpeg build decodes {0:?} through D3D11VA")]
@@ -124,6 +137,14 @@ pub struct D3d11Decoder {
     /// [`NegotiationRefusal`]. After `decoder`, so it outlives the codec
     /// context that points at it.
     refused: NegotiationRefusal,
+    /// Holds a stretch's pictures to hand on last first, playing backwards
+    /// — copies of them, since the surfaces they were decoded to are a fixed
+    /// pool the rest of the stretch is decoded into.
+    stretch: Stretch,
+    /// The device and its immediate context, for those copies.
+    gpu: D3d11Gpu,
+    /// What the copies travel in.
+    copies: UnboundObjectPool<ffmpeg::frame::Video>,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no
@@ -242,6 +263,9 @@ impl D3d11Decoder {
             held,
             preroll_gate: PrerollGate::default(),
             refused,
+            stretch: Stretch::default(),
+            gpu: gpu.clone(),
+            copies: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         })
     }
 
@@ -304,6 +328,15 @@ impl D3d11Decoder {
         self.pool.get()
     }
 
+    /// Hands on what was held of the stretch just over, last first.
+    fn release(&mut self) -> crate::error::Result<()> {
+        for buffer in self.stretch.end() {
+            self.preroll_gate
+                .push_admitted(buffer, |frame| self.pad.push(frame))?;
+        }
+        Ok(())
+    }
+
     fn drain(&mut self) -> crate::error::Result<()> {
         let mut frame = self.wrapper();
         loop {
@@ -312,6 +345,14 @@ impl D3d11Decoder {
                     if frame.format() != ffmpeg::format::Pixel::D3D11 {
                         pp_error!(self, "decoder did not select the D3D11VA pixel format");
                         return Err(D3d11DecoderError::HwAccelUnavailable.into());
+                    }
+                    if self.stretch.holding() {
+                        // Held as a copy; the surface goes back to the pool
+                        // as `frame` is reused below.
+                        let copy = self.copied(&frame)?;
+                        self.stretch.hold(MediaBuffer::Video(Arc::new(copy)));
+                        frame = self.wrapper();
+                        continue;
                     }
                     // Reassigning `frame` releases a suppressed one right here,
                     // returning its fixed-pool surface a whole branch earlier
@@ -327,6 +368,113 @@ impl D3d11Decoder {
             }
         }
         Ok(())
+    }
+}
+
+impl D3d11Decoder {
+    /// `frame`'s picture in a texture of its own, as a frame with its
+    /// timing and colour: what playing backwards holds, since a stretch is
+    /// more pictures than the decoder's pool has surfaces.
+    fn copied(
+        &self,
+        frame: &ffmpeg::frame::Video,
+    ) -> crate::error::Result<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let (raw, slice) = d3d11va_texture(frame).ok_or(D3d11DecoderError::HwAccelUnavailable)?;
+        // SAFETY: a D3D11VA frame's `data[0]` is a live `ID3D11Texture2D`
+        // for as long as the frame is; the borrow is cloned into an owned
+        // reference before the frame can go.
+        let source =
+            unsafe { <ID3D11Texture2D as windows::core::Interface>::from_raw_borrowed(&raw) }
+                .cloned()
+                .ok_or(D3d11DecoderError::HwAccelUnavailable)?;
+        let mut surface = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `source` is live and `surface` a writable description.
+        unsafe { source.GetDesc(&mut surface) };
+        let (width, height) = (frame.width(), frame.height());
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: surface.Format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut copy: Option<ID3D11Texture2D> = None;
+        // SAFETY: a plain texture description on this decoder's own device,
+        // and a live out-parameter.
+        unsafe {
+            self.gpu
+                .device()
+                .CreateTexture2D(&desc, None, Some(&mut copy))
+                .map_err(D3d11DecoderError::Copy)?;
+        }
+        let copy = copy.ok_or(D3d11DecoderError::HwAccelUnavailable)?;
+        {
+            let context = self.gpu.context();
+            let context = context
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let visible = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: width,
+                bottom: height,
+                back: 1,
+            };
+            // SAFETY: both textures are on this device and in the same
+            // format; the box is the picture's own size, within both, and
+            // `slice` is the surface's array slice the frame names.
+            unsafe {
+                context.CopySubresourceRegion(
+                    &copy,
+                    0,
+                    0,
+                    0,
+                    0,
+                    &source,
+                    u32::try_from(slice).unwrap_or(0),
+                    Some(&visible),
+                );
+            }
+        }
+        let mut wrapped = wrap_d3d11_texture(copy, width, height)
+            .map_err(|_| D3d11DecoderError::HwAccelUnavailable)?;
+        // SAFETY: both frames are live; this copies timing, colour and side
+        // data, not buffers.
+        unsafe {
+            ffi::av_frame_copy_props(wrapped.as_mut_ptr(), frame.as_ptr());
+        }
+        let mut pooled = self.copies.get();
+        *pooled = wrapped;
+        Ok(pooled)
+    }
+}
+
+impl ReversibleSink for D3d11Decoder {
+    fn begin_stretch(&mut self) -> crate::error::Result<()> {
+        self.stretch.begin();
+        Ok(())
+    }
+
+    /// Drains the decoder of the stretch and leaves it fresh for the next
+    /// one's keyframe, then hands the stretch on: copies of its pictures,
+    /// since the surfaces they were decoded to are a fixed pool.
+    fn end_stretch(&mut self) -> crate::error::Result<()> {
+        self.decoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(|error| self.decode_error(error))?;
+        self.drain()?;
+        self.decoder.flush();
+        self.release()
     }
 }
 
@@ -372,6 +520,10 @@ impl Sink for D3d11Decoder {
         InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
 
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+        Some(self)
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
@@ -410,6 +562,7 @@ impl Sink for D3d11Decoder {
         if *msg == ControlMsg::Flush {
             self.decoder.flush();
             self.preroll_gate.reset();
+            self.stretch.reset();
         }
         Ok(())
     }

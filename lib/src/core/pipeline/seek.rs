@@ -192,6 +192,18 @@ impl Pipeline {
         crate::control::SeekError::from_rejections(self.graph.seek_rejections())
     }
 
+    /// Says whether [`Self::set_rate`] with a negative rate would be
+    /// refused, and by what, without changing anything — answered from the
+    /// graph as [`Self::check_seek`] is. Playing backwards starts with a
+    /// seek, so what refuses one refuses it too; besides, every source has
+    /// to be a [`crate::element::ReversibleSource`], and every element that
+    /// turns a picture's packets into pictures a
+    /// [`crate::element::ReversibleSink`]. What a player needs to decide
+    /// whether to offer it.
+    pub fn check_reverse(&self) -> std::result::Result<(), crate::control::SeekError> {
+        crate::control::SeekError::from_rejections(self.graph.reverse_rejections())
+    }
+
     pub fn seek(&self, target: Duration, mode: SeekMode) -> Result<()> {
         let _operation = self
             .operation
@@ -247,6 +259,7 @@ impl Pipeline {
         // Everything read from here on belongs to the new position, and a
         // queue drops whatever reaches it from the old one — what the
         // `Flush` below discards, and what it misses.
+        self.state.set_backwards(self.rate() < 0.0);
         self.state.begin_timeline();
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
@@ -254,10 +267,22 @@ impl Pipeline {
 
     /// A preroll expecting every terminal the graph has now, as `make`
     /// sets it up, and naming them for a timeout to say which it waited on.
+    ///
+    /// Playing backwards, only those that show pictures: nothing reaches
+    /// the sound in reverse, and waiting on it would be waiting out the
+    /// timeout. What does reach another terminal is dropped, as in a step.
     fn preroll_for(
         &self,
         make: impl FnOnce(Vec<crate::graph::ElementId>) -> PrerollContext,
     ) -> Arc<PrerollContext> {
+        if self.rate() < 0.0 {
+            let (every, pictures) = self.picture_terminals();
+            let quiet: Vec<_> = every
+                .into_iter()
+                .filter(|terminal| !pictures.contains(terminal))
+                .collect();
+            return self.preroll_expecting(pictures, |terminals| make(terminals).silencing(quiet));
+        }
         self.preroll_expecting(self.graph().terminal_ids(), make)
     }
 
@@ -322,6 +347,9 @@ impl Pipeline {
     pub const MIN_RATE: f64 = 0.25;
     /// The fastest rate [`Self::set_rate`] takes.
     pub const MAX_RATE: f64 = 4.0;
+    /// The one backward rate [`Self::set_rate`] takes: the media's own speed,
+    /// backwards.
+    pub const REVERSE_RATE: f64 = -1.0;
 
     /// Plays on at `rate` times its own speed, from where playback is: 2.0
     /// covers two seconds of media in each second, 0.5 half of one.
@@ -337,26 +365,70 @@ impl Pipeline {
     /// rate it was stretched to. Paused, it takes effect as playback goes on.
     /// A seek, a step and a pause leave it as it is.
     ///
+    /// [`Self::REVERSE_RATE`] plays backwards from the picture shown. That
+    /// is a turn, not a change of speed: the source goes back over its media
+    /// a stretch at a time and the picture's decoder hands each stretch on
+    /// last picture first, so everything is sought to the picture shown and
+    /// prerolled there, as a seek is — paused or playing, as it was — and
+    /// the same happens turning forwards again. The sound is not played
+    /// backwards: nothing reaches it, and the clock goes on the wall.
+    ///
     /// Refused where a seek is, before anything changes — a live source
     /// plays at the rate it arrives, and a recording has to be of the stream
-    /// as it ran; see [`Self::check_seek`] — and with
-    /// [`PipelineError::UnsupportedRate`] outside
-    /// [`Self::MIN_RATE`]..=[`Self::MAX_RATE`]. Taken before [`Self::run`]
-    /// as well, for playback to start at it.
+    /// as it ran; see [`Self::check_seek`] — backwards also where
+    /// [`Self::check_reverse`] says, and before [`Self::run`]; and with
+    /// [`PipelineError::UnsupportedRate`] for a rate that is neither
+    /// [`Self::MIN_RATE`]..=[`Self::MAX_RATE`] nor
+    /// [`Self::REVERSE_RATE`]. A forward rate is taken before
+    /// [`Self::run`] as well, for playback to start at it.
     pub fn set_rate(&self, rate: f64) -> Result<()> {
-        if !(Self::MIN_RATE..=Self::MAX_RATE).contains(&rate) {
+        let reverse = rate == Self::REVERSE_RATE;
+        if !reverse && !(Self::MIN_RATE..=Self::MAX_RATE).contains(&rate) {
             return Err(PipelineError::UnsupportedRate.into());
         }
         let _operation = self
             .operation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.check_seek()?;
+        let running = self.running.load(Ordering::Acquire) > 0;
+        if reverse {
+            if !running {
+                return Err(PipelineError::NotRunning.into());
+            }
+            self.check_reverse()?;
+        } else {
+            self.check_seek()?;
+        }
+        let turning = reverse != (self.rate() < 0.0);
         pp_trace!(
             pp_log: &self.pp_log,
-            "event=rate rate={rate} phase=completed outcome=ok"
+            "event=rate rate={rate} turning={turning} phase=requested"
         );
+        if !turning || !running {
+            self.playback_clock.set_rate(rate);
+            return Ok(());
+        }
+        // Turning around: the picture shown, played the other way — a seek
+        // to it, with the rate set before the sources are repositioned, since
+        // it is the sign a source reads to go back over its media.
+        let (_, pictures) = self.picture_terminals();
+        let at = self
+            .state
+            .picture_at(&pictures)
+            .map(|(at, _)| at)
+            .or_else(|| self.position())
+            .unwrap_or_default();
+        self.stepped.store(false, Ordering::Release);
+        let playing = !self.paused.load(Ordering::Acquire);
+        if playing {
+            self.pause_runtime();
+        }
         self.playback_clock.set_rate(rate);
+        self.reposition(at);
+        let preroll = self.preroll_for(|terminals| PrerollContext::for_seek(terminals, at));
+        let prerolled = self.preroll(&preroll, PREROLL_TIMEOUT);
+        self.end_preroll(playing);
+        prerolled?;
         Ok(())
     }
 
@@ -422,7 +494,12 @@ impl Pipeline {
         self.stepped.store(true, Ordering::Release);
         // Where the clock stood is not where the picture is going.
         self.playback_clock.reset_for_seek();
-        let stepped = if frames > 0 {
+        // Playing backwards the stream goes down the media: what a step
+        // forward takes from it is the picture before, and the picture after
+        // is sought to.
+        let reverse = self.rate() < 0.0;
+        let along = if reverse { -frames } else { frames };
+        let stepped = if along > 0 {
             // Only what has pictures left to take: one that has taken the
             // end of its stream never will, and waiting on it would be
             // waiting out the timeout.
@@ -434,7 +511,7 @@ impl Pipeline {
             if taking.is_empty() {
                 return Ok(at);
             }
-            let count = usize::try_from(frames).unwrap_or(usize::MAX);
+            let count = usize::try_from(along).unwrap_or(usize::MAX);
             let preroll = self.preroll_expecting(taking, |terminals| {
                 PrerollContext::for_step(terminals, count).silencing(quiet)
             });
@@ -448,12 +525,20 @@ impl Pipeline {
             // the picture wanted: positions are whole nanoseconds, and a count
             // of rounded spacings lands on a picture's very start as often as
             // not — which is the picture after.
+            //
+            // Playing backwards a seek shows the last picture at or before its
+            // target, so a picture after the one shown is aimed at the middle
+            // of it the same way.
             let back = u32::try_from(frames.unsigned_abs()).unwrap_or(u32::MAX);
-            let target = match spacing {
-                Some(spacing) if back > 1 => at
+            let target = match (reverse, spacing) {
+                (false, Some(spacing)) if back > 1 => at
                     .saturating_sub(spacing.saturating_mul(back))
                     .saturating_add(spacing / 2),
-                _ => at.saturating_sub(Duration::from_nanos(1)),
+                (false, _) => at.saturating_sub(Duration::from_nanos(1)),
+                (true, Some(spacing)) => at
+                    .saturating_add(spacing.saturating_mul(back))
+                    .saturating_add(spacing / 2),
+                (true, None) => at,
             };
             self.reposition(target);
             let preroll = self.preroll_expecting(terminals.clone(), |terminals| {

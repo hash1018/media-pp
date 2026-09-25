@@ -125,6 +125,12 @@ impl PipelineBuilder {
                 crate::control::SeekRejectReason::SourceNotSeekable,
             );
         }
+        if source.as_reversible().is_none() {
+            self.graph.refuse_reverse(
+                source_id,
+                crate::control::SeekRejectReason::SourceNotReversible,
+            );
+        }
         // Made before the context, which carries them to a source that
         // records its own ticks.
         let counters = ElementCounters::new();

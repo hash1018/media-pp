@@ -65,7 +65,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -181,6 +181,8 @@ pub(crate) struct PlaybackState {
     /// The picture each terminal that shows pictures last took — what a
     /// frame step moves from; see [`Self::picture_taken`].
     pictures: Mutex<HashMap<ElementId, Picture>>,
+    /// Whether the current timeline runs backwards — see [`Self::backwards`].
+    backwards: AtomicBool,
 }
 
 /// The picture one terminal last took.
@@ -207,6 +209,7 @@ impl PlaybackState {
             raised_changed: Condvar::new(),
             listeners: Mutex::new(Vec::new()),
             pictures: Mutex::new(HashMap::new()),
+            backwards: AtomicBool::new(false),
         })
     }
 
@@ -349,6 +352,21 @@ impl PlaybackState {
     /// The number of the timeline media is being read on.
     pub(crate) fn timeline(&self) -> u64 {
         self.timeline.load(Ordering::Acquire)
+    }
+
+    /// Whether the timeline read now runs backwards: from the seek that
+    /// turned playback round with [`crate::pipeline::Pipeline::set_rate`]
+    /// until the one that turns it back. What a source is asked to seek
+    /// with, and where the stretches a decoder is handed begin and end, are
+    /// decided on it.
+    pub(crate) fn backwards(&self) -> bool {
+        self.backwards.load(Ordering::Acquire)
+    }
+
+    /// Sets which way the timeline about to begin runs — the pipeline's to
+    /// call, before [`Self::begin_timeline`].
+    pub(crate) fn set_backwards(&self, backwards: bool) {
+        self.backwards.store(backwards, Ordering::Release);
     }
 
     /// Starts a new timeline, and answers its number. Everything numbered

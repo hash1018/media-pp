@@ -118,7 +118,11 @@
 //! demuxer landed on. [`Pipeline::step`](pipeline::Pipeline::step) moves the
 //! picture by frames, forward or back, and holds it there, paused, and
 //! [`Pipeline::set_rate`](pipeline::Pipeline::set_rate) plays on faster or
-//! slower from where playback is, the sound stretched to it at its own pitch.
+//! slower from where playback is, the sound stretched to it at its own pitch
+//! — or backwards, the picture only: a
+//! [`ReversibleSource`](element::ReversibleSource) reads its media back a
+//! stretch at a time, and a [`ReversibleSink`](element::ReversibleSink)
+//! decoder hands each stretch on last first.
 //!
 //! # Connecting elements
 //!

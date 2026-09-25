@@ -38,7 +38,9 @@ use crate::{
         PortContract,
     },
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
+    element::{
+        Context, Element, ElementType, Filter, ReversibleSink, Sink, Source, element_pp_log,
+    },
     elements::{DecodeThreading, SwDecoder, filter::line::Line},
     error::{Error, Result},
     pad::SrcPad,
@@ -284,6 +286,9 @@ pub struct VideoDecodeBin {
     /// decoder brings down: the hardware line, on a target that can, built
     /// for a stream that did not say it was 10-bit.
     watch_for_p010: bool,
+    /// Whether the hardware line hands a stretch on backwards — see
+    /// [`ReversibleSink`]. The software line always does.
+    hardware_reverses: bool,
 }
 
 // SAFETY: what is not `Send` by its own type is the device a target holds —
@@ -405,6 +410,7 @@ impl VideoDecodeBin {
             pad,
             output_format,
             path: Arc::new(Mutex::new(path)),
+            hardware_reverses: target.reverses(),
             fallback,
         })
     }
@@ -596,6 +602,16 @@ impl Sink for VideoDecodeBin {
         InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
 
+    /// Where its decoder hands a stretch on backwards: the software line,
+    /// and D3D11's hardware one.
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+        let reverses = match self.path() {
+            DecodePath::Software(_) => true,
+            DecodePath::Hardware => self.hardware_reverses,
+        };
+        if reverses { Some(self) } else { None }
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.install();
         let eos = buf.is_eos();
@@ -636,6 +652,27 @@ impl Sink for VideoDecodeBin {
         let line = self.line.control(msg);
         let tail = self.tail.control(msg);
         line.and(tail)
+    }
+}
+
+/// The decoder at the head of its line is told, and what that hands on
+/// goes on as what it hands on from a packet does.
+impl ReversibleSink for VideoDecodeBin {
+    fn begin_stretch(&mut self) -> Result<()> {
+        self.install();
+        match self.line.reversible() {
+            Some(decoder) => decoder.begin_stretch(),
+            None => Ok(()),
+        }
+    }
+
+    fn end_stretch(&mut self) -> Result<()> {
+        self.install();
+        if let Some(decoder) = self.line.reversible() {
+            decoder.end_stretch()?;
+        }
+        let made = self.line.take_made();
+        self.push(made)
     }
 }
 
@@ -720,6 +757,21 @@ impl DecodeTarget {
             Self::D3d12 { .. } => Some(crate::elements::D3d12Decoder::supports(codec)),
             #[cfg(feature = "cuda")]
             Self::Cuda { .. } => Some(crate::elements::CudaDecoder::supports(codec)),
+        }
+    }
+
+    /// Whether its hardware decoder hands a stretch read backwards on last
+    /// picture first — see [`ReversibleSink`]. D3D11's does; the others do
+    /// not yet.
+    fn reverses(&self) -> bool {
+        match self {
+            Self::System => true,
+            #[cfg(all(target_os = "windows", feature = "d3d11"))]
+            Self::D3d11 { .. } => true,
+            #[cfg(all(target_os = "windows", feature = "d3d12"))]
+            Self::D3d12 { .. } => false,
+            #[cfg(feature = "cuda")]
+            Self::Cuda { .. } => false,
         }
     }
 

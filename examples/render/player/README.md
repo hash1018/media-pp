@@ -24,7 +24,7 @@ The audio renderer is `WasapiRenderer` on Windows and `PipeWireAudioRenderer`
 on Linux, on the default output device. Space pauses and plays, the left and
 right arrows move five seconds, the full stop and the comma step a picture
 on and back, the minus and plus play slower and faster and Backspace at the
-file's own speed, the up and down arrows turn the volume, M mutes, F or a double
+file's own speed, R plays backwards and forwards again, the up and down arrows turn the volume, M mutes, F or a double
 click fills the screen, Escape or closing the window
 stops; the title shows where playback is. One program for Windows
 and Linux, with no `#[cfg]` but the one choosing its `main`.

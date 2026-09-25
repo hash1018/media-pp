@@ -3,6 +3,7 @@
 //! D3D11VA/D3D12VA implementations live under [`windows`]. Shared hardware-frame
 //! ABI helpers live under `crate::platform::windows`.
 
+mod backwards;
 #[cfg(feature = "cuda")]
 mod cuda;
 #[cfg(any(

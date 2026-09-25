@@ -3,7 +3,8 @@
 //! [`Sink`] consumes buffers, [`Source`] owns the [`SrcPad`](crate::pad::SrcPad)s
 //! they leave through, and [`Filter`] is simply both. [`SourceElement`] adds
 //! the one thing a graph needs exactly once: a `run` loop that drives the
-//! whole pipeline.
+//! whole pipeline. [`ReversibleSource`] and [`ReversibleSink`] are what a
+//! source and a decoder add to play backwards.
 //!
 //! [`Element`] itself is the identity half — an element's type and its
 //! caller-chosen name, which every log record and every
@@ -491,6 +492,22 @@ pub trait Sink: Element {
         true
     }
 
+    /// This element as a [`ReversibleSink`], where it is one — asked as it
+    /// is wired, as [`Self::accepts_seek`] is, and again as each stretch
+    /// played backwards begins and ends. An implementation of
+    /// [`ReversibleSink`] answers `Some(self)`; `None` by default.
+    ///
+    /// What has to be one is an element that turns a picture's packets into
+    /// pictures: its [`Self::input_contract`] packets of video, what its pad
+    /// hands on pictures. Answering `None`, it refuses to play backwards —
+    /// see [`crate::pipeline::Pipeline::check_reverse`]. Everything else is
+    /// handed a stream played backwards as it is, pictures whose `pts` go
+    /// down, which a pacer and a synchronizer take from the playback clock,
+    /// and has nothing to add.
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+        None
+    }
+
     /// Reacts to a [`ControlMsg`] — drops what belongs to the timeline a
     /// `Flush` ends, arms for a `Preroll`, lets go of a device on `Stop` —
     /// on the thread delivering it, in order with the data around it.
@@ -559,6 +576,16 @@ pub trait SourceElement: Source {
     /// not imply that every downstream branch can accept a pipeline seek;
     /// that must be validated across the complete graph before mutation.
     fn is_seekable(&self) -> bool;
+
+    /// This source as a [`ReversibleSource`], where it is one — asked as it
+    /// is wired, and for each seek and finish while playing backwards. An
+    /// implementation of [`ReversibleSource`] answers `Some(self)`, or
+    /// `None` where what it was opened on cannot be read backwards — a file
+    /// with no picture. `None` by default, which refuses to play backwards
+    /// — see [`crate::pipeline::Pipeline::check_reverse`].
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSource> {
+        None
+    }
 
     /// Drives this source until `Eos` (normal completion),
     /// [`crate::pipeline::Pipeline::finish`], or `Stop` (see
@@ -635,6 +662,65 @@ pub trait SourceElement: Source {
     fn seek(&mut self, target: Duration) -> Result<Duration>;
 }
 
+/// A source that can read its media backwards — what
+/// [`crate::pipeline::Pipeline::set_rate`] asks of every source for
+/// [`crate::pipeline::Pipeline::REVERSE_RATE`]. It says it is one through
+/// [`SourceElement::as_reversible`].
+///
+/// Backwards is what the source reads and in what order; its
+/// [`SourceElement::run`] is the same loop. From a [`Self::seek_backwards`]
+/// on it hands the picture on in *stretches*. A stretch is a span of the
+/// media read in the order it decodes in: from the keyframe at or before
+/// the span's start, with each packet that is there only to decode the span
+/// from marked `AV_PKT_FLAG_DISCARD`, so that it is decoded and not shown.
+/// Each stretch is the span just before the one read before it, down to the
+/// start of the media, where the stream ends as it ends at the other end
+/// forwards. A stretch begins where a decode timestamp goes back — how the
+/// [`ReversibleSink`] after it is told one is complete. What the source has
+/// besides the picture it does not hand on: the sound is not played
+/// backwards.
+pub trait ReversibleSource: SourceElement {
+    /// Repositions this source to read backwards from `target`, the first
+    /// stretch ending with the picture at or before it. Called in place of
+    /// [`SourceElement::seek`] for each seek while the pipeline plays
+    /// backwards, in the same order with the messages around it, and
+    /// answers where it landed as that does.
+    fn seek_backwards(&mut self, target: Duration) -> Result<Duration>;
+
+    /// Reads the stretch under way to its end, as a `Finish` arrives while
+    /// the pipeline plays backwards and before the `Eos` it places behind
+    /// what was read: a stretch is played from its end, and one cut short
+    /// would lose its later pictures. The pipeline plays meanwhile. An
+    /// error is reported on `bus`, and the stream ends all the same.
+    fn finish_stretch(&mut self, bus: &Bus) -> Result<()>;
+}
+
+/// An element that turns a picture's packets into pictures and can hand
+/// them on backwards — what a pipeline asks of every such element for
+/// [`crate::pipeline::Pipeline::REVERSE_RATE`]. It says it is one through
+/// [`Sink::as_reversible`].
+///
+/// Played backwards, the packets come in the stretches a
+/// [`ReversibleSource`] reads, and the pipeline says where each begins and
+/// ends. Between [`Self::begin_stretch`] and [`Self::end_stretch`] the
+/// element decodes what it is given as ever, but holds the pictures it
+/// would have handed on; at the end it hands them on, last first. A packet
+/// marked `AV_PKT_FLAG_DISCARD` is decoded as a reference and gives no
+/// picture, as FFmpeg's decoders see to themselves.
+///
+/// A `Flush` ends a stretch unfinished: what is held of it is dropped with
+/// the rest of the timeline being left.
+pub trait ReversibleSink: Sink {
+    /// A stretch begins: hold every picture from here until
+    /// [`Self::end_stretch`].
+    fn begin_stretch(&mut self) -> Result<()>;
+
+    /// The stretch is complete: decode what is left of it — what the decoder
+    /// still delays — ready for the next stretch's keyframe, and hand every
+    /// picture held on, last first.
+    fn end_stretch(&mut self) -> Result<()>;
+}
+
 /// An element with both an input and an output — decoder, encoder,
 /// filter, thumbnail extractor, ... Just a name for "has a `Sink` to
 /// receive and a `Source` to push what it produces into"; nothing new to
@@ -705,6 +791,10 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
 
     fn accepts_seek(&self) -> bool {
         (**self).accepts_seek()
+    }
+
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+        (**self).as_reversible()
     }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {

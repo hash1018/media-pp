@@ -17,7 +17,7 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
     control::{ControlReceiver, RequestKind, drain_control, handle_request},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, ReversibleSource, Source, SourceElement, element_pp_log},
     pad::SrcPad,
 };
 
@@ -293,7 +293,43 @@ pub struct FileDemuxer {
     /// instead would drop the next lap on top of timestamps a muxer has
     /// already written.
     lap_end: i64,
+    /// The pipeline's playback clock, whose rate says which way to read —
+    /// see [`Backwards`].
+    /// Where reading backwards has got to, while it is.
+    backwards: Option<Backwards>,
 }
+
+/// Reading the picture backwards: a stretch at a time from the end, each
+/// stretch in its own order, for a decoder to hand on last picture first.
+///
+/// A stretch is the pictures shown in `[start, end)`. It is read from the
+/// keyframe at or before `start` — a picture is only decoded from its
+/// keyframe on — up to the first packet decoded at or after `end`: every
+/// picture shown before `end` is decoded before it. What is read only for
+/// its pictures' references, shown before `start` or at `end` and after, is
+/// flagged `AV_PKT_FLAG_DISCARD`, which the decoder decodes and does not
+/// hand on. Then the stretch before it, whose `end` is this one's `start`.
+///
+/// A stretch is [`BACKWARDS_STRETCH`] long, not a whole group of pictures:
+/// the decoder holds a stretch's pictures to hand them on backwards, and a
+/// group can be seconds long. The price is decoding the group's start again
+/// for each stretch in it. Only the picture is read; the sound is not
+/// played backwards, and its packets are passed over.
+struct Backwards {
+    /// The picture's stream.
+    stream: usize,
+    /// This stretch, in nanoseconds of the file.
+    start: i64,
+    end: i64,
+    /// Whether this stretch has still to be sought to.
+    unread: bool,
+}
+
+/// How much of the picture one stretch read backwards covers — see
+/// [`Backwards`]. What the decoder holds at once, and how often a group of
+/// pictures is decoded from its start again: a second of 1080p is about
+/// 90 MB, and a five-second group is decoded three times over.
+const BACKWARDS_STRETCH: Duration = Duration::from_secs(1);
 
 /// How far the read cursor may run ahead of what a blocked pad still owes,
 /// in file time, to keep another branch fed — see
@@ -388,6 +424,7 @@ impl FileDemuxer {
                 pending: VecDeque::new(),
                 pending_bytes: 0,
                 looping: Arc::new(AtomicBool::new(false)),
+                backwards: None,
                 published_offset: Arc::new(AtomicI64::new(0)),
                 loop_offset: 0,
                 lap_end: 0,
@@ -877,6 +914,13 @@ impl SourceElement for FileDemuxer {
                     pp_info!(self, "stopped");
                     return Ok(());
                 }
+                if self.backwards.is_some() {
+                    if self.read_backwards(bus)? {
+                        continue;
+                    }
+                    // The start of the file: the end of the stream, backwards.
+                    break;
+                }
                 // Deliver whatever is parked and now accepted, oldest first.
                 // Skipping a still-blocked pad's entry to reach a later one is
                 // safe: only each pad's own order has to hold, and this preserves
@@ -965,7 +1009,161 @@ impl SourceElement for FileDemuxer {
         }
     }
 
+    /// A file with a picture: that is what is read backwards.
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSource> {
+        if self.picture_stream().is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
+        self.backwards = None;
+        self.reposition(target)
+    }
+}
+
+/// The picture's stream, read back a second at a time. What
+/// nothing is wired to is read all the same and handed to no one, down to
+/// the start of the file, where the stream ends.
+impl ReversibleSource for FileDemuxer {
+    fn seek_backwards(&mut self, target: Duration) -> crate::error::Result<Duration> {
+        let stream = self
+            .picture_stream()
+            .ok_or(FileDemuxerError::NoStream(ffmpeg::media::Type::Video))?;
+        // The picture at `target` is the last of the first stretch.
+        let end = duration_ns(target).saturating_add(1);
+        self.backwards = Some(Backwards {
+            stream,
+            start: end,
+            end,
+            unread: true,
+        });
+        self.start_stretch()?;
+        Ok(target)
+    }
+
+    /// Not the one after: `unread` marks the one just read as the last.
+    fn finish_stretch(&mut self, bus: &Bus) -> crate::error::Result<()> {
+        while self
+            .backwards
+            .as_ref()
+            .is_some_and(|backwards| !backwards.unread)
+        {
+            if !self.read_backwards(bus)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FileDemuxer {
+    /// The picture's stream, where the file has one to play backwards.
+    fn picture_stream(&self) -> Option<usize> {
+        self.input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .map(|stream| stream.index())
+    }
+
+    /// Seeks to the stretch before the one just read — see [`Backwards`].
+    fn start_stretch(&mut self) -> crate::error::Result<()> {
+        let Some(backwards) = self.backwards.as_mut() else {
+            return Ok(());
+        };
+        backwards.start = backwards
+            .end
+            .saturating_sub(duration_ns(BACKWARDS_STRETCH))
+            .max(0);
+        backwards.unread = false;
+        let start = Duration::from_nanos(backwards.start.max(0) as u64);
+        self.forget_parked();
+        self.reposition(start)?;
+        Ok(())
+    }
+
+    /// Reads one packet backwards — see [`Backwards`] — and answers
+    /// whether there is more to read: `false` once the stretch that begins
+    /// the file has been read.
+    fn read_backwards(&mut self, bus: &Bus) -> crate::error::Result<bool> {
+        if self
+            .backwards
+            .as_ref()
+            .is_some_and(|backwards| backwards.unread)
+        {
+            self.start_stretch()?;
+            return Ok(true);
+        }
+        let next = self.take_parked().or_else(|| {
+            self.input
+                .packets()
+                .next()
+                .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))
+        });
+        let Some(backwards) = self.backwards.as_mut() else {
+            return Ok(false);
+        };
+        let Some((index, time_base, mut packet)) = next else {
+            // The file ran out inside the stretch: it is read.
+            return Ok(self.stretch_read());
+        };
+        if index != backwards.stream {
+            return Ok(true);
+        }
+        let nanos = ffmpeg::Rational::new(1, 1_000_000_000);
+        let decoded = packet_ns(&packet, time_base).unwrap_or(i64::MIN);
+        if decoded >= backwards.end {
+            return Ok(self.stretch_read());
+        }
+        let shown = packet
+            .pts()
+            .or_else(|| packet.dts())
+            .map(|ts| ts.rescale(time_base, nanos));
+        if shown.is_none_or(|shown| shown < backwards.start || shown >= backwards.end) {
+            use ffmpeg::packet::Mut;
+            // SAFETY: `packet` is this function's own live packet; `flags`
+            // is a plain field FFmpeg reads as it decodes it.
+            unsafe {
+                (*packet.as_mut_ptr()).flags |= ffmpeg::ffi::AV_PKT_FLAG_DISCARD;
+            }
+        }
+        packet.set_time_base(time_base);
+        self.push_to_pad(index, packet, bus);
+        Ok(true)
+    }
+
+    /// The stretch just read is done: on to the one before, unless it began
+    /// the file.
+    fn stretch_read(&mut self) -> bool {
+        let Some(backwards) = self.backwards.as_mut() else {
+            return false;
+        };
+        if backwards.start <= 0 {
+            return false;
+        }
+        backwards.end = backwards.start;
+        backwards.unread = true;
+        true
+    }
+
+    /// The oldest parked packet, taken out of the parked accounts.
+    fn take_parked(&mut self) -> Option<(usize, ffmpeg::Rational, ffmpeg::Packet)> {
+        let (index, time_base, packet) = self.pending.pop_front()?;
+        self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
+        if let Some(parked) = self.parked_per_pad.get_mut(index) {
+            *parked = parked.saturating_sub(1);
+            if *parked == 0 {
+                self.parked_since_ns[index] = None;
+            }
+        }
+        Some((index, time_base, packet))
+    }
+
+    /// Moves the read cursor to `target`, forwards — see
+    /// [`SourceElement::seek`].
+    fn reposition(&mut self, target: Duration) -> crate::error::Result<Duration> {
         // `Input::seek` takes microseconds (`AV_TIME_BASE` units) when
         // seeking the whole container (stream index -1, which is what it
         // uses internally) rather than one specific stream — an unbounded

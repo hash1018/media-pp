@@ -14,7 +14,7 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     core::pipeline::chain::FlowTracer,
-    element::{Context, Element, ElementType, Filter, Sink, element_pp_log},
+    element::{Context, Element, ElementType, Filter, ReversibleSink, Sink, element_pp_log},
     error::Result,
 };
 
@@ -137,11 +137,22 @@ impl Line {
         if let Some(head) = &mut self.head {
             head.consume(buf)?;
         }
+        Ok(self.take_made())
+    }
+
+    /// What came out of the line's end since this was last asked — for an
+    /// owner that drove the line some way other than [`Self::consume`].
+    pub(crate) fn take_made(&mut self) -> Vec<MediaBuffer> {
         let mut made = self
             .made
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(std::mem::take(&mut *made))
+        std::mem::take(&mut *made)
+    }
+
+    /// The line's first element as a [`ReversibleSink`], where it is one.
+    pub(crate) fn reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+        self.head.as_mut()?.as_reversible()
     }
 
     /// Whether the line's first element can take a buffer now — which, for

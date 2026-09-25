@@ -33,6 +33,7 @@ mod contracts;
 mod graph;
 mod lifecycle;
 mod rate;
+mod reverse;
 mod seek;
 mod stats;
 mod step;

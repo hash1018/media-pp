@@ -154,7 +154,8 @@ impl PlaybackClock {
     /// audio master's last sample is projected to now and re-sampled here
     /// for the same reason; what it publishes next is its own, and already
     /// counts the rate its sound was stretched at. `rate` is the caller's to
-    /// have checked — finite and positive.
+    /// have checked — finite and not zero; negative plays the media
+    /// backwards, the position going down.
     pub(crate) fn set_rate(&self, rate: f64) {
         let mut state = self.state.lock().unwrap();
         let elapsed = self.wall_clock.elapsed();
@@ -309,24 +310,56 @@ impl PlaybackClock {
     /// registration exists to avoid.
     pub(crate) fn remaining(&self, media_ns: i64) -> Duration {
         let mut state = self.state.lock().unwrap();
-        if let State::Unavailable { next_registration } = *state {
-            self.wall_clock.start();
-            let elapsed = self.wall_clock.elapsed();
-            *state = State::Wall {
-                anchor_ns: media_ns,
-                anchor_elapsed: elapsed,
-                next_registration,
-            };
-        }
-        let Some(position) = position_at(*state, self.wall_clock.elapsed(), self.rate()) else {
+        self.anchor_on(&mut state, media_ns);
+        let rate = self.rate();
+        let Some(position) = position_at(*state, self.wall_clock.elapsed(), rate) else {
             return Duration::ZERO;
         };
-        let ahead = media_ns.saturating_sub(position);
+        // Ahead in the direction playback goes: later media forwards,
+        // earlier media in reverse.
+        let ahead = if rate < 0.0 {
+            position.saturating_sub(media_ns)
+        } else {
+            media_ns.saturating_sub(position)
+        };
         if ahead <= 0 {
             return Duration::ZERO;
         }
         // Media ahead, as the time it takes to play it at this rate.
-        Duration::from_nanos((ahead as f64 / self.rate()) as u64)
+        Duration::from_nanos((ahead as f64 / rate.abs()) as u64)
+    }
+
+    /// Establishes the origin at `media_ns` where nothing has yet — the first
+    /// stream to ask speaks for the pipeline — and, playing in reverse,
+    /// where an audio master is waiting to prime: in reverse there is no
+    /// sound to prime it, so the wall clock goes on from the first picture
+    /// with the registration kept, for the sound to take the position back
+    /// once playback goes forwards again.
+    fn anchor_on(&self, state: &mut State, media_ns: i64) {
+        match *state {
+            State::Unavailable { next_registration } => {
+                self.wall_clock.start();
+                *state = State::Wall {
+                    anchor_ns: media_ns,
+                    anchor_elapsed: self.wall_clock.elapsed(),
+                    next_registration,
+                };
+            }
+            State::AudioPriming {
+                registration,
+                next_registration,
+                ..
+            } if self.rate() < 0.0 => {
+                self.wall_clock.start();
+                *state = State::AudioFallback {
+                    registration,
+                    anchor_ns: media_ns,
+                    anchor_elapsed: self.wall_clock.elapsed(),
+                    next_registration,
+                };
+            }
+            _ => {}
+        }
     }
 
     /// Moves the origin so that `media_ns` is due now.
@@ -362,15 +395,7 @@ impl PlaybackClock {
 
     pub(crate) fn video_snapshot(&self, media_ns: i64) -> (PlaybackMaster, Option<i64>) {
         let mut state = self.state.lock().unwrap();
-        if let State::Unavailable { next_registration } = *state {
-            self.wall_clock.start();
-            let elapsed = self.wall_clock.elapsed();
-            *state = State::Wall {
-                anchor_ns: media_ns,
-                anchor_elapsed: elapsed,
-                next_registration,
-            };
-        }
+        self.anchor_on(&mut state, media_ns);
         let elapsed = self.wall_clock.elapsed();
         let master = match *state {
             State::Unavailable { .. } => PlaybackMaster::Unavailable,
@@ -813,6 +838,46 @@ mod tests {
         let paused = playback.position_ns().unwrap();
         thread::sleep(Duration::from_millis(20));
         assert_eq!(playback.position_ns(), Some(paused), "paused still holds");
+    }
+
+    /// In reverse the position goes down from where it was, what is due is
+    /// what lies below it, and an audio master waiting to prime — there is
+    /// no sound in reverse — does not hold the picture up: the wall clock
+    /// takes over from the first picture.
+    #[test]
+    fn in_reverse_the_position_goes_down_on_the_wall_clock() {
+        let wall = Arc::new(Clock::new());
+        let playback = Arc::new(PlaybackClock::new(wall));
+        let audio = playback.register_audio_master().unwrap();
+        playback.set_rate(-1.0);
+        playback.reset_for_seek();
+        assert_eq!(
+            playback.remaining(5_000_000_000),
+            Duration::ZERO,
+            "the first picture anchors, and is due"
+        );
+        assert_eq!(playback.master(), PlaybackMaster::Wall);
+        let later = playback.remaining(5_000_000_000 - 100_000_000);
+        assert!(
+            (Duration::from_millis(80)..=Duration::from_millis(100)).contains(&later),
+            "100 ms below is 100 ms away: {later:?}"
+        );
+        assert_eq!(
+            playback.remaining(5_000_000_000 + 100_000_000),
+            Duration::ZERO,
+            "above it is past"
+        );
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            playback.position_ns().unwrap() < 4_970_000_000,
+            "going down"
+        );
+
+        // Forwards again: the sound takes the position back.
+        playback.set_rate(1.0);
+        playback.reset_for_seek();
+        audio.publish(2_000_000_000, 3_000_000_000, true).unwrap();
+        assert_eq!(playback.master(), PlaybackMaster::Audio);
     }
 
     /// An audio master's last sample is projected at the rate, and a change

@@ -102,6 +102,15 @@ impl PrerollGate {
     /// since this last looked, open again once none is running — whatever
     /// ended it. Called wherever the gate is about to decide.
     fn follow_state(&mut self) {
+        // Backwards a seek's target is where the stretches start from, and
+        // what each shows is cut by the source — see
+        // `crate::element::ReversibleSource`. Selecting here would drop
+        // everything below the target, which is all of it.
+        if self.state.as_ref().is_some_and(|state| state.backwards()) {
+            self.armed = None;
+            self.clear();
+            return;
+        }
         // Not a step's: a step selects no sample, and a picture decoded past
         // the last one asked for is the next step's first, not one to drop.
         let running = self

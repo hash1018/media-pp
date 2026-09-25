@@ -426,6 +426,10 @@ pub(crate) struct PortContracts {
     /// Whether the element can follow a seek — see
     /// [`crate::element::Sink::accepts_seek`].
     pub accepts_seek: bool,
+    /// Whether it can follow its pipeline playing backwards: anything but
+    /// what turns a picture's packets into pictures and is not a
+    /// [`crate::element::ReversibleSink`].
+    pub accepts_reverse: bool,
 }
 
 #[derive(Debug)]
@@ -554,6 +558,9 @@ struct GraphState {
     /// Why each attached element that cannot follow a seek cannot — what
     /// [`crate::pipeline::Pipeline::check_seek`] answers from.
     refusals: HashMap<ElementId, SeekRejectReason>,
+    /// Why each attached element that cannot play backwards cannot — what
+    /// [`crate::pipeline::Pipeline::check_reverse`] adds to the seek's.
+    reverse_refusals: HashMap<ElementId, SeekRejectReason>,
 }
 
 impl GraphState {
@@ -666,6 +673,30 @@ impl PipelineGraph {
     /// wiring knows as it adds it.
     pub(crate) fn refuse_seek(&self, id: ElementId, reason: SeekRejectReason) {
         self.0.lock().unwrap().refusals.insert(id, reason);
+    }
+
+    /// Records that the source `id` cannot read its media backwards.
+    pub(crate) fn refuse_reverse(&self, id: ElementId, reason: SeekRejectReason) {
+        self.0.lock().unwrap().reverse_refusals.insert(id, reason);
+    }
+
+    /// Every attached element that would refuse to play backwards, and why:
+    /// what would refuse a seek, since reverse starts with one, and what
+    /// cannot go backwards besides.
+    pub(crate) fn reverse_rejections(&self) -> Vec<SeekRejection> {
+        let mut rejections = self.seek_rejections();
+        let state = self.0.lock().unwrap();
+        rejections.extend(state.nodes.iter().filter_map(|node| {
+            state
+                .reverse_refusals
+                .get(&node.id)
+                .map(|&reason| SeekRejection {
+                    element_type: node.element_type,
+                    name: node.name.clone(),
+                    reason,
+                })
+        }));
+        rejections
     }
 
     /// Every attached element that would refuse a seek, and why — the graph
@@ -786,6 +817,15 @@ impl PipelineGraph {
                     .refusals
                     .insert(node.id, SeekRejectReason::ElementNotSeekable);
             }
+            if plan
+                .contracts
+                .get(&node.id)
+                .is_some_and(|contracts| !contracts.accepts_reverse)
+            {
+                state
+                    .reverse_refusals
+                    .insert(node.id, SeekRejectReason::ElementNotReversible);
+            }
         }
         state.nodes.extend(plan.nodes);
         state.edges.extend(edges);
@@ -844,6 +884,9 @@ impl PipelineGraph {
             .retain(|element, _| !removed_nodes.contains(element));
         state
             .refusals
+            .retain(|element, _| !removed_nodes.contains(element));
+        state
+            .reverse_refusals
             .retain(|element, _| !removed_nodes.contains(element));
         // Not this branch's entries — its elements are still alive, handed
         // back to the caller to drop outside this lock — but any earlier

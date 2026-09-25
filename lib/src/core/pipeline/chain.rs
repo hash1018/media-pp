@@ -7,7 +7,9 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
+    element::{
+        Context, Element, ElementType, Filter, ReversibleSink, Sink, Source, element_pp_log,
+    },
     error::Result,
     graph::{
         BranchId, BranchPlan, ElementId, GraphError, Incoming, NodeInfo, PlannedEdge,
@@ -42,6 +44,7 @@ struct PlannedNode {
     input: InputContract,
     output: OutputContract,
     accepts_seek: bool,
+    accepts_reverse: bool,
     /// Held strongly by the stage once it is built; the plan hands the
     /// registry a weak reference — see [`crate::stats`].
     counters: Arc<ElementCounters>,
@@ -96,6 +99,21 @@ pub(crate) struct FlowTracer<T> {
     /// [`Rack`](crate::elements::Rack) holds, which is counted as part of
     /// the rack: the graph has the rack as one node, not its contents.
     counters: Option<Arc<ElementCounters>>,
+    /// Where the stretches it is handed backwards begin and end — `None`
+    /// in a line, whose owner tells what is inside it.
+    stretches: Option<Stretches>,
+}
+
+/// Where the stretches a [`ReversibleSink`] is handed while playing
+/// backwards begin and end, for the stage in front of it to tell it — see
+/// [`crate::element::ReversibleSource`]. One place for every decoder, so
+/// none of them works it out from the packets on its own.
+struct Stretches {
+    state: Arc<PlaybackState>,
+    /// The decode time of the packet before, to see a stretch begin by.
+    last: Option<i64>,
+    /// Whether a stretch is under way.
+    open: bool,
 }
 
 impl<T: Element> Element for FlowTracer<T> {
@@ -139,6 +157,10 @@ impl<T: Filter> Sink for FlowTracer<T> {
         self.inner.accepts_seek()
     }
 
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+        self.inner.as_reversible()
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let is_eos = buf.is_eos();
         if is_eos {
@@ -148,7 +170,8 @@ impl<T: Filter> Sink for FlowTracer<T> {
             .counters
             .as_deref()
             .map(|counters| counters.begin(is_eos));
-        let result = self.inner.consume(buf);
+        let result = mark_stretch(&mut self.stretches, &mut self.inner, &buf)
+            .and_then(|()| self.inner.consume(buf));
         if let Some(call) = call {
             call.end(result.is_ok());
         }
@@ -176,6 +199,13 @@ impl<T: Filter> Sink for FlowTracer<T> {
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"
         );
+        if matches!(msg, ControlMsg::Flush)
+            && let Some(stretches) = &mut self.stretches
+        {
+            // What the element holds of a stretch goes with the timeline.
+            stretches.open = false;
+            stretches.last = None;
+        }
         let result = crate::control::deliver(&mut self.inner, msg);
         match &result {
             Ok(()) => pp_trace!(
@@ -191,6 +221,58 @@ impl<T: Filter> Sink for FlowTracer<T> {
     }
 }
 
+/// Tells a [`ReversibleSink`] where a stretch played backwards begins
+/// and ends, before it is handed `buf`: a stretch ends where a packet's
+/// decode time goes back, the next beginning with that packet, and the
+/// last ends with the end of the stream.
+fn mark_stretch<T: Filter>(
+    stretches: &mut Option<Stretches>,
+    inner: &mut T,
+    buf: &MediaBuffer,
+) -> Result<()> {
+    let Some(stretches) = stretches else {
+        return Ok(());
+    };
+    if !stretches.state.backwards() {
+        stretches.open = false;
+        stretches.last = None;
+        return Ok(());
+    }
+    let Some(reversible) = inner.as_reversible() else {
+        return Ok(());
+    };
+    match buf {
+        MediaBuffer::Packet(packet) => {
+            let decoded = packet.dts().or_else(|| packet.pts());
+            let goes_back = matches!(
+                (stretches.last, decoded),
+                (Some(last), Some(now)) if now < last
+            );
+            if stretches.open && goes_back {
+                stretches.open = false;
+                pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=end");
+                reversible.end_stretch()?;
+            }
+            if !stretches.open {
+                stretches.open = true;
+                pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=begin");
+                reversible.begin_stretch()?;
+            }
+            if decoded.is_some() {
+                stretches.last = decoded;
+            }
+        }
+        MediaBuffer::Eos if stretches.open => {
+            stretches.open = false;
+            stretches.last = None;
+            pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=end");
+            reversible.end_stretch()?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 impl<T: Element> FlowTracer<T> {
     /// Wraps `inner`, which a caller has already linked to whatever follows
     /// it. Uncounted: this is for a stage the graph does not have as a node
@@ -199,6 +281,7 @@ impl<T: Element> FlowTracer<T> {
         Self {
             inner,
             counters: None,
+            stretches: None,
         }
     }
 
@@ -236,6 +319,11 @@ where
         Ok(Box::new(FlowTracer {
             inner: element,
             counters: Some(counters),
+            stretches: Some(Stretches {
+                state: Arc::clone(&context.state),
+                last: None,
+                open: false,
+            }),
         }))
     }
 }
@@ -491,6 +579,11 @@ impl ChainBuilder {
             .map(|pad| (Arc::<str>::from(pad.name()), pad.contract()))
             .unwrap_or_else(|| ("src".into(), OutputContract::Unknown));
         let counters = ElementCounters::new();
+        let input = element.input_contract();
+        // What turns a picture's packets into pictures has to hand them on
+        // backwards to play so; everything else takes what it is handed.
+        let accepts_reverse = element.as_reversible().is_some()
+            || !crate::contract::decodes_pictures(&input, &output);
         self.planned.push(PlannedNode {
             info: NodeInfo {
                 id: self.context.graph.reserve_element_id(),
@@ -498,9 +591,10 @@ impl ChainBuilder {
                 name,
             },
             output_port,
-            input: element.input_contract(),
+            input,
             output,
             accepts_seek: element.accepts_seek(),
+            accepts_reverse,
             counters: Arc::clone(&counters),
         });
         self.elements.push(Box::new(DirectStage(element, counters)));
@@ -540,6 +634,7 @@ impl ChainBuilder {
             input: InputContract::Any,
             output: OutputContract::Passthrough,
             accepts_seek: true,
+            accepts_reverse: true,
             counters: Arc::clone(&counters),
         });
         self.elements.push(Box::new(QueueStage {
@@ -590,6 +685,7 @@ impl ChainBuilder {
                         input: node.input,
                         output: node.output,
                         accepts_seek: node.accepts_seek,
+                        accepts_reverse: node.accepts_reverse,
                     },
                 )
             })
@@ -600,6 +696,8 @@ impl ChainBuilder {
                 input: terminal.input_contract(),
                 output: OutputContract::Unknown,
                 accepts_seek: terminal.accepts_seek(),
+                // It hands nothing on, so decodes nothing that is shown.
+                accepts_reverse: true,
             },
         );
 
@@ -714,6 +812,7 @@ impl ChainBuilder {
                     input: node.input,
                     output: node.output,
                     accepts_seek: node.accepts_seek,
+                    accepts_reverse: node.accepts_reverse,
                 },
             );
             plan.counters

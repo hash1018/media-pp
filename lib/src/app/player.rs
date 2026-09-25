@@ -443,8 +443,9 @@ impl Player {
 
     /// Plays at `rate` times the file's own speed, from where playback is,
     /// the sound at its own pitch — see [`Pipeline::set_rate`]. Between
-    /// [`Pipeline::MIN_RATE`] and [`Pipeline::MAX_RATE`]; a seek, a step and
-    /// a pause keep it.
+    /// [`Pipeline::MIN_RATE`] and [`Pipeline::MAX_RATE`], or
+    /// [`Pipeline::REVERSE_RATE`] to play the picture backwards from the one
+    /// shown, without sound; a seek, a step and a pause keep it.
     pub fn set_rate(&self, rate: f64) -> Result<(), PlayerError> {
         self.pipeline.set_rate(rate)?;
         Ok(())
@@ -638,7 +639,7 @@ impl Player {
     /// and puts it back, the left and right arrows move five seconds, the
     /// full stop and the comma step a picture on and back, the minus and
     /// plus play a quarter slower and faster and Backspace at the file's own
-    /// speed again, the up and down arrows turn the volume up and down a
+    /// speed again, R plays backwards and forwards again, the up and down arrows turn the volume up and down a
     /// tenth, M mutes and unmutes, and Escape or closing the window answer
     /// `false` — the
     /// caller's to act on, by stopping or dropping the player. Anything else
@@ -674,14 +675,22 @@ impl Player {
             WindowEvent::Key(Key::Char(',')) => {
                 let _ = self.step(-1);
             }
-            WindowEvent::Key(Key::Char('-')) => {
+            // Speed, forwards; backwards has the one.
+            WindowEvent::Key(Key::Char('-')) if self.rate() > 0.0 => {
                 let _ = self.set_rate((self.rate() - RATE_STEP).max(Pipeline::MIN_RATE));
             }
-            WindowEvent::Key(Key::Char('+')) => {
+            WindowEvent::Key(Key::Char('+')) if self.rate() > 0.0 => {
                 let _ = self.set_rate((self.rate() + RATE_STEP).min(Pipeline::MAX_RATE));
             }
             WindowEvent::Key(Key::Backspace) => {
                 let _ = self.set_rate(1.0);
+            }
+            WindowEvent::Key(Key::Char('r')) => {
+                let _ = self.set_rate(if self.rate() < 0.0 {
+                    1.0
+                } else {
+                    Pipeline::REVERSE_RATE
+                });
             }
             WindowEvent::Key(Key::Up) => {
                 let _ = self.set_volume((self.volume() + VOLUME_STEP).min(1.0));
@@ -1023,6 +1032,39 @@ mod tests {
             Err(PlayerError::Pipeline(_))
         ));
         assert_eq!(player.rate(), 1.0, "a rate refused changes nothing");
+    }
+
+    /// R plays the file backwards from where it is, the position going
+    /// down, and forwards again from there.
+    #[test]
+    fn r_plays_the_file_backwards_and_forwards_again() {
+        let Some(player) = open(true) else { return };
+        player.play().unwrap();
+        assert!(
+            wait_until(|| player.position() > Some(Duration::from_millis(2_500))),
+            "playback moves"
+        );
+        assert!(player.respond_to(&WindowEvent::Key(Key::Char('r'))));
+        assert_eq!(player.rate(), Pipeline::REVERSE_RATE);
+        std::thread::sleep(Duration::from_millis(300));
+        let (from, started) = (player.position().unwrap(), std::time::Instant::now());
+        std::thread::sleep(Duration::from_millis(1_000));
+        let (to, took) = (player.position().unwrap(), started.elapsed());
+        let back = from.saturating_sub(to).as_secs_f64() / took.as_secs_f64();
+        assert!(
+            (0.7..1.3).contains(&back),
+            "backwards {from:?} to {to:?} in {took:?}"
+        );
+
+        assert!(player.respond_to(&WindowEvent::Key(Key::Char('r'))));
+        assert_eq!(player.rate(), 1.0);
+        std::thread::sleep(Duration::from_millis(300));
+        let from = player.position().unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            player.position().unwrap() > from + Duration::from_millis(400),
+            "forwards again"
+        );
     }
 
     /// A volume that is no gain is refused, and leaves the one set before.

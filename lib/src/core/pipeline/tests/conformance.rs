@@ -1,5 +1,5 @@
 //! Control conformance: random sequences of pause, resume, seek, frame step,
-//! rate and stop,
+//! rate — backwards too — and stop,
 //! run against the shapes of pipeline this crate is used in, and judged
 //! against what every terminal was handed.
 //!
@@ -20,6 +20,8 @@
 //!   and goes forward — nothing from before the seek arrives after it —
 //!   with nothing missing in between: no step between two samples much
 //!   wider than the stream's own spacing, where nothing drops by design;
+//! - playing backwards, the same going down from the new position, and no
+//!   sound at all;
 //! - resumed away from the end, it flows again;
 //! - played to the end, the pipeline says [`BusEvent::Finished`];
 //! - and nothing reports an error.
@@ -380,7 +382,7 @@ enum Op {
     PlayToEnd,
     /// The picture this many pictures on, or back.
     Step(i64),
-    /// Playing on at this rate.
+    /// Playing on at this rate, backwards at [`Pipeline::REVERSE_RATE`].
     Rate(f64),
 }
 
@@ -409,7 +411,7 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
             1 => Op::Resume,
             2 => Op::Seek(Duration::from_secs(1), SeekMode::Accurate),
             3 => Op::Step(1),
-            4 => Op::Rate(2.0),
+            4 => Op::Rate([2.0, Pipeline::REVERSE_RATE][rng.below(2) as usize]),
             _ => Op::Wait(Duration::from_millis(rng.below(300))),
         };
     };
@@ -449,7 +451,7 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
         }),
         // Not four times: the model counts only the waits as playing, and
         // what the other calls take is played too, four times as far.
-        12 => Op::Rate([0.5, 1.0, 2.0][rng.below(3) as usize]),
+        12 => Op::Rate([0.5, 1.0, 2.0, Pipeline::REVERSE_RATE][rng.below(4) as usize]),
         _ => Op::Wait(Duration::from_millis(rng.below(400))),
     }
 }
@@ -552,9 +554,10 @@ struct Model {
     played: Duration,
     /// The seeks that succeeded, in order: what each terminal's `Seek`
     /// controls are matched against. `None` for one whose target the
-    /// pipeline works out — a step back's, and the one a resume after a step
-    /// makes to line everything up to the picture.
-    seeks: Vec<(Option<Duration>, SeekMode)>,
+    /// pipeline works out — a step back's, a turn's, and the one a resume
+    /// after a step makes to line everything up to the picture — and whether
+    /// it plays backwards from there.
+    seeks: Vec<(Option<Duration>, SeekMode, bool)>,
     /// Whether the picture has been stepped since the last seek, so the next
     /// resume seeks to it first.
     stepped: bool,
@@ -565,15 +568,28 @@ struct Model {
 }
 
 impl Model {
+    fn backwards(&self) -> bool {
+        self.rate < 0.0
+    }
+
+    /// A seek succeeded, to `target` or where the pipeline works out.
+    fn seeked(&mut self, target: Option<Duration>, mode: SeekMode) {
+        self.seeks.push((target, mode, self.backwards()));
+    }
+
     fn sought(&mut self, target: Duration, duration: Option<Duration>) {
         self.played = Duration::ZERO;
-        self.far_from_end =
-            duration.is_some_and(|duration| target + Duration::from_secs(3) < duration);
+        // The end it plays towards: the start of the file, backwards.
+        self.far_from_end = if self.backwards() {
+            target > Duration::from_secs(3)
+        } else {
+            duration.is_some_and(|duration| target + Duration::from_secs(3) < duration)
+        };
     }
 
     fn waited(&mut self, wait: Duration) {
         if !self.paused {
-            self.played += wait.mul_f64(self.rate);
+            self.played += wait.mul_f64(self.rate.abs());
             if self.played > Duration::from_millis(1_500) {
                 self.far_from_end = false;
             }
@@ -638,7 +654,7 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                     && let Some(picture) = model.picture
                 {
                     // Lined up to the picture before playing on.
-                    model.seeks.push((None, SeekMode::Accurate));
+                    model.seeked(None, SeekMode::Accurate);
                     model.sought(picture, rig.duration);
                 }
             }
@@ -646,7 +662,19 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                 let pipeline = Arc::clone(&rig.pipeline);
                 match within(move || pipeline.set_rate(rate)) {
                     None => return fail(&history, "set_rate did not return".into()),
-                    Some(Ok(())) => model.rate = rate,
+                    Some(Ok(())) => {
+                        let turned = (rate < 0.0) != model.backwards();
+                        model.rate = rate;
+                        if turned {
+                            // Repositioned to the picture shown, which the
+                            // model does not know: whether that is far from
+                            // the end it now plays towards neither.
+                            model.seeked(None, SeekMode::Accurate);
+                            model.stepped = false;
+                            model.played = Duration::ZERO;
+                            model.far_from_end = false;
+                        }
+                    }
                     Some(Err(crate::Error::SeekError(_))) if rig.duration.is_none() => {}
                     Some(Err(error)) => return fail(&history, format!("set_rate failed: {error}")),
                 }
@@ -659,8 +687,9 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                         model.paused = true;
                         model.stepped = true;
                         model.picture = Some(at);
-                        if frames < 0 {
-                            model.seeks.push((None, SeekMode::Accurate));
+                        // A step against the way it plays is a seek.
+                        if (frames < 0) != model.backwards() {
+                            model.seeked(None, SeekMode::Accurate);
                             model.sought(at, rig.duration);
                         }
                     }
@@ -679,7 +708,7 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                 match within(move || pipeline.seek(target, mode)) {
                     None => return fail(&history, "seek did not return".into()),
                     Some(Ok(())) => {
-                        model.seeks.push((Some(target), mode));
+                        model.seeked(Some(target), mode);
                         model.stepped = false;
                         model.sought(target, rig.duration);
                     }
@@ -700,7 +729,12 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                 let Some(duration) = rig.duration else {
                     continue;
                 };
-                let target = duration.saturating_sub(Duration::from_millis(400));
+                // Just short of the start, backwards.
+                let target = if model.backwards() {
+                    Duration::from_millis(400)
+                } else {
+                    duration.saturating_sub(Duration::from_millis(400))
+                };
                 let from = bus.len();
                 let pipeline = Arc::clone(&rig.pipeline);
                 match within(move || pipeline.seek(target, SeekMode::Accurate)) {
@@ -709,7 +743,7 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                         return fail(&history, format!("seek to the end failed: {error}"));
                     }
                     Some(Ok(())) => {
-                        model.seeks.push((Some(target), SeekMode::Accurate));
+                        model.seeked(Some(target), SeekMode::Accurate);
                         model.stepped = false;
                     }
                 }
@@ -730,13 +764,24 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
             }
         }
         // Resumed away from the end: every terminal must be handed something
-        // new, or playback has stalled.
+        // new, or playback has stalled — every one that plays, backwards only
+        // the picture.
         let resumed = matches!(step, Op::Resume) || (matches!(step, Op::Seek(..)) && !model.paused);
         if resumed && model.far_from_end {
             let deadline = Instant::now() + FLOW_TIMEOUT;
+            let playing: Vec<bool> = rig
+                .terminals
+                .iter()
+                .map(|(name, _)| !model.backwards() || *name != "speakers")
+                .collect();
             loop {
                 let now = rig.data_counts();
-                if now.iter().zip(&before).all(|(now, before)| now > before) {
+                if now
+                    .iter()
+                    .zip(&before)
+                    .zip(&playing)
+                    .all(|((now, before), playing)| !playing || now > before)
+                {
                     break;
                 }
                 if Instant::now() > deadline {
@@ -839,7 +884,7 @@ fn tail(log: &[Entry]) -> &[Entry] {
 /// Checks one terminal's record against the promises about data.
 fn judge(
     log: &[Entry],
-    seeks: &[(Option<Duration>, SeekMode)],
+    seeks: &[(Option<Duration>, SeekMode, bool)],
     landings: &[Duration],
     duration: Option<Duration>,
     lossless: bool,
@@ -858,6 +903,9 @@ fn judge(
     let mut flushed = false;
     let mut seek = 0usize;
     let mut floor: Option<Duration> = None;
+    // Backwards the seek's target is the most a sample may start at, and
+    // they go down from it.
+    let mut ceiling: Option<Duration> = None;
     let mut last: Option<Duration> = None;
     // Whether what comes next may start further on than the stream's own
     // spacing allows: a step drops the sound, and unless a seek lines it
@@ -878,22 +926,28 @@ fn judge(
             Entry::Control(ControlMsg::Seek(target)) => {
                 flushed = false;
                 last = None;
-                let (asked, mode) = seeks
-                    .get(seek)
-                    .copied()
-                    .unwrap_or((Some(*target), SeekMode::Accurate));
+                let (asked, mode, backwards) =
+                    seeks
+                        .get(seek)
+                        .copied()
+                        .unwrap_or((Some(*target), SeekMode::Accurate, false));
                 let asked = asked.unwrap_or(*target);
                 if asked != *target {
                     return Err(format!(
                         "entry {at}: seek {seek} was for {asked:?}, this terminal was told {target:?}"
                     ));
                 }
-                floor = Some(match mode {
-                    SeekMode::Accurate => duration.map_or(*target, |duration| {
-                        (*target).min(duration.saturating_sub(LAST_SAMPLE))
-                    }),
-                    SeekMode::Keyframe => landings.get(seek).copied().unwrap_or(Duration::ZERO),
-                });
+                (floor, ceiling) = if backwards {
+                    (None, Some(*target))
+                } else {
+                    let floor = match mode {
+                        SeekMode::Accurate => duration.map_or(*target, |duration| {
+                            (*target).min(duration.saturating_sub(LAST_SAMPLE))
+                        }),
+                        SeekMode::Keyframe => landings.get(seek).copied().unwrap_or(Duration::ZERO),
+                    };
+                    (Some(floor), None)
+                };
                 seek += 1;
             }
             Entry::Control(ControlMsg::Stop) => break,
@@ -910,7 +964,34 @@ fn judge(
                         "entry {at}: data between a flush and its seek, {pts:?}"
                     ));
                 }
+                if ceiling.is_some() && !shows_pictures {
+                    return Err(format!("entry {at}: sound played backwards, {pts:?}"));
+                }
                 let Some(pts) = *pts else { continue };
+                if let Some(ceiling) = ceiling {
+                    if pts > ceiling + LANDING_TOLERANCE {
+                        return Err(format!(
+                            "entry {at}: {pts:?} after a seek backwards to {ceiling:?} — from after it"
+                        ));
+                    }
+                    if let Some(last) = last
+                        && pts > last
+                    {
+                        return Err(format!(
+                            "entry {at}: {pts:?} after {last:?}, backwards — going forwards"
+                        ));
+                    }
+                    if let (true, Some(last), Some(widest)) = (lossless, last, widest)
+                        && last - pts > widest
+                    {
+                        return Err(format!(
+                            "entry {at}: {pts:?} after {last:?}, backwards — {:?} missing between them",
+                            last - pts
+                        ));
+                    }
+                    last = Some(pts);
+                    continue;
+                }
                 if let Some(floor) = floor
                     && pts + LANDING_TOLERANCE < floor
                 {
@@ -953,7 +1034,7 @@ fn ends_the_stream(rest: &[Entry]) -> bool {
 }
 
 /// How far apart a terminal's samples usually are: the median step
-/// between two in a row, not counting across a seek. `None` for a record
+/// between two in a row, either way, not counting across a seek. `None` for a record
 /// too short to say.
 fn typical_spacing(log: &[Entry]) -> Option<Duration> {
     let mut steps = Vec::new();
@@ -963,9 +1044,9 @@ fn typical_spacing(log: &[Entry]) -> Option<Duration> {
             Entry::Control(ControlMsg::Seek(_)) => last = None,
             Entry::Data { pts: Some(pts) } => {
                 if let Some(last) = last
-                    && *pts > last
+                    && *pts != last
                 {
-                    steps.push(*pts - last);
+                    steps.push(pts.abs_diff(last));
                 }
                 last = Some(*pts);
             }

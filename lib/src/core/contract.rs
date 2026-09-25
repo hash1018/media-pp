@@ -707,6 +707,23 @@ pub enum OutputContract {
     Unknown,
 }
 
+/// Whether an element taking `input` and handing on `output` turns a
+/// picture's packets into pictures — what has to be a
+/// [`crate::element::ReversibleSink`] to play backwards.
+pub(crate) fn decodes_pictures(input: &InputContract, output: &OutputContract) -> bool {
+    let takes_packets = matches!(
+        input,
+        InputContract::Fixed(PortContract::Packets(kinds)) if kinds.contains(MediaKind::VideoPacket)
+    );
+    let hands_on_pictures = matches!(
+        output,
+        OutputContract::Fixed(PortContract::Frames(kinds, ..))
+            | OutputContract::SameLayout(PortContract::Frames(kinds, ..))
+            if kinds.contains(MediaKind::VideoFrame)
+    );
+    takes_packets && hands_on_pictures
+}
+
 impl fmt::Display for OutputContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

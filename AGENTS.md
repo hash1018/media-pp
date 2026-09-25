@@ -125,6 +125,12 @@ final source of truth when documentation and implementation differ.
   written, a replay window — returns false from `Sink::accepts_seek`, and a
   source says so through `is_live` and `is_seekable`. `Pipeline::check_seek`
   answers from what the graph holds; nothing asks the running elements.
+  Playing backwards likewise: a source that can is a `ReversibleSource`,
+  and an element that turns a picture's packets into pictures a
+  `ReversibleSink`, each saying so from `as_reversible`; the pipeline tells
+  a sink where each stretch begins and ends, so no decoder works that out
+  for itself. Everything else is handed the stream as it runs, and
+  declares nothing.
 - Preserve media metadata across transforms unless the element intentionally
   creates a new timeline: PTS, duration, packet `time_base`, and video
   color-space/range are part of the buffer contract, not optional decoration.

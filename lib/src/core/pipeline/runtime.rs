@@ -50,9 +50,9 @@ pub enum PipelineError {
     NoPicture,
 
     /// [`Pipeline::set_rate`] was asked for a rate outside
-    /// [`Pipeline::MIN_RATE`]..=[`Pipeline::MAX_RATE`], or one that is not a
-    /// number. Playing backwards is not yet something a pipeline does.
-    #[error("a playback rate has to be between 0.25 and 4")]
+    /// [`Pipeline::MIN_RATE`]..=[`Pipeline::MAX_RATE`] that is not
+    /// [`Pipeline::REVERSE_RATE`], or one that is not a number.
+    #[error("a playback rate has to be between 0.25 and 4, or -1 to play backwards")]
     UnsupportedRate,
 }
 

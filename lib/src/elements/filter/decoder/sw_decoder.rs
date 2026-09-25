@@ -8,11 +8,12 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, ReversibleSink, Sink, Source, element_pp_log},
     pad::SrcPad,
     pool::UnboundObjectPool,
 };
 
+use super::backwards::Stretch;
 use super::preroll_gate::PrerollGate;
 use crate::elements::filter::is_codec_drain_boundary;
 
@@ -107,6 +108,9 @@ pub struct SwDecoder {
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// Suppresses decoded samples before a seek target during preroll.
     preroll_gate: PrerollGate,
+    /// Holds a stretch's pictures to hand on last first, playing backwards
+    /// — see [`ReversibleSink`].
+    stretch: Stretch,
 }
 
 impl SwDecoder {
@@ -207,6 +211,7 @@ impl SwDecoder {
             pad,
             pool,
             preroll_gate: PrerollGate::default(),
+            stretch: Stretch::default(),
         })
     }
 }
@@ -272,6 +277,16 @@ impl Sink for SwDecoder {
         }))
     }
 
+    /// A picture's decoder hands a stretch on backwards; a sound's is never
+    /// given one.
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+        if matches!(self.kind, Kind::Video(_)) {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
@@ -284,7 +299,13 @@ impl Sink for SwDecoder {
                             .send_packet(&*packet)
                             .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_video(decoder, &mut self.pad, &self.pool, &mut self.preroll_gate)
+                        drain_video(
+                            decoder,
+                            &mut self.pad,
+                            &self.pool,
+                            &mut self.preroll_gate,
+                            &mut self.stretch,
+                        )
                     }
                     Kind::Audio(decoder) => {
                         decoder
@@ -302,7 +323,13 @@ impl Sink for SwDecoder {
                             .send_eof()
                             .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_video(decoder, &mut self.pad, &self.pool, &mut self.preroll_gate)?;
+                        drain_video(
+                            decoder,
+                            &mut self.pad,
+                            &self.pool,
+                            &mut self.preroll_gate,
+                            &mut self.stretch,
+                        )?;
                     }
                     Kind::Audio(decoder) => {
                         decoder
@@ -340,8 +367,36 @@ impl Sink for SwDecoder {
                 Kind::Audio(decoder) => decoder.flush(),
             }
             self.preroll_gate.reset();
+            self.stretch.reset();
         }
         Ok(())
+    }
+}
+
+impl ReversibleSink for SwDecoder {
+    fn begin_stretch(&mut self) -> crate::error::Result<()> {
+        self.stretch.begin();
+        Ok(())
+    }
+
+    /// Drains the decoder of the stretch and leaves it fresh for the next
+    /// one's keyframe, then hands the stretch on.
+    fn end_stretch(&mut self) -> crate::error::Result<()> {
+        if let Kind::Video(decoder) = &mut self.kind {
+            decoder
+                .send_eof()
+                .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+                .map_err(SwDecoderError::from)?;
+            drain_video(
+                decoder,
+                &mut self.pad,
+                &self.pool,
+                &mut self.preroll_gate,
+                &mut self.stretch,
+            )?;
+            decoder.flush();
+        }
+        release(&mut self.stretch, &mut self.pad, &mut self.preroll_gate)
     }
 }
 
@@ -350,20 +405,38 @@ fn drain_video(
     pad: &mut SrcPad,
     pool: &UnboundObjectPool<ffmpeg::frame::Video>,
     gate: &mut PrerollGate,
+    stretch: &mut Stretch,
 ) -> crate::error::Result<()> {
     let mut frame = pool.get();
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                // Reassigning `frame` releases the suppressed one right here.
-                // On a fixed hardware pool that returns its surface a whole
-                // branch earlier than dropping it downstream would.
-                gate.push_admitted(MediaBuffer::Video(Arc::new(frame)), |frame| pad.push(frame))?;
+                let buffer = MediaBuffer::Video(Arc::new(frame));
+                if stretch.holding() {
+                    stretch.hold(buffer);
+                } else {
+                    // Reassigning `frame` releases the suppressed one right
+                    // here. On a fixed hardware pool that returns its surface
+                    // a whole branch earlier than dropping it downstream would.
+                    gate.push_admitted(buffer, |frame| pad.push(frame))?;
+                }
                 frame = pool.get();
             }
             Err(error) if is_codec_drain_boundary(&error) => break,
             Err(error) => return Err(SwDecoderError::from(error).into()),
         }
+    }
+    Ok(())
+}
+
+/// Hands on what `stretch` held of the stretch just over, last first.
+fn release(
+    stretch: &mut Stretch,
+    pad: &mut SrcPad,
+    gate: &mut PrerollGate,
+) -> crate::error::Result<()> {
+    for buffer in stretch.end() {
+        gate.push_admitted(buffer, |frame| pad.push(frame))?;
     }
     Ok(())
 }
