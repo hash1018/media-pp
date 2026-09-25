@@ -713,7 +713,10 @@ fn to_drawable(
     )))
 }
 
-#[cfg(all(test, target_os = "windows"))]
+// Built wherever `Player` is — Windows with a D3D renderer and WASAPI, Linux
+// with Vulkan and PipeWire — and run on both: nothing here is one platform's
+// but the test of each one's GPU decode.
+#[cfg(test)]
 mod tests {
     use std::time::Instant;
 
@@ -851,6 +854,36 @@ mod tests {
             player.decoding(),
             Some(DecodePath::Software(SoftwareReason::SystemMemory))
         );
+        player.play().unwrap();
+        assert!(
+            wait_until(|| player.position() > Some(Duration::from_millis(300))),
+            "playback moves"
+        );
+    }
+
+    /// The Linux half of the test above: NVDEC, where the machine has an
+    /// NVIDIA GPU that takes the stream.
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[test]
+    fn the_picture_is_decoded_on_nvdec_where_it_can_be() {
+        // Held for the whole test, as every CUDA test holds it: the player
+        // opens a device of its own too.
+        let Some((device, _lock)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let Some(path) = try_test_video() else { return };
+        let (source, _) = FileDemuxer::open("file", &path).unwrap();
+        let video = source.best(ffmpeg::media::Type::Video).unwrap();
+        let target = DecodeTarget::Cuda {
+            device,
+            downstream_hw_frames: GPU_FRAMES_QUEUED as i32 + 3,
+        };
+        if let Err(error) = VideoDecodeBin::open("probe", video.parameters, target, None) {
+            eprintln!("skipping: NVDEC does not take the stream ({error})");
+            return;
+        }
+        let Some(player) = open(false) else { return };
+        assert_eq!(player.decoding(), Some(DecodePath::Hardware));
         player.play().unwrap();
         assert!(
             wait_until(|| player.position() > Some(Duration::from_millis(300))),
