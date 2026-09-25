@@ -561,6 +561,28 @@ pub trait SourceElement: Source {
     /// pad has nothing of its own to keep in step.
     fn on_control(&mut self, _msg: &ControlMsg) {}
 
+    /// Called as a `Pause` arrives, before it is passed downstream: what the
+    /// source does to stop producing — a capture device stopped. The time
+    /// it takes counts as paused. An error ends the source.
+    ///
+    /// The default does nothing: a source that only reads when asked has
+    /// nothing running to stop.
+    fn pausing(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called as a pause ends — on `Resume`, or on the `Preroll` of a seek
+    /// made while paused — after the request has been passed downstream and
+    /// before it is acknowledged, so no caller sees the source half resumed:
+    /// a capture device restarted, and whatever it queued while stopped
+    /// discarded, since that is from before the pause. An error ends the
+    /// source.
+    ///
+    /// The default does nothing.
+    fn resuming(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Repositions this source to `target`, an absolute position from the
     /// start of the media (e.g. `av_seek_frame` for
     /// [`crate::elements::FileDemuxer`]). Called by

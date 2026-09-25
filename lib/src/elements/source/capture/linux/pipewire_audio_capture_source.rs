@@ -7,7 +7,7 @@ use std::{
         mpsc::{self, RecvTimeoutError, SyncSender},
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -23,7 +23,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{self, ControlMsg, ControlOutcome, ControlReceiver, RequestKind},
+    control::ControlReceiver,
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::AudioFormat,
     error::Result,
@@ -431,90 +431,6 @@ impl PipeWireAudioCaptureSource {
         wait_set_active(reply, active)?;
         Ok(())
     }
-
-    /// Like [`crate::control::drain_control`], but drives the control receiver
-    /// directly (the same reason `WasapiCaptureSource` does
-    /// — see `drain_control`'s own docs) so it can bracket the blocking
-    /// `Pause` wait with the stream's own `set_active`.
-    ///
-    /// Without this the daemon keeps capturing for the whole pause with
-    /// nothing draining the queue: it fills, every later packet is discarded
-    /// as an overload, and `Resume` emits the queue's stale pre-pause audio as
-    /// a burst before any live audio. Deactivating the stream is the PipeWire
-    /// equivalent of the `IAudioClient::Stop` that source performs, and
-    /// discarding what is already queued before reactivating is its `Reset`.
-    fn handle_control(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<ControlOutcome> {
-        let mut paused_for = Duration::ZERO;
-        while let Some((request, ack)) = control.try_recv() {
-            let RequestKind::Control(msg) = request else {
-                control::apply_finish(self, bus, &ack);
-                return Ok(ControlOutcome {
-                    stopped: true,
-                    paused_for,
-                });
-            };
-            if msg != ControlMsg::Pause {
-                if control::apply_one(self, bus, &msg, &ack)? {
-                    return Ok(ControlOutcome {
-                        stopped: true,
-                        paused_for,
-                    });
-                }
-                continue;
-            }
-
-            // Include the stream transition and the downstream cascade in the
-            // frozen interval: this source produces no media during either.
-            let pause_start = Instant::now();
-            self.set_active(false)?;
-            control::apply_one(self, bus, &msg, &ack)?;
-
-            loop {
-                let Some((paused_msg, paused_ack)) = control.recv() else {
-                    paused_for += pause_start.elapsed();
-                    return Ok(ControlOutcome {
-                        stopped: true,
-                        paused_for,
-                    });
-                };
-                let RequestKind::Control(paused_msg) = paused_msg else {
-                    control::apply_finish(self, bus, &paused_ack);
-                    paused_for += pause_start.elapsed();
-                    return Ok(ControlOutcome {
-                        stopped: true,
-                        paused_for,
-                    });
-                };
-
-                if paused_msg == ControlMsg::Resume {
-                    // Keep the stream stopped until every downstream element
-                    // has resumed, then discard whatever the pause boundary
-                    // left queued so `Resume` starts from live audio, and only
-                    // then acknowledge.
-                    control::apply_one_unacked(self, bus, &paused_msg)?;
-                    discard_captured(&self.packets);
-                    self.set_active(true)?;
-                    let _ = paused_ack.send(());
-                    paused_for += pause_start.elapsed();
-                    break;
-                }
-
-                if control::apply_one(self, bus, &paused_msg, &paused_ack)? {
-                    paused_for += pause_start.elapsed();
-                    return Ok(ControlOutcome {
-                        stopped: true,
-                        paused_for,
-                    });
-                }
-                // A redundant Pause (or another one-shot control) was
-                // forwarded and acknowledged; remain frozen until Resume.
-            }
-        }
-        Ok(ControlOutcome {
-            stopped: false,
-            paused_for,
-        })
-    }
 }
 
 /// The samples inside one mapped buffer.
@@ -615,6 +531,22 @@ impl SourceElement for PipeWireAudioCaptureSource {
         true
     }
 
+    /// Deactivates the stream for the pause — the PipeWire equivalent of
+    /// `WasapiCaptureSource`'s `IAudioClient::Stop`. Left active, the daemon
+    /// keeps capturing with nothing draining the queue: it fills, every
+    /// later packet is discarded as an overload, and `Resume` would emit the
+    /// queue's stale pre-pause audio as a burst before any live audio.
+    fn pausing(&mut self) -> Result<()> {
+        self.set_active(false)
+    }
+
+    /// Discards whatever the pause boundary left queued, so `Resume` starts
+    /// from live audio, and reactivates the stream.
+    fn resuming(&mut self) -> Result<()> {
+        discard_captured(&self.packets);
+        self.set_active(true)
+    }
+
     fn is_seekable(&self) -> bool {
         false
     }
@@ -622,7 +554,7 @@ impl SourceElement for PipeWireAudioCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {
-            let outcome = self.handle_control(control, bus)?;
+            let outcome = crate::control::drain_control(control, self, bus)?;
             if outcome.stopped {
                 pp_info!(self, "stopped");
                 return Ok(());
@@ -1122,6 +1054,8 @@ fn make_link(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
 
     /// A node is free to put its samples partway into the mapping, and SPA's

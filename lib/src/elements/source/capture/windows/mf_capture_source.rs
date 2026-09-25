@@ -15,7 +15,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{self, ControlMsg, ControlReceiver, RequestKind},
+    control::ControlReceiver,
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::VideoFormat,
     error::Result,
@@ -624,60 +624,6 @@ impl MfCaptureSource {
             );
         }
     }
-
-    /// Like [`crate::control::drain_control`], but drives the raw control
-    /// receiver directly so Resume can flush the reader before reading
-    /// again. Samples the camera queued while this source was frozen are
-    /// stale by definition, and delivering them would put a burst of
-    /// backdated pictures downstream at the moment of Resume.
-    ///
-    /// Returns whether the loop should stop.
-    fn handle_control(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<bool> {
-        while let Some((request, ack)) = control.try_recv() {
-            let RequestKind::Control(msg) = request else {
-                control::apply_finish(self, bus, &ack);
-                return Ok(true);
-            };
-            if msg != ControlMsg::Pause {
-                if control::apply_one(self, bus, &msg, &ack)? {
-                    return Ok(true);
-                }
-                continue;
-            }
-            control::apply_one(self, bus, &msg, &ack)?;
-
-            loop {
-                let Some((paused_msg, paused_ack)) = control.recv() else {
-                    return Ok(true);
-                };
-                let RequestKind::Control(paused_msg) = paused_msg else {
-                    control::apply_finish(self, bus, &paused_ack);
-                    return Ok(true);
-                };
-                if paused_msg == ControlMsg::Resume {
-                    // Resume every downstream stage first, then discard what
-                    // the camera queued while nothing was reading, so the
-                    // caller cannot observe a half-resumed source.
-                    control::apply_one_unacked(self, bus, &paused_msg)?;
-                    // SAFETY: `reader` is live and this thread is the only
-                    // one reading it; flushing between reads is exactly
-                    // what this call is for.
-                    if let Err(error) = unsafe { self.reader.Flush(video_stream()) } {
-                        return Err(self.classify_error(error).into());
-                    }
-                    self.rebase = true;
-                    let _ = paused_ack.send(());
-                    break;
-                }
-                if control::apply_one(self, bus, &paused_msg, &paused_ack)? {
-                    return Ok(true);
-                }
-                // A redundant Pause (or another one-shot control) was
-                // forwarded and acknowledged; remain frozen until Resume.
-            }
-        }
-        Ok(false)
-    }
 }
 
 impl Element for MfCaptureSource {
@@ -709,6 +655,19 @@ impl SourceElement for MfCaptureSource {
         true
     }
 
+    /// Discards what the camera queued while nothing was reading: those
+    /// samples are stale by definition, and delivering them would put a
+    /// burst of backdated pictures downstream at the moment of `Resume`.
+    fn resuming(&mut self) -> Result<()> {
+        // SAFETY: `reader` is live and this thread is the only one reading
+        // it; flushing between reads is exactly what this call is for.
+        if let Err(error) = unsafe { self.reader.Flush(video_stream()) } {
+            return Err(self.classify_error(error).into());
+        }
+        self.rebase = true;
+        Ok(())
+    }
+
     fn is_seekable(&self) -> bool {
         false
     }
@@ -718,7 +677,7 @@ impl SourceElement for MfCaptureSource {
         let _apartment = ComApartment::new().map_err(MfCaptureSourceError::from)?;
 
         loop {
-            if self.handle_control(control, bus)? {
+            if crate::control::drain_control(control, self, bus)?.stopped {
                 pp_info!(self, "stopped");
                 return Ok(());
             }

@@ -143,7 +143,12 @@ final source of truth when documentation and implementation differ.
 ## Control, lifetime, and concurrency
 
 - Every `SourceElement` loop must remain responsive to Pause, Resume, Stop, and
-  Seek using the established `drain_control` or select-on-control pattern.
+  Seek. It drains its channel with `drain_control`, or, where it selects on the
+  channel beside its data, hands each request it takes to
+  `control::handle_request` — never applies one itself: a source that passed a
+  `Pause` on without pausing deadlocked a seek (208af56). What it has to do to
+  stop and restart its own input — a capture device — goes in
+  `SourceElement::pausing` and `resuming`, not in a pause loop of its own.
   Wall-clock-driven sources must add `ControlOutcome::paused_for` back into their
   scheduling state so Resume does not emit a catch-up burst.
 - `Sink::control` must consciously handle and, when it has downstream stages,

@@ -16,7 +16,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
-    control::{ControlMsg, ControlReceiver, RequestKind, apply_one, drain_control, wait_out_pause},
+    control::{ControlReceiver, RequestKind, drain_control, handle_request},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
 };
@@ -668,23 +668,17 @@ impl FileDemuxer {
             let Some((request, ack)) = control.recv() else {
                 return Ok(false);
             };
-            let RequestKind::Control(msg) = request else {
+            if matches!(request, RequestKind::Finish) {
                 // A graceful finish: the `Eos` it would push is already out.
                 let _ = ack.send(());
                 return Ok(false);
-            };
-            let pausing = msg == ControlMsg::Pause;
-            if apply_one(self, bus, &msg, &ack)? {
-                return Ok(false);
             }
-            // Paused here as it is anywhere: nothing is read until a `Resume`,
-            // or a seek's `Preroll` asking for its picture, whatever seeks
-            // come first. A seek from the end is one — a pipeline pauses
-            // around every seek — and reading on from it at once filled the
-            // paused queue after this, left this thread waiting to hand that
-            // queue a packet, and so never took the `Preroll` the seek then
-            // waited on.
-            if pausing && wait_out_pause(control, self, bus)? {
+            // Handled as a source handles one anywhere, a `Pause` included:
+            // nothing is read until a `Resume`, or a seek's `Preroll` asking
+            // for its picture. Passed on without pausing, as it once was
+            // here, a seek from the end read on into the paused queue after
+            // this and never took the `Preroll` it then waited on.
+            if handle_request(control, self, bus, request, ack)?.stopped {
                 return Ok(false);
             }
             if self.sought {

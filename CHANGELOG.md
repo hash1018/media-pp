@@ -663,6 +663,14 @@ compile error with no explanation.
 
 ### Added
 
+- **`SourceElement::pausing` and `SourceElement::resuming`**, called as a
+  pause begins — before the `Pause` goes downstream — and as it ends —
+  after the `Resume` has, before it is acknowledged. What a source does to
+  stop and restart its own input goes there, and `drain_control` does the
+  rest; the WASAPI, Media Foundation and PipeWire audio captures each kept
+  a copy of the pause wait to do it, and now use these. Both default to
+  doing nothing, so no source has to change.
+
 - **`DxgiCaptureSource::outputs`** lists what `CaptureArea::Output` can
   name, by the index that names it, with each monitor's name, place on the
   desktop, and which one is primary — output 0 need not be.

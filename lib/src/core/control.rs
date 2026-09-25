@@ -532,32 +532,9 @@ pub fn drain_control<S: SourceElement>(
 ) -> Result<ControlOutcome> {
     let mut paused_for = Duration::ZERO;
     while let Some((request, ack)) = control.try_recv() {
-        let RequestKind::Control(msg) = request else {
-            apply_finish(source, bus, &ack);
-            return Ok(ControlOutcome {
-                stopped: true,
-                paused_for,
-            });
-        };
-        if msg == ControlMsg::Pause {
-            // Start measuring before forwarding Pause. `apply_one` is a
-            // synchronous cascade and may itself spend substantial time
-            // waiting for a busy Queue/Sink to become paused; the source
-            // produces no media during that time, so it belongs to the
-            // frozen interval just as much as the later wait for Resume.
-            let pause_start = Instant::now();
-            apply_one(source, bus, &msg, &ack)?;
-            let stopped = wait_out_pause(control, source, bus)?;
-            paused_for += pause_start.elapsed();
-            if stopped {
-                return Ok(ControlOutcome {
-                    stopped: true,
-                    paused_for,
-                });
-            }
-            continue;
-        }
-        if apply_one(source, bus, &msg, &ack)? {
+        let outcome = handle_request(control, source, bus, request, ack)?;
+        paused_for += outcome.paused_for;
+        if outcome.stopped {
             return Ok(ControlOutcome {
                 stopped: true,
                 paused_for,
@@ -567,6 +544,52 @@ pub fn drain_control<S: SourceElement>(
     Ok(ControlOutcome {
         stopped: false,
         paused_for,
+    })
+}
+
+/// Handles one request a source has taken off its control channel — the
+/// one way every source does, whether it drains the channel between buffers
+/// ([`drain_control`]) or selects on it beside its data: `Finish` ends the
+/// stream in order, `Pause` pauses the source until it is resumed or stopped
+/// (see [`SourceElement::pausing`] and [`SourceElement::resuming`]), and
+/// anything else is applied and passed on.
+///
+/// One way, because a source that handled a request its own way got it
+/// wrong: `FileDemuxer`, waiting at the end of its file, passed a `Pause` on
+/// without pausing, read on into the paused queue behind it, and left a
+/// seek waiting on it for good (208af56); three capture sources each kept a
+/// copy of the pause wait to stop and restart their device around it.
+pub(crate) fn handle_request<S: SourceElement>(
+    control: &ControlReceiver,
+    source: &mut S,
+    bus: &Bus,
+    request: RequestKind,
+    ack: Sender<()>,
+) -> Result<ControlOutcome> {
+    let RequestKind::Control(msg) = request else {
+        apply_finish(source, bus, &ack);
+        return Ok(ControlOutcome {
+            stopped: true,
+            paused_for: Duration::ZERO,
+        });
+    };
+    if msg != ControlMsg::Pause {
+        return Ok(ControlOutcome {
+            stopped: apply_one(source, bus, &msg, &ack)?,
+            paused_for: Duration::ZERO,
+        });
+    }
+    // Measured from before the source stops and the `Pause` cascades: both
+    // may take a while — a device to stop, a busy queue to take the pause —
+    // and the source produces nothing meanwhile, so it belongs to the frozen
+    // interval as much as the wait for `Resume` does.
+    let pause_start = Instant::now();
+    source.pausing()?;
+    apply_one(source, bus, &msg, &ack)?;
+    let stopped = wait_out_pause(control, source, bus)?;
+    Ok(ControlOutcome {
+        stopped,
+        paused_for: pause_start.elapsed(),
     })
 }
 
@@ -671,11 +694,16 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
             apply_finish(source, bus, &ack);
             return Ok(true);
         };
+        if matches!(msg, ControlMsg::Resume | ControlMsg::Preroll(_)) {
+            // Downstream goes on first, then the source itself, and only
+            // then is the request done — see `SourceElement::resuming`.
+            apply_one_unacked(source, bus, &msg)?;
+            source.resuming()?;
+            let _ = ack.send(());
+            return Ok(false);
+        }
         if apply_one(source, bus, &msg, &ack)? {
             return Ok(true);
-        }
-        if matches!(msg, ControlMsg::Resume | ControlMsg::Preroll(_)) {
-            return Ok(false);
         }
         // Another Pause while already paused: already forwarded above
         // (harmless no-op downstream), just keep waiting.
@@ -820,6 +848,154 @@ mod tests {
 
         apply_one_unacked(&mut source, &bus, &ControlMsg::Flush).expect("flush applies");
         assert_eq!(source.flushes, 1);
+    }
+
+    /// Writes down, in one shared order, what a source's hooks and the
+    /// element after it see — for checking one against the other.
+    type Order = Arc<std::sync::Mutex<Vec<String>>>;
+
+    struct HookedSource {
+        pp_log: PpLog,
+        pad: SrcPad,
+        order: Order,
+    }
+
+    impl Element for HookedSource {
+        fn name(&self) -> Arc<str> {
+            "hooked".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Source for HookedSource {
+        fn src_pads(&mut self) -> &mut [SrcPad] {
+            std::slice::from_mut(&mut self.pad)
+        }
+    }
+
+    impl SourceElement for HookedSource {
+        fn is_live(&self) -> bool {
+            true
+        }
+
+        fn is_seekable(&self) -> bool {
+            false
+        }
+
+        fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
+            unreachable!("driven through drain_control directly")
+        }
+
+        fn pausing(&mut self) -> Result<()> {
+            self.order.lock().unwrap().push("source stops".into());
+            Ok(())
+        }
+
+        fn resuming(&mut self) -> Result<()> {
+            self.order.lock().unwrap().push("source starts".into());
+            Ok(())
+        }
+
+        fn seek(&mut self, target: Duration) -> Result<Duration> {
+            Ok(target)
+        }
+    }
+
+    struct OrderSink {
+        pp_log: PpLog,
+        order: Order,
+    }
+
+    impl Element for OrderSink {
+        fn name(&self) -> Arc<str> {
+            "order".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for OrderSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+            self.order
+                .lock()
+                .unwrap()
+                .push(format!("downstream {msg:?}"));
+            Ok(())
+        }
+    }
+
+    /// A source stops before its `Pause` goes downstream, and starts again
+    /// only once its `Resume` has gone downstream — and before the caller
+    /// hears the resume is done, so nobody sees it half resumed. What three
+    /// capture sources each did in a pause loop of their own, now the one
+    /// every source goes through.
+    #[test]
+    fn a_source_stops_before_its_pause_goes_on_and_starts_after_its_resume_has() {
+        let order: Order = Arc::default();
+        let mut source = HookedSource {
+            pp_log: element_pp_log(ElementType::Other, "hooked", None),
+            pad: SrcPad::new("hooked_src"),
+            order: Arc::clone(&order),
+        };
+        source.pad.link(Box::new(OrderSink {
+            pp_log: element_pp_log(ElementType::Other, "order", None),
+            order: Arc::clone(&order),
+        }));
+        let (tx, rx) = channel();
+        let (bus, _bus_rx) = Bus::new();
+        let worker = thread::spawn(move || {
+            while !drain_control(&rx, &mut source, &bus)
+                .expect("the hooks succeed")
+                .stopped
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        tx.send(ControlMsg::Pause);
+        order.lock().unwrap().push("pause done".into());
+        tx.send(ControlMsg::Resume);
+        order.lock().unwrap().push("resume done".into());
+        tx.send(ControlMsg::Stop);
+        worker.join().expect("the source thread");
+
+        assert_eq!(
+            *order.lock().unwrap(),
+            [
+                "source stops",
+                "downstream Pause",
+                "pause done",
+                "downstream Resume",
+                "source starts",
+                "resume done",
+                "downstream Stop",
+            ]
+        );
     }
 
     struct SlowPauseSink {
