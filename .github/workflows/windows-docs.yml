@@ -3,17 +3,19 @@ name: Windows API documentation
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags:
       - "v*"
+  pull_request:
+    branches: [main]
 
+# Built on every change and published only from a tag or by hand, so a
+# documentation error shows on the push that made it rather than first when a
+# version is tagged.
 permissions:
   contents: read
   pages: write
   id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -69,14 +71,20 @@ jobs:
           Remove-Item target/doc/.lock -ErrorAction SilentlyContinue
 
       - name: Configure GitHub Pages
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: actions/configure-pages@v5
 
       - name: Upload GitHub Pages artifact
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-pages-artifact@v4
         with:
           path: target/doc
 
   deploy:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

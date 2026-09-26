@@ -268,6 +268,24 @@ jobs:
           cargo doc -p media-pp --no-deps --features whisper
           cargo doc -p media-pp --no-deps --features rnnoise
 
+      # What docs.rs runs for a release: `cargo-docs-rs` reads
+      # `[package.metadata.docs.rs]` and passes what docs.rs passes —
+      # nightly, `--cfg docsrs`, `DOCS_RS=1`, those features, no network.
+      # Nothing above builds that combination, and a version whose docs.rs
+      # build fails keeps an empty page until the next one is published.
+      # It proves the crate and its build scripts, not docs.rs's machine:
+      # that one documents against the FFmpeg its own image carries, this
+      # one against the pinned tree above.
+      - name: Install nightly and cargo-docs-rs
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install --locked cargo-docs-rs
+
+      - name: Build documentation as docs.rs does
+        run: |
+          cargo fetch
+          cargo +nightly docs-rs -p media-pp --offline
+
       - name: Test (no features)
         run: cargo test -p media-pp
 
