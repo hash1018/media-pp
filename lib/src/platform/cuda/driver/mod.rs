@@ -26,6 +26,7 @@ use crate::color::Color;
 /// `crate::elements::VulkanWindowRenderer`.
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub(crate) mod interop;
+mod load;
 mod ptx;
 
 use ptx::{BLEND_PTX, CONVERT_PTX};
@@ -64,13 +65,10 @@ struct CudaMemcpy2D {
     height: usize,
 }
 
-// SAFETY of the block: these are the driver's own C ABI declarations, and
-// every call site below checks the returned `CUresult`. On Windows the
-// driver's `nvcuda.dll` is linked by name — `raw-dylib` needs no import
-// library, so no CUDA toolkit install is required there either.
-#[cfg_attr(windows, link(name = "nvcuda", kind = "raw-dylib"))]
-#[cfg_attr(not(windows), link(name = "cuda"))]
-unsafe extern "C" {
+// These are the driver's own C ABI declarations, and every call site below
+// checks the returned `CUresult`. Opened when first called — see `load` —
+// so neither a CUDA toolkit nor the driver itself is needed to start.
+load::cuda_driver! {
     fn cuInit(flags: c_uint) -> CUresult;
     fn cuDeviceGet(device: *mut CUdevice, ordinal: c_int) -> CUresult;
     /// Retains the device's *primary* context — the same one

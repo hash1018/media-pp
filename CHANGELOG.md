@@ -138,6 +138,17 @@ compile error with no explanation.
   format is fixed:
   `set_mix_format` answers `FixedMixFormat`.
 
+### Fixed
+
+- **A program built with `cuda` starts without NVIDIA's driver.** The CUDA
+  driver calls this crate makes itself linked `libcuda.so.1` — `nvcuda.dll`
+  on Windows — so a machine without the driver could not load the program
+  at all, and one meant to look for a GPU and use Vulkan where there is no
+  NVIDIA one never got to look. The driver is now opened when first called,
+  as FFmpeg opens it for its own CUDA code, and where it is missing the call
+  fails with an error — `CudaDevice::new` already does, first. Nothing to
+  link either: a build machine needs no driver or stub library.
+
 ## 0.3.1
 
 One fix: a pipeline stopped just as its source ended could hang for good.

@@ -88,8 +88,7 @@ struct ExternalMemoryMipmappedArrayDesc {
     reserved: [std::ffi::c_uint; 16],
 }
 
-#[link(name = "cuda")]
-unsafe extern "C" {
+super::load::cuda_driver! {
     /// The 16 bytes Vulkan reports as `VkPhysicalDeviceIDProperties::deviceUUID`
     /// for the same GPU — what proves a Vulkan device is the one the frames
     /// are on, rather than the first one listed.

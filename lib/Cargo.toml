@@ -68,6 +68,10 @@ naga = { version = "30", optional = true, default-features = false, features = [
     "wgsl-in",
     "spv-out",
 ] }
+# The `cuda` feature's own driver calls, opened when first made rather than
+# linked — see `platform::cuda::driver::load`. The version `ash` loads the
+# Vulkan loader with, so it adds nothing to the tree beside it.
+libloading = { version = "0.8", optional = true }
 
 # Bindings to FFmpeg's Vulkan hardware context, for the `vulkan` feature —
 # see `build.rs`. The versions `ffmpeg-sys-next` builds its own with, so
@@ -141,13 +145,15 @@ x11rb = { version = "0.13", optional = true, default-features = false, features 
 undocumented_unsafe_blocks = "deny"
 
 [features]
-# CUDA-resident decode and rendering. Needs no extra Rust dependency: FFmpeg
-# owns the CUDA context and the frame pool, and this crate's CUDA elements
-# only ever move `AVFrame`s around. Showing a CUDA frame is either the
+# CUDA-resident decode and rendering. FFmpeg owns the CUDA context and the
+# frame pool, and this crate's CUDA elements only ever move `AVFrame`s
+# around; the few driver calls it makes itself are opened on first use, so
+# a program built with this starts on a machine with no NVIDIA driver and
+# finds out there, from `CudaDevice::new`. Showing a CUDA frame is either the
 # caller's own `CudaFrameRenderer`, or `vulkan` below, which is where `ash`
 # is pulled in — not here, so encoding and compositing do not pay for it.
 # Not platform-gated: CUDA is available on Linux and Windows alike.
-cuda = []
+cuda = ["dep:libloading"]
 # Vulkan, on Windows and Linux: `VulkanDevice`, the device FFmpeg decodes,
 # encodes and keeps its Vulkan frames on. Needs an FFmpeg built with Vulkan
 # and the Vulkan headers at build time — see `build.rs`. On Linux also
