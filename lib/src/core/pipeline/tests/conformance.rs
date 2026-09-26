@@ -166,7 +166,8 @@ impl Sink for Recorder {
 enum Shape {
     /// A file's picture, decoded, queued and paced — a player's video half.
     Video,
-    /// Picture and sound off one demuxer, each paced — a whole player.
+    /// Picture and sound off one demuxer, each paced — a whole player,
+    /// the sound stretched to the rate after its pacer as a mixer input is.
     AudioVideo,
     /// One decoded picture fanned out to two paced branches.
     Tee,
@@ -314,6 +315,9 @@ impl Rig {
                     .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
                     .queue("audio-frames", frames)
                     .pipe(Pacer::new("audio-pacer"))
+                    // As a mixer input is fed: stretched to the rate after its
+                    // pacer, which holds sound until it has enough to stretch.
+                    .pipe(crate::elements::AudioTempo::new("audio-tempo"))
                     .to(recorder)?;
                 ctx.attach(source, audio.index, sound)?;
             }

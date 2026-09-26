@@ -11,6 +11,7 @@ use crate::{
     elements::AudioFormat,
     error::Result,
     playback_clock::PlaybackClock,
+    playback_state::PlaybackState,
     pp_log::PpLog,
 };
 
@@ -55,7 +56,9 @@ pub enum AudioTempoError {
 /// stretch of the old and begins one of the new.
 ///
 /// A `Flush` forgets what a stretch holds, and the end of the stream hands
-/// it on before the `Eos`.
+/// it on before the `Eos`. While a preroll runs a frame goes on as it came:
+/// what a preroll asks of the terminal after this is one sample, and a
+/// stretch hands on nothing until it has been given more than that.
 pub struct AudioTempo {
     pp_log: PpLog,
     name: Arc<str>,
@@ -63,15 +66,11 @@ pub struct AudioTempo {
     /// The pipeline's; `None` for one no pipeline wired, which passes
     /// everything as it came.
     playback_clock: Option<Arc<PlaybackClock>>,
+    /// The pipeline's, for whether a preroll is running.
+    state: Option<Arc<PlaybackState>>,
     /// What stretches, and the format and layout it was made for.
-    stretcher: Option<(AudioFormat, ffmpeg::ChannelLayout, Stretcher)>,
+    stretcher: Option<(AudioFormat, u64, Stretcher)>,
 }
-
-// SAFETY: what is not `Send` by its own type is FFmpeg's — the filter graph a
-// stretch runs and the channel layouts, whose pointers are to FFmpeg-owned
-// memory or null — and none of it has thread affinity. Every method that
-// touches it takes `&mut self`, which rules out two threads at once.
-unsafe impl Send for AudioTempo {}
 
 impl AudioTempo {
     /// One that stretches to the rate of the pipeline it is wired into, and
@@ -89,6 +88,7 @@ impl AudioTempo {
             ),
             name,
             playback_clock: None,
+            state: None,
             stretcher: None,
         }
     }
@@ -101,6 +101,13 @@ impl AudioTempo {
     }
 
     fn stretch(&mut self, frame: Arc<ffmpeg::frame::Audio>) -> Result<()> {
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.is_prerolling())
+        {
+            return self.pad.push(MediaBuffer::Audio(frame));
+        }
         let rate = self.rate();
         if self
             .stretcher
@@ -115,7 +122,8 @@ impl AudioTempo {
             return Err(AudioTempoError::UnknownFormat.into());
         }
         let format = AudioFormat::new(frame.format(), sample_rate, channels);
-        let layout = frame.channel_layout();
+        let channel_layout = frame.channel_layout();
+        let layout = channel_layout.bits();
         if self
             .stretcher
             .as_ref()
@@ -123,9 +131,13 @@ impl AudioTempo {
         {
             self.finish()?;
         }
-        let (_, _, stretcher) = self
-            .stretcher
-            .get_or_insert_with(|| (format, layout, Stretcher::with_layout(format, layout)));
+        let (_, _, stretcher) = self.stretcher.get_or_insert_with(|| {
+            (
+                format,
+                layout,
+                Stretcher::with_layout(format, channel_layout),
+            )
+        });
         let nanos = ffmpeg::Rational::new(1, 1_000_000_000);
         let media_ns = frame
             .pts()
@@ -198,6 +210,7 @@ impl Element for AudioTempo {
 
     fn attach_context(&mut self, context: &Arc<Context>) {
         self.playback_clock = Some(Arc::clone(&context.playback_clock));
+        self.state = Some(Arc::clone(&context.state));
     }
 }
 

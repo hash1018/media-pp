@@ -217,3 +217,59 @@ fn a_tempo_hands_sound_on_at_the_wall_clocks_pace() {
     let media = to.saturating_sub(from).as_secs_f64() / took.as_secs_f64();
     assert!((1.7..2.3).contains(&media), "{media:.2}x the media");
 }
+
+/// A seek's preroll asks each terminal for one sample, and at a rate that
+/// sample must not be held back by the stretch waiting for more: sought
+/// while paused at twice the rate, the sound's end has its sample and the
+/// seek does not wait out its timeout.
+#[test]
+fn a_tempo_hands_a_preroll_its_sample() {
+    use crate::elements::{AppSink, AudioTempo};
+    let Some(path) = try_test_video() else {
+        return;
+    };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+    let audio = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+        .expect("the fixture has sound")
+        .clone();
+    let taken = Arc::new(Mutex::new(0usize));
+    let counted = Arc::clone(&taken);
+    let (pipeline, ()) = Pipeline::new("tempo-preroll", source, |source, ctx| {
+        let sound = ctx
+            .branch()
+            .queue("audio-packets", 64)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .queue("audio-frames", 8)
+            .pipe(Pacer::new("audio-pacer"))
+            .pipe(AudioTempo::new("audio-tempo"))
+            .to(AppSink::new("mixer-input", move |buf| {
+                if matches!(buf, MediaBuffer::Audio(_)) {
+                    *counted.lock().unwrap() += 1;
+                }
+                Ok(())
+            }))?;
+        ctx.attach(source, audio.index, sound)?;
+        Ok(())
+    })
+    .expect("wire");
+    pipeline.set_rate(2.0).expect("twice the rate");
+    pipeline.pause();
+    pipeline.run().expect("run");
+    let before = *taken.lock().unwrap();
+    let started = Instant::now();
+    pipeline
+        .seek(Duration::from_secs(3), SeekMode::Accurate)
+        .expect("the seek's preroll completes");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the preroll took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        *taken.lock().unwrap() > before,
+        "the sound's end took a sample"
+    );
+    pipeline.stop();
+}

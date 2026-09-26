@@ -20,9 +20,19 @@ use crate::elements::AudioFormat;
 /// stretched to.
 pub(crate) struct Stretcher {
     format: AudioFormat,
-    layout: ffmpeg::ChannelLayout,
+    /// The channel layout, as the mask the graph is told it by: a mask
+    /// rather than a `ChannelLayout`, which holds a pointer and is not `Send`.
+    layout: u64,
     graph: Option<Stretching>,
 }
+
+// `Send`, as every renderer holding one has to be: a field that is not
+// broke the Linux renderer while the Windows one, which says it is `Send`
+// for reasons of its own, still built. Checked here, on every platform.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Stretcher>();
+};
 
 /// One rate's graph, and where in the media its next output starts.
 struct Stretching {
@@ -75,7 +85,7 @@ impl Stretcher {
     pub(crate) fn with_layout(format: AudioFormat, layout: ffmpeg::ChannelLayout) -> Self {
         Self {
             format,
-            layout,
+            layout: layout.bits(),
             graph: None,
         }
     }
@@ -154,7 +164,7 @@ impl Stretcher {
 impl Stretching {
     fn open(
         format: AudioFormat,
-        layout: ffmpeg::ChannelLayout,
+        layout: u64,
         rate: f64,
         media_ns: i64,
     ) -> Result<Self, ffmpeg::Error> {
@@ -163,7 +173,7 @@ impl Stretching {
             "time_base=1/{rate}:sample_rate={rate}:sample_fmt={format}:channel_layout=0x{mask:x}",
             rate = format.sample_rate,
             format = format.sample_format.name(),
-            mask = layout.bits(),
+            mask = layout,
         );
         let abuffer = ffmpeg::filter::find("abuffer").ok_or(ffmpeg::Error::FilterNotFound)?;
         let abuffersink =
@@ -188,7 +198,7 @@ impl Stretching {
             "aformat=sample_fmts={}:sample_rates={}:channel_layouts=0x{:x}",
             format.sample_format.name(),
             format.sample_rate,
-            layout.bits()
+            layout
         ));
         graph
             .output("in", 0)?
