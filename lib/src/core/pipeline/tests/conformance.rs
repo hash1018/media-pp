@@ -188,6 +188,8 @@ enum Shape {
     /// frame ahead of what it has drawn, while its own is paused, resumed
     /// and stopped. Not sought: it is not seekable.
     Offline,
+    /// The same for sound: an offline mixer fed by a live tone.
+    OfflineMix,
 }
 
 impl Shape {
@@ -232,6 +234,43 @@ impl Rig {
                 duration: None,
                 terminals: vec![("screen", log)],
                 _feeds: Vec::new(),
+            });
+        }
+
+        if let Shape::OfflineMix = shape {
+            let (recorder, log) = Recorder::new("speakers", ffmpeg::Rational::new(1, 48_000));
+            let (mixer, handle) = crate::elements::AudioMixer::new(
+                "offline-mix",
+                crate::elements::AudioMixerOptions {
+                    sample_rate: 48_000,
+                    channels: 2,
+                    mode: crate::elements::RenderMode::Offline { end: None },
+                },
+            );
+            let input = handle.add_source("tone").expect("add its input");
+            let source = crate::elements::TestAudioSource::new(
+                "tone",
+                crate::elements::TestAudioOptions::default(),
+            );
+            let (feed, ()) =
+                Pipeline::new("conformance-offline-mix-feed", source, |source, ctx| {
+                    let branch = ctx.branch().queue("tone-frames", 4).to(input)?;
+                    ctx.attach(source, 0, branch)?;
+                    Ok(())
+                })
+                .expect("wire the feed");
+            feed.run().expect("run the feed");
+            let (pipeline, ()) = Pipeline::new("conformance-offline-mix", mixer, |source, ctx| {
+                let branch = ctx.branch().queue("mixed", 4).to(recorder)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the offline mix");
+            return Some(Self {
+                pipeline,
+                duration: None,
+                terminals: vec![("speakers", log)],
+                _feeds: vec![feed],
             });
         }
 
@@ -1194,6 +1233,11 @@ fn a_live_source_keeps_its_control_promises() {
 #[test]
 fn an_offline_render_keeps_its_control_promises() {
     conform(Shape::Offline);
+}
+
+#[test]
+fn an_offline_mix_keeps_its_control_promises() {
+    conform(Shape::OfflineMix);
 }
 
 #[test]

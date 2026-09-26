@@ -19,6 +19,10 @@ compile error with no explanation.
   `..Default::default()` needs nothing. Each compositor's error enum gains
   `FixedFrameRate` and `UntimedFrame`, which a `match` on it needs arms for.
 
+- **`AudioMixerOptions` has a `mode` too**, for the same choice:
+  `RenderMode::Live` is what the mixer did. `AudioMixerError` gains
+  `FixedMixFormat` and `UntimedFrame`.
+
 ### Added
 
 - **A video compositor can render offline:
@@ -40,6 +44,17 @@ compile error with no explanation.
   shown to its last frame's end. An offline compositor is not live, and
   refuses `set_frame_rate` with `FixedFrameRate`: every output time is a
   count of its frames.
+
+- **An `AudioMixer` can mix offline**, so an export's sound is made the way
+  its picture is. Each input's sound is placed where its `pts` says, in its
+  own time base and at its own sample rate, with silence where no input
+  has anything; each twenty-millisecond stretch is mixed once every input
+  has what belongs in it; and the mix ends at `end` or once every input has
+  ended and been mixed to its last sample. Where an input's timestamps and
+  the sound it has already given disagree by more than twenty milliseconds,
+  the difference is a gap, filled with silence, or an overlap, dropped. Its
+  format is fixed:
+  `set_mix_format` answers `FixedMixFormat`.
 
 ## 0.3.1
 

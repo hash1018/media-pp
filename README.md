@@ -158,6 +158,8 @@ Built with `RenderMode::Offline` it renders instead: each output frame is
 made as soon as every input has said what it shows at that time, placed by
 the inputs' own timestamps, and the next follows at once — an export as
 fast as decoding allows, frame-exact whatever rates the inputs run at.
+`AudioMixer` takes the same `RenderMode`, and mixes an export's sound the
+same way, placed by its inputs' timestamps.
 
 `VideoWindow` is the one to reach for first: a window of its own on whichever
 renderer the platform has, on a GPU of its own, taking frames in system
