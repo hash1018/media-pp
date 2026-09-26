@@ -29,6 +29,8 @@ use crate::elements::D3d11Gpu;
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::D3d12Gpu;
 
+#[cfg(feature = "vulkan")]
+use crate::elements::VulkanDevice;
 #[cfg(feature = "cuda")]
 use crate::elements::{CudaDevice, CudaFrameFormat};
 use crate::{
@@ -142,6 +144,22 @@ pub enum DecodeTarget {
         /// holds. See
         /// [`crate::elements::CudaDecoder::new`] for the budget NVDEC's
         /// fixed, capped pool has to fit.
+        downstream_hw_frames: i32,
+    },
+    /// Vulkan frames on `device`, as [`crate::elements::VulkanDecoder`] and
+    /// [`crate::elements::VulkanUpload`] make them — NV12, or BGRA where the
+    /// stream has alpha or an odd side. Nothing on Vulkan here brings 10-bit
+    /// down to 8 bits or converts colour yet, so a 10-bit stream is decoded
+    /// in software, and a BT.2020 or HDR one decoded on the GPU stays NV12
+    /// with its own tags — read with its own matrix by
+    /// [`crate::elements::VulkanVideoCompositor`], not tone mapped.
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        /// The one Vulkan device every Vulkan element in the pipeline shares.
+        device: VulkanDevice,
+        /// How many decoded frames downstream may hold at once, counted as
+        /// for `Cuda` — see [`crate::elements::VulkanDecoder::new`], which
+        /// asks FFmpeg for this many beyond what decoding needs.
         downstream_hw_frames: i32,
     },
 }
@@ -722,6 +740,8 @@ fn refused(error: &Error) -> bool {
         Error::D3d12DecoderError(crate::elements::D3d12DecoderError::HwAccelUnavailable) => true,
         #[cfg(feature = "cuda")]
         Error::CudaDecoderError(crate::elements::CudaDecoderError::HwAccelUnavailable) => true,
+        #[cfg(feature = "vulkan")]
+        Error::VulkanDecoderError(crate::elements::VulkanDecoderError::HwAccelUnavailable) => true,
         _ => false,
     }
 }
@@ -769,6 +789,8 @@ impl DecodeTarget {
             Self::D3d12 { .. } => MemoryDomain::D3d12,
             #[cfg(feature = "cuda")]
             Self::Cuda { .. } => MemoryDomain::Cuda,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan { .. } => MemoryDomain::Vulkan,
         }
     }
 
@@ -786,6 +808,8 @@ impl DecodeTarget {
             Self::D3d12 { .. } => Some(crate::elements::D3d12Decoder::supports(codec)),
             #[cfg(feature = "cuda")]
             Self::Cuda { .. } => Some(crate::elements::CudaDecoder::supports(codec)),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan { .. } => Some(crate::elements::VulkanDecoder::supports(codec)),
         }
     }
 
@@ -799,6 +823,8 @@ impl DecodeTarget {
             Self::D3d12 { .. } => false,
             #[cfg(feature = "cuda")]
             Self::Cuda { .. } => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan { .. } => true,
         }
     }
 
@@ -813,6 +839,19 @@ impl DecodeTarget {
             Self::D3d12 { .. } => false,
             #[cfg(feature = "cuda")]
             Self::Cuda { .. } => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan { .. } => false,
+        }
+    }
+
+    /// Whether the target has what brings a BT.2020 or HDR picture its
+    /// hardware decoder makes to BT.709 BGRA — see [`VideoDecodeBin`]'s colour
+    /// section.
+    fn makes_rgb(&self) -> bool {
+        match self {
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan { .. } => false,
+            _ => self.keeps_alpha(),
         }
     }
 
@@ -820,7 +859,7 @@ impl DecodeTarget {
     /// BT.2020 stream where the target has BGRA — see [`VideoDecodeBin`] on
     /// why BT.2020 is made BT.709 RGB as soon as it is decoded.
     fn hardware_format(&self, stream: &Stream) -> ffmpeg::format::Pixel {
-        if stream.made_rgb() && self.keeps_alpha() {
+        if stream.made_rgb() && self.makes_rgb() {
             ffmpeg::format::Pixel::BGRA
         } else {
             ffmpeg::format::Pixel::NV12
@@ -971,6 +1010,16 @@ impl DecodeTarget {
                 device,
                 *downstream_hw_frames,
             )?),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan {
+                device,
+                downstream_hw_frames,
+            } => Box::new(crate::elements::VulkanDecoder::new(
+                name,
+                params,
+                device,
+                *downstream_hw_frames,
+            )?),
         })
     }
 
@@ -978,7 +1027,8 @@ impl DecodeTarget {
     /// which is where the pictures already are.
     ///
     /// `format` is fixed at construction only for CUDA; `D3d11Upload` takes
-    /// NV12 and BGRA alike, frame by frame, and `D3d12Upload` has NV12 only.
+    /// NV12 and BGRA alike, frame by frame, as `VulkanUpload` does, and
+    /// `D3d12Upload` has NV12 only.
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
     fn upload(
         &self,
@@ -1001,6 +1051,10 @@ impl DecodeTarget {
                 Some(Box::new(crate::elements::CudaUpload::new(
                     name, device, format,
                 )))
+            }
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan { device, .. } => {
+                Some(Box::new(crate::elements::VulkanUpload::new(name, device)))
             }
         })
     }
@@ -1423,6 +1477,7 @@ mod tests {
     /// skip on too. Anything else is the failure it looks like.
     #[cfg(any(
         feature = "cuda",
+        feature = "vulkan",
         all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
     ))]
     fn open_or_skip(
@@ -1472,7 +1527,11 @@ mod tests {
 
     /// 10-bit HEVC, every sample 90 at 8 bits, from NVENC — the one 10-bit
     /// HEVC encoder an FFmpeg build here is likely to have.
-    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "vulkan",
+        all(target_os = "windows", feature = "d3d11")
+    ))]
     fn ten_bit_hevc() -> Option<(ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>)> {
         crate::test_support::try_encoded_packets(
             "hevc_nvenc",
@@ -2307,6 +2366,107 @@ mod tests {
                     .iter()
                     .all(|frame| frame.format() == ffmpeg::format::Pixel::CUDA)
             );
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    mod vulkan {
+        use super::*;
+        use crate::{elements::VulkanDownload, test_support::try_encoded_packets};
+
+        fn target(device: &VulkanDevice) -> DecodeTarget {
+            DecodeTarget::Vulkan {
+                device: device.clone(),
+                downstream_hw_frames: 4,
+            }
+        }
+
+        /// H.264 decodes on the GPU with Vulkan Video, every picture as a
+        /// Vulkan NV12 frame with the value it was encoded with.
+        #[test]
+        fn h264_decodes_with_vulkan_video() {
+            let Some(device) = crate::test_support::try_vulkan_device() else {
+                return;
+            };
+            let (params, packets) = h264();
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("h264", params, target(&device)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+            let handle = bin.handle();
+            let download = VulkanDownload::new("read-back", &device);
+            let frames = run(bin, Some(Box::new(download)), packets).expect("H.264 decodes");
+            assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            for frame in &frames {
+                assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
+                let luma = frame.data(0)[frame.stride(0) * 32 + 32];
+                assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+            }
+        }
+
+        /// ProRes has no Vulkan decoder, and its alpha arrives in a BGRA
+        /// Vulkan frame.
+        #[test]
+        fn alpha_survives_onto_vulkan() {
+            let Some(device) = crate::test_support::try_vulkan_device() else {
+                return;
+            };
+            let Some((params, packets)) = try_encoded_packets(
+                "prores_ks",
+                ffmpeg::format::Pixel::YUVA444P10LE,
+                (64, 48),
+                2,
+            ) else {
+                return;
+            };
+            let Some(bin) = open_or_skip("prores", params, target(&device)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
+            let download = VulkanDownload::new("read-back", &device);
+            let frames = run(bin, Some(Box::new(download)), packets).expect("ProRes decodes");
+            let frame = frames.last().expect("a picture came out");
+            let alpha = frame.data(0)[3];
+            assert!(
+                (120..=136).contains(&alpha),
+                "alpha {alpha} is not the half it was encoded with"
+            );
+        }
+
+        /// Nothing on Vulkan here brings 10 bits down to 8, so a 10-bit
+        /// stream is decoded in software and goes up as NV12.
+        #[test]
+        fn ten_bit_is_decoded_in_software_and_goes_up_as_nv12() {
+            let Some(device) = crate::test_support::try_vulkan_device() else {
+                return;
+            };
+            let Some((params, packets)) = ten_bit_hevc() else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("hevc10", params, target(&device)) else {
+                return;
+            };
+            assert!(
+                matches!(
+                    bin.path(),
+                    DecodePath::Software(SoftwareReason::PixelFormat(_))
+                ),
+                "{:?}",
+                bin.path()
+            );
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+            let download = VulkanDownload::new("read-back", &device);
+            let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            let frame = frames.last().unwrap();
+            assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
+            let luma = frame.data(0)[frame.stride(0) * 72 + 128];
+            assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
         }
     }
 }

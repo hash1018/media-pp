@@ -148,9 +148,9 @@ Video, by backend:
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` |
 | Render | `VideoWindow`; every window renderer | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` | |
 
-`VideoDecodeBin` chooses among the decode row and the uploads for a stream —
-Vulkan's not yet — and `VideoEncodeBin` among the encode row and the
-downloads, for H.264 from system memory, D3D11 or CUDA.
+`VideoDecodeBin` chooses among the decode row and the uploads for a stream,
+and `VideoEncodeBin` among the encode row and the downloads, for H.264 from
+system memory, D3D11, CUDA or Vulkan.
 
 Every compositor runs live by default, emitting at its own rate and drawing
 whatever each input last handed over — a preview, a recording, a broadcast.

@@ -40,6 +40,11 @@ compile error with no explanation.
 - **`MemoryDomain` has a `Vulkan` variant**, for frames in Vulkan images.
   A `match` on `MemoryDomain` needs an arm for it.
 
+- **`DecodeTarget`, `EncodeInput` and `EncodePath` have Vulkan variants**
+  (`DecodeTarget::Vulkan` and `EncodeInput::Vulkan` with the `vulkan`
+  feature, `EncodePath::Vulkan` always). A `match` on any of them needs an
+  arm for it.
+
 ### Added
 
 - **Vulkan frames, on Windows and Linux: `VulkanDevice`, `VulkanDecoder`,
@@ -61,6 +66,15 @@ compile error with no explanation.
   FFmpeg's frames under FFmpeg's own lock and semaphores, so a decoder's
   picture is drawn once written and the output read once drawn. Two 1080p
   layers composite in about 0.35 ms on an RTX 3050.
+
+- **`VideoDecodeBin` and `VideoEncodeBin` choose Vulkan too.**
+  `DecodeTarget::Vulkan` decodes with Vulkan Video where the stream allows —
+  alpha, a codec it has no decoder for and 10-bit going to software and up
+  through `VulkanUpload`, as on the other targets — and `EncodeInput::Vulkan`
+  encodes NV12 with `h264_vulkan`, falling back to software after a
+  `VulkanDownload`. `EncodeInput::for_decoded` pairs the two. Nothing on
+  Vulkan converts colour yet: BT.2020 and HDR stay NV12 with their own tags,
+  and BGRA is encoded in software.
 
 - **`VulkanEncoder`**: H.264, H.265 and AV1 with Vulkan Video
   (`VulkanCodec`), from NV12 Vulkan frames — a `VulkanDecoder`'s, an NV12

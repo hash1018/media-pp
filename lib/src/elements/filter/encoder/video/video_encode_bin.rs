@@ -16,6 +16,11 @@ use crate::elements::{
     D3d11Download, D3d11Gpu, D3d11Scaler, D3d11ScalerFormat, D3d11VideoCodec, D3d11VideoEncoder,
     D3d11VideoEncoderOptions, D3d11VideoInputFormat,
 };
+#[cfg(feature = "vulkan")]
+use crate::elements::{
+    VulkanCodec, VulkanDevice, VulkanDownload, VulkanEncoder, VulkanEncoderOptions,
+    VulkanFrameFormat,
+};
 use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
@@ -97,6 +102,14 @@ pub enum EncodeInput {
         /// What every surface holds.
         format: CudaFrameFormat,
     },
+    /// Vulkan frames on `device`, NV12 or BGRA.
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        /// The Vulkan device every Vulkan element in the pipeline shares.
+        device: VulkanDevice,
+        /// What every frame holds.
+        format: VulkanFrameFormat,
+    },
 }
 
 impl EncodeInput {
@@ -114,7 +127,11 @@ impl EncodeInput {
         format: Option<ffmpeg::format::Pixel>,
     ) -> Option<Self> {
         use crate::elements::DecodeTarget;
-        #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+        #[cfg(any(
+            feature = "cuda",
+            feature = "vulkan",
+            all(target_os = "windows", feature = "d3d11")
+        ))]
         use ffmpeg::format::Pixel;
 
         match target {
@@ -136,6 +153,15 @@ impl EncodeInput {
                 format: match format? {
                     Pixel::NV12 => CudaFrameFormat::Nv12,
                     Pixel::BGRA => CudaFrameFormat::Bgra,
+                    _ => return None,
+                },
+            }),
+            #[cfg(feature = "vulkan")]
+            DecodeTarget::Vulkan { device, .. } => Some(Self::Vulkan {
+                device: device.clone(),
+                format: match format? {
+                    Pixel::NV12 => VulkanFrameFormat::Nv12,
+                    Pixel::BGRA => VulkanFrameFormat::Bgra,
                     _ => return None,
                 },
             }),
@@ -177,6 +203,8 @@ pub enum EncodePath {
     Nvenc,
     /// `h264_mf`, on whichever hardware transform Windows offers.
     MediaFoundation,
+    /// `h264_vulkan`, on whichever GPU's Vulkan Video.
+    Vulkan,
     /// `libx264`, in software.
     X264,
     /// `libopenh264`, in software — where this FFmpeg has no `libx264`.
@@ -186,7 +214,7 @@ pub enum EncodePath {
 impl EncodePath {
     /// Whether the encoding is done on the GPU.
     pub fn is_hardware(self) -> bool {
-        matches!(self, Self::Nvenc | Self::MediaFoundation)
+        matches!(self, Self::Nvenc | Self::MediaFoundation | Self::Vulkan)
     }
 }
 
@@ -201,6 +229,8 @@ impl EncodePath {
 ///
 /// - D3D11 textures: `h264_nvenc`, then `h264_mf`, then software.
 /// - CUDA frames: `h264_nvenc`, then software.
+/// - Vulkan frames: `h264_vulkan` for NV12, then software; BGRA in software,
+///   nothing on Vulkan here converting RGB to YUV yet.
 /// - Frames in system memory: software.
 ///
 /// Software is `libx264` where this FFmpeg has it, and `libopenh264`, which
@@ -216,8 +246,8 @@ impl EncodePath {
 /// # What it holds
 ///
 /// The encoder, and what the encoder needs in front of it: on the software
-/// path from a device, the download to system memory (`D3d11Download` or
-/// `CudaDownload`, in the layout the frames are in), and always
+/// path from a device, the download to system memory (`D3d11Download`,
+/// `CudaDownload` or `VulkanDownload`, in the layout the frames are in), and always
 /// a `SwScaler` to YUV420P at the size asked for; on `h264_mf` from BGRA
 /// textures, a `D3d11Scaler` to NV12. They are ordinary elements, run the
 /// way a [`Rack`](crate::elements::Rack) runs what it holds — each logging
@@ -346,6 +376,12 @@ impl VideoEncodeBin {
             EncodeInput::Cuda { device, format } => (
                 cuda(&name, device, *format, options, &mut tried)?,
                 PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                    .with_layouts(format.layouts()),
+            ),
+            #[cfg(feature = "vulkan")]
+            EncodeInput::Vulkan { device, format } => (
+                vulkan(&name, device, *format, options, &mut tried)?,
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
                     .with_layouts(format.layouts()),
             ),
         };
@@ -609,6 +645,45 @@ fn cuda(
         name,
         vec![download],
         format == CudaFrameFormat::Bgra,
+        options,
+        tried,
+    )
+}
+
+#[cfg(feature = "vulkan")]
+fn vulkan(
+    name: &str,
+    device: &VulkanDevice,
+    format: VulkanFrameFormat,
+    options: VideoEncodeOptions,
+    tried: &mut Tried<'_>,
+) -> Result<Chosen> {
+    if format == VulkanFrameFormat::Nv12 && tried.may(EncodePath::Vulkan) {
+        let vulkan_options = VulkanEncoderOptions {
+            codec: VulkanCodec::H264,
+            width: options.width,
+            height: options.height,
+            frame_rate: options.frame_rate,
+            bit_rate: options.bit_rate,
+            gop_size: options.gop_size,
+            max_b_frames: options.max_b_frames,
+        };
+        let encoder = format!("{name}-encoder");
+        let opened = match options.color {
+            Some(color) => VulkanEncoder::with_color(&encoder, device, vulkan_options, color),
+            None => VulkanEncoder::new(&encoder, device, vulkan_options),
+        };
+        match opened {
+            Ok(encoder) => return Ok(Chosen::of(EncodePath::Vulkan, Vec::new(), encoder)),
+            Err(error) => tried.refused("h264_vulkan", error),
+        }
+    }
+    let download: Box<dyn Filter> =
+        Box::new(VulkanDownload::new(format!("{name}-download"), device));
+    software(
+        name,
+        vec![download],
+        format == VulkanFrameFormat::Bgra,
         options,
         tried,
     )
@@ -1180,6 +1255,57 @@ mod tests {
                     };
                     let path = encodes_red(input, color, skip, frames);
                     eprintln!("{format:?}, passing over {skip:?}: {path:?}");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    mod vulkan {
+        use super::*;
+        use crate::{elements::VulkanUpload, repeat::PerFrameTransform};
+
+        /// A format, what it holds, and how a frame of red is made in it.
+        type Case = (
+            VulkanFrameFormat,
+            Option<ColorDescription>,
+            fn(i64) -> MediaBuffer,
+        );
+
+        /// BGRA and NV12 on Vulkan play as red: NV12 on `h264_vulkan` and in
+        /// software, BGRA in software after its download.
+        #[test]
+        fn vulkan_frames_play_as_red_on_every_path() {
+            let Some(device) = crate::test_support::try_vulkan_device() else {
+                return;
+            };
+            let _session = crate::test_support::encoder_session();
+            let cases: [Case; 2] = [
+                (VulkanFrameFormat::Bgra, None, bgra),
+                (
+                    VulkanFrameFormat::Nv12,
+                    Some(ColorDescription::BT709_LIMITED),
+                    yuv420p,
+                ),
+            ];
+            for (format, color, make) in cases {
+                for skip in [&[][..], &[EncodePath::Vulkan][..]] {
+                    let mut upload = VulkanUpload::new("upload", &device);
+                    let frames = (0..FRAMES).map(make).map(move |frame| {
+                        let MediaBuffer::Video(frame) = frame else {
+                            unreachable!()
+                        };
+                        MediaBuffer::Video(upload.transform(&frame).expect("the frame uploads"))
+                    });
+                    let input = EncodeInput::Vulkan {
+                        device: device.clone(),
+                        format,
+                    };
+                    let path = encodes_red(input, color, skip, frames);
+                    eprintln!("{format:?}, passing over {skip:?}: {path:?}");
+                    if format == VulkanFrameFormat::Bgra || !skip.is_empty() {
+                        assert!(!path.is_hardware(), "{format:?}: in software");
+                    }
                 }
             }
         }

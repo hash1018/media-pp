@@ -85,7 +85,7 @@ impl VulkanFrameFormat {
         }
     }
 
-    fn layouts(self) -> crate::contract::PixelLayoutSet {
+    pub(crate) fn layouts(self) -> crate::contract::PixelLayoutSet {
         match self {
             Self::Bgra => crate::contract::PixelLayoutSet::BGRA,
             Self::Nv12 => crate::contract::PixelLayoutSet::NV12,
