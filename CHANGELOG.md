@@ -722,6 +722,18 @@ compile error with no explanation.
 
 ### Added
 
+- **`AudioTempo` stretches sound to the playback rate, for what takes it
+  at the wall clock's pace.** Played at twice the rate, a `Pacer` hands on
+  two seconds of sound each second; an `AudioMixer` input or an encoder
+  after it takes one. `AudioTempo`, after the pacer, makes it one again
+  without changing its pitch — the same FFmpeg `atempo` stretch the audio
+  renderers use — reading the rate from the pipeline's playback clock, so
+  `Pipeline::set_rate` reaches it with nothing to set. At the file's own
+  speed a frame goes on as it came. A stretched frame's `pts` is where its
+  first sample is in the media, in its own sample rate; the format goes on
+  as it came, planar or packed. New: `Error::AudioTempoError` and
+  `ElementType::AudioTempo`.
+
 - **`SwScaler::if_needed`: a software decode fitted to what takes it.**
   Given a stream's parameters and the sink it is to reach, it answers
   nothing where the sink takes what the stream decodes to, and otherwise a

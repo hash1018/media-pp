@@ -185,7 +185,9 @@ Everything else:
   `PipeWireAudioCaptureSource`, `V4l2CaptureSource`.
 - **Audio**: `AudioMixer`, `AudioResampler`, `AudioVolume`, `AudioGate`,
   `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `SwAudioEncoder`,
-  and `AudioWaveform`, which draws sound as pictures;
+  `AudioTempo`, which stretches sound to the playback rate for what takes
+  it at the wall clock's pace, and `AudioWaveform`, which draws sound as
+  pictures;
   playback through `WasapiRenderer` and `PipeWireAudioRenderer`.
 - **Outputs**: `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`,
   `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`.

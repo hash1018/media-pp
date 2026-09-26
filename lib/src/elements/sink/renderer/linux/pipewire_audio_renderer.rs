@@ -25,7 +25,8 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::AudioFormat,
-    elements::sink::renderer::audio_rate::{Piece, PlayedMedia, Stretcher},
+    elements::filter::audio::stretcher::{Piece, Stretcher},
+    elements::sink::renderer::audio_rate::PlayedMedia,
     error::Result,
     platform::linux::pipewire::{
         PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,

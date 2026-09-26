@@ -86,9 +86,9 @@ use crate::{
     control::{PrerollError, SeekError},
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
-        AudioResamplerError, AudioVolumeError, AudioWaveformError, FileDemuxerError,
-        FileMuxerError, FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError,
-        RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError,
+        AudioResamplerError, AudioTempoError, AudioVolumeError, AudioWaveformError,
+        FileDemuxerError, FileMuxerError, FrameRateLimiterError, HlsMuxerError, MuxerTrackError,
+        PacerError, RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError,
         SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
         SwTextLayerError, SwVideoCompositorError, SwVideoEffectError, VideoSynchronizerError,
     },
@@ -394,6 +394,10 @@ pub enum Error {
     /// An audio resampling operation failed.
     #[error(transparent)]
     AudioResamplerError(#[from] AudioResamplerError),
+
+    /// Sound could not be stretched to a playback rate.
+    #[error(transparent)]
+    AudioTempoError(#[from] AudioTempoError),
 
     /// An audio gain operation failed.
     #[error(transparent)]

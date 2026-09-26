@@ -125,6 +125,8 @@ pub enum ElementType {
     AudioResampler,
     /// Runtime-adjustable audio gain filter.
     AudioVolume,
+    /// Stretches sound to the playback rate.
+    AudioTempo,
     /// Noise gate.
     AudioGate,
     /// Dynamic range compressor.

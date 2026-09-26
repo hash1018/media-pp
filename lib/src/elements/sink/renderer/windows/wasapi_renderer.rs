@@ -16,7 +16,8 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
-    elements::sink::renderer::audio_rate::{Piece, PlayedMedia, Stretcher},
+    elements::filter::audio::stretcher::{Piece, Stretcher},
+    elements::sink::renderer::audio_rate::PlayedMedia,
     elements::{AudioFormat, WasapiDevice, WasapiDeviceKind},
     error::Result,
     platform::windows::wasapi::{

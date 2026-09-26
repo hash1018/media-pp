@@ -156,3 +156,64 @@ fn a_rate_is_refused_where_it_cannot_be_played() {
         "a live source plays at the rate it arrives"
     );
 }
+
+/// Stretched after the pacer that times it, sound played at a rate goes on
+/// at the wall clock's pace — what a mixer's input takes — however fast
+/// the media goes: at twice the rate, a second's worth of samples each
+/// second, covering two of the media.
+#[test]
+fn a_tempo_hands_sound_on_at_the_wall_clocks_pace() {
+    use crate::elements::{AppSink, AudioTempo};
+    let Some(path) = try_test_video() else {
+        return;
+    };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+    let audio = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+        .expect("the fixture has sound")
+        .clone();
+    // Samples handed on, and the sample rate they are at.
+    let taken = Arc::new(Mutex::new((0usize, 0u32)));
+    let counted = Arc::clone(&taken);
+    let (pipeline, ()) = Pipeline::new("tempo", source, |source, ctx| {
+        let sound = ctx
+            .branch()
+            .queue("audio-packets", 64)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .queue("audio-frames", 8)
+            .pipe(Pacer::new("audio-pacer"))
+            .pipe(AudioTempo::new("audio-tempo"))
+            .to(AppSink::new("mixer-input", move |buf| {
+                if let MediaBuffer::Audio(frame) = &buf {
+                    let mut counted = counted.lock().unwrap();
+                    counted.0 += frame.samples();
+                    counted.1 = frame.rate();
+                }
+                Ok(())
+            }))?;
+        ctx.attach(source, audio.index, sound)?;
+        Ok(())
+    })
+    .expect("wire");
+    pipeline.set_rate(2.0).expect("twice the rate");
+    pipeline.run().expect("run");
+    thread::sleep(Duration::from_millis(500));
+    let (before, started, from) = (
+        taken.lock().unwrap().0,
+        Instant::now(),
+        pipeline.position().expect("a position"),
+    );
+    thread::sleep(Duration::from_millis(1_500));
+    let (after, rate) = *taken.lock().unwrap();
+    let (took, to) = (started.elapsed(), pipeline.position().expect("a position"));
+    pipeline.stop();
+
+    let pace = (after - before) as f64 / f64::from(rate) / took.as_secs_f64();
+    assert!(
+        (0.8..1.2).contains(&pace),
+        "{pace:.2} seconds of sound each second"
+    );
+    let media = to.saturating_sub(from).as_secs_f64() / took.as_secs_f64();
+    assert!((1.7..2.3).contains(&media), "{media:.2}x the media");
+}

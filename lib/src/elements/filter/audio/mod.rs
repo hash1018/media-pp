@@ -1,5 +1,5 @@
 //! Filters on decoded audio: resampling, gain, gating, compression,
-//! limiting and noise suppression.
+//! limiting, noise suppression and stretching to a playback rate.
 //!
 //! Grouped by what they take rather than by what they do, and only the
 //! filters — the audio encoder stays with the other encoders, the mixer and
@@ -13,10 +13,12 @@ mod audio_f32;
 mod audio_gate;
 mod audio_limiter;
 pub(crate) mod audio_resampler;
+mod audio_tempo;
 mod audio_volume;
 mod audio_waveform;
 #[cfg(feature = "rnnoise")]
 mod noise_suppressor;
+pub(crate) mod stretcher;
 mod tuning;
 
 pub use audio_compressor::{
@@ -25,6 +27,7 @@ pub use audio_compressor::{
 pub use audio_gate::{AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions};
 pub use audio_limiter::{AudioLimiter, AudioLimiterError, AudioLimiterHandle, AudioLimiterOptions};
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
+pub use audio_tempo::{AudioTempo, AudioTempoError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
 pub use audio_waveform::{AudioWaveform, AudioWaveformError, AudioWaveformOptions};
 #[cfg(feature = "rnnoise")]
