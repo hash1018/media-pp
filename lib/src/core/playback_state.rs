@@ -186,6 +186,9 @@ pub(crate) struct PlaybackState {
     /// How late, in nanoseconds of wall time, the last picture handed on
     /// was — see [`Self::picture_late`].
     picture_late_ns: AtomicU64,
+    /// Whether decoders decode every picture however late pictures come,
+    /// which only a test asks for, through `decode_everything`.
+    decodes_everything: AtomicBool,
 }
 
 /// The picture one terminal last took.
@@ -214,6 +217,7 @@ impl PlaybackState {
             pictures: Mutex::new(HashMap::new()),
             backwards: AtomicBool::new(false),
             picture_late_ns: AtomicU64::new(0),
+            decodes_everything: AtomicBool::new(false),
         })
     }
 
@@ -401,6 +405,21 @@ impl PlaybackState {
     /// How late the last picture handed on was — see [`Self::picture_late`].
     pub(crate) fn picture_lateness(&self) -> Duration {
         Duration::from_nanos(self.picture_late_ns.load(Ordering::Relaxed))
+    }
+
+    /// Keeps every decoder decoding every picture however late pictures
+    /// come: for a test that asserts no picture goes missing, where a
+    /// machine too slow to keep up would otherwise have a decoder leave some
+    /// out, as it is meant to.
+    #[cfg(test)]
+    pub(crate) fn decode_everything(&self) {
+        self.decodes_everything.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a test asked for every picture to be decoded, through
+    /// `decode_everything` — never outside this crate's own tests.
+    pub(crate) fn decodes_everything(&self) -> bool {
+        self.decodes_everything.load(Ordering::Relaxed)
     }
 
     /// Starts a new timeline, and answers its number. Everything numbered

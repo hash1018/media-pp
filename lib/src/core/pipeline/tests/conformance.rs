@@ -703,6 +703,10 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
     let Some(rig) = Rig::build(shape) else {
         return Ok(());
     };
+    // A decoder whose pictures come late leaves some out by design, and a
+    // runner pinned to two cores is slow enough, playing backwards, for that
+    // to happen. What these sequences check is that control loses nothing.
+    rig.pipeline.state.decode_everything();
     let rig = Arc::new(rig);
     let mut rng = Rng(seed.max(1));
     let mut history: Vec<String> = Vec::new();

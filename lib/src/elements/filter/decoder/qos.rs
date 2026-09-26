@@ -116,7 +116,7 @@ impl Qos {
     pub(super) fn follow(&mut self, decoder: &mut ffmpeg::decoder::Video, pp_log: &PpLog) {
         let wanted = match &self.state {
             None => Level::All,
-            Some(state) if state.is_prerolling() => Level::All,
+            Some(state) if state.is_prerolling() || state.decodes_everything() => Level::All,
             Some(state) => {
                 let late = state.picture_lateness();
                 if late >= CAUGHT_UP {
@@ -242,6 +242,22 @@ mod tests {
         );
 
         qos.reset(&mut decoder);
+        assert_eq!(skipping(&decoder), ffi::AVDiscard::AVDISCARD_DEFAULT);
+    }
+
+    /// A state a test has asked to decode everything keeps it decoding
+    /// everything, however late pictures come.
+    #[test]
+    fn a_test_can_keep_everything_decoded() {
+        let log = element_pp_log(ElementType::Other, "qos", None);
+        let state = PlaybackState::new();
+        state.decode_everything();
+        let mut qos = Qos::default();
+        qos.attach(&state);
+        let mut decoder = decoder();
+        state.picture_late(Duration::from_millis(300));
+        thread::sleep(SETTLE + Duration::from_millis(50));
+        qos.follow(&mut decoder, &log);
         assert_eq!(skipping(&decoder), ffi::AVDiscard::AVDISCARD_DEFAULT);
     }
 
