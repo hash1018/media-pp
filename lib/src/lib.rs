@@ -194,6 +194,8 @@
 //! frames                        encoded packets         an encoder
 //! system memory                 D3D11 / D3D12 / CUDA    D3d11Upload / D3d12Upload / CudaUpload
 //! D3D11 / D3D12 / CUDA          system memory           D3d11Download / D3d12Download / CudaDownload
+//! system memory                 Vulkan                  VulkanUpload
+//! Vulkan                        system memory           VulkanDownload
 //! D3D11                         CUDA, or back           system memory: download, then upload
 //! any layout, system memory     another                 SwScaler::to_format
 //! NV12, P010 or BGRA, D3D11     NV12 or BGRA            D3d11Scaler::to_format with a D3d11ScalerFormat

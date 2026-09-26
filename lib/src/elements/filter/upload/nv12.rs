@@ -74,6 +74,37 @@ pub(crate) fn interleave_chroma_row(
     }
 }
 
+/// `source`, a YUV420P or YUVJ420P frame, as NV12 in a frame of its own —
+/// `reuse` where it is the same size, the staging frame an upload kept from
+/// the last one. For an upload whose device takes the NV12 in one transfer.
+#[cfg(any(feature = "cuda", feature = "vulkan"))]
+pub(crate) fn staged(
+    source: &ffmpeg::frame::Video,
+    reuse: Option<ffmpeg::frame::Video>,
+) -> Result<ffmpeg::frame::Video, PlaneTooSmall> {
+    check_planes(source)?;
+    let (width, height) = (source.width(), source.height());
+    let mut staging = match reuse {
+        Some(staging) if staging.width() == width && staging.height() == height => staging,
+        _ => ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
+    };
+    let row_bytes = width as usize;
+    let (luma_stride, source_stride) = (staging.stride(0), source.stride(0));
+    for row in 0..height as usize {
+        staging.data_mut(0)[row * luma_stride..][..row_bytes]
+            .copy_from_slice(&source.data(0)[row * source_stride..][..row_bytes]);
+    }
+    // An odd width has one more chroma sample than luma column, and NV12's
+    // chroma rows room for both of its halves.
+    let chroma_bytes = 2 * width.div_ceil(2) as usize;
+    let chroma_stride = staging.stride(1);
+    for row in 0..height.div_ceil(2) as usize {
+        let destination = &mut staging.data_mut(1)[row * chroma_stride..][..chroma_bytes];
+        interleave_chroma_row(source, row, destination);
+    }
+    Ok(staging)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

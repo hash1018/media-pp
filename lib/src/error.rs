@@ -285,6 +285,26 @@ pub enum Error {
     #[error(transparent)]
     CudaDeviceError(#[from] CudaDeviceError),
 
+    /// The Vulkan device could not be opened.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanDeviceError(#[from] crate::elements::VulkanDeviceError),
+
+    /// Decoding on Vulkan failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanDecoderError(#[from] crate::elements::VulkanDecoderError),
+
+    /// Uploading a frame to Vulkan failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanUploadError(#[from] crate::elements::VulkanUploadError),
+
+    /// Reading a Vulkan frame back failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanDownloadError(#[from] crate::elements::VulkanDownloadError),
+
     /// The CUDA driver refused a call this crate makes to it directly.
     #[cfg(feature = "cuda")]
     #[error(transparent)]

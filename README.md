@@ -136,21 +136,21 @@ accepts, what it owns and how it fails. Both are on
 
 Video, by backend:
 
-| | Software | D3D11 | D3D12 | CUDA |
-|---|---|---|---|---|
-| Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` |
-| Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` |
-| Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` |
-| HDR to SDR | | `D3d11ToneMap` | | `CudaConverter` |
-| Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` |
-| Text overlay | `SwVideoCompositorHandle::add_text_layer` | `D3d11VideoCompositorHandle::add_text_layer` | | `CudaVideoCompositorHandle::add_text_layer` |
-| Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` |
-| Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` |
-| Render | `VideoWindow`; every window renderer | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` |
+| | Software | D3D11 | D3D12 | CUDA | Vulkan |
+|---|---|---|---|---|---|
+| Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` | `VulkanDecoder` |
+| Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` | |
+| Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` | |
+| HDR to SDR | | `D3d11ToneMap` | | `CudaConverter` | |
+| Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | |
+| Text overlay | `SwVideoCompositorHandle::add_text_layer` | `D3d11VideoCompositorHandle::add_text_layer` | | `CudaVideoCompositorHandle::add_text_layer` | |
+| Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | |
+| Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` |
+| Render | `VideoWindow`; every window renderer | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` | |
 
-`VideoDecodeBin` chooses among the decode row and the uploads for a stream,
-and `VideoEncodeBin` among the encode row and the downloads, for H.264 from
-system memory, D3D11 or CUDA.
+`VideoDecodeBin` chooses among the decode row and the uploads for a stream —
+Vulkan's not yet — and `VideoEncodeBin` among the encode row and the
+downloads, for H.264 from system memory, D3D11 or CUDA.
 
 Every compositor runs live by default, emitting at its own rate and drawing
 whatever each input last handed over — a preview, a recording, a broadcast.
@@ -218,7 +218,7 @@ backend's prefix and exist only where their feature is enabled.
 | `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
 | `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and hardware encoding | Windows |
 | `d3d12` | D3D12VA decode, scaling, upload/download, and rendering | Windows |
-| `vulkan` | `VulkanWindowRenderer`: video in an X11 or Wayland window — NV12, YUV420P or BGRA from system memory, or NV12 or BGRA from CUDA with `cuda` too | Linux |
+| `vulkan` | `VulkanDevice`, Vulkan Video decode and upload/download, on any GPU with a Vulkan driver; on Linux also `VulkanWindowRenderer`: video in an X11 or Wayland window — NV12, YUV420P or BGRA from system memory, or NV12 or BGRA from CUDA with `cuda` too | Linux, Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |
@@ -272,6 +272,13 @@ elsewhere.
 - `pipewire-*` features: PipeWire 0.3.50 or newer development files.
 - `cuda`: only the NVIDIA driver. The kernels ship as PTX the driver
   compiles, so no CUDA toolkit is needed.
+- `vulkan`: an FFmpeg built with Vulkan (`--enable-vulkan`, or vcpkg's
+  `ffmpeg[vulkan]`), whose `libavutil/hwcontext_vulkan.h` the build script
+  generates bindings from, found through `FFMPEG_DIR` or pkg-config as FFmpeg
+  itself is; and the Vulkan headers that header includes — beside FFmpeg's
+  own where vcpkg put them, the Vulkan SDK's (`VULKAN_SDK`), or a
+  distribution's `libvulkan-dev`. The Vulkan loader itself is opened at run
+  time.
 
 What an element needs at run time — one shared `D3d11Gpu`, one
 `CudaDevice` per process, a portal for screen capture on Linux, a server to

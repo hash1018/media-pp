@@ -260,7 +260,7 @@ impl CudaUpload {
         &mut self,
         source: &ffmpeg::frame::Video,
     ) -> std::result::Result<ffmpeg::frame::Video, CudaUploadError> {
-        nv12::check_planes(source).map_err(
+        nv12::staged(source, self.staging.take()).map_err(
             |nv12::PlaneTooSmall {
                  actual,
                  stride,
@@ -270,27 +270,7 @@ impl CudaUpload {
                 stride,
                 height,
             },
-        )?;
-        let (width, height) = (source.width(), source.height());
-        let mut staging = match self.staging.take() {
-            Some(staging) if staging.width() == width && staging.height() == height => staging,
-            _ => ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
-        };
-        let row_bytes = width as usize;
-        let (luma_stride, source_stride) = (staging.stride(0), source.stride(0));
-        for row in 0..height as usize {
-            staging.data_mut(0)[row * luma_stride..][..row_bytes]
-                .copy_from_slice(&source.data(0)[row * source_stride..][..row_bytes]);
-        }
-        // An odd width has one more chroma sample than luma column, and
-        // NV12's chroma rows room for both of its halves.
-        let chroma_bytes = 2 * width.div_ceil(2) as usize;
-        let chroma_stride = staging.stride(1);
-        for row in 0..height.div_ceil(2) as usize {
-            let destination = &mut staging.data_mut(1)[row * chroma_stride..][..chroma_bytes];
-            nv12::interleave_chroma_row(source, row, destination);
-        }
-        Ok(staging)
+        )
     }
 }
 

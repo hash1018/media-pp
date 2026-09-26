@@ -35,6 +35,8 @@ pub use crate::platform::cuda::{
 pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub use crate::platform::linux::vulkan::{VulkanGpu, VulkanGpuError};
+#[cfg(feature = "vulkan")]
+pub use crate::platform::vulkan::device::{VulkanDevice, VulkanDeviceError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use crate::platform::windows::d3d11_gpu::{D3d11Gpu, D3d11GpuError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
@@ -119,6 +121,11 @@ pub use filter::{
 };
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
+#[cfg(feature = "vulkan")]
+pub use filter::{
+    VulkanDecoder, VulkanDecoderError, VulkanDownload, VulkanDownloadError, VulkanUpload,
+    VulkanUploadError,
+};
 pub use sink::{
     AppSink, CounterHandle, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer,
     HlsMuxerError, HlsOptions, HlsSegmentFormat, MuxerSinks, MuxerTrack, MuxerTrackError,

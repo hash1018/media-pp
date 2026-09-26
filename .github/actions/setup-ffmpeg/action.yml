@@ -23,14 +23,25 @@ inputs:
       encoder it can rely on unconditionally (`VideoCodec::OpenH264` in
       `sw_encoder.rs`, used by `segmented_mp4_muxer.rs`'s tests) — every other
       codec variant is allowed to be absent and those tests skip cleanly, but
-      this one is treated as always-available. `openh264` is additive to
-      vcpkg's default feature set, not a replacement for it.
+      this one is treated as always-available. `vulkan` is what the crate's
+      `vulkan` feature builds against: FFmpeg's Vulkan hardware context, its
+      header, and the Vulkan headers that one includes, which vcpkg installs
+      beside FFmpeg's own. Both are additive to vcpkg's default feature set,
+      not a replacement for it.
     required: false
-    default: "openh264"
+    default: "openh264,vulkan"
 
 runs:
   using: composite
   steps:
+    # A cache key cannot hold a comma, and the feature list is one.
+    - name: Name the cache entry
+      id: key
+      shell: bash
+      run: |
+        features="${{ inputs.vcpkg-features }}"
+        echo "key=vcpkg-ffmpeg-${{ runner.os == 'Windows' && 'x64-windows' || 'x64-linux-dynamic' }}-${{ inputs.vcpkg-ref }}-${features//,/-}" >> "$GITHUB_OUTPUT"
+
     # Building FFmpeg from source costs tens of minutes on a hosted runner.
     # What it produces depends only on the ref above, which is immutable, so
     # the installed tree is cached under exactly that ref.
@@ -60,7 +71,7 @@ runs:
       uses: actions/cache/restore@v4
       with:
         path: .vcpkg/installed
-        key: vcpkg-ffmpeg-${{ runner.os == 'Windows' && 'x64-windows' || 'x64-linux-dynamic' }}-${{ inputs.vcpkg-ref }}-${{ inputs.vcpkg-features }}
+        key: ${{ steps.key.outputs.key }}
 
     - name: Check out compatible vcpkg
       if: steps.ffmpeg.outputs.cache-hit != 'true'
@@ -175,4 +186,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: .vcpkg/installed
-        key: vcpkg-ffmpeg-${{ runner.os == 'Windows' && 'x64-windows' || 'x64-linux-dynamic' }}-${{ inputs.vcpkg-ref }}-${{ inputs.vcpkg-features }}
+        key: ${{ steps.key.outputs.key }}

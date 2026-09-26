@@ -58,6 +58,25 @@ ab_glyph = "0.2"
 # RNNoise, as pure Rust with its weights compiled in — see `NoiseSuppressor`.
 # Without its default features, which are the command-line tool's.
 nnnoiseless = { version = "0.5", optional = true, default-features = false }
+# The `vulkan` feature's device calls: `ash` with its default `loaded`
+# feature, so the Vulkan loader is opened at run time rather than linked —
+# the same stance as the EGL and CUDA libraries this crate `dlopen`s. `naga`
+# compiles the WGSL shaders at construction, the way the D3D11 elements
+# compile their HLSL, so there is no shader toolchain to install.
+ash = { version = "0.38", optional = true }
+naga = { version = "30", optional = true, default-features = false, features = [
+    "wgsl-in",
+    "spv-out",
+] }
+
+# Bindings to FFmpeg's Vulkan hardware context, for the `vulkan` feature —
+# see `build.rs`. The versions `ffmpeg-sys-next` builds its own with, so
+# they add nothing to the tree.
+[build-dependencies]
+bindgen = { version = "0.72", optional = true, default-features = false, features = [
+    "runtime",
+] }
+pkg-config = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true }
@@ -97,19 +116,9 @@ futures-util = { version = "0.3", optional = true }
 libc = { version = "0.2", optional = true }
 pipewire = { version = "0.10.1", optional = true, features = ["v0_3_50"] }
 pollster = { version = "1", optional = true }
-# `VulkanWindowRenderer`: `ash` with its default `loaded` feature, so the
-# Vulkan loader is opened at run time and building this needs no Vulkan SDK
-# — the same stance as the EGL and CUDA libraries this crate `dlopen`s.
-# `ash-window` makes a surface from whichever window handle is given, X11 or
-# Wayland; `naga` compiles the WGSL presenting shaders at construction, the
-# way the D3D11 renderer compiles its HLSL, so there is no shader toolchain
-# to install either.
-ash = { version = "0.38", optional = true }
+# `VulkanWindowRenderer`'s surface, made from whichever window handle is
+# given, X11 or Wayland.
 ash-window = { version = "0.13", optional = true }
-naga = { version = "30", optional = true, default-features = false, features = [
-    "wgsl-in",
-    "spv-out",
-] }
 # The window a `VulkanWindowRenderer` is given, as on Windows. `std` for
 # its `HandleError` to be an `Error`.
 raw-window-handle = { version = "0.6", optional = true, features = ["std"] }
@@ -139,13 +148,22 @@ undocumented_unsafe_blocks = "deny"
 # is pulled in — not here, so encoding and compositing do not pay for it.
 # Not platform-gated: CUDA is available on Linux and Windows alike.
 cuda = []
+# Vulkan, on Windows and Linux: `VulkanDevice`, the device FFmpeg decodes,
+# encodes and keeps its Vulkan frames on. Needs an FFmpeg built with Vulkan
+# and the Vulkan headers at build time — see `build.rs`. On Linux also
 # `VulkanGpu` and `VulkanWindowRenderer`, which shows video in a window —
-# frames in system memory on any GPU, and CUDA frames too when `cuda` is also
-# on. Named for what draws rather than for what it takes, as a GStreamer sink
-# is, because it takes more than one memory domain. Linux only: its CUDA
-# path shares memory through a POSIX file descriptor, and the window it
-# opens for itself is X11.
-vulkan = ["dep:ash", "dep:ash-window", "dep:naga", "dep:raw-window-handle", "dep:x11rb"]
+# frames in system memory on any GPU, and CUDA frames too when `cuda` is
+# also on; its CUDA path shares memory through a POSIX file descriptor, and
+# the window it opens for itself is X11.
+vulkan = [
+    "dep:ash",
+    "dep:ash-window",
+    "dep:naga",
+    "dep:raw-window-handle",
+    "dep:x11rb",
+    "dep:bindgen",
+    "dep:pkg-config",
+]
 d3d12 = [
     "dep:windows",
     # `D3d12WindowRenderer`'s own window, drawn into through a swap chain, or

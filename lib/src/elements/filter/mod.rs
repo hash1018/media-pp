@@ -69,12 +69,16 @@ pub use decoder::{
     VideoDecodeBinHandle,
 };
 pub use decoder::{DecodeThreadKind, DecodeThreading, SwDecoder, SwDecoderError};
+#[cfg(feature = "vulkan")]
+pub use decoder::{VulkanDecoder, VulkanDecoderError};
 #[cfg(feature = "cuda")]
 pub use download::{CudaDownload, CudaDownloadError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use download::{D3d11Download, D3d11DownloadError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use download::{D3d12Download, D3d12DownloadError};
+#[cfg(feature = "vulkan")]
+pub use download::{VulkanDownload, VulkanDownloadError};
 pub use encoder::{
     AudioCodec, EncodeInput, EncodePath, SwAudioEncoder, SwAudioEncoderError,
     SwAudioEncoderOptions, SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec, VideoEncodeBin,
@@ -109,6 +113,8 @@ pub use upload::{CudaUpload, CudaUploadError};
 pub use upload::{D3d11Upload, D3d11UploadError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use upload::{D3d12Upload, D3d12UploadError};
+#[cfg(feature = "vulkan")]
+pub use upload::{VulkanUpload, VulkanUploadError};
 pub use video_effect::{
     ColorCorrection, LumaKey, SwVideoEffect, SwVideoEffectError, VideoEffect, VideoEffectHandle,
 };

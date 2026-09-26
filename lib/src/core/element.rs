@@ -97,6 +97,12 @@ pub enum ElementType {
     CudaUpload,
     /// CUDA to system-memory download filter.
     CudaDownload,
+    /// Vulkan Video hardware decoder filter.
+    VulkanDecoder,
+    /// System-memory to Vulkan upload filter.
+    VulkanUpload,
+    /// Vulkan to system-memory download filter.
+    VulkanDownload,
     /// CUDA pixel-format converter filter.
     CudaConverter,
     /// D3D12 hardware decoder filter.

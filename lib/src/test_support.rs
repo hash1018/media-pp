@@ -471,6 +471,28 @@ pub(crate) fn try_cuda_device() -> Option<(
     }
 }
 
+/// The Vulkan device the tests share, or `None` — with the reason printed —
+/// on a machine without Vulkan or whose FFmpeg was built without it.
+///
+/// One device for every test, made once: FFmpeg makes a device with every
+/// queue and extension its codecs could want, which is not cheap, and a
+/// test run makes dozens of elements. Submissions from tests running at
+/// once are kept apart by FFmpeg's own queue lock, as a pipeline's are. A
+/// test needing a *second* device — to check that a frame from another is
+/// refused — calls `VulkanDevice::new()` itself.
+#[cfg(feature = "vulkan")]
+pub(crate) fn try_vulkan_device() -> Option<crate::elements::VulkanDevice> {
+    static DEVICE: std::sync::OnceLock<Result<crate::elements::VulkanDevice, String>> =
+        std::sync::OnceLock::new();
+    match DEVICE.get_or_init(|| crate::elements::VulkanDevice::new().map_err(|e| e.to_string())) {
+        Ok(device) => Some(device.clone()),
+        Err(error) => {
+            eprintln!("skipping: no usable Vulkan device on this machine ({error})");
+            None
+        }
+    }
+}
+
 /// A media file this crate builds for itself, rather than one a test has to
 /// find.
 ///

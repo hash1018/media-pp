@@ -8,10 +8,20 @@ use crate::control::PrerollContext;
 use crate::playback_state::PlaybackState;
 
 const NANOS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
-#[cfg(any(test, feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+#[cfg(any(
+    test,
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "windows", feature = "d3d11")
+))]
 pub(super) const ACCURATE_SEEK_CANDIDATE_FRAMES: i32 = 1;
 
-#[cfg(any(test, feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+#[cfg(any(
+    test,
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "windows", feature = "d3d11")
+))]
 pub(super) fn hw_surface_budget(downstream_frames: i32) -> Option<i32> {
     (downstream_frames >= 0)
         .then(|| downstream_frames.checked_add(ACCURATE_SEEK_CANDIDATE_FRAMES))

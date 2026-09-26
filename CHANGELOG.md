@@ -30,7 +30,27 @@ compile error with no explanation.
   one over a video layer raised above zero calls
   `CudaTextLayerHandle::set_z_index`.
 
+- **The `vulkan` feature needs an FFmpeg built with Vulkan**, and the
+  Vulkan headers, to build: its new elements are FFmpeg's Vulkan frames,
+  and the build script generates the bindings to FFmpeg's Vulkan hardware
+  context from the installed `hwcontext_vulkan.h` — see the README's
+  requirements. vcpkg's `ffmpeg[vulkan]` brings both. A program using only
+  `VulkanWindowRenderer` builds against such an FFmpeg as before.
+
+- **`MemoryDomain` has a `Vulkan` variant**, for frames in Vulkan images.
+  A `match` on `MemoryDomain` needs an arm for it.
+
 ### Added
+
+- **Vulkan frames, on Windows and Linux: `VulkanDevice`, `VulkanDecoder`,
+  `VulkanUpload` and `VulkanDownload`.** `VulkanDevice` is the one Vulkan
+  device a pipeline's Vulkan elements share, made by FFmpeg with whatever
+  its Vulkan decoders and encoders need; `VulkanDecoder` decodes H.264,
+  HEVC and AV1 with Vulkan Video on any GPU whose driver does — NVIDIA's,
+  and AMD's and Intel's with Mesa — backwards too; `VulkanUpload` takes
+  NV12, P010, BGRA and YUV420P (as NV12) up, and `VulkanDownload` brings
+  them back. The `vulkan` feature now builds on Windows as well; the
+  window renderer stays Linux's.
 
 - **One API for every video compositor: `VideoCompositorControl`,
   `VideoLayerControl` and `TextLayerControl`.** Each compositor's handles
