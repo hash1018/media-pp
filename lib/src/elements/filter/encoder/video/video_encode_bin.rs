@@ -976,10 +976,17 @@ mod tests {
     ) -> Option<ColorDescription> {
         use crate::elements::{FileDemuxer, FileMuxer};
 
+        // A file of its own for every recording, not one per path: tests run
+        // at once, and two that took the same path wrote into one file. On
+        // a runner with no NVIDIA GPU a BGRA recording falls to software,
+        // the path a YUV420P one takes, and CI read the BGRA one's colour
+        // back as the YUV420P one's.
+        static RECORDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = bin.path();
         let file = std::env::temp_dir().join(format!(
-            "media-pp-encode-bin-{}-{path:?}.mp4",
-            std::process::id()
+            "media-pp-encode-bin-{}-{}-{path:?}.mp4",
+            std::process::id(),
+            RECORDINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let mut muxer = FileMuxer::create(&file).expect("the file opens");
         let track = muxer.add_stream("video", &bin).expect("the track is added");
