@@ -84,6 +84,12 @@ pub use compositor::{
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,
 };
+#[cfg(feature = "vulkan")]
+pub use compositor::{
+    VulkanFrameFormat, VulkanTextLayerHandle, VulkanVideoCompositor, VulkanVideoCompositorError,
+    VulkanVideoCompositorHandle, VulkanVideoCompositorInput, VulkanVideoCompositorInputSink,
+    VulkanVideoLayerHandle,
+};
 pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle, StreamInfo};
 pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,

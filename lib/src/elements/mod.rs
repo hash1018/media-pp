@@ -37,6 +37,8 @@ pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 pub use crate::platform::linux::vulkan::{VulkanGpu, VulkanGpuError};
 #[cfg(feature = "vulkan")]
 pub use crate::platform::vulkan::device::{VulkanDevice, VulkanDeviceError};
+#[cfg(feature = "vulkan")]
+pub use crate::platform::vulkan::gpu::VulkanError;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use crate::platform::windows::d3d11_gpu::{D3d11Gpu, D3d11GpuError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
@@ -208,6 +210,12 @@ pub use source::{
 };
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 pub use source::{V4l2CaptureOptions, V4l2CaptureSource, V4l2CaptureSourceError};
+#[cfg(feature = "vulkan")]
+pub use source::{
+    VulkanFrameFormat, VulkanTextLayerHandle, VulkanVideoCompositor, VulkanVideoCompositorError,
+    VulkanVideoCompositorHandle, VulkanVideoCompositorInput, VulkanVideoCompositorInputSink,
+    VulkanVideoLayerHandle,
+};
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wgc-capture"))]

@@ -52,6 +52,16 @@ compile error with no explanation.
   them back. The `vulkan` feature now builds on Windows as well; the
   window renderer stays Linux's.
 
+- **`VulkanVideoCompositor`**, the fourth compositor, on any GPU with a
+  Vulkan driver, on Windows and Linux: the same `VideoLayer` API, text
+  layers, live and offline, and `VideoCompositorControl`, composing NV12 and
+  BGRA Vulkan frames into BGRA (`VulkanFrameFormat::Bgra`, the default, which
+  keeps a translucent background) or NV12 for an encoder. It draws with
+  compute shaders of its own, compiled from WGSL at construction, and uses
+  FFmpeg's frames under FFmpeg's own lock and semaphores, so a decoder's
+  picture is drawn once written and the output read once drawn. Two 1080p
+  layers composite in about 0.35 ms on an RTX 3050.
+
 - **One API for every video compositor: `VideoCompositorControl`,
   `VideoLayerControl` and `TextLayerControl`.** Each compositor's handles
   had the same methods, each answering its own error type; the traits are

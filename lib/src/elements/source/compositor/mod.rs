@@ -27,7 +27,11 @@ mod cuda;
 
 #[cfg(feature = "cuda")]
 pub use cuda::*;
+#[cfg(feature = "vulkan")]
+mod vulkan;
 pub use text_layer::TextLayer;
 pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect};
+#[cfg(feature = "vulkan")]
+pub use vulkan::*;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::*;

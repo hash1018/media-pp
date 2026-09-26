@@ -79,6 +79,8 @@ pub enum ElementType {
     SwVideoCompositor,
     /// CUDA video compositor source.
     CudaVideoCompositor,
+    /// Vulkan video compositor source.
+    VulkanVideoCompositor,
     /// D3D11 video compositor source.
     D3d11VideoCompositor,
     /// WebRTC connection driver.

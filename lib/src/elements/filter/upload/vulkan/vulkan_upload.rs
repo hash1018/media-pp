@@ -166,7 +166,15 @@ impl VulkanUpload {
             pp_info!(self, "allocating a {width}x{height} {format:?} pool");
             // SAFETY: `hw_device_ctx` is this element's own reference to a live
             // Vulkan device context.
-            let frames = unsafe { create_frames_ctx(&self.hw_device_ctx, format, width, height) }?;
+            let frames = unsafe {
+                create_frames_ctx(
+                    &self.hw_device_ctx,
+                    format,
+                    width,
+                    height,
+                    ash::vk::ImageUsageFlags::empty(),
+                )
+            }?;
             self.frames = Some((width, height, format, frames));
         }
         Ok(self.frames.as_ref().expect("made above").3.as_ptr())

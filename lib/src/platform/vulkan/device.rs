@@ -6,10 +6,11 @@ use std::{
     sync::Arc,
 };
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use ffmpeg_next::{self as ffmpeg, ffi as av};
 use thiserror::Error as ThisError;
 
+use super::ffi::AVVulkanDeviceContext;
 use crate::platform::ffmpeg::AvBufferRef;
 
 /// Why a [`VulkanDevice`] could not be opened.
@@ -45,6 +46,14 @@ pub enum VulkanDeviceError {
     /// FFmpeg reported success without returning a context reference.
     #[error("FFmpeg opened Vulkan without returning a device context")]
     MissingContext,
+
+    /// FFmpeg made the device without a queue that computes, which this
+    /// crate's own Vulkan work is submitted to.
+    #[error("the Vulkan device {device} has no compute queue")]
+    NoComputeQueue {
+        /// The device that was opened.
+        device: String,
+    },
 }
 
 /// The one Vulkan device every Vulkan element in a pipeline shares.
@@ -54,8 +63,10 @@ pub enum VulkanDeviceError {
 /// or takes Vulkan frames must be built from the same `VulkanDevice`.
 ///
 /// FFmpeg makes the device, with whatever queues and extensions its Vulkan
-/// decoders, encoders and frames need, and owns it. Nothing here creates or
-/// destroys the `VkInstance` or `VkDevice`.
+/// decoders, encoders and frames need, and owns it; this crate's own Vulkan
+/// work runs on it too, submitted to a queue FFmpeg made, under FFmpeg's own
+/// lock for that queue. Nothing here creates or destroys the `VkInstance` or
+/// `VkDevice`.
 ///
 /// Opens a discrete GPU where there is one — an integrated GPU listed first
 /// is the ordinary laptop, and the slower of the two — else the first there
@@ -80,15 +91,21 @@ impl std::fmt::Debug for VulkanDevice {
 pub(crate) struct DeviceShared {
     /// The `AVHWDeviceContext` FFmpeg made, which owns the device.
     ctx: Arc<AvBufferRef>,
+    pub(crate) device: ash::Device,
+    pub(crate) memory_properties: vk::PhysicalDeviceMemoryProperties,
+    /// The queue family this crate submits its own work to: one FFmpeg
+    /// made, that computes.
+    pub(crate) compute_family: u32,
     /// The device's own name, for a log line.
     pub(crate) name: String,
 }
 
 // SAFETY: `ctx` is an FFmpeg reference to a device context that FFmpeg
-// itself hands between threads; nothing here is mutated after
-// construction.
+// itself hands between threads, and the ash tables are plain function
+// pointers and handles; nothing here is mutated after construction.
 unsafe impl Send for DeviceShared {}
-// SAFETY: as above.
+// SAFETY: as above. Queue access, which Vulkan requires to be externally
+// synchronized, goes through FFmpeg's own lock — see `DeviceShared::queue`.
 unsafe impl Sync for DeviceShared {}
 
 impl VulkanDevice {
@@ -119,10 +136,70 @@ impl VulkanDevice {
         // SAFETY: `av_hwdevice_ctx_create` left `ctx` owning one reference and
         // nothing else has taken it; a failure left it null and returned above.
         let ctx = unsafe { AvBufferRef::from_raw(ctx) }.ok_or(VulkanDeviceError::MissingContext)?;
+        // SAFETY: a Vulkan device context's `data` is its `AVHWDeviceContext`,
+        // whose `hwctx` is the `AVVulkanDeviceContext` FFmpeg filled in as it
+        // made the device, and the reference just taken keeps both alive.
+        let hwctx = unsafe {
+            let device_ctx = (*ctx.as_ptr()).data as *const av::AVHWDeviceContext;
+            &*((*device_ctx).hwctx as *const AVVulkanDeviceContext)
+        };
+        let get_instance_proc_addr = hwctx
+            .get_proc_addr
+            .ok_or(VulkanDeviceError::MissingContext)?;
+        // SAFETY: both are `PFN_vkGetInstanceProcAddr`, the one generated from
+        // the header FFmpeg was built with and the other ash's; `VKAPI_PTR`,
+        // the calling convention the header declares it with, is what
+        // `extern "system"` names.
+        let get_instance_proc_addr = unsafe {
+            std::mem::transmute::<
+                unsafe extern "C" fn(
+                    super::ffi::VkInstance,
+                    *const std::ffi::c_char,
+                ) -> super::ffi::PFN_vkVoidFunction,
+                vk::PFN_vkGetInstanceProcAddr,
+            >(get_instance_proc_addr)
+        };
+        let static_fn = ash::StaticFn {
+            get_instance_proc_addr,
+        };
+        // SAFETY: the function comes from the loader FFmpeg opened, which
+        // stays open while its device context does — as long as this lives.
+        let entry = unsafe { ash::Entry::from_static_fn(static_fn) };
+        let instance_handle = vk::Instance::from_raw(hwctx.inst as u64);
+        // SAFETY: `inst` is the live instance FFmpeg made through that loader.
+        let instance = unsafe { ash::Instance::load(entry.static_fn(), instance_handle) };
+        let physical_device = vk::PhysicalDevice::from_raw(hwctx.phys_dev as u64);
+        // SAFETY: `act_dev` is the live device FFmpeg made on `phys_dev`.
+        let device = unsafe {
+            ash::Device::load(
+                instance.fp_v1_0(),
+                vk::Device::from_raw(hwctx.act_dev as u64),
+            )
+        };
+        // SAFETY: a plain query of the physical device FFmpeg opened.
+        let memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let families = usize::try_from(hwctx.nb_qf)
+            .unwrap_or(0)
+            .min(hwctx.qf.len());
+        let compute_family = hwctx.qf[..families]
+            .iter()
+            .find(|family| {
+                family.num > 0
+                    && vk::QueueFlags::from_raw(family.flags as u32)
+                        .contains(vk::QueueFlags::COMPUTE)
+            })
+            .and_then(|family| u32::try_from(family.idx).ok())
+            .ok_or_else(|| VulkanDeviceError::NoComputeQueue {
+                device: name.clone(),
+            })?;
 
         Ok(Self {
             shared: Arc::new(DeviceShared {
                 ctx: Arc::new(ctx),
+                device,
+                memory_properties,
+                compute_family,
                 name,
             }),
         })
@@ -139,12 +216,71 @@ impl VulkanDevice {
         Arc::clone(&self.shared.ctx)
     }
 
+    pub(crate) fn shared(&self) -> &Arc<DeviceShared> {
+        &self.shared
+    }
+
     /// FFmpeg's context for the device, to compare a frame's against — see
     /// `frames::sw_format_of`. Kept alive by this value's reference.
     pub(crate) fn device_ctx(&self) -> *const av::AVHWDeviceContext {
         // SAFETY: a device context's `data` is its `AVHWDeviceContext`; only
         // the pointer is taken, never read through here.
         unsafe { (*self.shared.ctx.as_ptr()).data as *const av::AVHWDeviceContext }
+    }
+}
+
+impl DeviceShared {
+    /// Runs `submit` with the first queue of the compute family, holding
+    /// FFmpeg's lock for it throughout: FFmpeg submits its own decoding and
+    /// encoding to the queues it made, from its own threads, and Vulkan
+    /// requires every submission to a queue to be externally synchronized.
+    pub(crate) fn queue<R>(&self, submit: impl FnOnce(vk::Queue) -> R) -> R {
+        // SAFETY: as in `VulkanDevice::new`; the reference `ctx` keeps the
+        // contexts alive.
+        let (device_ctx, hwctx) = unsafe {
+            let device_ctx = (*self.ctx.as_ptr()).data as *mut av::AVHWDeviceContext;
+            (
+                device_ctx,
+                &*((*device_ctx).hwctx as *const AVVulkanDeviceContext),
+            )
+        };
+        let (lock, unlock) = (hwctx.lock_queue, hwctx.unlock_queue);
+        // SAFETY: FFmpeg sets both locking functions as it makes a device (a
+        // caller-made one may leave them null, which is why they are optional
+        // here); they take the device context they belong to and a queue it
+        // made, which the compute family's first queue is.
+        unsafe {
+            if let Some(lock) = lock {
+                lock(device_ctx.cast(), self.compute_family, 0);
+            }
+        }
+        // SAFETY: the family is one FFmpeg made at least one queue of.
+        let queue = unsafe { self.device.get_device_queue(self.compute_family, 0) };
+        let result = submit(queue);
+        // SAFETY: as for `lock`, releasing what was taken above.
+        unsafe {
+            if let Some(unlock) = unlock {
+                unlock(device_ctx.cast(), self.compute_family, 0);
+            }
+        }
+        result
+    }
+
+    /// The first memory type among those `bits` allows that has every one of
+    /// `properties`.
+    pub(crate) fn memory_type(
+        &self,
+        bits: u32,
+        properties: vk::MemoryPropertyFlags,
+    ) -> Option<u32> {
+        let count = self.memory_properties.memory_type_count as usize;
+        self.memory_properties.memory_types[..count]
+            .iter()
+            .enumerate()
+            .find(|(index, kind)| {
+                bits & (1 << index) != 0 && kind.property_flags.contains(properties)
+            })
+            .map(|(index, _)| index as u32)
     }
 }
 

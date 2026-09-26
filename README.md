@@ -142,8 +142,8 @@ Video, by backend:
 | Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` | |
 | Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` | |
 | HDR to SDR | | `D3d11ToneMap` | | `CudaConverter` | |
-| Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | |
-| Text overlay | `SwVideoCompositorHandle::add_text_layer` | `D3d11VideoCompositorHandle::add_text_layer` | | `CudaVideoCompositorHandle::add_text_layer` | |
+| Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` |
+| Text overlay | `SwVideoCompositorHandle::add_text_layer` | `D3d11VideoCompositorHandle::add_text_layer` | | `CudaVideoCompositorHandle::add_text_layer` | `VulkanVideoCompositorHandle::add_text_layer` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` |
 | Render | `VideoWindow`; every window renderer | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` | |
@@ -218,7 +218,7 @@ backend's prefix and exist only where their feature is enabled.
 | `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
 | `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and hardware encoding | Windows |
 | `d3d12` | D3D12VA decode, scaling, upload/download, and rendering | Windows |
-| `vulkan` | `VulkanDevice`, Vulkan Video decode and upload/download, on any GPU with a Vulkan driver; on Linux also `VulkanWindowRenderer`: video in an X11 or Wayland window — NV12, YUV420P or BGRA from system memory, or NV12 or BGRA from CUDA with `cuda` too | Linux, Windows |
+| `vulkan` | `VulkanDevice`, Vulkan Video decode, compositing and upload/download, on any GPU with a Vulkan driver; on Linux also `VulkanWindowRenderer`: video in an X11 or Wayland window — NV12, YUV420P or BGRA from system memory, or NV12 or BGRA from CUDA with `cuda` too | Linux, Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |

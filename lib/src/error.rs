@@ -305,6 +305,11 @@ pub enum Error {
     #[error(transparent)]
     VulkanDownloadError(#[from] crate::elements::VulkanDownloadError),
 
+    /// A Vulkan video compositor operation failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanVideoCompositorError(#[from] crate::elements::VulkanVideoCompositorError),
+
     /// The CUDA driver refused a call this crate makes to it directly.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
