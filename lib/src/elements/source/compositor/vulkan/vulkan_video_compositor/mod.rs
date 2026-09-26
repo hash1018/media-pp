@@ -43,7 +43,7 @@ use crate::{
             device::DeviceShared,
             frame_access::{Claim, abandon, claim, images_of},
             frames::{NotOurs, create_frames_ctx, sw_format_of},
-            gpu::{HostBuffer, Image, Kernel, Recording, Sampler, View, VulkanError},
+            gpu::{HostBuffer, Image, Kernel, Recording, Sampler, View, VulkanError, plane_views},
         },
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -1333,7 +1333,7 @@ impl VulkanVideoCompositor {
             // SAFETY: validated when the draw was made, as a live Vulkan
             // frame of this device.
             let images = unsafe { images_of(frame) };
-            let planes = plane_views(&gpu, &images.images, *layout)?;
+            let planes = plane_views(&gpu, &images.images, *layout == LayerLayout::Nv12)?;
             video_views.push(planes.iter().map(|view| view.view).collect());
             views.extend(planes);
         }
@@ -1341,7 +1341,7 @@ impl VulkanVideoCompositor {
             VulkanFrameFormat::Nv12 => {
                 // SAFETY: a frame of this element's own pool.
                 let images = unsafe { images_of(output) };
-                let planes = plane_views(&gpu, &images.images, LayerLayout::Nv12)?;
+                let planes = plane_views(&gpu, &images.images, true)?;
                 let handles = [planes[0].view, planes[1].view];
                 views.extend(planes);
                 Some(handles)
@@ -1825,58 +1825,6 @@ fn canvas_barrier(device: &ash::Device, commands: vk::CommandBuffer) {
             &vk::DependencyInfo::default().memory_barriers(&barrier),
         );
     }
-}
-
-/// A view of each plane of a picture in `layout`: NV12's luma and its
-/// chroma, from the planes of one multi-planar image or from an image each;
-/// BGRA's one.
-fn plane_views(
-    gpu: &Arc<DeviceShared>,
-    images: &[(vk::Image, vk::Format)],
-    layout: LayerLayout,
-) -> std::result::Result<Vec<View>, VulkanVideoCompositorError> {
-    let views = match (layout, images) {
-        (LayerLayout::Bgra, [(image, _), ..]) => vec![View::new(
-            gpu,
-            *image,
-            vk::Format::B8G8R8A8_UNORM,
-            vk::ImageAspectFlags::COLOR,
-        )?],
-        (LayerLayout::Nv12, [(image, _)]) => vec![
-            View::new(
-                gpu,
-                *image,
-                vk::Format::R8_UNORM,
-                vk::ImageAspectFlags::PLANE_0,
-            )?,
-            View::new(
-                gpu,
-                *image,
-                vk::Format::R8G8_UNORM,
-                vk::ImageAspectFlags::PLANE_1,
-            )?,
-        ],
-        (LayerLayout::Nv12, [(luma, _), (chroma, _), ..]) => vec![
-            View::new(
-                gpu,
-                *luma,
-                vk::Format::R8_UNORM,
-                vk::ImageAspectFlags::COLOR,
-            )?,
-            View::new(
-                gpu,
-                *chroma,
-                vk::Format::R8G8_UNORM,
-                vk::ImageAspectFlags::COLOR,
-            )?,
-        ],
-        _ => {
-            return Err(VulkanVideoCompositorError::UnsupportedLayout(
-                ffmpeg::format::Pixel::VULKAN,
-            ));
-        }
-    };
-    Ok(views)
 }
 
 impl Element for VulkanVideoCompositor {

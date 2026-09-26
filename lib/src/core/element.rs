@@ -107,6 +107,8 @@ pub enum ElementType {
     VulkanVideoEffect,
     /// Vulkan chroma key filter.
     VulkanChromaKey,
+    /// Vulkan NV12-to-BGRA converter filter.
+    VulkanConverter,
     /// System-memory to Vulkan upload filter.
     VulkanUpload,
     /// Vulkan to system-memory download filter.

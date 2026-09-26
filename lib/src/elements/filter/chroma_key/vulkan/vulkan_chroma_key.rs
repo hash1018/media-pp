@@ -16,7 +16,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     platform::vulkan::{
-        bgra_pass::{BgraPass, BgraPassError, immediates},
+        bgra_pass::{BgraPass, BgraPassError, PassInput, immediates},
         gpu::VulkanError,
     },
     pool::UnboundObjectPoolRef,
@@ -91,7 +91,7 @@ impl VulkanChromaKey {
     ) -> std::result::Result<(Self, ChromaKeyHandle), VulkanChromaKeyError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VulkanChromaKey, &name, None);
-        let pass = BgraPass::new(device, SHADER, c"main", 48)?;
+        let pass = BgraPass::new(device, SHADER, c"main", 48, PassInput::Bgra)?;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(

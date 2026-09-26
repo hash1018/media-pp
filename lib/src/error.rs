@@ -300,6 +300,11 @@ pub enum Error {
     #[error(transparent)]
     VulkanVideoEffectError(#[from] crate::elements::VulkanVideoEffectError),
 
+    /// A Vulkan conversion failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanConverterError(#[from] crate::elements::VulkanConverterError),
+
     /// A Vulkan chroma key failed.
     #[cfg(feature = "vulkan")]
     #[error(transparent)]

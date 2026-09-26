@@ -35,6 +35,10 @@ pub enum VulkanError {
     /// The device has no memory of a kind an allocation needs.
     #[error("the device has no {0} memory for this")]
     NoMemoryType(&'static str),
+
+    /// A frame's images are not the planes its layout has.
+    #[error("a frame's images are not the planes its layout has")]
+    UnexpectedImages,
 }
 
 pub(crate) fn call(call: &'static str) -> impl FnOnce(vk::Result) -> VulkanError {
@@ -578,6 +582,53 @@ impl Drop for Sampler {
         // SAFETY: made on this device, and nothing using it is still running.
         unsafe { self.shared.device.destroy_sampler(self.sampler, None) };
     }
+}
+
+/// A view of each plane of a picture: NV12's luma and chroma where `nv12`,
+/// from the planes of one multi-planar image or from an image each, and
+/// otherwise BGRA's one.
+pub(crate) fn plane_views(
+    gpu: &Arc<DeviceShared>,
+    images: &[(vk::Image, vk::Format)],
+    nv12: bool,
+) -> Result<Vec<View>, VulkanError> {
+    Ok(match (nv12, images) {
+        (false, [(image, _), ..]) => vec![View::new(
+            gpu,
+            *image,
+            vk::Format::B8G8R8A8_UNORM,
+            vk::ImageAspectFlags::COLOR,
+        )?],
+        (true, [(image, _)]) => vec![
+            View::new(
+                gpu,
+                *image,
+                vk::Format::R8_UNORM,
+                vk::ImageAspectFlags::PLANE_0,
+            )?,
+            View::new(
+                gpu,
+                *image,
+                vk::Format::R8G8_UNORM,
+                vk::ImageAspectFlags::PLANE_1,
+            )?,
+        ],
+        (true, [(luma, _), (chroma, _), ..]) => vec![
+            View::new(
+                gpu,
+                *luma,
+                vk::Format::R8_UNORM,
+                vk::ImageAspectFlags::COLOR,
+            )?,
+            View::new(
+                gpu,
+                *chroma,
+                vk::Format::R8G8_UNORM,
+                vk::ImageAspectFlags::COLOR,
+            )?,
+        ],
+        _ => return Err(VulkanError::UnexpectedImages),
+    })
 }
 
 #[cfg(test)]

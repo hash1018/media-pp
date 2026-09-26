@@ -140,7 +140,7 @@ Video, by backend:
 |---|---|---|---|---|---|
 | Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` | `VulkanDecoder` |
 | Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` | `VulkanEncoder` |
-| Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` | |
+| Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` | `VulkanConverter` |
 | HDR to SDR | | `D3d11ToneMap` | | `CudaConverter` | |
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` |
 | Text overlay | `SwVideoCompositorHandle::add_text_layer` | `D3d11VideoCompositorHandle::add_text_layer` | | `CudaVideoCompositorHandle::add_text_layer` | `VulkanVideoCompositorHandle::add_text_layer` |

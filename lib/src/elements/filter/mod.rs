@@ -60,6 +60,8 @@ pub use chroma_key::{D3d11ChromaKey, D3d11ChromaKeyError};
 pub use chroma_key::{VulkanChromaKey, VulkanChromaKeyError};
 #[cfg(feature = "cuda")]
 pub use convert::{CudaConverter, CudaConverterError};
+#[cfg(feature = "vulkan")]
+pub use convert::{VulkanConverter, VulkanConverterError};
 #[cfg(feature = "cuda")]
 pub use decoder::{CudaDecoder, CudaDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

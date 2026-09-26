@@ -67,6 +67,10 @@ compile error with no explanation.
   picture is drawn once written and the output read once drawn. Two 1080p
   layers composite in about 0.35 ms on an RTX 3050.
 
+- **`VulkanConverter`**: NV12 Vulkan frames as BGRA ones, each read by its
+  own colour description — what a BGRA-only Vulkan element is put behind
+  when a decoder's or a camera's NV12 arrives.
+
 - **`VulkanVideoEffect` and `VulkanChromaKey`**: the colour correction,
   luma key and chroma key on BGRA Vulkan frames, evaluating the numbers
   every other backend's evaluates — to within one step of the software
