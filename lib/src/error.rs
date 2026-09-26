@@ -290,6 +290,11 @@ pub enum Error {
     #[error(transparent)]
     VulkanDeviceError(#[from] crate::elements::VulkanDeviceError),
 
+    /// Encoding on Vulkan failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanEncoderError(#[from] crate::elements::VulkanEncoderError),
+
     /// Decoding on Vulkan failed.
     #[cfg(feature = "vulkan")]
     #[error(transparent)]

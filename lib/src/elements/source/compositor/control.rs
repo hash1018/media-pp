@@ -1,8 +1,8 @@
 //! What every video compositor's handles do, whichever backend draws.
 //!
 //! Each compositor has handles of its own — [`SwVideoCompositorHandle`],
-//! `D3d11VideoCompositorHandle`, `CudaVideoCompositorHandle` — with the same
-//! methods, each answering its own error type. These traits are those
+//! `D3d11VideoCompositorHandle`, `CudaVideoCompositorHandle`,
+//! `VulkanVideoCompositorHandle` — with the same methods, each answering its own error type. These traits are those
 //! methods once, answering the crate's [`Error`], so code that builds a
 //! composition — a Scene, an editing timeline — is written once and handed
 //! whichever compositor the platform has.

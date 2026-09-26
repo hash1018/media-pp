@@ -7,6 +7,10 @@ mod video_encode_bin;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
+#[cfg(feature = "vulkan")]
+mod vulkan;
+#[cfg(feature = "vulkan")]
+pub use vulkan::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod windows;
 

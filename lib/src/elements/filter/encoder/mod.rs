@@ -24,3 +24,5 @@ pub use video::{
     EncodeInput, EncodePath, SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec,
     VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
 };
+#[cfg(feature = "vulkan")]
+pub use video::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};

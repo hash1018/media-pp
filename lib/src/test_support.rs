@@ -420,7 +420,11 @@ pub(crate) fn try_single_threaded_d3d11_device()
 /// Poison is stepped over: a test that panicked while holding this must not
 /// turn every later encoder test into a poison error instead of its own
 /// real result.
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "windows", feature = "d3d11")
+))]
 pub(crate) fn encoder_session() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())

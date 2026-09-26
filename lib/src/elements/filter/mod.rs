@@ -91,6 +91,8 @@ pub use encoder::{
     D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderError, D3d11VideoEncoderOptions,
     D3d11VideoInputFormat,
 };
+#[cfg(feature = "vulkan")]
+pub use encoder::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};
 pub use frame_rate_limiter::{FrameRateLimiter, FrameRateLimiterError};
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};

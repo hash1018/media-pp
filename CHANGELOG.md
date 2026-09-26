@@ -62,6 +62,13 @@ compile error with no explanation.
   picture is drawn once written and the output read once drawn. Two 1080p
   layers composite in about 0.35 ms on an RTX 3050.
 
+- **`VulkanEncoder`**: H.264, H.265 and AV1 with Vulkan Video
+  (`VulkanCodec`), from NV12 Vulkan frames — a `VulkanDecoder`'s, an NV12
+  `VulkanVideoCompositor`'s or a `VulkanUpload`'s — with the options
+  `CudaEncoder` takes. A codec the GPU does not encode fails to open, by
+  name. So a whole edit — decode, composite, encode — runs on the GPU on
+  any vendor's hardware whose driver has Vulkan Video.
+
 - **One API for every video compositor: `VideoCompositorControl`,
   `VideoLayerControl` and `TextLayerControl`.** Each compositor's handles
   had the same methods, each answering its own error type; the traits are

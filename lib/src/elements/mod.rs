@@ -125,8 +125,8 @@ pub use filter::{
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 #[cfg(feature = "vulkan")]
 pub use filter::{
-    VulkanDecoder, VulkanDecoderError, VulkanDownload, VulkanDownloadError, VulkanUpload,
-    VulkanUploadError,
+    VulkanCodec, VulkanDecoder, VulkanDecoderError, VulkanDownload, VulkanDownloadError,
+    VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions, VulkanUpload, VulkanUploadError,
 };
 pub use sink::{
     AppSink, CounterHandle, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer,

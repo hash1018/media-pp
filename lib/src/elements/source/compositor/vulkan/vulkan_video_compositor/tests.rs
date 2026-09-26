@@ -740,3 +740,234 @@ fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
         .collect();
     assert_eq!(shown, expected);
 }
+
+/// What an NV12 compositor makes goes straight into a Vulkan encoder, and
+/// decodes back to the picture composed.
+#[test]
+fn a_composition_encodes_without_leaving_the_gpu() {
+    use crate::elements::{SwDecoder, VulkanCodec, VulkanEncoder, VulkanEncoderOptions};
+
+    let Some(device) = try_vulkan_device() else {
+        return;
+    };
+    let _session = crate::test_support::encoder_session();
+    let (width, height) = (256u32, 128u32);
+    let mut encoder = match VulkanEncoder::new(
+        "encoder",
+        &device,
+        VulkanEncoderOptions {
+            codec: VulkanCodec::H264,
+            width,
+            height,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 4_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    ) {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            eprintln!("skipping: no Vulkan H.264 encoder here ({error})");
+            return;
+        }
+    };
+    let packets = capture(&mut encoder);
+    let (mut compositor, handle) = nv12_compositor(&device, width, height);
+    let mut layer = handle
+        .add_source(
+            "grey",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, width / 2, height))
+            },
+        )
+        .unwrap();
+    layer
+        .sink
+        .consume(nv12_frame(&device, 32, 32, 180))
+        .unwrap();
+    for index in 0..10 {
+        // Moved a pixel each frame, so each is composed afresh.
+        layer
+            .layer
+            .set_rect(VideoRect::new(index % 2, 0, width / 2, height))
+            .unwrap();
+        let composed = compositor.compose_frame().expect("compose");
+        encoder
+            .consume(MediaBuffer::Video(Arc::new(composed)))
+            .expect("the composition encodes");
+    }
+    encoder.consume(MediaBuffer::Eos).unwrap();
+
+    let mut decoder = SwDecoder::new("check", encoder.parameters()).unwrap();
+    let decoded = capture(&mut decoder);
+    for packet in packets.lock().unwrap().drain(..) {
+        decoder.consume(packet).unwrap();
+    }
+    let decoded = decoded.lock().unwrap();
+    let pictures: Vec<_> = decoded
+        .iter()
+        .filter_map(|buffer| match buffer {
+            MediaBuffer::Video(frame) => Some(frame),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pictures.len(), 10, "every composition came back");
+    let last = pictures[9];
+    near(luma_at(last, 60, 64), 180, "the layer");
+    near(luma_at(last, 200, 64), 16, "the background");
+}
+
+/// An export as it would run: a file decoded with Vulkan Video, composed
+/// offline by its timestamps and encoded with Vulkan Video into an MP4 —
+/// three pipelines' worth of elements, none of them bringing a picture to
+/// the CPU — ends by itself at `end`, with every frame in the file.
+#[test]
+fn a_file_is_decoded_composed_and_encoded_on_the_gpu() {
+    use crate::elements::{
+        FileDemuxer, FileMuxer, VulkanCodec, VulkanDecoder, VulkanEncoder, VulkanEncoderOptions,
+    };
+    use crate::pipeline::Pipeline;
+    use std::time::{Duration, Instant};
+
+    let Some(device) = try_vulkan_device() else {
+        return;
+    };
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let _session = crate::test_support::encoder_session();
+    let (width, height) = (640u32, 360u32);
+    let encoder = match VulkanEncoder::new(
+        "encoder",
+        &device,
+        VulkanEncoderOptions {
+            codec: VulkanCodec::H264,
+            width,
+            height,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 2_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    ) {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            eprintln!("skipping: no Vulkan H.264 encoder here ({error})");
+            return;
+        }
+    };
+    let (source, streams) = FileDemuxer::open("file", &path).unwrap();
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("the fixture has a picture")
+        .clone();
+    if !VulkanDecoder::supports(video.parameters.id()) {
+        return;
+    }
+    let decoder = VulkanDecoder::new("decoder", video.parameters.clone(), &device, 4).unwrap();
+
+    let (compositor, handle) = VulkanVideoCompositor::with_format(
+        "export",
+        &device,
+        VideoCompositorOptions {
+            width,
+            height,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            mode: RenderMode::Offline {
+                end: Some(Duration::from_secs(2)),
+            },
+            ..VideoCompositorOptions::default()
+        },
+        VulkanFrameFormat::Nv12,
+    )
+    .unwrap();
+    // The picture, scaled up to the frame and letterboxed into it.
+    let whole = handle
+        .add_source(
+            "whole",
+            VideoLayer::new(VideoRect::new(0, 0, width, height)),
+        )
+        .unwrap();
+    let file = std::env::temp_dir().join(format!(
+        "vulkan_export_{}_{:?}.mp4",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let mut muxer = FileMuxer::create(&file).unwrap();
+    let track = muxer.add_stream("video", &encoder).unwrap();
+    let mut sinks = muxer.open().unwrap();
+    let track_sink = sinks.take(track).unwrap();
+
+    let (render, ()) = Pipeline::new("render", compositor, |source, ctx| {
+        let branch = ctx.branch().pipe(encoder).to(track_sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    let (feed, ()) = Pipeline::new("feed", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .queue("packets", 8)
+            .pipe(decoder)
+            .queue("frames", 2)
+            .to(whole.sink)?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    render.run().unwrap();
+    feed.run().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut finished = false;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match render.bus().recv_timeout(left) {
+            Ok(BusEvent::Finished) => {
+                finished = true;
+                break;
+            }
+            Ok(BusEvent::Error { error, .. }) => panic!("the export failed: {error}"),
+            _ => {}
+        }
+    }
+    feed.stop();
+    render.stop();
+    drop(render);
+    assert!(finished, "the export ends by itself at its end");
+
+    let mut input = ffmpeg::format::input(&file).expect("the file reads back");
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .expect("a picture");
+    let (index, parameters) = (stream.index(), stream.parameters());
+    let mut decoder = ffmpeg::codec::context::Context::from_parameters(parameters)
+        .and_then(|context| context.decoder().video())
+        .unwrap();
+    let mut frames = 0;
+    let mut last = None;
+    let mut picture = ffmpeg::frame::Video::empty();
+    let mut take = |decoder: &mut ffmpeg::decoder::Video| {
+        while decoder.receive_frame(&mut picture).is_ok() {
+            frames += 1;
+            last = Some((picture.width(), picture.height(), picture.data(0).to_vec()));
+        }
+    };
+    for (stream, packet) in input.packets() {
+        if stream.index() == index {
+            decoder.send_packet(&packet).unwrap();
+            take(&mut decoder);
+        }
+    }
+    decoder.send_eof().unwrap();
+    take(&mut decoder);
+    let (last_width, last_height, luma) = last.expect("a picture decoded");
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(frames, 60, "two seconds at thirty frames a second");
+    assert_eq!((last_width, last_height), (width, height));
+    // Not the background: the picture is in it.
+    let distinct: std::collections::HashSet<u8> = luma.iter().step_by(97).copied().collect();
+    assert!(distinct.len() > 8, "a picture, not a flat field");
+}

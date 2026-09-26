@@ -883,13 +883,11 @@ impl VulkanVideoCompositor {
                     | vk::ImageUsageFlags::TRANSFER_SRC
                     | vk::ImageUsageFlags::SAMPLED
             }
-            // Written plane by plane by `to_nv12`.
-            VulkanFrameFormat::Nv12 => {
-                vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_DST
-                    | vk::ImageUsageFlags::TRANSFER_SRC
-                    | vk::ImageUsageFlags::SAMPLED
-            }
+            // Written plane by plane by `to_nv12`, and read by an encoder:
+            // FFmpeg's own choice, which is every use the format allows —
+            // storage and encoding among them — on images whose planes can
+            // each be viewed on their own.
+            VulkanFrameFormat::Nv12 => vk::ImageUsageFlags::empty(),
         };
         // SAFETY: `create_frames_ctx`'s contract is a live device context,
         // which the reference just taken is.
