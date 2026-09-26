@@ -46,7 +46,11 @@ impl ChromaKeyMethod {
 /// Only the GPU backends resolve the band ahead of time; the software one
 /// evaluates `threshold`/`smoothing` directly where it needs them, so a build
 /// with neither backend has no caller for this.
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "windows", feature = "d3d11")
+))]
 pub(crate) fn feather_band(threshold: f32, smoothing: f32) -> (f32, f32) {
     let smoothing = smoothing.max(0.0);
     if smoothing > 0.0 {

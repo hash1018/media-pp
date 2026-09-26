@@ -10,6 +10,8 @@ mod cuda;
 mod handle;
 mod options;
 mod sw_chroma_key;
+#[cfg(feature = "vulkan")]
+mod vulkan;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod windows;
 
@@ -18,5 +20,7 @@ pub use cuda::{CudaChromaKey, CudaChromaKeyError};
 pub use handle::ChromaKeyHandle;
 pub use options::{ChromaKeyMethod, ChromaKeyOptions};
 pub use sw_chroma_key::{SwChromaKey, SwChromaKeyError};
+#[cfg(feature = "vulkan")]
+pub use vulkan::{VulkanChromaKey, VulkanChromaKeyError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::{D3d11ChromaKey, D3d11ChromaKeyError};

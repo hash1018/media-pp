@@ -103,6 +103,10 @@ pub enum ElementType {
     VulkanDecoder,
     /// Vulkan Video hardware encoder filter.
     VulkanEncoder,
+    /// Vulkan colour correction and luma key filter.
+    VulkanVideoEffect,
+    /// Vulkan chroma key filter.
+    VulkanChromaKey,
     /// System-memory to Vulkan upload filter.
     VulkanUpload,
     /// Vulkan to system-memory download filter.

@@ -95,6 +95,7 @@ impl<T> ForSize<T> {
     /// cannot allocate for a new size is still the element it was.
     #[cfg(any(
         feature = "cuda",
+        feature = "vulkan",
         all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
     ))]
     pub(crate) fn try_get<E>(

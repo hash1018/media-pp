@@ -20,6 +20,8 @@ mod cuda;
 mod handle;
 mod options;
 mod sw_video_effect;
+#[cfg(feature = "vulkan")]
+mod vulkan;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod windows;
 
@@ -28,5 +30,7 @@ pub use cuda::{CudaVideoEffect, CudaVideoEffectError};
 pub use handle::VideoEffectHandle;
 pub use options::{ColorCorrection, LumaKey, VideoEffect};
 pub use sw_video_effect::{SwVideoEffect, SwVideoEffectError};
+#[cfg(feature = "vulkan")]
+pub use vulkan::{VulkanVideoEffect, VulkanVideoEffectError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::{D3d11VideoEffect, D3d11VideoEffectError};

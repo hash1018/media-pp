@@ -295,6 +295,16 @@ pub enum Error {
     #[error(transparent)]
     VulkanEncoderError(#[from] crate::elements::VulkanEncoderError),
 
+    /// A Vulkan video effect failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanVideoEffectError(#[from] crate::elements::VulkanVideoEffectError),
+
+    /// A Vulkan chroma key failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanChromaKeyError(#[from] crate::elements::VulkanChromaKeyError),
+
     /// Decoding on Vulkan failed.
     #[cfg(feature = "vulkan")]
     #[error(transparent)]

@@ -1,6 +1,7 @@
 //! Vulkan through FFmpeg: the device FFmpeg decodes, encodes and keeps its
 //! Vulkan frames on, which this crate's own Vulkan work runs on as well.
 
+pub(crate) mod bgra_pass;
 pub(crate) mod device;
 pub(crate) mod frame_access;
 pub(crate) mod frames;

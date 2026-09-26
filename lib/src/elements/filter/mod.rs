@@ -56,6 +56,8 @@ pub use chroma_key::{
 pub use chroma_key::{CudaChromaKey, CudaChromaKeyError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use chroma_key::{D3d11ChromaKey, D3d11ChromaKeyError};
+#[cfg(feature = "vulkan")]
+pub use chroma_key::{VulkanChromaKey, VulkanChromaKeyError};
 #[cfg(feature = "cuda")]
 pub use convert::{CudaConverter, CudaConverterError};
 #[cfg(feature = "cuda")]
@@ -124,6 +126,8 @@ pub use video_effect::{
 pub use video_effect::{CudaVideoEffect, CudaVideoEffectError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use video_effect::{D3d11VideoEffect, D3d11VideoEffectError};
+#[cfg(feature = "vulkan")]
+pub use video_effect::{VulkanVideoEffect, VulkanVideoEffectError};
 pub use video_synchronizer::{VideoSynchronizer, VideoSynchronizerError};
 
 /// `avcodec_receive_frame`/`avcodec_receive_packet` use `EAGAIN` to mean

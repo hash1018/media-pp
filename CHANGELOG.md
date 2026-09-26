@@ -67,6 +67,12 @@ compile error with no explanation.
   picture is drawn once written and the output read once drawn. Two 1080p
   layers composite in about 0.35 ms on an RTX 3050.
 
+- **`VulkanVideoEffect` and `VulkanChromaKey`**: the colour correction,
+  luma key and chroma key on BGRA Vulkan frames, evaluating the numbers
+  every other backend's evaluates — to within one step of the software
+  element's — and tuned while they run through the same
+  `VideoEffectHandle` and `ChromaKeyHandle`.
+
 - **`VideoDecodeBin` and `VideoEncodeBin` choose Vulkan too.**
   `DecodeTarget::Vulkan` decodes with Vulkan Video where the stream allows —
   alpha, a codec it has no decoder for and 10-bit going to software and up
