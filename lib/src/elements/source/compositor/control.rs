@@ -2,10 +2,11 @@
 //!
 //! Each compositor has handles of its own — [`SwVideoCompositorHandle`],
 //! `D3d11VideoCompositorHandle`, `CudaVideoCompositorHandle`,
-//! `VulkanVideoCompositorHandle` — with the same methods, each answering its own error type. These traits are those
-//! methods once, answering the crate's [`Error`], so code that builds a
-//! composition — a Scene, an editing timeline — is written once and handed
-//! whichever compositor the platform has.
+//! `VulkanVideoCompositorHandle` — with the same methods, each answering
+//! its own error type. These traits are those methods once, answering the
+//! crate's [`Error`], so code that builds a composition — a Scene, an
+//! editing timeline — is written once and handed whichever compositor the
+//! platform has.
 //!
 //! A backend's own handle is still what to reach for where the backend is
 //! known: it says exactly which errors it can give, and has what only that
