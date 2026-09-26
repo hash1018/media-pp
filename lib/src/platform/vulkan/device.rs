@@ -186,8 +186,7 @@ impl VulkanDevice {
             .iter()
             .find(|family| {
                 family.num > 0
-                    && vk::QueueFlags::from_raw(family.flags as u32)
-                        .contains(vk::QueueFlags::COMPUTE)
+                    && vk::QueueFlags::from_raw(family.flags as _).contains(vk::QueueFlags::COMPUTE)
             })
             .and_then(|family| u32::try_from(family.idx).ok())
             .ok_or_else(|| VulkanDeviceError::NoComputeQueue {

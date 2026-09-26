@@ -50,7 +50,7 @@ pub(crate) unsafe fn images_of(frame: &ffmpeg::frame::Video) -> FrameImages {
             .map(|index| {
                 (
                     vk::Image::from_raw((*vkf).img[index] as u64),
-                    vk::Format::from_raw((*hwctx).format[index]),
+                    vk::Format::from_raw((*hwctx).format[index] as _),
                 )
             })
             .take_while(|(image, _)| *image != vk::Image::null())
@@ -118,12 +118,10 @@ pub(crate) unsafe fn claim(
             claim.barriers.push(
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                    .src_access_mask(vk::AccessFlags2::from_raw(u64::from(
-                        vkf_ref.access[index] as u32,
-                    )))
+                    .src_access_mask(vk::AccessFlags2::from_raw(vkf_ref.access[index] as u64))
                     .dst_stage_mask(stage)
                     .dst_access_mask(access)
-                    .old_layout(vk::ImageLayout::from_raw(vkf_ref.layout[index]))
+                    .old_layout(vk::ImageLayout::from_raw(vkf_ref.layout[index] as _))
                     .new_layout(layout)
                     .src_queue_family_index(vkf_ref.queue_family[index])
                     .dst_queue_family_index(vkf_ref.queue_family[index])
@@ -148,7 +146,7 @@ pub(crate) unsafe fn claim(
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
             );
             vkf_ref.sem_value[index] = value + 1;
-            vkf_ref.layout[index] = layout.as_raw();
+            vkf_ref.layout[index] = layout.as_raw() as _;
             vkf_ref.access[index] = access.as_raw() as _;
         }
         if let Some(unlock) = (*hwctx).unlock_frame {

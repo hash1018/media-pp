@@ -296,10 +296,14 @@ jobs:
           MEDIA_PP_CONTROL_RANDOM: "1"
         run: taskset -c 0,1 cargo test -p media-pp --lib -- conformance
 
-      # Runs without a GPU: the Vulkan loader is opened at run time, the
-      # tests that need a device skip where there is none, and what is left —
-      # the presenting shader compiling, the colour matrices, the letterbox —
-      # is exactly what a runner can check.
+      # Runs without a GPU, on lavapipe — Mesa's Vulkan on the CPU — so what
+      # needs only a Vulkan device runs rather than skips: the compositor, the
+      # uploads and downloads, FFmpeg's frames under its own locks. What needs
+      # a GPU's video blocks, Vulkan Video decode and encode, and the window
+      # renderer's presenting skip, saying why.
+      - name: Install lavapipe
+        run: sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+
       - name: Test (Vulkan)
         run: cargo test -p media-pp --features vulkan
 
