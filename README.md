@@ -30,7 +30,7 @@ own crate, so platform-specific dependencies stay out of the library.
 
 ```toml
 [dependencies]
-media-pp = "0.2"
+media-pp = "0.3"
 ```
 
 FFmpeg 8.0 or newer development libraries must be installed (see

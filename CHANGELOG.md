@@ -8,7 +8,17 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
-## Unreleased
+## 0.3.0
+
+Playback, mostly. A file plays in a window with its sound (`Player`,
+`VideoWindow`, window renderers on D3D11, D3D12 and Vulkan), and can be
+sought, stepped, and played faster, slower or backwards. Most of what breaks
+is the wiring saying more before anything runs: link contracts that name a
+pixel layout, a seek refused from the graph rather than by the source,
+frames that carry their own time base, and a pipeline that hands back what
+its wiring made. Also new: filters that clean up a microphone, speech turned
+into subtitles, a replay buffer, RTMP publishing, and HDR brought to SDR on
+the GPU.
 
 ### Breaking
 
