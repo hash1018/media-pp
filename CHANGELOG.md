@@ -8,6 +8,20 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
+## Unreleased
+
+### Fixed
+
+- **A pipeline stopped as its source ends no longer hangs.** A source that
+  ended drops the `Queue` behind it with its `Eos` still inside, and a
+  dropped queue stays until that `Eos` is handed on. Stopped a moment
+  later, the pipeline's terminals hold for good, and the `Stop` message
+  never reaches a queue whose source has already gone — so the queue waited
+  on a terminal that would never take anything, the source's thread waited
+  on the queue, and `Pipeline::stop` and its drop waited on the source. A
+  stopped pipeline is now owed no end: the queue abandons what it holds, as
+  a stop means to.
+
 ## 0.3.0
 
 Playback, mostly. A file plays in a window with its sound (`Player`,

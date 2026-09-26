@@ -710,8 +710,17 @@ impl Inbox {
     /// is queued then is abandoned, and a downstream that will never take
     /// it — a wedged one, which is why a branch gets detached — must not
     /// keep the drop waiting.
+    ///
+    /// Nor once the pipeline is stopped, `Eos` or not. A stop abandons the
+    /// stream, and nothing downstream takes anything again: the terminals
+    /// hold for good. A source that ended just before a stop dropped its
+    /// queue with an `Eos` in it, a moment before the `Stop` message could
+    /// reach the queue behind it — and the worker waited, for a terminal
+    /// that would never be ready, while the stop joined the source and the
+    /// source joined it.
     fn owes_an_end(&self) -> bool {
         self.ends_owed.load(Ordering::Acquire) > 0
+            && !self.state.as_deref().is_some_and(PlaybackState::is_stopped)
     }
 
     /// Counts out `ends` `Eos` that will not be handed on from here.
@@ -1441,6 +1450,55 @@ mod tests {
             "the drop waited on a downstream that will never take anything"
         );
         assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    /// An `Eos` is owed only while something could still take it. Once the
+    /// pipeline is stopped its terminals hold for good, so a queue dropped
+    /// with an `Eos` in it ends rather than waiting on them.
+    ///
+    /// What obs-rs's CI hung on for hours: a capture whose source ended as
+    /// it was stopped. The source dropped its queue with the `Eos` in it,
+    /// the `Stop` could no longer reach the queue behind a source that had
+    /// gone, and the worker waited on a terminal that the stop made hold —
+    /// while the stop joined the source, and the source joined the worker.
+    #[test]
+    fn a_stopped_pipeline_is_owed_no_end() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let sink = Gated {
+            pp_log: element_pp_log(ElementType::Other, "gated", None),
+            // Closed, as a terminal is once the pipeline is stopped.
+            open: Arc::new(AtomicBool::new(false)),
+            count: Arc::new(AtomicUsize::new(0)),
+            ended: ended.clone(),
+        };
+        let state = PlaybackState::new();
+        let (bus, _bus_rx) = Bus::new();
+        let mut queue = Queue::spawn_with_policy_using(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+            None,
+            Some(Arc::clone(&state)),
+            |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
+        )
+        .unwrap();
+        queue.consume(packet()).unwrap();
+        queue.consume(MediaBuffer::Eos).unwrap();
+        state.observe(&ControlMsg::Stop);
+
+        let (dropped, done) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(queue);
+            let _ = dropped.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the drop waited to hand an Eos to a stopped pipeline"
+        );
+        assert!(!ended.load(Ordering::SeqCst), "and nothing took it");
     }
 
     #[test]

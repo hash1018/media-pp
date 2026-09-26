@@ -275,6 +275,12 @@ impl PlaybackState {
         self.lock().holds()
     }
 
+    /// Whether the pipeline has been stopped: nothing will flow again, and
+    /// nothing still held is owed to anything.
+    pub(crate) fn is_stopped(&self) -> bool {
+        matches!(*self.lock(), Phase::Stopped)
+    }
+
     /// The preroll whose holds are in force: the one under way, or the one
     /// the pause that followed it keeps — see the module docs.
     pub(crate) fn preroll(&self) -> Option<Arc<PrerollContext>> {
