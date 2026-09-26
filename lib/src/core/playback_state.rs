@@ -275,6 +275,14 @@ impl PlaybackState {
         self.lock().holds()
     }
 
+    /// Wakes whatever waits on this pipeline without moving it on: a
+    /// terminal that has just made room says so this way, and the `Queue`
+    /// in front of it, which looks at a downstream that was not ready only
+    /// when rung or on a slow timer, looks again at once.
+    pub(crate) fn wake(&self) {
+        self.ring();
+    }
+
     /// Whether the pipeline has been stopped: nothing will flow again, and
     /// nothing still held is owed to anything.
     pub(crate) fn is_stopped(&self) -> bool {

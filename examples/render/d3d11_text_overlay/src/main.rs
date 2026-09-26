@@ -93,6 +93,7 @@ mod windows_example {
                 frame_rate,
                 background: Color::new(24, 24, 24),
                 background_alpha: 255,
+                mode: media_pp::elements::RenderMode::Live,
             },
         )?;
 

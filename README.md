@@ -152,6 +152,13 @@ Video, by backend:
 and `VideoEncodeBin` among the encode row and the downloads, for H.264 from
 system memory, D3D11 or CUDA.
 
+Every compositor runs live by default, emitting at its own rate and drawing
+whatever each input last handed over — a preview, a recording, a broadcast.
+Built with `RenderMode::Offline` it renders instead: each output frame is
+made as soon as every input has said what it shows at that time, placed by
+the inputs' own timestamps, and the next follows at once — an export as
+fast as decoding allows, frame-exact whatever rates the inputs run at.
+
 `VideoWindow` is the one to reach for first: a window of its own on whichever
 renderer the platform has, on a GPU of its own, taking frames in system
 memory — a software decode goes straight in, with no `#[cfg]` in the program.

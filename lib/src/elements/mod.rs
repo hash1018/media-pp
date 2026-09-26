@@ -163,9 +163,9 @@ pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxer, FileDemuxerError, FileDemuxerHandle, MixFormat, MixerHandle, MixerInputSink,
-    PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RtspSource,
-    RtspSourceError, StreamInfo, SwTextLayerError, SwTextLayerHandle, SwVideoCompositor,
-    SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
+    PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RenderMode,
+    RtspSource, RtspSourceError, StreamInfo, SwTextLayerError, SwTextLayerHandle,
+    SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
     SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions, TestAudioSource,
     TestVideoOptions, TestVideoSource, TextLayer, VideoCompositorOptions, VideoFit, VideoInputId,
     VideoLayer, VideoRect, VideoSourceRect,

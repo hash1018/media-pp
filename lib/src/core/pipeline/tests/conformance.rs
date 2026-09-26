@@ -183,6 +183,11 @@ enum Shape {
     /// branches of their own, one slower to take a picture than the other
     /// — so one prerolls while the other is still catching up.
     TeeOfPackets,
+    /// An offline compositor fed by a live source through a pipeline of its
+    /// own — a render waiting on its input, holding that pipeline back a
+    /// frame ahead of what it has drawn, while its own is paused, resumed
+    /// and stopped. Not sought: it is not seekable.
+    Offline,
 }
 
 impl Shape {
@@ -200,6 +205,8 @@ struct Rig {
     pipeline: Arc<Pipeline>,
     duration: Option<Duration>,
     terminals: Vec<(&'static str, Arc<Mutex<Vec<Entry>>>)>,
+    /// Pipelines feeding the one under test, kept running as long as it is.
+    _feeds: Vec<Arc<Pipeline>>,
 }
 
 impl Rig {
@@ -224,6 +231,55 @@ impl Rig {
                 pipeline,
                 duration: None,
                 terminals: vec![("screen", log)],
+                _feeds: Vec::new(),
+            });
+        }
+
+        if let Shape::Offline = shape {
+            let (recorder, log) = Recorder::new("screen", ffmpeg::Rational::new(1, 30));
+            let (compositor, handle) = crate::elements::SwVideoCompositor::new(
+                "offline",
+                crate::elements::VideoCompositorOptions {
+                    width: 64,
+                    height: 48,
+                    frame_rate: ffmpeg::Rational::new(30, 1),
+                    mode: crate::elements::RenderMode::Offline { end: None },
+                    ..Default::default()
+                },
+            )
+            .expect("make the offline compositor");
+            let input = handle
+                .add_source(
+                    "camera",
+                    crate::elements::VideoLayer::new(crate::elements::VideoRect::new(0, 0, 64, 48)),
+                )
+                .expect("add its input");
+            let source = TestVideoSource::new(
+                "live",
+                TestVideoOptions {
+                    width: 64,
+                    height: 48,
+                    frame_rate: ffmpeg::Rational::new(30, 1),
+                },
+            );
+            let (feed, ()) = Pipeline::new("conformance-offline-feed", source, |source, ctx| {
+                let branch = ctx.branch().queue("camera-frames", 4).to(input.sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the feed");
+            feed.run().expect("run the feed");
+            let (pipeline, ()) = Pipeline::new("conformance-offline", compositor, |source, ctx| {
+                let branch = ctx.branch().queue("composed", 4).to(recorder)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the offline pipeline");
+            return Some(Self {
+                pipeline,
+                duration: None,
+                terminals: vec![("screen", log)],
+                _feeds: vec![feed],
             });
         }
 
@@ -328,6 +384,7 @@ impl Rig {
             pipeline,
             duration: Some(duration),
             terminals,
+            _feeds: Vec::new(),
         })
     }
 
@@ -1132,6 +1189,11 @@ fn one_deep_queues_keep_their_control_promises() {
 #[test]
 fn a_live_source_keeps_its_control_promises() {
     conform(Shape::Live);
+}
+
+#[test]
+fn an_offline_render_keeps_its_control_promises() {
+    conform(Shape::Offline);
 }
 
 #[test]

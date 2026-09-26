@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -16,10 +16,15 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use crate::rate::FrameRate;
 
 use super::super::sw_video_compositor::VideoCompositorOptions;
+use super::super::timed_inputs::{
+    OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, run_offline,
+};
 use super::super::video_layer::{
     self, LayerGeometry, MAX_DIMENSION, VideoInputId, VideoLayer, VideoLayerError, VideoRect,
     VideoSourceRect, layer_geometry,
 };
+use crate::elements::source::render_mode::{MediaTime, RenderMode};
+use crate::playback_state::Bell;
 use crate::{
     buffer::{MediaBuffer, picture_id, release_picture},
     bus::{Bus, BusEvent},
@@ -199,15 +204,28 @@ pub enum CudaVideoCompositorError {
     /// an input nothing would ever read.
     #[error("the compositor has stopped")]
     Stopped,
+
+    /// An offline compositor's rate cannot change while it runs — see
+    /// [`crate::elements::SwVideoCompositorError::FixedFrameRate`].
+    #[error("an offline compositor's frame rate is fixed at construction")]
+    FixedFrameRate,
+
+    /// An offline compositor was given a frame it cannot place in time —
+    /// one with no `pts`, or no time base to read it in.
+    #[error("an offline compositor's input frame has no {0}")]
+    UntimedFrame(&'static str),
 }
 
-struct VideoInput {
+pub(crate) struct VideoInput {
     id: VideoInputId,
     /// The hot producer/consumer path is an atomic latest-value slot:
     /// input pipelines replace the pointer without taking the layer lock,
     /// and the compositor acquires a stable Arc snapshot independently.
     latest_frame: ArcSwapOption<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     layer: Mutex<VideoLayer>,
+    /// An offline compositor's input fed through a sink — see the CPU
+    /// compositor's field of the same name.
+    timed: Option<TimedFeed>,
 }
 
 struct CompositorShared {
@@ -227,6 +245,22 @@ struct CompositorShared {
     /// can reject a frame from another CUDA context before it ever reaches a
     /// device pointer. Only ever compared.
     device_ctx: *const ffi::AVHWDeviceContext,
+    mode: RenderMode,
+    /// Rung by an offline compositor's input sinks as frames or their ends
+    /// arrive.
+    arrived: Bell,
+    /// The output frame an offline compositor is making next.
+    next_output: AtomicI64,
+    /// Whether an offline compositor has ever had an input fed through a sink.
+    fed: AtomicBool,
+}
+
+impl CompositorShared {
+    /// Output frame `index` as a time, counted in output frames.
+    fn output_time(&self, index: i64) -> MediaTime {
+        MediaTime::new(index, self.frame_rate.get().invert())
+            .expect("the frame rate was validated as positive")
+    }
 }
 
 // SAFETY: `device_ctx` is only ever compared, never dereferenced, and the
@@ -268,6 +302,10 @@ impl CudaVideoCompositorHandle {
     /// does not, and without a [`crate::elements::Pacer`] in front of this
     /// sink it is read as fast as it decodes, and all but the last frame of
     /// each tick are passed over.
+    ///
+    /// Offline the input is read by its timestamps instead, and held back a
+    /// frame ahead of the output — see [`crate::elements::RenderMode::Offline`]
+    /// and [`crate::elements::SwVideoCompositorHandle::add_source`].
     pub fn add_source(
         &self,
         name: impl Into<String>,
@@ -278,11 +316,17 @@ impl CudaVideoCompositorHandle {
             return Err(CudaVideoCompositorError::Stopped);
         };
         let name: Arc<str> = name.into().into();
+        let timed = (!shared.mode.is_live()).then(|| {
+            shared.fed.store(true, Ordering::Release);
+            let next = shared.next_output.load(Ordering::Acquire);
+            TimedFeed::new(shared.arrived.clone(), shared.output_time(next))
+        });
         let id = VideoInputId(shared.next_input_id.fetch_add(1, Ordering::Relaxed));
         let input = Arc::new(VideoInput {
             id,
             latest_frame: ArcSwapOption::empty(),
             layer: Mutex::new(layer),
+            timed,
         });
         shared
             .inputs
@@ -317,7 +361,9 @@ impl CudaVideoCompositorHandle {
     ///
     /// Fails with [`CudaVideoCompositorError::InvalidFrameRate`] for a rate that is not
     /// positive, and [`CudaVideoCompositorError::Stopped`] for a compositor that has already
-    /// been dropped; either way the running rate is left alone. The same contract as
+    /// been dropped; either way the running rate is left alone. An offline
+    /// compositor refuses any change with
+    /// [`CudaVideoCompositorError::FixedFrameRate`]. The same contract as
     /// `D3d11VideoCompositorHandle::set_frame_rate`, and with the same
     /// caveat: [`CudaVideoCompositor::time_base`] is the reciprocal of this
     /// and the output `pts` is a tick counter in those units, so a change
@@ -332,9 +378,14 @@ impl CudaVideoCompositorHandle {
         &self,
         frame_rate: ffmpeg::Rational,
     ) -> std::result::Result<(), CudaVideoCompositorError> {
-        self.shared
+        let shared = self
+            .shared
             .upgrade()
-            .ok_or(CudaVideoCompositorError::Stopped)?
+            .ok_or(CudaVideoCompositorError::Stopped)?;
+        if !shared.mode.is_live() {
+            return Err(CudaVideoCompositorError::FixedFrameRate);
+        }
+        shared
             .frame_rate
             .set(frame_rate)
             .map_err(|_| CudaVideoCompositorError::InvalidFrameRate(frame_rate))
@@ -390,6 +441,16 @@ impl CudaVideoCompositorInputSink {
 }
 
 impl Element for CudaVideoCompositorInputSink {
+    /// Remembers the pipeline this input is fed by, which an offline
+    /// compositor rings as it makes room.
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        if let Some(input) = self.input.upgrade()
+            && let Some(timed) = &input.timed
+        {
+            timed.fed_by(&context.state);
+        }
+    }
+
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -416,6 +477,15 @@ impl Sink for CudaVideoCompositorInputSink {
         )
     }
 
+    /// Always, live: an input keeps only its latest frame. Offline, not
+    /// once it holds a frame past the output time being made.
+    fn ready_consume(&mut self) -> bool {
+        self.input
+            .upgrade()
+            .and_then(|input| input.timed.as_ref().map(TimedFeed::wants_more))
+            .unwrap_or(true)
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
@@ -428,13 +498,31 @@ impl Sink for CudaVideoCompositorInputSink {
                 // `cuMemcpy2D` at all.
                 validate_input_frame(&frame, shared.device_ctx)
                     .inspect_err(|error| pp_error!(self, "{error}"))?;
-                if let Some(input) = self.input.upgrade() {
+                let Some(input) = self.input.upgrade() else {
+                    return Ok(());
+                };
+                let Some(timed) = &input.timed else {
                     input.latest_frame.store(Some(frame));
-                }
-                Ok(())
+                    return Ok(());
+                };
+                timed.push(frame).map_err(|untimed| {
+                    CudaVideoCompositorError::UntimedFrame(match untimed {
+                        Untimed::NoTimestamp => "timestamp",
+                        Untimed::NoTimeBase => "time base",
+                    })
+                    .into()
+                })
             }
             MediaBuffer::Eos => {
-                pp_debug!(self, "input reached eos; leaving its last frame in place");
+                // Offline an input's end is part of the picture: what it holds
+                // is still shown to its last frame's end.
+                if let Some(input) = self.input.upgrade()
+                    && let Some(timed) = &input.timed
+                {
+                    timed.end();
+                } else {
+                    pp_debug!(self, "input reached eos; leaving its last frame in place");
+                }
                 Ok(())
             }
             other => {
@@ -450,6 +538,13 @@ impl Sink for CudaVideoCompositorInputSink {
         // goes with it — same as `SwVideoCompositorInputSink`.
         if matches!(msg, ControlMsg::Stop) {
             self.detach();
+        }
+        // Offline, what an input held before a flush is not what comes after.
+        if matches!(msg, ControlMsg::Flush)
+            && let Some(input) = self.input.upgrade()
+            && let Some(timed) = &input.timed
+        {
+            timed.clear();
         }
         Ok(())
     }
@@ -735,6 +830,10 @@ impl CudaVideoCompositor {
             frame_rate: FrameRate::new(options.frame_rate),
             driver: driver.clone(),
             device_ctx,
+            mode: options.mode,
+            arrived: Bell::new(),
+            next_output: AtomicI64::new(0),
+            fed: AtomicBool::new(false),
         });
         pp_info!(
             pp_log: &pp_log,
@@ -1274,11 +1373,21 @@ impl Source for CudaVideoCompositor {
 
 impl SourceElement for CudaVideoCompositor {
     fn is_live(&self) -> bool {
-        true
+        self.options.mode.is_live()
     }
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
+        match self.options.mode {
+            RenderMode::Live => self.run_live(control, bus),
+            RenderMode::Offline { end } => run_offline(self, control, bus, end),
+        }
+    }
+}
+
+impl CudaVideoCompositor {
+    /// Emits at its own rate by the wall clock — see [`RenderMode::Live`].
+    fn run_live(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
@@ -1309,6 +1418,58 @@ impl SourceElement for CudaVideoCompositor {
                 ticks.missed(missed);
             }
         }
+    }
+}
+
+impl TimedInput for VideoInput {
+    fn timed(&self) -> Option<&TimedFeed> {
+        self.timed.as_ref()
+    }
+
+    fn show(&self, picture: Option<Picture>) {
+        self.latest_frame.store(picture);
+    }
+}
+
+impl OfflineCompositor for CudaVideoCompositor {
+    type Input = VideoInput;
+
+    fn inputs(&self) -> Vec<Arc<VideoInput>> {
+        self.shared
+            .inputs
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn frame_index(&self) -> i64 {
+        self.frame_index
+    }
+
+    fn output_time(&self, index: i64) -> MediaTime {
+        self.shared.output_time(index)
+    }
+
+    fn fed(&self) -> bool {
+        self.shared.fed.load(Ordering::Acquire)
+    }
+
+    fn arrived(&self) -> Bell {
+        self.shared.arrived.clone()
+    }
+
+    fn making(&self, index: i64) {
+        self.shared.next_output.store(index, Ordering::Release);
+    }
+
+    fn draw(&mut self, bus: &Bus) -> Result<()> {
+        Ok(self.push_frame(bus)?)
+    }
+
+    fn end_render(&mut self) -> Result<()> {
+        self.pad.push_eos(&self.pp_log)
     }
 }
 

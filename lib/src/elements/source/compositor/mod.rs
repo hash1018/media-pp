@@ -8,6 +8,7 @@
 mod sw_text_layer;
 mod sw_video_compositor;
 mod text_layer;
+mod timed_inputs;
 mod video_layer;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod windows;

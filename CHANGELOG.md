@@ -8,6 +8,39 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
+## Unreleased
+
+### Breaking
+
+- **`VideoCompositorOptions` has a `mode`.** Every video compositor —
+  `SwVideoCompositor`, `D3d11VideoCompositor`, `CudaVideoCompositor` —
+  takes it, and `RenderMode::Live` is what they all did before. A struct
+  literal naming every field adds `mode: RenderMode::Live`; one ending in
+  `..Default::default()` needs nothing. Each compositor's error enum gains
+  `FixedFrameRate` and `UntimedFrame`, which a `match` on it needs arms for.
+
+### Added
+
+- **A video compositor can render offline:
+  `RenderMode::Offline { end }`.** Live, a compositor emits at its own rate
+  by the wall clock and draws whatever each input last handed over.
+  Offline it emits the frame for each output time as soon as every input
+  has said what it shows then, and goes straight on to the next — as fast
+  as the inputs decode, and the same output however fast that is. What an
+  export wants, where the live mode is what a preview wants.
+
+  Each input frame is placed by its own `pts`, read in its own time base
+  and compared exactly (not through floating-point seconds), so inputs at
+  different rates and in different time bases line up to the frame. A
+  frame is shown until its duration runs out or the next begins. An input
+  holds its pipeline back once it has a frame past the output time being
+  made — a `Queue` somewhere in that pipeline is what waits — and is
+  woken the moment the compositor moves on. The render ends at `end`, or,
+  without one, once every input fed through a sink has ended and been
+  shown to its last frame's end. An offline compositor is not live, and
+  refuses `set_frame_rate` with `FixedFrameRate`: every output time is a
+  count of its frames.
+
 ## 0.3.1
 
 One fix: a pipeline stopped just as its source ended could hang for good.

@@ -424,6 +424,7 @@ fn compositor_input_churn_does_not_grow_process_memory() {
             frame_rate: frame_rate(),
             background: Color::new(16, 16, 16),
             background_alpha: 255,
+            mode: media_pp::elements::RenderMode::Live,
         },
     )
     .expect("create the compositor");
@@ -513,6 +514,7 @@ fn a_running_compositor_does_not_grow_while_it_answers_frames() {
             frame_rate: frame_rate(),
             background: Color::new(16, 16, 16),
             background_alpha: 255,
+            mode: media_pp::elements::RenderMode::Live,
         },
     )
     .expect("create the compositor");
@@ -753,6 +755,7 @@ mod d3d11 {
                 frame_rate: frame_rate(),
                 background: Color::new(0, 255, 0),
                 background_alpha: 255,
+                mode: media_pp::elements::RenderMode::Live,
             },
         )
         .expect("build the compositor");
@@ -1122,6 +1125,7 @@ mod d3d11 {
                 frame_rate: frame_rate(),
                 background: Color::new(16, 16, 16),
                 background_alpha: 255,
+                mode: media_pp::elements::RenderMode::Live,
             },
         )
         .expect("build the compositor");
@@ -2123,6 +2127,7 @@ mod cuda {
                 frame_rate: frame_rate(),
                 background: Color::new(16, 16, 16),
                 background_alpha: 255,
+                mode: media_pp::elements::RenderMode::Live,
             },
         )
         .expect("build the compositor");

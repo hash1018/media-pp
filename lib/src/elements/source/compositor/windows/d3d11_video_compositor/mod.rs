@@ -12,7 +12,7 @@ use std::{
     ffi::c_void,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -43,10 +43,13 @@ pub use video_handle::D3d11VideoLayerHandle;
 
 use super::super::{
     text_layer::{TextLayer, load_font},
+    timed_inputs::{OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, run_offline},
     video_layer::{
         self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError, VideoSourceRect,
     },
 };
+use crate::elements::source::render_mode::{MediaTime, RenderMode};
+use crate::playback_state::Bell;
 use crate::{
     buffer::{MediaBuffer, picture_id, picture_is_referenced, release_picture},
     bus::{Bus, BusEvent},
@@ -222,6 +225,16 @@ pub enum D3d11VideoCompositorError {
     /// an input nothing would ever read.
     #[error("the compositor has stopped")]
     Stopped,
+
+    /// An offline compositor's rate cannot change while it runs — see
+    /// [`crate::elements::SwVideoCompositorError::FixedFrameRate`].
+    #[error("an offline compositor's frame rate is fixed at construction")]
+    FixedFrameRate,
+
+    /// An offline compositor was given a frame it cannot place in time —
+    /// one with no `pts`, or no time base to read it in.
+    #[error("an offline compositor's input frame has no {0}")]
+    UntimedFrame(&'static str),
 }
 
 fn map_layer_error(error: VideoLayerError) -> D3d11VideoCompositorError {
@@ -244,7 +257,7 @@ fn map_layer_error(error: VideoLayerError) -> D3d11VideoCompositorError {
     }
 }
 
-struct GpuVideoInput {
+pub(crate) struct GpuVideoInput {
     id: video_layer::VideoInputId,
     /// Same shape as the CPU `SwVideoCompositor`'s own `VideoInput` field —
     /// `ffmpeg::frame::Video` is the same Rust type whether its pixel data
@@ -254,6 +267,9 @@ struct GpuVideoInput {
     /// stable `Arc` snapshot independently.
     latest_frame: ArcSwapOption<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     layer: Mutex<VideoLayer>,
+    /// An offline compositor's input fed through a sink — see the CPU
+    /// compositor's field of the same name.
+    timed: Option<TimedFeed>,
 }
 
 struct D3d11CompositorShared {
@@ -267,6 +283,22 @@ struct D3d11CompositorShared {
     /// requiring a separately-threaded-through device parameter that could
     /// drift from the real one.
     device: ID3D11Device,
+    mode: RenderMode,
+    /// Rung by an offline compositor's input sinks as frames or their ends
+    /// arrive.
+    arrived: Bell,
+    /// The output frame an offline compositor is making next.
+    next_output: AtomicI64,
+    /// Whether an offline compositor has ever had an input fed through a sink.
+    fed: AtomicBool,
+}
+
+impl D3d11CompositorShared {
+    /// Output frame `index` as a time, counted in output frames.
+    fn output_time(&self, index: i64) -> MediaTime {
+        MediaTime::new(index, self.frame_rate.get().invert())
+            .expect("the frame rate was validated as positive")
+    }
 }
 
 /// A cheaply cloneable handle for adding and removing
@@ -296,17 +328,24 @@ impl D3d11VideoCompositorHandle {
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
+        fed: bool,
     ) -> std::result::Result<D3d11VideoLayerHandle, D3d11VideoCompositorError> {
         video_layer::validate_layer(layer).map_err(map_layer_error)?;
         let Some(shared) = self.shared.upgrade() else {
             return Err(D3d11VideoCompositorError::Stopped);
         };
         let name: Arc<str> = name.into().into();
+        let timed = (fed && !shared.mode.is_live()).then(|| {
+            shared.fed.store(true, Ordering::Release);
+            let next = shared.next_output.load(Ordering::Acquire);
+            TimedFeed::new(shared.arrived.clone(), shared.output_time(next))
+        });
         let id = video_layer::VideoInputId(shared.next_input_id.fetch_add(1, Ordering::Relaxed));
         let input = Arc::new(GpuVideoInput {
             id,
             latest_frame: ArcSwapOption::empty(),
             layer: Mutex::new(layer),
+            timed,
         });
         shared
             .inputs
@@ -332,12 +371,16 @@ impl D3d11VideoCompositorHandle {
     /// does not, and without a [`crate::elements::Pacer`] in front of this
     /// sink it is read as fast as it decodes, and all but the last frame of
     /// each tick are passed over.
+    ///
+    /// Offline the input is read by its timestamps instead, and held back a
+    /// frame ahead of the output — see [`crate::elements::RenderMode::Offline`]
+    /// and [`crate::elements::SwVideoCompositorHandle::add_source`].
     pub fn add_source(
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
     ) -> std::result::Result<D3d11VideoCompositorInput, D3d11VideoCompositorError> {
-        let layer_handle = self.register_input(name, layer)?;
+        let layer_handle = self.register_input(name, layer, true)?;
         Ok(D3d11VideoCompositorInput {
             sink: Box::new(D3d11VideoCompositorInputSink {
                 name: layer_handle.name.clone(),
@@ -359,7 +402,7 @@ impl D3d11VideoCompositorHandle {
         name: impl Into<String>,
         layer: VideoLayer,
     ) -> std::result::Result<D3d11VideoLayerHandle, D3d11VideoCompositorError> {
-        self.register_input(name, layer)
+        self.register_input(name, layer, false)
     }
 
     /// Removes `name`; existing sinks and handles become stale immediately.
@@ -374,6 +417,8 @@ impl D3d11VideoCompositorHandle {
     /// Fails with [`D3d11VideoCompositorError::InvalidFrameRate`] for a rate that is not
     /// positive, and [`D3d11VideoCompositorError::Stopped`] for a compositor that has already
     /// been dropped; either way the running rate is left alone.
+    /// An offline compositor refuses any change with
+    /// [`D3d11VideoCompositorError::FixedFrameRate`].
     ///
     /// # What moves with it
     ///
@@ -398,9 +443,14 @@ impl D3d11VideoCompositorHandle {
         &self,
         frame_rate: ffmpeg::Rational,
     ) -> std::result::Result<(), D3d11VideoCompositorError> {
-        self.shared
+        let shared = self
+            .shared
             .upgrade()
-            .ok_or(D3d11VideoCompositorError::Stopped)?
+            .ok_or(D3d11VideoCompositorError::Stopped)?;
+        if !shared.mode.is_live() {
+            return Err(D3d11VideoCompositorError::FixedFrameRate);
+        }
+        shared
             .frame_rate
             .set(frame_rate)
             .map_err(|_| D3d11VideoCompositorError::InvalidFrameRate(frame_rate))
@@ -496,6 +546,16 @@ impl D3d11VideoCompositorInputSink {
 }
 
 impl Element for D3d11VideoCompositorInputSink {
+    /// Remembers the pipeline this input is fed by, which an offline
+    /// compositor rings as it makes room.
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        if let Some(input) = self.input.upgrade()
+            && let Some(timed) = &input.timed
+        {
+            timed.fed_by(&context.state);
+        }
+    }
+
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -523,6 +583,15 @@ impl Sink for D3d11VideoCompositorInputSink {
         )
     }
 
+    /// Always, live: an input keeps only its latest frame. Offline, not
+    /// once it holds a frame past the output time being made.
+    fn ready_consume(&mut self) -> bool {
+        self.input
+            .upgrade()
+            .and_then(|input| input.timed.as_ref().map(TimedFeed::wants_more))
+            .unwrap_or(true)
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let Some(input) = self.input.upgrade() else {
             return Ok(());
@@ -532,11 +601,25 @@ impl Sink for D3d11VideoCompositorInputSink {
                 if frame.format() != ffmpeg::format::Pixel::D3D11 {
                     return Err(D3d11VideoCompositorError::UnsupportedFormat(frame.format()).into());
                 }
-                input.latest_frame.store(Some(frame));
-                Ok(())
+                let Some(timed) = &input.timed else {
+                    input.latest_frame.store(Some(frame));
+                    return Ok(());
+                };
+                timed.push(frame).map_err(|untimed| {
+                    D3d11VideoCompositorError::UntimedFrame(match untimed {
+                        Untimed::NoTimestamp => "timestamp",
+                        Untimed::NoTimeBase => "time base",
+                    })
+                    .into()
+                })
             }
+            // Offline an input's end is part of the picture: what it holds is
+            // still shown to its last frame's end.
             MediaBuffer::Eos => {
-                self.detach();
+                match &input.timed {
+                    Some(timed) => timed.end(),
+                    None => self.detach(),
+                }
                 Ok(())
             }
             MediaBuffer::Packet(_) => {
@@ -554,6 +637,9 @@ impl Sink for D3d11VideoCompositorInputSink {
             ControlMsg::Flush => {
                 if let Some(input) = self.input.upgrade() {
                     input.latest_frame.store(None);
+                    if let Some(timed) = &input.timed {
+                        timed.clear();
+                    }
                 }
             }
             ControlMsg::Pause
@@ -855,6 +941,10 @@ impl D3d11VideoCompositor {
             next_input_id: AtomicU64::new(1),
             frame_rate: FrameRate::new(options.frame_rate),
             device: device.clone(),
+            mode: options.mode,
+            arrived: Bell::new(),
+            next_output: AtomicI64::new(0),
+            fed: AtomicBool::new(false),
         });
 
         // SAFETY: `device` is live; the helper reads only static shader bytes
@@ -1348,11 +1438,21 @@ impl Source for D3d11VideoCompositor {
 
 impl SourceElement for D3d11VideoCompositor {
     fn is_live(&self) -> bool {
-        true
+        self.options.mode.is_live()
     }
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
+        match self.options.mode {
+            RenderMode::Live => self.run_live(control, bus),
+            RenderMode::Offline { end } => run_offline(self, control, bus, end),
+        }
+    }
+}
+
+impl D3d11VideoCompositor {
+    /// Emits at its own rate by the wall clock — see [`RenderMode::Live`].
+    fn run_live(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
@@ -1383,6 +1483,58 @@ impl SourceElement for D3d11VideoCompositor {
                 ticks.missed(missed);
             }
         }
+    }
+}
+
+impl TimedInput for GpuVideoInput {
+    fn timed(&self) -> Option<&TimedFeed> {
+        self.timed.as_ref()
+    }
+
+    fn show(&self, picture: Option<Picture>) {
+        self.latest_frame.store(picture);
+    }
+}
+
+impl OfflineCompositor for D3d11VideoCompositor {
+    type Input = GpuVideoInput;
+
+    fn inputs(&self) -> Vec<Arc<GpuVideoInput>> {
+        self.shared
+            .inputs
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn frame_index(&self) -> i64 {
+        self.frame_index
+    }
+
+    fn output_time(&self, index: i64) -> MediaTime {
+        self.shared.output_time(index)
+    }
+
+    fn fed(&self) -> bool {
+        self.shared.fed.load(Ordering::Acquire)
+    }
+
+    fn arrived(&self) -> Bell {
+        self.shared.arrived.clone()
+    }
+
+    fn making(&self, index: i64) {
+        self.shared.next_output.store(index, Ordering::Release);
+    }
+
+    fn draw(&mut self, bus: &Bus) -> Result<()> {
+        Ok(self.push_frame(bus)?)
+    }
+
+    fn end_render(&mut self) -> Result<()> {
+        self.pad.push_eos(&self.pp_log)
     }
 }
 

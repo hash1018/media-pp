@@ -20,6 +20,7 @@ mod capture;
 mod compositor;
 mod file_demuxer;
 mod pipeline_bridge;
+pub(crate) mod render_mode;
 mod rtsp_source;
 mod shared_texture;
 mod synthetic;
@@ -86,6 +87,7 @@ pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle, StreamI
 pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };
+pub use render_mode::RenderMode;
 pub use rtsp_source::{RtspSource, RtspSourceError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use shared_texture::{

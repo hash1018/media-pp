@@ -148,6 +148,7 @@ fn invalid_text_layer_does_not_replace_an_existing_registration() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (_compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options).unwrap();
     let existing = handle
@@ -174,6 +175,7 @@ fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (_compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options).unwrap();
     let D3d11VideoCompositorInput { mut sink, layer } = handle
@@ -206,6 +208,7 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -266,6 +269,7 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
             // Black, so what lands is the layer's own contribution alone.
             background: Color::BLACK,
             background_alpha: 255,
+            mode: crate::elements::RenderMode::Live,
         };
         let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
             .expect("D3d11VideoCompositor::new should succeed");
@@ -338,6 +342,7 @@ fn a_layer_draws_only_its_source_region() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -384,6 +389,7 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -484,6 +490,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -544,6 +551,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -620,6 +628,7 @@ fn an_unchanged_scene_is_composed_once() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -690,6 +699,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -750,6 +760,7 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -813,6 +824,7 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -903,6 +915,7 @@ fn resuming_after_a_pause_preserves_output_phase() {
         frame_rate: ffmpeg::Rational::new(10, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (compositor, _handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -963,6 +976,7 @@ fn its_ticks_are_reported_through_its_pipeline() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (compositor, _handle) = D3d11VideoCompositor::new("ticking", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -1011,6 +1025,7 @@ fn the_frame_rate_can_be_changed_while_it_is_running() {
             frame_rate: ffmpeg::Rational::new(60, 1),
             background: Color::BLACK,
             background_alpha: 255,
+            mode: crate::elements::RenderMode::Live,
         },
     )
     .expect("compositor");
@@ -1042,6 +1057,7 @@ fn an_impossible_frame_rate_is_refused_and_changes_nothing() {
             frame_rate: ffmpeg::Rational::new(60, 1),
             background: Color::BLACK,
             background_alpha: 255,
+            mode: crate::elements::RenderMode::Live,
         },
     )
     .expect("compositor");
@@ -1078,6 +1094,7 @@ fn the_setter_reports_a_compositor_that_is_gone() {
             frame_rate: ffmpeg::Rational::new(60, 1),
             background: Color::BLACK,
             background_alpha: 255,
+            mode: crate::elements::RenderMode::Live,
         },
     )
     .expect("compositor");
@@ -1109,6 +1126,7 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 0,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -1154,6 +1172,7 @@ fn a_system_memory_frame_goes_in_through_an_upload() {
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
     };
     let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -1219,4 +1238,112 @@ fn a_system_memory_frame_goes_in_through_an_upload() {
         "the YUV420P overlay drawn as {:?}",
         [red, green, blue]
     );
+}
+
+/// Offline, every output time shows what the inputs' own timestamps say —
+/// the CPU compositor's contract, on the GPU: red over the first second in
+/// quarter-second frames counted in milliseconds, blue over it from 0.5 s
+/// to 0.9 s counted at 90 kHz, at ten frames a second, and the render ends
+/// by itself once both inputs have.
+#[test]
+fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
+    use crate::pipeline::Pipeline;
+
+    let Some(gpu) = try_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        width: 2,
+        height: 2,
+        frame_rate: ffmpeg::Rational::new(10, 1),
+        mode: RenderMode::Offline { end: None },
+        ..VideoCompositorOptions::default()
+    };
+    let (compositor, handle) = D3d11VideoCompositor::new("offline", &gpu, options).unwrap();
+
+    let timed = |bgra: [u8; 4], pts: i64, base: ffmpeg::Rational, duration: i64| {
+        let mut frame = wrap_d3d11_texture(bgra_texture(gpu.device(), 2, 2, bgra), 2, 2).unwrap();
+        frame.set_pts(Some(pts));
+        crate::buffer::set_time_base(&mut frame, base);
+        // SAFETY: a plain field of a frame this test owns outright.
+        unsafe { (*frame.as_mut_ptr()).duration = duration };
+        MediaBuffer::video(frame)
+    };
+    let feed = |name: &str, z_index: i32, frames: Vec<MediaBuffer>| {
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
+        layer.z_index = z_index;
+        let sink = handle.add_source(name, layer).unwrap().sink;
+        let (source, pusher) = crate::elements::AppSource::new(name, 64);
+        let (pipeline, ()) = Pipeline::new(format!("{name}-feed"), source, |source, ctx| {
+            let branch = ctx.branch().queue(format!("{name}-queue"), 2).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        for frame in frames {
+            pusher.push(frame).unwrap();
+        }
+        pipeline
+    };
+    let ms = ffmpeg::Rational::new(1, 1000);
+    let khz90 = ffmpeg::Rational::new(1, 90_000);
+    const RED: [u8; 4] = [0, 0, 255, 255];
+    const BLUE: [u8; 4] = [255, 0, 0, 255];
+    let red = [0, 250, 500, 750]
+        .map(|start| timed(RED, start, ms, 250))
+        .into();
+    let blue = [45_000, 63_000]
+        .map(|start| timed(BLUE, start, khz90, 18_000))
+        .into();
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let capture = CapturingSink {
+        received: received.clone(),
+        pp_log: element_pp_log(ElementType::Other, "capture", None),
+    };
+    let (render, ()) = Pipeline::new("render", compositor, |source, ctx| {
+        let branch = ctx.branch().to(capture)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    render.run().unwrap();
+    // Each feed's pusher is dropped as the closure returns, which ends it.
+    let _red = feed("red", 0, red);
+    let _blue = feed("blue", 1, blue);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut finished = false;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        if let Ok(BusEvent::Finished) = render.bus().recv_timeout(left) {
+            finished = true;
+            break;
+        }
+    }
+    render.stop();
+    assert!(finished, "the render ends once its inputs have");
+
+    let frames: Vec<_> = received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|buffer| match buffer {
+            MediaBuffer::Video(frame) => Some(Arc::clone(frame)),
+            _ => None,
+        })
+        .collect();
+    let shown: Vec<_> = frames
+        .into_iter()
+        .map(|frame| {
+            (
+                frame.pts().unwrap(),
+                pixel(&download_frame(&gpu, frame), 0, 0),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = (0..10)
+        .map(|index| (index, if (5..9).contains(&index) { BLUE } else { RED }))
+        .collect();
+    assert_eq!(shown, expected);
 }

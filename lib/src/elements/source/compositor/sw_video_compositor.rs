@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -14,10 +14,15 @@ use arc_swap::ArcSwapOption;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
+use super::timed_inputs::{
+    OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, run_offline,
+};
 use super::video_layer::{
     self, LayerGeometry, MAX_DIMENSION, VideoFit, VideoInputId, VideoLayer, VideoLayerError,
     VideoRect, VideoSourceRect,
 };
+use crate::elements::source::render_mode::{MediaTime, RenderMode};
+use crate::playback_state::Bell;
 use crate::{
     buffer::{MediaBuffer, picture_id, picture_is_referenced, release_picture},
     bus::{Bus, BusEvent},
@@ -60,6 +65,10 @@ pub struct VideoCompositorOptions {
     /// `CudaVideoCompositor` composes in NV12, which has no alpha at all, and
     /// refuses a translucent background rather than quietly making it opaque.
     pub background_alpha: u8,
+    /// Whether output is made by the wall clock or by the inputs'
+    /// timestamps — see [`RenderMode`]. Settled here, since whether the
+    /// element is live is settled as a pipeline is wired.
+    pub mode: RenderMode,
 }
 
 impl Default for VideoCompositorOptions {
@@ -70,6 +79,7 @@ impl Default for VideoCompositorOptions {
             frame_rate: ffmpeg::Rational::new(30, 1),
             background: Color::BLACK,
             background_alpha: 255,
+            mode: RenderMode::Live,
         }
     }
 }
@@ -159,9 +169,21 @@ pub enum SwVideoCompositorError {
     /// an input nothing would ever read.
     #[error("the compositor has stopped")]
     Stopped,
+
+    /// An offline compositor's rate cannot change while it runs: every
+    /// output time is a count of its frames, and a render made half at one
+    /// rate and half at another is not the render that was asked for.
+    #[error("an offline compositor's frame rate is fixed at construction")]
+    FixedFrameRate,
+
+    /// An offline compositor was given a frame it cannot place in time —
+    /// one with no `pts`, or no time base to read it in (see
+    /// [`crate::buffer::time_base`]).
+    #[error("an offline compositor's input frame has no {0}")]
+    UntimedFrame(&'static str),
 }
 
-struct VideoInput {
+pub(crate) struct VideoInput {
     id: VideoInputId,
     /// The hot producer/consumer path is an atomic latest-value slot:
     /// input pipelines replace the pointer without taking the layer lock,
@@ -170,6 +192,11 @@ struct VideoInput {
     /// Layer changes are infrequent and update several related fields as
     /// one coherent value, so a small dedicated lock remains appropriate.
     layer: Mutex<VideoLayer>,
+    /// An offline compositor's input fed through a sink: its frames in time
+    /// order, from which each output time's picture is chosen into
+    /// `latest_frame` just before it is drawn. `None` live, and for an input
+    /// whose frame is set through its layer handle.
+    timed: Option<TimedFeed>,
 }
 
 struct CompositorShared {
@@ -178,6 +205,24 @@ struct CompositorShared {
     /// The output rate, which the tick loop reads each pass and
     /// [`SwVideoCompositorHandle::set_frame_rate`] writes.
     frame_rate: Arc<FrameRate>,
+    mode: RenderMode,
+    /// Rung by an offline compositor's input sinks as frames or their ends
+    /// arrive, which is what the compositor waits on.
+    arrived: Bell,
+    /// The output frame an offline compositor is making next, so an input
+    /// added while it runs starts from there.
+    next_output: AtomicI64,
+    /// Whether an offline compositor has ever had an input fed through a
+    /// sink. Until one is added, "every input has ended" is not an end.
+    fed: AtomicBool,
+}
+
+impl CompositorShared {
+    /// Output frame `index` as a time, counted in output frames.
+    fn output_time(&self, index: i64) -> MediaTime {
+        MediaTime::new(index, self.frame_rate.get().invert())
+            .expect("the frame rate was validated as positive")
+    }
 }
 
 /// A cheaply cloneable handle for adding and removing compositor inputs.
@@ -208,12 +253,18 @@ impl SwVideoCompositorHandle {
     /// does not, and without a [`crate::elements::Pacer`] in front of this
     /// sink it is read as fast as it decodes, and all but the last frame of
     /// each tick are passed over.
+    ///
+    /// Offline the input is read the other way round: each frame is placed
+    /// by its own timestamp, and the sink holds its pipeline back once it
+    /// has a frame past the output time being made — which takes a
+    /// [`crate::queue::Queue`] somewhere in that pipeline to wait on, and no
+    /// `Pacer`. The input's end is an `Eos` through the sink, or its removal.
     pub fn add_source(
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
     ) -> std::result::Result<SwVideoCompositorInput, SwVideoCompositorError> {
-        let layer = self.register_input(name, layer)?;
+        let layer = self.register(name, layer, true)?;
         Ok(SwVideoCompositorInput {
             sink: Box::new(SwVideoCompositorInputSink {
                 name: layer.name.clone(),
@@ -233,16 +284,33 @@ impl SwVideoCompositorHandle {
         name: impl Into<String>,
         layer: VideoLayer,
     ) -> std::result::Result<SwVideoLayerHandle, SwVideoCompositorError> {
+        self.register(name, layer, false)
+    }
+
+    /// Registers an input, fed through a sink where `fed` says so — which,
+    /// offline, is an input whose frames are placed by their timestamps.
+    fn register(
+        &self,
+        name: impl Into<String>,
+        layer: VideoLayer,
+        fed: bool,
+    ) -> std::result::Result<SwVideoLayerHandle, SwVideoCompositorError> {
         validate_layer(layer)?;
         let Some(shared) = self.shared.upgrade() else {
             return Err(SwVideoCompositorError::Stopped);
         };
         let name: Arc<str> = name.into().into();
+        let timed = (fed && !shared.mode.is_live()).then(|| {
+            shared.fed.store(true, Ordering::Release);
+            let next = shared.next_output.load(Ordering::Acquire);
+            TimedFeed::new(shared.arrived.clone(), shared.output_time(next))
+        });
         let id = VideoInputId(shared.next_input_id.fetch_add(1, Ordering::Relaxed));
         let input = Arc::new(VideoInput {
             id,
             latest_frame: ArcSwapOption::empty(),
             layer: Mutex::new(layer),
+            timed,
         });
         shared
             .inputs
@@ -271,7 +339,9 @@ impl SwVideoCompositorHandle {
     ///
     /// Fails with [`SwVideoCompositorError::InvalidFrameRate`] for a rate that is not
     /// positive, and [`SwVideoCompositorError::Stopped`] for a compositor that has already
-    /// been dropped; either way the running rate is left alone. The same contract as the GPU
+    /// been dropped; either way the running rate is left alone. An offline compositor
+    /// refuses any change with [`SwVideoCompositorError::FixedFrameRate`].
+    /// The same contract as the GPU
     /// compositors' setters, and with the same caveat: [`
     /// SwVideoCompositor::time_base`] is the reciprocal of this and the output
     /// `pts` is a tick counter in those units, so a change re-means every
@@ -281,9 +351,14 @@ impl SwVideoCompositorHandle {
         &self,
         frame_rate: ffmpeg::Rational,
     ) -> std::result::Result<(), SwVideoCompositorError> {
-        self.shared
+        let shared = self
+            .shared
             .upgrade()
-            .ok_or(SwVideoCompositorError::Stopped)?
+            .ok_or(SwVideoCompositorError::Stopped)?;
+        if !shared.mode.is_live() {
+            return Err(SwVideoCompositorError::FixedFrameRate);
+        }
+        shared
             .frame_rate
             .set(frame_rate)
             .map_err(|_| SwVideoCompositorError::InvalidFrameRate(frame_rate))
@@ -451,6 +526,17 @@ impl SwVideoCompositorInputSink {
 }
 
 impl Element for SwVideoCompositorInputSink {
+    /// Remembers the pipeline this input is fed by, which an offline
+    /// compositor rings as it makes room, so the `Queue` in front of this sink
+    /// looks again at once.
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        if let Some(input) = self.input.upgrade()
+            && let Some(timed) = &input.timed
+        {
+            timed.fed_by(&context.state);
+        }
+    }
+
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -478,23 +564,48 @@ impl Sink for SwVideoCompositorInputSink {
         ))
     }
 
+    /// Always, live: an input keeps only its latest frame. Offline, not
+    /// once it holds a frame past the output time being made.
+    fn ready_consume(&mut self) -> bool {
+        self.input
+            .upgrade()
+            .and_then(|input| input.timed.as_ref().map(TimedFeed::wants_more))
+            .unwrap_or(true)
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let Some(input) = self.input.upgrade() else {
             return Ok(());
         };
-        match buf {
-            MediaBuffer::Video(frame) => {
+        match (buf, &input.timed) {
+            (MediaBuffer::Video(frame), None) => {
                 input.latest_frame.store(Some(frame));
                 Ok(())
             }
-            MediaBuffer::Eos => {
+            (MediaBuffer::Video(frame), Some(timed)) => timed.push(frame).map_err(|untimed| {
+                SwVideoCompositorError::UntimedFrame(match untimed {
+                    Untimed::NoTimestamp => "timestamp",
+                    Untimed::NoTimeBase => "time base",
+                })
+                .into()
+            }),
+            (MediaBuffer::Eos, None) => {
                 self.detach();
                 Ok(())
             }
-            MediaBuffer::Packet(_) => {
+            // Offline an input's end is part of the picture: what it holds is
+            // still shown to its last frame's end, after which it is no longer
+            // waited for.
+            (MediaBuffer::Eos, Some(timed)) => {
+                timed.end();
+                Ok(())
+            }
+            (MediaBuffer::Packet(_), _) => {
                 Err(SwVideoCompositorError::UnsupportedBuffer("Packet").into())
             }
-            MediaBuffer::Audio(_) => Err(SwVideoCompositorError::UnsupportedBuffer("Audio").into()),
+            (MediaBuffer::Audio(_), _) => {
+                Err(SwVideoCompositorError::UnsupportedBuffer("Audio").into())
+            }
         }
     }
 
@@ -504,6 +615,9 @@ impl Sink for SwVideoCompositorInputSink {
             ControlMsg::Flush => {
                 if let Some(input) = self.input.upgrade() {
                     input.latest_frame.store(None);
+                    if let Some(timed) = &input.timed {
+                        timed.clear();
+                    }
                 }
             }
             ControlMsg::Pause
@@ -690,6 +804,10 @@ impl SwVideoCompositor {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
             frame_rate: FrameRate::new(options.frame_rate),
+            mode: options.mode,
+            arrived: Bell::new(),
+            next_output: AtomicI64::new(0),
+            fed: AtomicBool::new(false),
         });
         let (width, height) = (options.width, options.height);
         let output_pool = UnboundObjectPool::new(
@@ -699,10 +817,11 @@ impl SwVideoCompositor {
         );
         pp_info!(
             pp_log: &pp_log,
-            "created: {}x{}, frame_rate={}, format=BGRA",
+            "created: {}x{}, frame_rate={}, format=BGRA, mode={:?}",
             width,
             height,
-            options.frame_rate
+            options.frame_rate,
+            options.mode
         );
         Ok((
             Self {
@@ -952,11 +1071,21 @@ impl Source for SwVideoCompositor {
 
 impl SourceElement for SwVideoCompositor {
     fn is_live(&self) -> bool {
-        true
+        self.options.mode.is_live()
     }
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
+        match self.options.mode {
+            RenderMode::Live => self.run_live(control, bus),
+            RenderMode::Offline { end } => run_offline(self, control, bus, end),
+        }
+    }
+}
+
+impl SwVideoCompositor {
+    /// Emits at its own rate by the wall clock — see [`RenderMode::Live`].
+    fn run_live(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
@@ -987,6 +1116,58 @@ impl SourceElement for SwVideoCompositor {
                 ticks.missed(missed);
             }
         }
+    }
+}
+
+impl TimedInput for VideoInput {
+    fn timed(&self) -> Option<&TimedFeed> {
+        self.timed.as_ref()
+    }
+
+    fn show(&self, picture: Option<Picture>) {
+        self.latest_frame.store(picture);
+    }
+}
+
+impl OfflineCompositor for SwVideoCompositor {
+    type Input = VideoInput;
+
+    fn inputs(&self) -> Vec<Arc<VideoInput>> {
+        self.shared
+            .inputs
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn frame_index(&self) -> i64 {
+        self.frame_index
+    }
+
+    fn output_time(&self, index: i64) -> MediaTime {
+        self.shared.output_time(index)
+    }
+
+    fn fed(&self) -> bool {
+        self.shared.fed.load(Ordering::Acquire)
+    }
+
+    fn arrived(&self) -> Bell {
+        self.shared.arrived.clone()
+    }
+
+    fn making(&self, index: i64) {
+        self.shared.next_output.store(index, Ordering::Release);
+    }
+
+    fn draw(&mut self, bus: &Bus) -> Result<()> {
+        Ok(self.push_frame(bus)?)
+    }
+
+    fn end_render(&mut self) -> Result<()> {
+        self.pad.push_eos(&self.pp_log)
     }
 }
 
@@ -1187,6 +1368,7 @@ mod tests {
             frame_rate: ffmpeg::Rational::new(30, 1),
             background: Color::BLACK,
             background_alpha: 255,
+            mode: crate::elements::RenderMode::Live,
         }
     }
 
@@ -1817,6 +1999,7 @@ mod tests {
                 frame_rate: ffmpeg::Rational::new(60, 1),
                 background: Color::BLACK,
                 background_alpha: 255,
+                mode: crate::elements::RenderMode::Live,
             },
         )
         .expect("compositor");
@@ -1954,5 +2137,298 @@ mod tests {
                 SwVideoCompositorError::SourceRemoved
             ))
         ));
+    }
+
+    const RED: Color = Color::new(255, 0, 0);
+    const BLUE: Color = Color::new(0, 0, 255);
+
+    /// A 2x2 `color` frame at `pts` in `time_base`, lasting `duration` of it.
+    fn timed_frame(
+        color: Color,
+        pts: i64,
+        time_base: ffmpeg::Rational,
+        duration: i64,
+    ) -> MediaBuffer {
+        let pool = UnboundObjectPool::new(
+            0,
+            || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 2, 2),
+            |_| {},
+        );
+        let mut frame = pool.get();
+        fill_background(&mut frame, color, 255);
+        frame.set_pts(Some(pts));
+        crate::buffer::set_time_base(&mut frame, time_base);
+        // SAFETY: a plain field of a frame this test owns outright.
+        unsafe { (*frame.as_mut_ptr()).duration = duration };
+        MediaBuffer::Video(Arc::new(frame))
+    }
+
+    fn offline(end: Option<Duration>, frame_rate: ffmpeg::Rational) -> VideoCompositorOptions {
+        VideoCompositorOptions {
+            frame_rate,
+            mode: RenderMode::Offline { end },
+            ..options(2, 2)
+        }
+    }
+
+    /// One input as an export has it: its own pipeline, a `Queue` for the
+    /// compositor to hold back, and nothing pacing it. The handle is what
+    /// feeds it; dropping it ends the input.
+    fn feed(
+        handle: &SwVideoCompositorHandle,
+        name: &str,
+        z_index: i32,
+    ) -> (
+        Arc<crate::pipeline::Pipeline>,
+        crate::elements::AppSourceHandle,
+    ) {
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
+        layer.z_index = z_index;
+        let (sink, _layer) = input(handle, name, layer);
+        let (source, pusher) = crate::elements::AppSource::new(name, 64);
+        let (pipeline, ()) =
+            crate::pipeline::Pipeline::new(format!("{name}-feed"), source, |source, ctx| {
+                let branch = ctx.branch().queue(format!("{name}-queue"), 2).to(sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .unwrap();
+        pipeline.run().unwrap();
+        (pipeline, pusher)
+    }
+
+    /// What a render made — each frame's `pts` and top-left pixel — whether
+    /// it finished, and its pipeline, still to be stopped.
+    type Rendered = (Vec<(i64, [u8; 4])>, bool, Arc<crate::pipeline::Pipeline>);
+
+    /// The compositor in a pipeline of its own, what it made collected, run
+    /// until it finishes or `limit` passes.
+    fn render(compositor: SwVideoCompositor, limit: Duration) -> Rendered {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let sink = CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        };
+        let (pipeline, ()) = crate::pipeline::Pipeline::new("render", compositor, |source, ctx| {
+            let branch = ctx.branch().to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        let deadline = Instant::now() + limit;
+        let mut finished = false;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            if let Ok(crate::bus::BusEvent::Finished) = pipeline.bus().recv_timeout(left) {
+                finished = true;
+                break;
+            }
+        }
+        let frames = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|buffer| match buffer {
+                MediaBuffer::Video(frame) => Some((frame.pts().unwrap(), pixel(frame, 0, 0))),
+                _ => None,
+            })
+            .collect();
+        (frames, finished, pipeline)
+    }
+
+    const BGRA_RED: [u8; 4] = [0, 0, 255, 255];
+    const BGRA_BLUE: [u8; 4] = [255, 0, 0, 255];
+    const BGRA_BLACK: [u8; 4] = [0, 0, 0, 255];
+
+    /// Every output time shows the frame its inputs' timestamps say, however
+    /// differently those inputs count time — one in milliseconds, one at
+    /// 90 kHz — and the render ends by itself once both have ended.
+    ///
+    /// Red covers the first second in quarter-second frames; blue lies over
+    /// it from 0.5 s to 0.9 s. At ten frames a second that is five red, four
+    /// blue and one red again, and nothing after the red's last frame ends.
+    #[test]
+    fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
+        let (compositor, handle) =
+            SwVideoCompositor::new("offline", offline(None, ffmpeg::Rational::new(10, 1))).unwrap();
+        let (_red_feed, red) = feed(&handle, "red", 0);
+        let (_blue_feed, blue) = feed(&handle, "blue", 1);
+        let ms = ffmpeg::Rational::new(1, 1000);
+        let khz90 = ffmpeg::Rational::new(1, 90_000);
+        let feeding = thread::spawn(move || {
+            for start in [0, 250, 500, 750] {
+                red.push(timed_frame(RED, start, ms, 250)).unwrap();
+            }
+            for start in [45_000, 63_000] {
+                blue.push(timed_frame(BLUE, start, khz90, 18_000)).unwrap();
+            }
+        });
+
+        let (frames, finished, pipeline) = render(compositor, Duration::from_secs(10));
+        feeding.join().unwrap();
+        pipeline.stop();
+
+        assert!(finished, "the render ends once its inputs have");
+        let expected: Vec<_> = (0..10)
+            .map(|index| {
+                let colour = if (5..9).contains(&index) {
+                    BGRA_BLUE
+                } else {
+                    BGRA_RED
+                };
+                (index, colour)
+            })
+            .collect();
+        assert_eq!(frames, expected);
+    }
+
+    /// Nothing paces an offline render but its inputs: ten seconds of
+    /// thirty-frame input render in a fraction of that.
+    #[test]
+    fn an_offline_render_runs_faster_than_real_time() {
+        let (compositor, handle) =
+            SwVideoCompositor::new("offline", offline(None, ffmpeg::Rational::new(30, 1))).unwrap();
+        let (_feed, pusher) = feed(&handle, "input", 0);
+        let base = ffmpeg::Rational::new(1, 30);
+        let feeding = thread::spawn(move || {
+            for index in 0..300 {
+                pusher.push(timed_frame(RED, index, base, 1)).unwrap();
+            }
+        });
+
+        let started = Instant::now();
+        let (frames, finished, pipeline) = render(compositor, Duration::from_secs(20));
+        let took = started.elapsed();
+        feeding.join().unwrap();
+        pipeline.stop();
+
+        assert!(finished);
+        assert_eq!(frames.len(), 300);
+        assert!(
+            took < Duration::from_secs(5),
+            "ten seconds of input took {took:?}"
+        );
+    }
+
+    /// An input that is late is waited for, not drawn as whatever it last
+    /// had: blue lies over red at every output time, including the first,
+    /// though it sends nothing for a while after red has sent everything.
+    #[test]
+    fn an_offline_render_waits_for_an_input_that_is_late() {
+        let (compositor, handle) =
+            SwVideoCompositor::new("offline", offline(None, ffmpeg::Rational::new(10, 1))).unwrap();
+        let (_red_feed, red) = feed(&handle, "red", 0);
+        let (_blue_feed, blue) = feed(&handle, "blue", 1);
+        let base = ffmpeg::Rational::new(1, 10);
+        let feeding = thread::spawn(move || {
+            for index in 0..5 {
+                red.push(timed_frame(RED, index, base, 1)).unwrap();
+            }
+            drop(red);
+            thread::sleep(Duration::from_millis(300));
+            for index in 0..5 {
+                blue.push(timed_frame(BLUE, index, base, 1)).unwrap();
+            }
+        });
+
+        let (frames, finished, pipeline) = render(compositor, Duration::from_secs(10));
+        feeding.join().unwrap();
+        pipeline.stop();
+
+        assert!(finished);
+        assert_eq!(
+            frames,
+            (0..5).map(|index| (index, BGRA_BLUE)).collect::<Vec<_>>()
+        );
+    }
+
+    /// With an end of its own, a render stops exactly there: short of what
+    /// its inputs hold, or past it with the background filling the rest.
+    #[test]
+    fn an_offline_render_ends_where_it_is_told() {
+        let base = ffmpeg::Rational::new(1, 10);
+        for (end, expected) in [
+            (Duration::from_millis(500), vec![BGRA_RED; 5]),
+            (
+                Duration::from_millis(1500),
+                [vec![BGRA_RED; 10], vec![BGRA_BLACK; 5]].concat(),
+            ),
+        ] {
+            let (compositor, handle) =
+                SwVideoCompositor::new("offline", offline(Some(end), ffmpeg::Rational::new(10, 1)))
+                    .unwrap();
+            let (_feed, pusher) = feed(&handle, "input", 0);
+            let feeding = thread::spawn(move || {
+                for index in 0..10 {
+                    // Refused once the render is over, which is not a failure
+                    // of this test: it ended short of what was fed.
+                    if pusher.push(timed_frame(RED, index, base, 1)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let (frames, finished, pipeline) = render(compositor, Duration::from_secs(10));
+            pipeline.stop();
+            drop(_feed);
+            feeding.join().unwrap();
+
+            assert!(finished, "{end:?}");
+            let colours: Vec<_> = frames.iter().map(|(_, colour)| *colour).collect();
+            assert_eq!(colours, expected, "{end:?}");
+        }
+    }
+
+    /// An offline compositor is not live, which is what lets a pipeline
+    /// preroll it, and its rate stays what it was built with: every output
+    /// time is a count of its frames.
+    #[test]
+    fn an_offline_compositor_is_not_live_and_keeps_its_rate() {
+        let (compositor, handle) =
+            SwVideoCompositor::new("offline", offline(None, ffmpeg::Rational::new(10, 1))).unwrap();
+        assert!(!compositor.is_live());
+        assert!(matches!(
+            handle.set_frame_rate(ffmpeg::Rational::new(30, 1)),
+            Err(SwVideoCompositorError::FixedFrameRate)
+        ));
+        assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(10, 1));
+
+        let (live, _) = SwVideoCompositor::new("live", options(2, 2)).unwrap();
+        assert!(live.is_live());
+    }
+
+    /// A render waiting on an input that sends nothing is still stopped at
+    /// once, and a frame that cannot be placed in time is refused, not
+    /// guessed at.
+    #[test]
+    fn an_offline_render_stops_while_it_waits_and_refuses_an_untimed_frame() {
+        let (compositor, handle) =
+            SwVideoCompositor::new("offline", offline(None, ffmpeg::Rational::new(10, 1))).unwrap();
+        let (mut sink, _layer) = input(
+            &handle,
+            "input",
+            VideoLayer::new(VideoRect::new(0, 0, 2, 2)),
+        );
+        let untimed = MediaBuffer::Video(solid_frame(2, 2, RED));
+        assert!(sink.consume(untimed).is_err());
+
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let capture = CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        };
+        let (pipeline, ()) = crate::pipeline::Pipeline::new("render", compositor, |source, ctx| {
+            let branch = ctx.branch().to(capture)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let stopping = Instant::now();
+        pipeline.stop();
+        drop(pipeline);
+        assert!(stopping.elapsed() < Duration::from_secs(2));
+        assert!(received.lock().unwrap().is_empty(), "nothing was drawn");
     }
 }

@@ -15,6 +15,7 @@ fn options(width: u32, height: u32) -> VideoCompositorOptions {
         height,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
         background: Color::BLACK,
     }
 }
@@ -976,6 +977,7 @@ fn a_translucent_background_is_refused() {
     let opaque = options(64, 64);
     let translucent = VideoCompositorOptions {
         background_alpha: 128,
+        mode: crate::elements::RenderMode::Live,
         ..opaque
     };
 
@@ -1005,6 +1007,7 @@ fn a_bgra_canvas_keeps_what_no_layer_covered_transparent() {
     let (width, height) = (64u32, 64u32);
     let options = VideoCompositorOptions {
         background_alpha: 0,
+        mode: crate::elements::RenderMode::Live,
         ..options(width, height)
     };
     let Ok((mut compositor, handle)) =
@@ -1092,6 +1095,7 @@ fn an_nv12_layer_lands_opaque_on_a_bgra_canvas() {
     let (width, height) = (64u32, 64u32);
     let options = VideoCompositorOptions {
         background_alpha: 0,
+        mode: crate::elements::RenderMode::Live,
         ..options(width, height)
     };
     let Ok((mut compositor, handle)) =
@@ -1156,6 +1160,7 @@ fn a_text_layer_draws_on_a_bgra_canvas() {
     let (width, height) = (64u32, 64u32);
     let options = VideoCompositorOptions {
         background_alpha: 0,
+        mode: crate::elements::RenderMode::Live,
         ..options(width, height)
     };
     let Ok((mut compositor, handle)) =
@@ -1270,4 +1275,129 @@ fn an_nv12_layer_is_composed_by_its_own_colour() {
             "{what}: got {got}, want {want} — BT.601 read as BT.709 would be {bt709:?}"
         );
     }
+}
+
+/// Offline, every output time shows what the inputs' own timestamps say —
+/// the CPU compositor's contract, on the device: a luma-100 input over the
+/// first second in quarter-second frames counted in milliseconds, a
+/// luma-200 one over it from 0.5 s to 0.9 s counted at 90 kHz, at ten
+/// frames a second; and the render ends by itself once both inputs have.
+#[test]
+fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
+    use crate::pipeline::Pipeline;
+
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        frame_rate: ffmpeg::Rational::new(10, 1),
+        mode: RenderMode::Offline { end: None },
+        ..options(64, 64)
+    };
+    let Ok((compositor, handle)) = CudaVideoCompositor::new("offline", &device, options) else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+
+    let timed = |luma: u8, pts: i64, base: ffmpeg::Rational, duration: i64| {
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+        let uploaded = capture(&mut upload);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
+        let y_stride = frame.stride(0);
+        frame.data_mut(0)[..y_stride * 64].fill(luma);
+        let uv_stride = frame.stride(1);
+        frame.data_mut(1)[..uv_stride * 32].fill(128);
+        frame.set_pts(Some(pts));
+        crate::buffer::set_time_base(&mut frame, base);
+        // SAFETY: a plain field of a frame this test owns outright.
+        unsafe { (*frame.as_mut_ptr()).duration = duration };
+        upload.consume(MediaBuffer::video(frame)).expect("upload");
+        uploaded.lock().unwrap().remove(0)
+    };
+    let feed = |name: &str, z_index: i32, frames: Vec<MediaBuffer>| {
+        let layer = VideoLayer {
+            z_index,
+            fit: VideoFit::Stretch,
+            ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+        };
+        let sink = handle.add_source(name, layer).unwrap().sink;
+        let (source, pusher) = crate::elements::AppSource::new(name, 64);
+        let (pipeline, ()) = Pipeline::new(format!("{name}-feed"), source, |source, ctx| {
+            let branch = ctx.branch().queue(format!("{name}-queue"), 2).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        for frame in frames {
+            pusher.push(frame).unwrap();
+        }
+        pipeline
+    };
+    let ms = ffmpeg::Rational::new(1, 1000);
+    let khz90 = ffmpeg::Rational::new(1, 90_000);
+    let low: Vec<_> = [0, 250, 500, 750]
+        .into_iter()
+        .map(|start| timed(100, start, ms, 250))
+        .collect();
+    let high: Vec<_> = [45_000, 63_000]
+        .into_iter()
+        .map(|start| timed(200, start, khz90, 18_000))
+        .collect();
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = crate::test_support::CapturingSink {
+        received: received.clone(),
+        pp_log: element_pp_log(ElementType::Other, "capture", None),
+    };
+    let (render, ()) = Pipeline::new("render", compositor, |source, ctx| {
+        let branch = ctx.branch().to(sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    render.run().unwrap();
+    // Each feed's pusher is dropped as the closure returns, which ends it.
+    let _low = feed("low", 0, low);
+    let _high = feed("high", 1, high);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut finished = false;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        if let Ok(BusEvent::Finished) = render.bus().recv_timeout(left) {
+            finished = true;
+            break;
+        }
+    }
+    render.stop();
+    assert!(finished, "the render ends once its inputs have");
+
+    let composed: Vec<_> = received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|buffer| match buffer {
+            MediaBuffer::Video(frame) => Some(Arc::clone(frame)),
+            _ => None,
+        })
+        .collect();
+    let shown: Vec<_> = composed
+        .into_iter()
+        .map(|frame| {
+            let pts = frame.pts().unwrap();
+            let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
+            let received = capture(&mut download);
+            download
+                .consume(MediaBuffer::Video(frame))
+                .expect("download");
+            let MediaBuffer::Video(frame) = received.lock().unwrap().remove(0) else {
+                panic!("expected a video frame");
+            };
+            (pts, luma_at(&frame, 0, 0))
+        })
+        .collect();
+    let expected: Vec<_> = (0..10)
+        .map(|index| (index, if (5..9).contains(&index) { 200 } else { 100 }))
+        .collect();
+    assert_eq!(shown, expected);
 }

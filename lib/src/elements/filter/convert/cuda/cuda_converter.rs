@@ -978,6 +978,7 @@ mod tests {
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 background: Color::BLACK,
                 background_alpha: 255,
+                mode: crate::elements::RenderMode::Live,
             },
         ) else {
             eprintln!("skipping: this machine cannot open a CUDA compositor");
