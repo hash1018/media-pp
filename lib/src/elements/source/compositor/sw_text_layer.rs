@@ -185,3 +185,25 @@ impl SwVideoCompositorHandle {
         })
     }
 }
+
+impl crate::elements::TextLayerControl for SwTextLayerHandle {
+    fn set_text(&self, text: &str) -> std::result::Result<(), crate::error::Error> {
+        Ok(Self::set_text(self, text)?)
+    }
+
+    fn set_position(&self, x: i32, y: i32) -> std::result::Result<(), crate::error::Error> {
+        Ok(Self::set_position(self, x, y)?)
+    }
+
+    fn set_opacity(&self, opacity: f32) -> std::result::Result<(), crate::error::Error> {
+        Ok(Self::set_opacity(self, opacity)?)
+    }
+
+    fn set_z_index(&self, z_index: i32) -> std::result::Result<(), crate::error::Error> {
+        Ok(Self::set_z_index(self, z_index)?)
+    }
+
+    fn set_visible(&self, visible: bool) -> std::result::Result<(), crate::error::Error> {
+        Ok(Self::set_visible(self, visible)?)
+    }
+}

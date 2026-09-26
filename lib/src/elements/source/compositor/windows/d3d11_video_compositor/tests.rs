@@ -1347,3 +1347,29 @@ fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
         .collect();
     assert_eq!(shown, expected);
 }
+
+/// The backend-independent traits drive this compositor as its own handles
+/// do, and a layer added with `add_layer` is drawn from the texture set on it.
+#[test]
+fn the_backend_independent_traits_drive_it() {
+    let Some(gpu) = try_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        width: 4,
+        height: 4,
+        ..VideoCompositorOptions::default()
+    };
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options).unwrap();
+    let still = crate::elements::source::compositor::control::arrange(&handle, 4, 4);
+    let texture = bgra_texture(gpu.device(), 4, 4, [255, 0, 0, 255]);
+    let MediaBuffer::Video(picture) =
+        MediaBuffer::video(wrap_d3d11_texture(texture, 4, 4).unwrap())
+    else {
+        unreachable!()
+    };
+    crate::elements::VideoLayerControl::set_frame(&still, picture).unwrap();
+    let composed = compositor.compose_frame(&test_bus()).unwrap();
+    let downloaded = download_frame(&gpu, composed);
+    assert_eq!(pixel(&downloaded, 0, 0), [255, 0, 0, 255]);
+}

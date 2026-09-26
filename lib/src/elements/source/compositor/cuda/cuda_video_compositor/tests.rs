@@ -689,12 +689,13 @@ fn try_font() -> Option<Vec<u8>> {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
     ] {
         if let Ok(data) = std::fs::read(path) {
             return Some(data);
         }
     }
-    eprintln!("skipping: no DejaVuSans on this machine to rasterize with");
+    eprintln!("skipping: no font on this machine to rasterize with");
     None
 }
 
@@ -1400,4 +1401,88 @@ fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
         .map(|index| (index, if (5..9).contains(&index) { 200 } else { 100 }))
         .collect();
     assert_eq!(shown, expected);
+}
+
+/// A text layer stacks among the video layers by its `z_index`: under an
+/// opaque video layer above it, it is covered; raised over it, it shows.
+#[test]
+fn a_text_layer_stacks_among_video_layers_by_its_z_index() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let Some(font) = try_font() else {
+        return;
+    };
+    let (width, height) = (256u32, 128u32);
+    let Ok((mut compositor, handle)) =
+        CudaVideoCompositor::new("compositor", &device, options(width, height))
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+    let mut cover = handle
+        .add_source(
+            "cover",
+            VideoLayer {
+                z_index: 1,
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, width, height))
+            },
+        )
+        .expect("add the cover")
+        .sink;
+    let Some(frame) = cuda_frame(&device, width, height, 60) else {
+        return;
+    };
+    cover.consume(frame).expect("cover frame");
+
+    let mut layer = TextLayer::new(font);
+    layer.font_size = 48.0;
+    layer.color = Color::WHITE;
+    layer.x = 8;
+    layer.y = 8;
+    let text = handle.add_text_layer("title", layer).expect("add text");
+    text.set_text("HELLO").expect("set_text");
+
+    let lit = |compositor: &mut CudaVideoCompositor| {
+        let out = download(&device, compositor.compose_frame().expect("compose"));
+        (0..64usize)
+            .flat_map(|y| (0..200usize).map(move |x| (x, y)))
+            .filter(|(x, y)| luma_at(&out, *x, *y) > 120)
+            .count()
+    };
+    assert_eq!(lit(&mut compositor), 0, "under the cover, nothing shows");
+    text.set_z_index(2);
+    assert!(lit(&mut compositor) > 100, "raised over it, the text shows");
+}
+
+/// The backend-independent traits drive this compositor as its own handles
+/// do, and a layer added with `add_layer` is drawn from the frame set on
+/// it — which, as through a sink, has to be on the compositor's device.
+#[test]
+fn the_backend_independent_traits_drive_it() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let Ok((mut compositor, handle)) =
+        CudaVideoCompositor::new("compositor", &device, options(64, 64))
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+    let still = crate::elements::source::compositor::control::arrange(&handle, 64, 64);
+    let in_memory = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
+    let MediaBuffer::Video(in_memory) = MediaBuffer::video(in_memory) else {
+        unreachable!()
+    };
+    assert!(
+        crate::elements::VideoLayerControl::set_frame(&still, in_memory).is_err(),
+        "a frame in system memory is refused"
+    );
+    let Some(MediaBuffer::Video(picture)) = cuda_frame(&device, 64, 64, 200) else {
+        return;
+    };
+    crate::elements::VideoLayerControl::set_frame(&still, picture).unwrap();
+    let out = download(&device, compositor.compose_frame().expect("compose"));
+    assert_eq!(luma_at(&out, 10, 10), 200);
 }

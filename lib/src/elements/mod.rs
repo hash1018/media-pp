@@ -162,13 +162,14 @@ pub use sink::{VulkanWindowRenderer, VulkanWindowRendererError, WindowSize};
 pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
-    FileDemuxer, FileDemuxerError, FileDemuxerHandle, MixFormat, MixerHandle, MixerInputSink,
-    PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RenderMode,
-    RtspSource, RtspSourceError, StreamInfo, SwTextLayerError, SwTextLayerHandle,
-    SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
-    SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions, TestAudioSource,
-    TestVideoOptions, TestVideoSource, TextLayer, VideoCompositorOptions, VideoFit, VideoInputId,
-    VideoLayer, VideoRect, VideoSourceRect,
+    CompositorInput, FileDemuxer, FileDemuxerError, FileDemuxerHandle, LayerFrame, MixFormat,
+    MixerHandle, MixerInputSink, PipelineBridge, PipelineBridgeError, PipelineBridgeHandle,
+    PipelineBridgeOptions, RenderMode, RtspSource, RtspSourceError, StreamInfo, SwTextLayerError,
+    SwTextLayerHandle, SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle,
+    SwVideoCompositorInput, SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions,
+    TestAudioSource, TestVideoOptions, TestVideoSource, TextLayer, TextLayerControl,
+    VideoCompositorControl, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
+    VideoLayerControl, VideoRect, VideoSourceRect,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{

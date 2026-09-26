@@ -14,6 +14,7 @@ use arc_swap::ArcSwapOption;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
+use super::control::{CompositorInput, compositor_control};
 use super::timed_inputs::{
     OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, run_offline,
 };
@@ -233,15 +234,9 @@ pub struct SwVideoCompositorHandle {
     shared: Weak<CompositorShared>,
 }
 
-/// The two endpoints created for one compositor input registration.
-/// Move `sink` into the upstream pipeline and retain `layer` in application
-/// code for runtime placement changes.
-pub struct SwVideoCompositorInput {
-    /// Terminal sink to attach to the input pipeline branch.
-    pub sink: Box<dyn Sink>,
-    /// Runtime control for this input's placement and visibility.
-    pub layer: SwVideoLayerHandle,
-}
+/// The sink and layer handle [`SwVideoCompositorHandle::add_source`] returns
+/// — see [`CompositorInput`].
+pub type SwVideoCompositorInput = CompositorInput<SwVideoLayerHandle>;
 
 impl SwVideoCompositorHandle {
     /// Registers an input and returns its terminal Sink plus independent
@@ -274,6 +269,23 @@ impl SwVideoCompositorHandle {
             }),
             layer,
         })
+    }
+
+    /// Registers an input and returns *only* its layer handle — no `Sink` —
+    /// for a caller that sets this input's picture itself through
+    /// [`SwVideoLayerHandle::set_frame`] rather than wiring a pipeline into
+    /// it: a still image, a title card, a picture drawn by the application.
+    /// Replaces any registration of the same name, as [`Self::add_source`]
+    /// does.
+    ///
+    /// Offline too the picture is whatever was last set: it has no
+    /// timestamps to be placed by, and is never waited for.
+    pub fn add_layer(
+        &self,
+        name: impl Into<String>,
+        layer: VideoLayer,
+    ) -> std::result::Result<SwVideoLayerHandle, SwVideoCompositorError> {
+        self.register(name, layer, false)
     }
 
     /// Registers an input with no sink — one whose frames are set through
@@ -424,6 +436,25 @@ impl SwVideoLayerHandle {
         self.input.upgrade()?.latest_frame.load_full()
     }
 
+    /// Makes `frame` this input's picture, drawn from the next frame composed
+    /// until another replaces it — for a layer from
+    /// [`SwVideoCompositorHandle::add_layer`]. A layer fed through a sink
+    /// has its picture replaced by the next frame that arrives.
+    ///
+    /// Returns [`SwVideoCompositorError::SourceRemoved`] if this handle is
+    /// stale.
+    pub fn set_frame(
+        &self,
+        frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> std::result::Result<(), SwVideoCompositorError> {
+        let input = self
+            .input
+            .upgrade()
+            .ok_or(SwVideoCompositorError::SourceRemoved)?;
+        input.latest_frame.store(Some(frame));
+        Ok(())
+    }
+
     /// Atomically replaces every layer setting.
     ///
     /// Returns [`SwVideoCompositorError::SourceRemoved`] if this handle is stale.
@@ -470,20 +501,6 @@ impl SwVideoLayerHandle {
     ) -> std::result::Result<(), SwVideoCompositorError> {
         video_layer::validate_source(source).map_err(map_layer_error)?;
         self.update(|layer| layer.source = source)
-    }
-
-    /// Makes `frame` what this input is drawn from next — for an input with
-    /// no sink, whose frames come from its owner rather than a branch.
-    pub(crate) fn set_frame(
-        &self,
-        frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
-    ) -> std::result::Result<(), SwVideoCompositorError> {
-        let input = self
-            .input
-            .upgrade()
-            .ok_or(SwVideoCompositorError::SourceRemoved)?;
-        input.latest_frame.store(Some(frame));
-        Ok(())
     }
 
     fn update(
@@ -1346,6 +1363,12 @@ fn blend_bgra(
         }
     }
 }
+
+compositor_control!(
+    SwVideoCompositorHandle,
+    SwVideoLayerHandle,
+    super::SwTextLayerHandle
+);
 
 #[cfg(test)]
 mod tests {
@@ -2430,5 +2453,19 @@ mod tests {
         drop(pipeline);
         assert!(stopping.elapsed() < Duration::from_secs(2));
         assert!(received.lock().unwrap().is_empty(), "nothing was drawn");
+    }
+
+    /// The backend-independent traits drive this compositor as its own
+    /// handles do, and a layer added with `add_layer` is drawn from the
+    /// picture set on it.
+    #[test]
+    fn the_backend_independent_traits_drive_it() {
+        use crate::elements::VideoLayerControl;
+
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
+        let still = super::super::control::arrange(&handle, 4, 4);
+        VideoLayerControl::set_frame(&still, solid_frame(4, 4, BLUE)).unwrap();
+        let composed = compositor.compose_frame().unwrap();
+        assert_eq!(pixel(&composed, 0, 0), BGRA_BLUE);
     }
 }

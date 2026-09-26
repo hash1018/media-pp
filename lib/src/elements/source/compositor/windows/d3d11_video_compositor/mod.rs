@@ -309,13 +309,9 @@ pub struct D3d11VideoCompositorHandle {
     shared: Weak<D3d11CompositorShared>,
 }
 
-/// The two endpoints created for one compositor input registration.
-pub struct D3d11VideoCompositorInput {
-    /// Terminal sink to attach to the input pipeline branch.
-    pub sink: Box<dyn Sink>,
-    /// Runtime control for this input's placement and visibility.
-    pub layer: D3d11VideoLayerHandle,
-}
+/// The sink and layer handle [`D3d11VideoCompositorHandle::add_source`]
+/// returns — see [`crate::elements::CompositorInput`].
+pub type D3d11VideoCompositorInput = crate::elements::CompositorInput<D3d11VideoLayerHandle>;
 
 impl D3d11VideoCompositorHandle {
     /// Registers an input under `name` and returns its layer handle —
@@ -1822,3 +1818,9 @@ unsafe fn create_output_target(
 
 #[cfg(test)]
 mod tests;
+
+super::super::control::compositor_control!(
+    D3d11VideoCompositorHandle,
+    D3d11VideoLayerHandle,
+    D3d11TextLayerHandle
+);

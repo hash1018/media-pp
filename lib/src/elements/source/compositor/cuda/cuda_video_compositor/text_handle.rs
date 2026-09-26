@@ -34,6 +34,9 @@ pub(super) struct TextLayerState {
     /// impossible for a 32-bit atomic.
     pub(super) opacity: AtomicU32,
     pub(super) visible: AtomicBool,
+    /// Where it stacks among the video layers and the other text layers:
+    /// drawn by it, a video layer first where the two are equal.
+    pub(super) z_index: AtomicI32,
 }
 
 /// Runtime control for one text layer — the CUDA sibling of
@@ -94,6 +97,13 @@ impl CudaTextLayerHandle {
     pub fn set_visible(&self, visible: bool) {
         self.state.visible.store(visible, Ordering::Relaxed);
     }
+
+    /// Where it stacks: among video layers and other text layers by
+    /// `z_index`, a video layer first where the two are equal. Zero to
+    /// begin with, which is over every video layer at zero or below.
+    pub fn set_z_index(&self, z_index: i32) {
+        self.state.z_index.store(z_index, Ordering::Relaxed);
+    }
 }
 
 impl CudaVideoCompositorHandle {
@@ -127,6 +137,7 @@ impl CudaVideoCompositorHandle {
             y: AtomicI32::new(text_layer.y),
             opacity: AtomicU32::new(1.0f32.to_bits()),
             visible: AtomicBool::new(true),
+            z_index: AtomicI32::new(0),
         });
         // Reusing a name replaces that registration, the same contract
         // `add_source` has; the replaced handle then controls a layer nothing
@@ -153,5 +164,30 @@ fn text_raster_error(error: TextRasterError) -> CudaVideoCompositorError {
         TextRasterError::AllocationFailed { bytes } => {
             CudaVideoCompositorError::AllocationFailed { bytes }
         }
+    }
+}
+
+impl crate::elements::TextLayerControl for CudaTextLayerHandle {
+    fn set_text(&self, text: &str) -> std::result::Result<(), crate::error::Error> {
+        Ok(Self::set_text(self, text)?)
+    }
+
+    fn set_position(&self, x: i32, y: i32) -> std::result::Result<(), crate::error::Error> {
+        Self::set_position(self, x, y);
+        Ok(())
+    }
+
+    fn set_opacity(&self, opacity: f32) -> std::result::Result<(), crate::error::Error> {
+        Ok(Self::set_opacity(self, opacity)?)
+    }
+
+    fn set_z_index(&self, z_index: i32) -> std::result::Result<(), crate::error::Error> {
+        Self::set_z_index(self, z_index);
+        Ok(())
+    }
+
+    fn set_visible(&self, visible: bool) -> std::result::Result<(), crate::error::Error> {
+        Self::set_visible(self, visible);
+        Ok(())
     }
 }

@@ -228,7 +228,7 @@ pub(crate) struct VideoInput {
     timed: Option<TimedFeed>,
 }
 
-struct CompositorShared {
+pub(crate) struct CompositorShared {
     inputs: Mutex<HashMap<Arc<str>, Arc<VideoInput>>>,
     /// Text layers are kept apart from video inputs because they are not
     /// inputs at all: nothing pushes frames into one. They are drawn after
@@ -281,15 +281,9 @@ pub struct CudaVideoCompositorHandle {
     shared: Weak<CompositorShared>,
 }
 
-/// The two endpoints created for one compositor input registration.
-/// Move `sink` into the upstream pipeline and retain `layer` in application
-/// code for runtime placement changes.
-pub struct CudaVideoCompositorInput {
-    /// Terminal sink to attach to the input pipeline branch.
-    pub sink: Box<dyn Sink>,
-    /// Runtime control for this input's placement and visibility.
-    pub layer: CudaVideoLayerHandle,
-}
+/// The sink and layer handle [`CudaVideoCompositorHandle::add_source`]
+/// returns — see [`crate::elements::CompositorInput`].
+pub type CudaVideoCompositorInput = crate::elements::CompositorInput<CudaVideoLayerHandle>;
 
 impl CudaVideoCompositorHandle {
     /// Registers an input and returns its terminal Sink plus independent
@@ -311,12 +305,50 @@ impl CudaVideoCompositorHandle {
         name: impl Into<String>,
         layer: VideoLayer,
     ) -> std::result::Result<CudaVideoCompositorInput, CudaVideoCompositorError> {
+        let layer = self.register(name, layer, true)?;
+        Ok(CudaVideoCompositorInput {
+            sink: Box::new(CudaVideoCompositorInputSink {
+                pp_log: element_pp_log(ElementType::CudaVideoCompositor, &layer.name, None),
+                name: layer.name.clone(),
+                id: layer.id,
+                shared: self.shared.clone(),
+                input: layer.input.clone(),
+            }),
+            layer,
+        })
+    }
+
+    /// Registers an input and returns *only* its layer handle — no `Sink` —
+    /// for a caller that sets this input's picture itself through
+    /// [`CudaVideoLayerHandle::set_frame`] rather than wiring a pipeline into
+    /// it: a still image, a title card, a picture drawn by the application.
+    /// Replaces any registration of the same name, as [`Self::add_source`]
+    /// does.
+    ///
+    /// Offline too the picture is whatever was last set: it has no
+    /// timestamps to be placed by, and is never waited for.
+    pub fn add_layer(
+        &self,
+        name: impl Into<String>,
+        layer: VideoLayer,
+    ) -> std::result::Result<CudaVideoLayerHandle, CudaVideoCompositorError> {
+        self.register(name, layer, false)
+    }
+
+    /// Registers an input, fed through a sink where `fed` says so — which,
+    /// offline, is an input whose frames are placed by their timestamps.
+    fn register(
+        &self,
+        name: impl Into<String>,
+        layer: VideoLayer,
+        fed: bool,
+    ) -> std::result::Result<CudaVideoLayerHandle, CudaVideoCompositorError> {
         validate_layer(layer)?;
         let Some(shared) = self.shared.upgrade() else {
             return Err(CudaVideoCompositorError::Stopped);
         };
         let name: Arc<str> = name.into().into();
-        let timed = (!shared.mode.is_live()).then(|| {
+        let timed = (fed && !shared.mode.is_live()).then(|| {
             shared.fed.store(true, Ordering::Release);
             let next = shared.next_output.load(Ordering::Acquire);
             TimedFeed::new(shared.arrived.clone(), shared.output_time(next))
@@ -333,20 +365,11 @@ impl CudaVideoCompositorHandle {
             .lock()
             .unwrap()
             .insert(name.clone(), input.clone());
-
-        Ok(CudaVideoCompositorInput {
-            sink: Box::new(CudaVideoCompositorInputSink {
-                pp_log: element_pp_log(ElementType::CudaVideoCompositor, &name, None),
-                name: name.clone(),
-                id,
-                shared: Arc::downgrade(&shared),
-                input: Arc::downgrade(&input),
-            }),
-            layer: CudaVideoLayerHandle {
-                id,
-                name,
-                input: Arc::downgrade(&input),
-            },
+        Ok(CudaVideoLayerHandle {
+            id,
+            name,
+            input: Arc::downgrade(&input),
+            shared: self.shared.clone(),
         })
     }
 
@@ -588,6 +611,7 @@ struct TextSnapshot {
     opacity: u32,
     visible: bool,
     color: Color,
+    z_index: i32,
 }
 
 impl PartialEq for TextSnapshot {
@@ -596,6 +620,7 @@ impl PartialEq for TextSnapshot {
             && self.y == other.y
             && self.opacity == other.opacity
             && self.visible == other.visible
+            && self.z_index == other.z_index
             && self.color == other.color
             && match (&self.mask, &other.mask) {
                 // Identity again: `set_text` replaces a mask wholesale.
@@ -946,6 +971,7 @@ impl CudaVideoCompositor {
                 opacity: state.opacity.load(Ordering::Relaxed),
                 visible: state.visible.load(Ordering::Relaxed),
                 color: state.color,
+                z_index: state.z_index.load(Ordering::Relaxed),
             })
             .collect()
     }
@@ -1119,6 +1145,7 @@ impl CudaVideoCompositor {
                 format,
                 snapshot.id,
                 colour,
+                snapshot.layer.z_index,
             ));
         }
 
@@ -1156,7 +1183,76 @@ impl CudaVideoCompositor {
             )?,
         }
 
-        for (scaled, placement, opacity, format, id, colour) in &layers {
+        // Video and text in one stacking order: by `z_index`, a video layer
+        // before a text layer of the same one — which is what drawing every
+        // text last used to give — and each kind in the order it is in.
+        let mut order: Vec<(i32, bool, usize)> = layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| (layer.6, false, index))
+            .chain(
+                texts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, text)| (text.z_index, true, index)),
+            )
+            .collect();
+        order.sort();
+        for (_, is_text, index) in order {
+            if is_text {
+                let text = &texts[index];
+                if !text.visible {
+                    continue;
+                }
+                let Some(mask) = &text.mask else {
+                    continue;
+                };
+                let opacity = f32::from_bits(text.opacity);
+                if opacity <= 0.0 {
+                    continue;
+                }
+                let Some(placement) = TextPlacement::new(
+                    text.x,
+                    text.y,
+                    mask.width,
+                    mask.height,
+                    self.options.width,
+                    self.options.height,
+                ) else {
+                    continue;
+                };
+                let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+                match canvas {
+                    Canvas::Nv12(canvas) => self.driver.blend_mask_nv12(
+                        canvas,
+                        placement.destination_x,
+                        placement.destination_y,
+                        mask,
+                        placement.mask_x,
+                        placement.mask_y,
+                        placement.width,
+                        placement.height,
+                        text.color,
+                        alpha,
+                    )?,
+                    // The full-resolution half of the mask alone: a BGRA canvas
+                    // has no subsampled plane to cover, so the half-resolution
+                    // one the NV12 path needs is not read.
+                    Canvas::Bgra(canvas) => self.driver.blend_mask_bgra(
+                        canvas,
+                        placement.destination_x,
+                        placement.destination_y,
+                        mask.full_at(placement.mask_x, placement.mask_y),
+                        mask.width,
+                        placement.width,
+                        placement.height,
+                        text.color,
+                        alpha,
+                    )?,
+                }
+                continue;
+            }
+            let (scaled, placement, opacity, format, id, colour, _) = &layers[index];
             let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
             let as_bgra =
                 |canvas_scratch: &mut HashMap<VideoInputId, CudaBgraScratch>| match format {
@@ -1241,58 +1337,6 @@ impl CudaVideoCompositor {
             };
             self.driver
                 .blend_bgra_nv12(layer_surface, scratch, canvas, placement.region, alpha)?;
-        }
-
-        for text in &texts {
-            if !text.visible {
-                continue;
-            }
-            let Some(mask) = &text.mask else {
-                continue;
-            };
-            let opacity = f32::from_bits(text.opacity);
-            if opacity <= 0.0 {
-                continue;
-            }
-            let Some(placement) = TextPlacement::new(
-                text.x,
-                text.y,
-                mask.width,
-                mask.height,
-                self.options.width,
-                self.options.height,
-            ) else {
-                continue;
-            };
-            let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
-            match canvas {
-                Canvas::Nv12(canvas) => self.driver.blend_mask_nv12(
-                    canvas,
-                    placement.destination_x,
-                    placement.destination_y,
-                    mask,
-                    placement.mask_x,
-                    placement.mask_y,
-                    placement.width,
-                    placement.height,
-                    text.color,
-                    alpha,
-                )?,
-                // The full-resolution half of the mask alone: a BGRA canvas
-                // has no subsampled plane to cover, so the half-resolution
-                // one the NV12 path needs is not read.
-                Canvas::Bgra(canvas) => self.driver.blend_mask_bgra(
-                    canvas,
-                    placement.destination_x,
-                    placement.destination_y,
-                    mask.full_at(placement.mask_x, placement.mask_y),
-                    mask.width,
-                    placement.width,
-                    placement.height,
-                    text.color,
-                    alpha,
-                )?,
-            }
         }
 
         // Unconditional: what is handed downstream is read on FFmpeg's own
@@ -1981,3 +2025,9 @@ fn text_axis(origin: i32, extent: u32, canvas_extent: u32) -> Option<(u32, u32, 
 
 #[cfg(test)]
 mod tests;
+
+super::super::control::compositor_control!(
+    CudaVideoCompositorHandle,
+    CudaVideoLayerHandle,
+    CudaTextLayerHandle
+);

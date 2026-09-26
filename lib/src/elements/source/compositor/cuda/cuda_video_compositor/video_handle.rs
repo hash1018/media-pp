@@ -11,8 +11,8 @@ use super::super::super::video_layer::{
     self, VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
 use super::{
-    CudaVideoCompositorError, VideoInput, layer_error, validate_layer, validate_opacity,
-    validate_rect,
+    CompositorShared, CudaVideoCompositorError, VideoInput, layer_error, validate_input_frame,
+    validate_layer, validate_opacity, validate_rect,
 };
 
 /// Runtime placement control for one registered input — the CUDA sibling of
@@ -22,6 +22,8 @@ pub struct CudaVideoLayerHandle {
     pub(super) id: VideoInputId,
     pub(super) name: Arc<str>,
     pub(super) input: Weak<VideoInput>,
+    /// The compositor, for the device a frame set here must come from.
+    pub(super) shared: Weak<CompositorShared>,
 }
 
 impl CudaVideoLayerHandle {
@@ -51,6 +53,32 @@ impl CudaVideoLayerHandle {
     /// NV12 or BGRA — as the input was handed it.
     pub fn latest_frame(&self) -> Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>> {
         self.input.upgrade()?.latest_frame.load_full()
+    }
+
+    /// Makes `frame` this input's picture, drawn from the next frame composed
+    /// until another replaces it — for a layer from
+    /// [`super::CudaVideoCompositorHandle::add_layer`]. A layer fed through a
+    /// sink has its picture replaced by the next frame that arrives.
+    ///
+    /// The frame has to be on the compositor's own device, as one through a
+    /// sink does: one in system memory, or from another CUDA context, is
+    /// refused here rather than when it is drawn. Returns
+    /// [`CudaVideoCompositorError::SourceRemoved`] if this handle is stale.
+    pub fn set_frame(
+        &self,
+        frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> std::result::Result<(), CudaVideoCompositorError> {
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or(CudaVideoCompositorError::Stopped)?;
+        validate_input_frame(&frame, shared.device_ctx)?;
+        let input = self
+            .input
+            .upgrade()
+            .ok_or(CudaVideoCompositorError::SourceRemoved)?;
+        input.latest_frame.store(Some(frame));
+        Ok(())
     }
 
     /// Atomically replaces every layer setting.

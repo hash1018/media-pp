@@ -66,6 +66,13 @@ pub use capture::{V4l2CaptureOptions, V4l2CaptureSource, V4l2CaptureSourceError}
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
 pub use capture::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};
+pub use compositor::{
+    CompositorInput, LayerFrame, SwTextLayerError, SwTextLayerHandle, SwVideoCompositor,
+    SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
+    SwVideoCompositorInputSink, SwVideoLayerHandle, TextLayer, TextLayerControl,
+    VideoCompositorControl, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
+    VideoLayerControl, VideoRect, VideoSourceRect,
+};
 #[cfg(feature = "cuda")]
 pub use compositor::{
     CudaTextLayerHandle, CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,
@@ -76,12 +83,6 @@ pub use compositor::{
     D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,
-};
-pub use compositor::{
-    SwTextLayerError, SwTextLayerHandle, SwVideoCompositor, SwVideoCompositorError,
-    SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,
-    SwVideoLayerHandle, TextLayer, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
-    VideoRect, VideoSourceRect,
 };
 pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle, StreamInfo};
 pub use pipeline_bridge::{

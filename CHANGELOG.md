@@ -23,7 +23,28 @@ compile error with no explanation.
   `RenderMode::Live` is what the mixer did. `AudioMixerError` gains
   `FixedMixFormat` and `UntimedFrame`.
 
+- **A `CudaVideoCompositor` text layer stacks by `z_index`**, as the other
+  compositors' do, where it used to be drawn over every video layer. It
+  starts at zero, and a video layer of the same `z_index` is drawn under
+  it, so a text layer is still over every video layer at zero or below;
+  one over a video layer raised above zero calls
+  `CudaTextLayerHandle::set_z_index`.
+
 ### Added
+
+- **One API for every video compositor: `VideoCompositorControl`,
+  `VideoLayerControl` and `TextLayerControl`.** Each compositor's handles
+  had the same methods, each answering its own error type; the traits are
+  those methods once, answering the crate's `Error`, so what builds a
+  composition is written once and handed whichever compositor the
+  platform has. `CompositorInput<L>` is what `add_source` returns on every
+  backend — `SwVideoCompositorInput` and its siblings are now aliases of
+  it, with the same two fields. To make the three agree,
+  `SwVideoCompositorHandle::add_layer` and `CudaVideoCompositorHandle::add_layer`
+  register an input whose picture is set through the new
+  `set_frame` on its layer handle, as `D3d11VideoCompositorHandle` already
+  could — a still image or a title card with no pipeline behind it — and
+  `CudaTextLayerHandle` has `set_z_index`.
 
 - **A video compositor can render offline:
   `RenderMode::Offline { end }`.** Live, a compositor emits at its own rate

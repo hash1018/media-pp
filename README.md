@@ -160,6 +160,8 @@ the inputs' own timestamps, and the next follows at once — an export as
 fast as decoding allows, frame-exact whatever rates the inputs run at.
 `AudioMixer` takes the same `RenderMode`, and mixes an export's sound the
 same way, placed by its inputs' timestamps.
+What builds a composition can be written once for every backend, against
+`VideoCompositorControl`, which each compositor's handle implements.
 
 `VideoWindow` is the one to reach for first: a window of its own on whichever
 renderer the platform has, on a GPU of its own, taking frames in system
