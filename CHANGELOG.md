@@ -8,7 +8,9 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
-## Unreleased
+## 0.3.1
+
+One fix: a pipeline stopped just as its source ended could hang for good.
 
 ### Fixed
 
