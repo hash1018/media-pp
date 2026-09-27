@@ -230,13 +230,18 @@ impl Sink for Recorder {
         Ok(())
     }
 
-    /// Each segment once, each on a later timeline than the one before it,
-    /// and — but for the stream's first — after a flush.
+    /// A flushed segment on a later timeline than the one before it — a
+    /// seek's — and one not flushed on the same timeline: a lap of a looping
+    /// file, which no seek began. The stream's first is not flushed.
     fn stream_event(&mut self, event: crate::stream::Event<'_>) -> Result<()> {
         let crate::stream::StreamEvent::Segment(segment) = event.0;
         let mut log = self.log.lock().unwrap();
         if let Some(before) = self.segment
-            && (segment.id <= before || !segment.flushed)
+            && (if segment.flushed {
+                segment.id <= before
+            } else {
+                segment.id != before
+            })
         {
             log.push(Entry::Outside(format!(
                 "segment on timeline {} after one on {before}, flushed: {}",

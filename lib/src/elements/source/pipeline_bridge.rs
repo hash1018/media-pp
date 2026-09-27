@@ -175,6 +175,11 @@ pub struct PipelineBridge {
     name: Arc<str>,
     shared: Arc<BridgeShared>,
     pad: SrcPad,
+    /// Its pipeline's, for the timeline a segment this begins is on.
+    state: Option<Arc<crate::playback_state::PlaybackState>>,
+    /// The connection whose buffers went on last, to tell when another's
+    /// begin.
+    handing_on: Option<u64>,
 }
 
 /// Shared between the bridge and every handle and sink derived from it.
@@ -203,7 +208,10 @@ struct BridgeShared {
 }
 
 struct BridgeState {
-    buffers: std::collections::VecDeque<MediaBuffer>,
+    /// The buffers in flight, each with the connection that put it there —
+    /// which is how the bridge sees one input's stream give way to the
+    /// next's.
+    buffers: std::collections::VecDeque<(u64, MediaBuffer)>,
     /// Which connection may push. `None` before the first `connect` and
     /// after an input ends.
     connection: Option<u64>,
@@ -255,6 +263,8 @@ impl PipelineBridge {
                 name,
                 shared,
                 pad,
+                state: None,
+                handing_on: None,
             },
             handle,
         )
@@ -397,7 +407,7 @@ impl Sink for PipelineBridgeSink {
                 return Ok(());
             }
             if state.buffers.len() < shared.options.depth {
-                state.buffers.push_back(buf);
+                state.buffers.push_back((self.id, buf));
                 drop(state);
                 shared.changed.notify_all();
                 return Ok(());
@@ -473,6 +483,38 @@ impl Element for PipelineBridge {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        self.state = Some(Arc::clone(&context.state));
+    }
+}
+
+impl PipelineBridge {
+    /// Begins a segment downstream: a flushed one where the feeding side's
+    /// flush crossed, and one not flushed where another input's stream
+    /// begins — see `crate::stream`. On this pipeline's current timeline,
+    /// which only its own seeks move on, and at nothing it can say: where
+    /// the feeding side's stream stands is that pipeline's to know, and the
+    /// timestamps cross as they are. Only in a pipeline, as a source's
+    /// segments are.
+    fn begin_segment(&mut self, flushed: bool, bus: &Bus) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let segment = crate::stream::Segment {
+            id: state.timeline(),
+            flushed,
+            position: Duration::ZERO,
+            start: Duration::ZERO,
+            show_from: None,
+            backwards: false,
+        };
+        if let Err(error) =
+            crate::stream::begin_segment(std::slice::from_mut(&mut self.pad), segment, &self.pp_log)
+        {
+            bus.post_downstream_error(&self.pp_log, self.element_type(), self.name.clone(), error);
+        }
+    }
 }
 
 impl Source for PipelineBridge {
@@ -533,9 +575,19 @@ impl SourceElement for PipelineBridge {
             let (taken, flush) = taken;
             if flush {
                 self.pad.control(&ControlMsg::Flush)?;
+                self.begin_segment(true, bus);
             }
-            if let Some(buffer) = taken {
+            if let Some((connection, buffer)) = taken {
                 self.shared.changed.notify_all();
+                // Another input's stream begins here. The first's needs no
+                // segment of its own: the stream began with one.
+                if self
+                    .handing_on
+                    .replace(connection)
+                    .is_some_and(|before| before != connection)
+                {
+                    self.begin_segment(false, bus);
+                }
                 // One buffer's failure is not this bridge's end, the same way
                 // a `Queue` reports a failing downstream and keeps its worker.
                 if let Err(error) = self.pad.push(buffer) {
@@ -819,6 +871,105 @@ mod tests {
             *seen.lock().unwrap(),
             vec![Some(2)],
             "and what belonged to the timeline it left did not"
+        );
+    }
+
+    /// What reaches the far side, in order: a packet as its `pts`, a
+    /// segment as whether it followed a flush.
+    #[derive(Debug, PartialEq)]
+    enum Crossed {
+        Segment { flushed: bool },
+        Packet(Option<i64>),
+    }
+
+    struct StreamWatcher {
+        pp_log: PpLog,
+        crossed: Arc<StdMutex<Vec<Crossed>>>,
+    }
+
+    impl Element for StreamWatcher {
+        fn name(&self) -> Arc<str> {
+            "stream-watcher".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for StreamWatcher {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Packet(packet) = &buf {
+                self.crossed
+                    .lock()
+                    .unwrap()
+                    .push(Crossed::Packet(packet.pts()));
+            }
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: crate::stream::Event<'_>) -> Result<()> {
+            let crate::stream::StreamEvent::Segment(segment) = event.0;
+            self.crossed.lock().unwrap().push(Crossed::Segment {
+                flushed: segment.flushed,
+            });
+            Ok(())
+        }
+    }
+
+    /// The far side is told where the stream it is handed begins again: a
+    /// flushed segment behind the flush the feeding side's seek sent across,
+    /// and one not flushed where another input's stream begins — each ahead
+    /// of the first buffer it describes.
+    #[test]
+    fn a_flush_and_a_new_input_each_begin_a_segment_on_the_far_side() {
+        let (bridge, handle) = PipelineBridge::new("bridge", PipelineBridgeOptions::default());
+        let crossed = Arc::new(StdMutex::new(Vec::new()));
+        let sink = StreamWatcher {
+            pp_log: element_pp_log(ElementType::Other, "stream-watcher", None),
+            crossed: Arc::clone(&crossed),
+        };
+        let pipeline = downstream(bridge, Box::new(sink));
+        let packets = || {
+            crossed
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|crossed| matches!(crossed, Crossed::Packet(_)))
+                .count()
+        };
+
+        let mut first = handle.connect().expect("the bridge is running");
+        first.consume(packet(1)).expect("queued");
+        wait_until(|| packets() == 1);
+        first
+            .control(&ControlMsg::Flush)
+            .expect("a flush from the feeding pipeline");
+        first.consume(packet(2)).expect("after the flush");
+        wait_until(|| packets() == 2);
+        let mut second = handle.connect().expect("replacing the first");
+        second.consume(packet(3)).expect("the new input's first");
+        wait_until(|| packets() == 3);
+        pipeline.stop();
+
+        assert_eq!(
+            *crossed.lock().unwrap(),
+            vec![
+                Crossed::Segment { flushed: false },
+                Crossed::Packet(Some(1)),
+                Crossed::Segment { flushed: true },
+                Crossed::Packet(Some(2)),
+                Crossed::Segment { flushed: false },
+                Crossed::Packet(Some(3)),
+            ]
         );
     }
 

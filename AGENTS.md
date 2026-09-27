@@ -194,7 +194,9 @@ final source of truth when documentation and implementation differ.
   source failed, a `Flush` a bridge injects. A Queue control failure is
   reported without leaving the control cascade permanently blocked.
 - What describes the stream travels in it (`crate::stream`): so far the
-  `Segment` each stream begins with and each seek begins again, in order
+  `Segment` each stream begins with and each seek begins again — and a
+  looping file at each lap, and a bridge where its feeding side flushed or
+  another input begins, those on the timeline they come in — in order
   with the buffers. An element reacts through `Sink::stream_event`, pushing
   from there whatever it answers the event with; the graph passes the event
   on through its pads, as it does control. Only an element that routes the

@@ -11,7 +11,11 @@ use crate::stream::{Event, StreamEvent};
 /// What an element on the stream was handed, in the order it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seen {
-    Segment { id: u64, flushed: bool },
+    Segment {
+        id: u64,
+        flushed: bool,
+        start: Duration,
+    },
     Buffer,
 }
 
@@ -76,6 +80,7 @@ impl Sink for Watcher {
         self.seen.lock().unwrap().push(Seen::Segment {
             id: segment.id,
             flushed: segment.flushed,
+            start: segment.start,
         });
         Ok(())
     }
@@ -85,7 +90,7 @@ impl Sink for Watcher {
 /// first and that nothing but buffers came after it.
 fn segment_of(name: &str, seen: &Record) -> u64 {
     let seen = seen.lock().unwrap();
-    let Some(Seen::Segment { id, flushed }) = seen.first().copied() else {
+    let Some(Seen::Segment { id, flushed, .. }) = seen.first().copied() else {
         panic!("{name} was handed {:?} before any segment", seen.first());
     };
     assert!(
@@ -264,4 +269,67 @@ fn a_segment_goes_past_a_queue_a_pause_has_stopped() {
     wait_for_a_buffer("terminal", &seen);
     pipeline.stop();
     segment_of("terminal", &seen);
+}
+
+/// A looping file begins each lap as a segment of its own: on the same
+/// timeline, since no seek began it, not flushed, and starting a lap on
+/// from the one before — with the lap's buffers between each two.
+#[test]
+fn each_lap_of_a_looping_file_begins_a_segment() {
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let index = streams
+        .iter()
+        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream")
+        .index;
+    source.looping_handle().set_looping(true);
+    let (terminal, seen) = Watcher::new("terminal");
+    let (pipeline, ()) = Pipeline::new("laps", source, |source, ctx| {
+        let branch = ctx.branch().to(terminal)?;
+        ctx.attach(source, index, branch)?;
+        Ok(())
+    })
+    .expect("wiring succeeds");
+    pipeline.run().expect("run");
+    let segments = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry, Seen::Segment { .. }))
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while segments() < 3 {
+        assert!(Instant::now() < deadline, "two laps did not begin");
+        thread::sleep(Duration::from_millis(5));
+    }
+    pipeline.stop();
+
+    let seen = seen.lock().unwrap();
+    let starts: Vec<_> = seen
+        .iter()
+        .filter_map(|entry| match *entry {
+            Seen::Segment { id, flushed, start } => Some((id, flushed, start)),
+            Seen::Buffer => None,
+        })
+        .collect();
+    let (id, _, first) = starts[0];
+    assert_eq!(first, Duration::ZERO, "the stream starts at the start");
+    for (at, pair) in starts.windows(2).enumerate() {
+        let ((_, _, before), (lap_id, flushed, start)) = (pair[0], pair[1]);
+        assert_eq!(lap_id, id, "lap {}: no seek began it", at + 1);
+        assert!(!flushed, "lap {}: nothing is flushed", at + 1);
+        assert!(start > before, "lap {}: a lap on, at {start:?}", at + 1);
+    }
+    let mut between = 0;
+    for entry in seen.iter().skip(1) {
+        match entry {
+            Seen::Buffer => between += 1,
+            Seen::Segment { .. } => {
+                assert!(between > 0, "a lap with nothing in it");
+                between = 0;
+            }
+        }
+    }
 }

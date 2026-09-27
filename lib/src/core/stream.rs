@@ -1,13 +1,16 @@
 //! The stream plane: what describes a stream travels in it, in order with
 //! its buffers — see `docs/stream-events.md`.
 //!
-//! So far the one event is the [`Segment`] every stream begins with and
-//! every seek begins again. It says which timeline it opens, whether it
-//! follows a flush, where it begins both as a caller names a place in the
-//! media and on the timeline its buffers are stamped on — two places a
-//! looping file keeps a lap or more apart — and, for an accurate seek,
-//! where on that timeline what is shown begins, which is what a decoder
-//! drops what comes before by.
+//! So far the one event is the [`Segment`]: every stream begins with one,
+//! every seek begins one again, and so do a looping file at each lap and a
+//! [`PipelineBridge`](crate::elements::PipelineBridge) where its feeding
+//! side flushed or another input's stream begins — those last not on a
+//! timeline of their own, since no seek of this pipeline began them. It
+//! says which timeline it is on, whether it follows a flush, where it
+//! begins both as a caller names a place in the media and on the timeline
+//! its buffers are stamped on — two places a looping file keeps a lap or
+//! more apart — and, for an accurate seek, where on that timeline what is
+//! shown begins, which is what a decoder drops what comes before by.
 //!
 //! # How an event travels
 //!
@@ -69,9 +72,11 @@ pub(crate) enum StreamEvent {
 
 /// Where a run of buffers begins — see this module's docs.
 pub(crate) struct Segment {
-    /// Which of the pipeline's timelines it opens — which seek's, and one
+    /// Which of the pipeline's timelines it is on — which seek's, and one
     /// for the stream as it starts: the pipeline's own count, which each
-    /// seek moves on before it flushes.
+    /// seek moves on before it flushes. A lap of a looping file and what a
+    /// bridge begins are on the timeline they come in, a seek not having
+    /// begun them.
     pub(crate) id: u64,
     /// Whether it follows a flush, so that what an element holds from
     /// before it belongs to a timeline the pipeline has left.

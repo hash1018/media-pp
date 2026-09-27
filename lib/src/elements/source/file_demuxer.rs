@@ -738,6 +738,38 @@ impl FileDemuxer {
             .any(|&since| read_ns.saturating_sub(since) > duration_ns(MAX_INTERLEAVE))
     }
 
+    /// Begins the lap just wrapped to as a segment of its own: on the same
+    /// timeline — no seek began it, and nothing is flushed — but starting a
+    /// lap further on, at the start of the file. What is shown and what a
+    /// caller seeks in are a lap apart across the join, and the segment is
+    /// where downstream can tell which lap it has; see `crate::stream`.
+    ///
+    /// Sent as the wrap leaves it: nothing is parked but the new lap's
+    /// first packet, which the segment goes ahead of. Only in a pipeline,
+    /// whose count its timelines are: a demuxer driven by hand begins no
+    /// segment at all.
+    fn begin_lap(&mut self, bus: &Bus) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let segment = crate::stream::Segment {
+            id: state.timeline(),
+            flushed: false,
+            position: Duration::ZERO,
+            start: Duration::from_micros(self.loop_offset.max(0).unsigned_abs()),
+            show_from: None,
+            backwards: state.backwards(),
+        };
+        if let Err(error) = crate::stream::begin_segment(&mut self.pads, segment, &self.pp_log) {
+            bus.post_downstream_error(
+                &self.pp_log,
+                ElementType::FileDemuxer,
+                self.name.clone(),
+                error,
+            );
+        }
+    }
+
     fn push_to_pad(&mut self, index: usize, packet: ffmpeg::Packet, bus: &Bus) {
         if let Err(error) = self.pads[index].push(MediaBuffer::Packet(Arc::new(packet))) {
             bus.post_downstream_error(
@@ -1115,7 +1147,10 @@ impl SourceElement for FileDemuxer {
                     // source was already heading for.
                     if self.looping.load(Ordering::Relaxed) {
                         match self.wrap() {
-                            Ok(()) => continue,
+                            Ok(()) => {
+                                self.begin_lap(bus);
+                                continue;
+                            }
                             // A file that cannot be rewound cannot be looped,
                             // but it has been fully read — so report why the
                             // loop stopped and end the stream properly, rather
