@@ -379,9 +379,7 @@ impl Sink for Pacer {
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // Acknowledge the interrupt that made any in-flight wait return.
-        // Flush discards an interrupted old-timeline buffer; Seek then drops
-        // the origin so the new timeline anchors on whichever stream reaches
-        // its landing place first.
+        // Flush discards an interrupted old-timeline buffer.
         // A pacer that was never wired has no clock to acknowledge, and
         // nothing is going to send it control either — see
         // `PacerError::NotAttached`.
@@ -390,20 +388,12 @@ impl Sink for Pacer {
         }
         match msg {
             ControlMsg::Flush | ControlMsg::Stop => self.pending.clear(),
-            ControlMsg::Seek(_) => {
-                // The wall clock is left alone, which it could not be while
-                // the origin was paired with `Clock::start()`: post-seek
-                // timestamps restart near zero, and against a stale anchor
-                // every one of them was already overdue. The playback clock
-                // holds its origin as an elapsed offset instead, so it
-                // re-anchors itself on the next buffer and the pipeline's
-                // monotonic time — which a seek does not stop — keeps
-                // running for everything else that reads it.
-                if let Some(playback) = &self.playback_clock {
-                    playback.reset_for_seek();
-                }
-            }
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Preroll(_) => {}
+            // The playback clock is the pipeline's to reset for a seek, once
+            // every thread has taken the `Flush` — see `Pipeline::seek`.
+            ControlMsg::Pause
+            | ControlMsg::Resume
+            | ControlMsg::Preroll(_)
+            | ControlMsg::Seek(_) => {}
         }
         Ok(())
     }

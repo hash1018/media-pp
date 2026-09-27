@@ -661,34 +661,6 @@ impl AudioMasterRegistration {
         };
         Ok(())
     }
-
-    pub(crate) fn reset_for_seek(&self) -> Result<(), PlaybackClockError> {
-        let mut state = self.clock.state.lock().unwrap();
-        let next_registration = match *state {
-            State::AudioPriming {
-                registration,
-                next_registration,
-                ..
-            }
-            | State::Audio {
-                registration,
-                next_registration,
-                ..
-            }
-            | State::AudioFallback {
-                registration,
-                next_registration,
-                ..
-            } if registration == self.registration => next_registration,
-            _ => return Err(PlaybackClockError::StaleAudioMaster),
-        };
-        *state = State::AudioPriming {
-            registration: self.registration,
-            held_ns: None,
-            next_registration,
-        };
-        Ok(())
-    }
 }
 
 impl Drop for AudioMasterRegistration {
@@ -822,7 +794,7 @@ mod tests {
         thread::sleep(Duration::from_millis(5));
         assert!(playback.position_ns().unwrap() > 2_000);
 
-        audio.reset_for_seek().unwrap();
+        playback.reset_for_seek();
         assert_eq!(playback.master(), PlaybackMaster::AudioPriming);
         assert_eq!(playback.position_ns(), None);
     }

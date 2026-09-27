@@ -256,14 +256,17 @@ impl Pipeline {
             "event=control control={msg:?} phase=requested"
         );
         self.state.interrupt();
-        self.playback_clock.reset_for_seek();
-        // Everything read from here on belongs to the new position, and a
-        // queue drops whatever reaches it from the old one — what the
-        // `Flush` below discards, and what it misses.
         self.state.set_backwards(self.rate() < 0.0);
         self.state.picture_late(Duration::ZERO);
         self.state.begin_timeline();
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
+        // Once every thread has taken the `Flush`, and not before: from then
+        // nothing from the old position gets past a pad or a queue, so
+        // nothing is left to anchor the clock on it. Reset before, a frame
+        // still on its way anchored it again, and the `Pacer` and the WASAPI
+        // renderer each reset it a second time to undo that — see
+        // docs/stream-events.md. This is now the one place a seek does.
+        self.playback_clock.reset_for_seek();
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
     }
 

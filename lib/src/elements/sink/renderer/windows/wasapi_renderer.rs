@@ -752,9 +752,8 @@ impl Sink for WasapiRenderer {
                 unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
                 self.timeline = None;
                 self.stretcher.reset();
-                if let Some(master) = self.clock_binding.registration() {
-                    master.reset_for_seek().map_err(WasapiRendererError::from)?;
-                }
+                // The playback clock it masters the pipeline resets for the
+                // seek, once every thread has taken this — see `Pipeline::seek`.
             }
             ControlMsg::Seek(_) | ControlMsg::Preroll(_) => {}
         }

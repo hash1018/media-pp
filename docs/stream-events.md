@@ -151,7 +151,9 @@ holds frames.
   after a seek back.)
 - The playback clock is reset for a seek in four places (`reposition`, `step`,
   `Pacer` on `Seek`, the WASAPI renderer on `Flush`). `VideoSynchronizer`
-  resets it nowhere.
+  resets it nowhere. (Since fixed: a seek resets it in one place, once every
+  thread has taken its `Flush` and nothing old can anchor it again; a step
+  forward, which flushes nothing, still does its own.)
 - A control error on the source's own thread ends that thread. Behind a
   `Queue` the same error becomes a bus event. A `Tee` never returns one.
   (Since fixed: on the source's own thread it is a bus event too, and the
@@ -289,6 +291,19 @@ never had, in its first hours. Each is reproduced by a test in
   §5, which this design does not fix; so it was fixed on its own, each pad
   handed its end as it can take one.
 
+One more, not yet reproduced: **an accurate seek near the end, packets
+fanned out to two picture branches and sound stretched to the rate through
+one-deep queues, once in a few hundred sequences never prerolls the sound**
+(`picturetee-bin-scaled-synchronizer-stretched-tight`; seeds
+1790510535646853409 and 1790511430483020841, neither of which fails again
+when replayed). After the seek the sound's queue took nothing at all while
+the picture's went on — the single read cursor (§5) again, by its look. It
+showed twice in about nine hundred sequences after the playback clock's
+seek reset moved behind the `Flush`, and not in six hundred and forty
+before; nothing reads the clock while a `Flush` is handled, and nine hundred
+more after it passed, so the two are not taken to be related. Without a
+seed that fails again it cannot be an ignored test, so it is kept here.
+
 ---
 
 ## 4. The design
@@ -367,7 +382,7 @@ What moves out of `PlaybackState` and the control messages:
 | `Flush` resetting per-element state | the flushed `Segment`, arriving exactly where the old data ends |
 | "first sample of the new timeline" | first buffer a terminal takes after the flushed `Segment` — exact, per terminal |
 | `Completion`: `Eos` "not flushed since" | `Eos` of the current segment id |
-| clock reset for a seek in four places | the one place that turns a `Segment` into a playback anchor (the playback clock, fed by the terminal that shows the segment's first picture) |
+| clock reset for a seek in four places | done, without the segment: the pipeline resets it once every thread has taken the seek's `Flush`, after which pad flushing lets nothing old anchor it; the `Pacer`'s and the WASAPI renderer's own resets are gone. |
 
 This reverses a rule `AGENTS.md` states outright (c0e76e8): *do not add a
 number to `MediaBuffer` or thread it through elements*. The rule's reason
