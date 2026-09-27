@@ -159,6 +159,13 @@ compile error with no explanation.
 
 ### Fixed
 
+- **After a paused seek, `WasapiRenderer` plays from the seek's target.**
+  The one sample a paused seek hands every terminal reached it while it
+  was paused, and it dropped it, so once playback resumed the sound began
+  a frame after the picture. It now waits in the device's buffer, the
+  device still stopped — no blip — and plays on `Resume`, as
+  `PipeWireAudioRenderer`'s already did.
+
 - **An element refusing a pipeline's control no longer ends its source.**
   A sink on a source's own thread — no `Queue` between them — that
   failed a `Pause`, say, ended that source's thread, while the same sink

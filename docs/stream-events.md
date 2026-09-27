@@ -141,7 +141,9 @@ holds frames.
 
 - The two audio renderers each keep a `paused` flag of their own instead of
   reading the phase, and they disagree. WASAPI drops a paused seek's preroll
-  sample; PipeWire queues it and plays it on `Resume`.
+  sample; PipeWire queues it and plays it on `Resume`. (Since
+  made one answer: WASAPI holds it in the device's buffer, silent, and plays
+  it on `Resume` too.)
 - The Sw and D3D11 compositor inputs clear their latest frame on `Flush` and
   detach on a live `Eos`. The Vulkan and CUDA inputs do neither. (Since
   made one answer on every backend: `Flush` and a live `Eos` both clear the

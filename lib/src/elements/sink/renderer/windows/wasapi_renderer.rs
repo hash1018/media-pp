@@ -1,6 +1,6 @@
 use std::{ffi::c_void, ptr, sync::Arc, thread, time::Duration};
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, Rescale, Rounding};
 use thiserror::Error as ThisError;
 use windows::Win32::{
@@ -387,9 +387,13 @@ impl WasapiRenderer {
         )
     }
 
+    /// Writes `frame` to the device. Paused — a paused seek's one sample —
+    /// it waits in the device's buffer, silent, until `Resume` starts the
+    /// device, as the PipeWire renderer's does. Dropped instead, as it was,
+    /// the sound after a paused seek began a frame after the picture.
     fn render(&mut self, frame: &ffmpeg::frame::Audio) -> Result<()> {
         validate_frame(self.format, frame)?;
-        if frame.samples() == 0 || self.paused {
+        if frame.samples() == 0 {
             return Ok(());
         }
         self.ensure_playback_master()?;
@@ -488,6 +492,16 @@ impl WasapiRenderer {
             let rebase_timeline = padding == 0 && self.running && self.timeline.is_some();
             let available = self.buffer_frames.saturating_sub(padding) as usize;
             if available == 0 {
+                if self.paused {
+                    // Stopped, the device takes nothing until it is resumed,
+                    // and what does not fit waits no longer than the pause:
+                    // dropped, as all of it once was.
+                    pp_debug!(
+                        self,
+                        "paused with the device's buffer full; dropping what does not fit"
+                    );
+                    return Ok(());
+                }
                 self.start()?;
                 self.publish_device_position(true)?;
                 thread::sleep(POLL_INTERVAL);
@@ -532,8 +546,11 @@ impl WasapiRenderer {
                 }
             }
             frame_offset += take;
-            self.start()?;
-            self.publish_device_position(true)?;
+            // Paused, it waits in the buffer: `Resume` starts the device.
+            if !self.paused {
+                self.start()?;
+                self.publish_device_position(true)?;
+            }
         }
         Ok(())
     }
@@ -544,26 +561,29 @@ impl WasapiRenderer {
             .stretcher
             .finish()
             .map_err(WasapiRendererError::Stretch)?;
+        // Paused, nothing is played out: starting the device to drain it is
+        // the blip a paused seek must not make. What a paused seek to the
+        // end left in the buffer goes with it, as it always did.
         if !self.paused {
             self.submit_pieces(pieces, None, None)?;
-        }
-        // SAFETY: the initialized live client returns its current padding by
-        // value and this renderer serializes calls.
-        let padding = unsafe { self.audio_client.GetCurrentPadding() }
-            .map_err(|error| self.classify_error(error))?;
-        if padding > 0 {
-            self.start()?;
-        }
-        loop {
-            // SAFETY: same live-client query as above; no buffer pointer is
-            // borrowed across this call.
+            // SAFETY: the initialized live client returns its current padding
+            // by value and this renderer serializes calls.
             let padding = unsafe { self.audio_client.GetCurrentPadding() }
                 .map_err(|error| self.classify_error(error))?;
-            if padding == 0 {
-                break;
+            if padding > 0 {
+                self.start()?;
             }
-            self.publish_device_position(true)?;
-            thread::sleep(POLL_INTERVAL);
+            loop {
+                // SAFETY: same live-client query as above; no buffer pointer
+                // is borrowed across this call.
+                let padding = unsafe { self.audio_client.GetCurrentPadding() }
+                    .map_err(|error| self.classify_error(error))?;
+                if padding == 0 {
+                    break;
+                }
+                self.publish_device_position(true)?;
+                thread::sleep(POLL_INTERVAL);
+            }
         }
         self.publish_device_position(false)?;
         let final_position = self
@@ -873,5 +893,47 @@ mod tests {
             .control(&ControlMsg::Resume)
             .expect("resume the renderer");
         assert!(!renderer.paused, "only Resume lifts the pause");
+    }
+
+    /// A paused seek's one sample waits in the device's buffer, and the
+    /// device stays stopped — no blip — until `Resume` starts it to play
+    /// that sample. It was dropped, so the sound after a paused seek began a
+    /// frame after the picture.
+    #[test]
+    fn a_sample_taken_while_paused_plays_once_resumed() {
+        let devices = match WasapiRenderer::list_devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                eprintln!("skipping: unable to enumerate WASAPI render devices: {error}");
+                return;
+            }
+        };
+        let Some(device) = devices.into_iter().next() else {
+            eprintln!("skipping: no active WASAPI render device");
+            return;
+        };
+        let (mut renderer, _) =
+            match WasapiRenderer::open("paused-sample-test", WasapiRendererOptions { device }) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    eprintln!("skipping: unable to open a WASAPI render device: {error}");
+                    return;
+                }
+            };
+
+        renderer.control(&ControlMsg::Pause).expect("pause");
+        renderer.control(&ControlMsg::Flush).expect("flush");
+        let sample = frame(renderer.format, 480);
+        renderer
+            .consume(MediaBuffer::Audio(Arc::new(sample)))
+            .expect("taken while paused");
+        let _apartment = ComApartment::new().expect("COM for the query");
+        // SAFETY: the initialized client returns its padding by value.
+        let padding = unsafe { renderer.audio_client.GetCurrentPadding() }.expect("padding");
+        assert!(padding > 0, "held in the device's buffer");
+        assert!(!renderer.running, "and not played while paused");
+
+        renderer.control(&ControlMsg::Resume).expect("resume");
+        assert!(renderer.running, "played once resumed");
     }
 }
