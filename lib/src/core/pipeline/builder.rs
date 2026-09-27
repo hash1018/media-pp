@@ -7,7 +7,9 @@ use crate::{
     bus::{Bus, BusReceiver},
     clock::Clock,
     control::{self, ControlReceiver, ControlSender},
-    element::{Context, SourceElement, element_pp_log, pipeline_pp_log},
+    element::{
+        Context, Element, IntoSource, Source, SourceElement, element_pp_log, pipeline_pp_log,
+    },
     error::Result,
     graph::{ElementId, PipelineGraph},
     pad::SrcPad,
@@ -109,11 +111,12 @@ impl PipelineBuilder {
     /// })?;
     /// let pipeline = builder.build();
     /// ```
-    pub fn add_source<S: SourceElement + 'static, T>(
+    pub fn add_source<M, I: IntoSource<M>, T>(
         mut self,
-        mut source: S,
-        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<T>,
+        source: I,
+        wire: impl FnOnce(&mut I::Source, &Arc<Context>) -> Result<T>,
     ) -> Result<(Self, T)> {
+        let mut source = source.into_source();
         *source.pp_log_mut() =
             element_pp_log(source.element_type(), &source.name(), Some(&self.id));
         let source_id = self.graph.add_source(source.element_type(), source.name());

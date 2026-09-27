@@ -1,20 +1,14 @@
-use std::{
-    sync::Arc,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
-    pad::SrcPad,
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     pool::UnboundObjectPool,
+    produce::produce_source,
     schedule::PeriodicSchedule,
 };
 
@@ -85,11 +79,16 @@ impl Default for TestVideoOptions {
 /// Runs until `Stop` — never reaches `Eos` on its own (no frame-count
 /// limit is exposed, deliberately, mirroring a live camera source more
 /// than a file).
-pub struct TestVideoSource {
+pub struct TestVideoSource(ProducingSource<Generating>);
+
+produce_source!(TestVideoSource);
+
+/// What a [`TestVideoSource`] makes, one frame when asked: all of its
+/// work, which the framework makes the source.
+struct Generating {
     pp_log: PpLog,
     name: Arc<str>,
     options: TestVideoOptions,
-    pad: SrcPad,
     frame_index: i64,
     /// `1 / options.frame_rate`, precomputed once — how long to wait
     /// between generated frames. `Duration::ZERO` (never sleeps, same as
@@ -102,6 +101,12 @@ pub struct TestVideoSource {
     /// element's fixed size; the next `generate_frame` call overwrites
     /// every pixel anyway, so `release` has nothing to reset.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// When each frame is due, on the clock a pause does not move — made
+    /// as the first is asked for.
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a frame went on since the schedule last moved: it moves on
+    /// once that frame has been handed on, as the next is asked for.
+    ticked: bool,
 }
 
 impl TestVideoSource {
@@ -109,13 +114,6 @@ impl TestVideoSource {
     pub fn new(name: impl Into<String>, options: TestVideoOptions) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::TestVideoSource, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::YUV420P),
-            ),
-        );
         pp_info!(
             pp_log: &pp_log,
             "created: {}x{}, frame_rate={}",
@@ -137,20 +135,27 @@ impl TestVideoSource {
         } else {
             Duration::ZERO
         };
-        Self {
+        Self(ProducingSource::new(Generating {
             name,
             pp_log,
             options,
-            pad,
             frame_index: 0,
             frame_interval,
             pool,
-        }
+            schedule: None,
+            ticked: false,
+        }))
     }
 
     /// The unit each generated frame's `pts` is expressed in — what you
     /// need to construct a matching [`crate::elements::Pacer`].
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Generating {
+    fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(
             self.options.frame_rate.denominator(),
             self.options.frame_rate.numerator(),
@@ -188,7 +193,7 @@ impl TestVideoSource {
     }
 }
 
-impl Element for TestVideoSource {
+impl Element for Generating {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -206,64 +211,59 @@ impl Element for TestVideoSource {
     }
 }
 
-impl Source for TestVideoSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for TestVideoSource {
+impl Produce for Generating {
     fn is_live(&self) -> bool {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
-        pp_info!(self, "started");
-        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            if outcome.paused_for > Duration::ZERO {
-                schedule.resume_after_pause(outcome.paused_for, Instant::now());
-            }
-            thread::sleep(schedule.remaining(Instant::now()));
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::YUV420P),
+        )
+    }
 
-            let frame = self.generate_frame();
-            // A downstream failure drops just this one frame — same
-            // "report, don't die" contract `Queue`'s worker gives a
-            // failing `Sink` — rather than ending this whole source
-            // thread over it.
-            if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::Error {
-                        element_type: ElementType::TestVideoSource,
-                        name: self.name.clone(),
-                        error,
-                    },
-                );
-            }
-            // Advance only now that this tick's own work (generate + push,
-            // which a slow downstream can stretch arbitrarily) is done —
-            // `advance_after_tick`'s resync check needs `now` to reflect
-            // that, or one abnormally slow tick's own catch-up frame slips
-            // through uncapped before the next iteration ever notices.
-            schedule.advance_after_tick(Instant::now());
+    /// The next frame, once it is due on the schedule — kept on the clock a
+    /// pause does not move, so playing on after one is not a burst of the
+    /// frames it would have owed.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> crate::error::Result<Produced> {
+        let now = wait.now();
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(self.frame_interval, now));
+        // Moved on only now that the last frame's own work (generate and
+        // push, which a slow downstream can stretch arbitrarily) is done —
+        // `advance_after_tick`'s resync check needs `now` to reflect that,
+        // or one abnormally slow tick's own catch-up frame slips through
+        // uncapped before the next is asked for.
+        if std::mem::take(&mut self.ticked) {
+            schedule.advance_after_tick(now);
         }
+        let due = now + schedule.remaining(now);
+        if !wait.until(due) {
+            return Ok(Produced::Nothing);
+        }
+        let frame = self.generate_frame();
+        self.ticked = true;
+        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame))))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Mutex, thread, time::Duration};
+    use std::{
+        sync::Mutex,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use crate::pp_log::PpLog;
 
     use super::*;
-    use crate::{element::Sink, pipeline::Pipeline};
+    use crate::{
+        element::{Sink, SourceElement},
+        pipeline::Pipeline,
+    };
 
     type VideoObservation = (ffmpeg::format::Pixel, u32, u32, Option<i64>);
     type RecordedFrames = Arc<Mutex<Vec<VideoObservation>>>;

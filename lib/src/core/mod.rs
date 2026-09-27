@@ -33,6 +33,7 @@ pub mod pad;
 pub mod pipeline;
 pub(crate) mod playback_state;
 pub mod pool;
+pub(crate) mod produce;
 pub mod queue;
 pub mod repeat;
 pub(crate) mod stash;

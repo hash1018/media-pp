@@ -15,7 +15,7 @@ use crate::{
     bus::{Bus, BusReceiver},
     clock::Clock,
     control::{ControlReceiver, ControlSender},
-    element::{Context, SourceElement},
+    element::{Context, IntoSource},
     error::Result,
     graph::{GraphSnapshot, NodeInfo, PipelineGraph},
     playback_clock::PlaybackClock,
@@ -219,10 +219,10 @@ impl Pipeline {
     /// The single-source special case of [`PipelineBuilder`] — see its own
     /// docs for combining more than one live source (e.g. a video capture
     /// and an audio capture) into one `Pipeline`.
-    pub fn new<S: SourceElement + 'static, T>(
+    pub fn new<M, I: IntoSource<M>, T>(
         id: impl Into<String>,
-        source: S,
-        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<T>,
+        source: I,
+        wire: impl FnOnce(&mut I::Source, &Arc<Context>) -> Result<T>,
     ) -> Result<(Arc<Self>, T)> {
         let (builder, wired) = PipelineBuilder::new(id).add_source(source, wire)?;
         Ok((builder.build(), wired))

@@ -1,17 +1,15 @@
 use std::sync::Arc;
 
 use crate::pp_log::{PpLog, pp_info};
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::OutputContract,
-    control::{ControlReceiver, RequestKind, drain_control, handle_request},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    produce::{Received, produce_source},
 };
 
 /// Errors specific to `AppSource`. Converts into the crate-wide `Error`
@@ -31,21 +29,24 @@ pub enum AppSourceError {
 /// camera SDK, or synthetic test data) via [`AppSourceHandle`], from any
 /// thread — a live capture callback, a network receive loop, a test.
 ///
-/// Unlike [`crate::elements::FileDemuxer`], whose blocking read can only
-/// be checked against [`ControlMsg`](crate::control::ControlMsg) once per
-/// loop iteration (see [`drain_control`]'s docs), `AppSource::run` selects
-/// on its control channel and its data channel together — a `Stop` (or
-/// any other control message) is handled the moment it arrives, even if
-/// [`AppSourceHandle::push`] never gets called again.
+/// It waits for the next buffer and for what the pipeline asks together — a
+/// `Stop` (or any other control message) is handled the moment it arrives,
+/// even if [`AppSourceHandle::push`] never gets called again.
 ///
 /// Push [`MediaBuffer::Eos`] when done, or just drop every
-/// [`AppSourceHandle`] clone — either ends `run` the same way, pushing
-/// exactly one `Eos` of its own to `src_pads()`.
+/// [`AppSourceHandle`] clone — either ends the stream the same way, with
+/// exactly one `Eos` of its own on `src_pads()`.
 ///
 /// Has no timeline of its own, so it is not a
 /// [`SeekableSource`](crate::element::SeekableSource): there is nothing to
 /// reposition when the app, not a file offset, decides what comes next.
-pub struct AppSource {
+pub struct AppSource(ProducingSource<Receiving>);
+
+produce_source!(AppSource);
+
+/// What an [`AppSource`] does when asked: waits for the application's next
+/// buffer. All of its work, which the framework makes the source.
+struct Receiving {
     pp_log: PpLog,
     name: Arc<str>,
     /// Almost always [`ElementType::AppSource`]. An element built on this
@@ -54,7 +55,8 @@ pub struct AppSource {
     /// instead, since what a reader of either wants is the element the
     /// caller actually constructed.
     element_type: ElementType,
-    pad: SrcPad,
+    /// What it declares its output to be — see [`AppSource::typed`].
+    contract: OutputContract,
     data_rx: Receiver<MediaBuffer>,
 }
 
@@ -92,16 +94,15 @@ impl AppSource {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(element_type, &name, None);
         pp_info!(pp_log: &pp_log, "created: capacity={capacity}");
-        let pad = SrcPad::with_contract(format!("{name}_src"), contract);
         let (data_tx, data_rx) = bounded(capacity);
         (
-            Self {
+            Self(ProducingSource::new(Receiving {
                 name: name.clone(),
                 pp_log,
                 element_type,
-                pad,
+                contract,
                 data_rx,
-            },
+            })),
             AppSourceHandle { name, data_tx },
         )
     }
@@ -135,7 +136,7 @@ impl AppSourceHandle {
     }
 }
 
-impl Element for AppSource {
+impl Element for Receiving {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -153,75 +154,30 @@ impl Element for AppSource {
     }
 }
 
-impl Source for AppSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for AppSource {
+impl Produce for Receiving {
     fn is_live(&self) -> bool {
         false
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        loop {
-            // Non-blocking first: if control is already backed up, clear
-            // it before the `select!` below picks an arbitrary ready arm
-            // (it'd be just as correct to skip straight to `select!`, but
-            // this keeps `AppSource` consistent with every other
-            // `SourceElement::run` calling `drain_control` per iteration).
-            if drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
+    fn output_contract(&self) -> OutputContract {
+        self.contract
+    }
 
-            select! {
-                recv(control.rx) -> req => {
-                    match req {
-                        Ok(req) => {
-                            let finishing = matches!(req.kind, RequestKind::Finish);
-                            if handle_request(control, self, bus, req.kind, req.ack)?.stopped {
-                                pp_info!(self, "{}", if finishing { "finished" } else { "stopped" });
-                                return Ok(());
-                            }
-                        }
-                        // The Pipeline itself is gone — nothing left to drive this.
-                        Err(_) => {
-                            pp_info!(self, "run: control channel gone, ending");
-                            return Ok(());
-                        }
-                    }
-                }
-                recv(self.data_rx) -> buf => {
-                    match buf {
-                        Ok(buf) if buf.is_eos() => {
-                            pp_info!(self, "event=eos phase=source_received");
-                            break;
-                        }
-                        Ok(buf) => {
-                            if let Err(error) = self.pad.push(buf) {
-                                bus.post(
-                                    &self.pp_log,
-                                    BusEvent::Error {
-                                        element_type: self.element_type,
-                                        name: self.name.clone(),
-                                        error,
-                                    },
-                                );
-                            }
-                        }
-                        // Every `AppSourceHandle` dropped without an explicit Eos.
-                        Err(_) => {
-                            pp_info!(self, "run: every AppSourceHandle dropped, ending");
-                            break;
-                        }
-                    }
-                }
+    /// The application's next buffer: the end of the stream where it
+    /// pushed one, or where every [`AppSourceHandle`] is gone.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        Ok(match wait.recv(&self.data_rx) {
+            Received::Got(buf) if buf.is_eos() => {
+                pp_info!(self, "event=eos phase=source_received");
+                Produced::End
             }
-        }
-        self.pad.push_eos(&self.pp_log)
+            Received::Got(buf) => Produced::Buffer(buf),
+            Received::LetGo => Produced::Nothing,
+            Received::Gone => {
+                pp_info!(self, "every AppSourceHandle dropped, ending");
+                Produced::End
+            }
+        })
     }
 }
 
@@ -234,7 +190,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::pipeline::Pipeline;
+    use crate::{bus::BusEvent, pipeline::Pipeline};
 
     struct CountingSink {
         pp_log: PpLog,

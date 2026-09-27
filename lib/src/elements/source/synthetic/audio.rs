@@ -1,7 +1,6 @@
 use std::{
     f64::consts::TAU,
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -10,16 +9,13 @@ use ffmpeg_next as ffmpeg;
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     error::Result,
-    pad::SrcPad,
-    schedule::ActiveTimeline,
+    produce::produce_source,
 };
 
-/// How often [`TestAudioSource::run`] wakes up to top up however many
+/// How often a [`TestAudioSource`] wakes up to top up however many
 /// samples wall-clock time now owes — same role/value as
 /// [`crate::elements::WasapiCaptureSource`]'s own `POLL_INTERVAL`/
 /// [`crate::elements::AudioMixer`]'s `TICK_INTERVAL`.
@@ -49,7 +45,7 @@ impl Default for TestAudioOptions {
 }
 
 /// Generates a synthetic sine-wave tone — GStreamer's `audiotestsrc`
-/// equivalent. No real capture device involved: [`TestAudioSource::run`]
+/// equivalent. No real capture device involved: each tick it
 /// fabricates however many samples wall-clock time now owes on a
 /// drift-free absolute schedule (`expected = elapsed * sample_rate`,
 /// `needed = expected - samples_emitted` — the same shape
@@ -69,10 +65,15 @@ impl Default for TestAudioOptions {
 /// Runs until `Stop` — never reaches `Eos` on its own, same as every other
 /// live source in this crate (no sample-count limit is exposed,
 /// deliberately, mirroring a live capture source more than a file).
-pub struct TestAudioSource {
+pub struct TestAudioSource(ProducingSource<Generating>);
+
+produce_source!(TestAudioSource);
+
+/// What a [`TestAudioSource`] makes, a tick's worth of samples when asked:
+/// all of its work, which the framework makes the source.
+struct Generating {
     pp_log: PpLog,
     name: Arc<str>,
-    pad: SrcPad,
     sample_rate: u32,
     channels: u16,
     format: ffmpeg::format::Sample,
@@ -80,17 +81,19 @@ pub struct TestAudioSource {
     frequency: f64,
     /// Cumulative sample count across every emitted frame — this
     /// element's `pts` unit (see [`TestAudioSource::time_base`]) *and* the
-    /// sine wave's own running phase ([`TestAudioSource::generate_frame`]
-    /// divides this by `sample_rate` for `t`), so the waveform stays
-    /// phase-continuous across frame boundaries instead of restarting
-    /// from zero every tick.
+    /// sine wave's own running phase (`generate_frame` divides this by
+    /// `sample_rate` for `t`), so the waveform stays phase-continuous across
+    /// frame boundaries instead of restarting from zero every tick.
     samples_emitted: i64,
+    /// When the first samples were made, on the clock a pause does not move
+    /// — what every later tick counts the samples it owes from.
+    started: Option<Instant>,
 }
 
 // SAFETY: see `AudioMixer`'s own `unsafe impl Send` docs — same
 // reasoning, `channel_layout` here is always `ChannelLayout::default`'s
 // plain native layout.
-unsafe impl Send for TestAudioSource {}
+unsafe impl Send for Generating {}
 
 impl TestAudioSource {
     /// Creates an unbounded synthetic sine-wave source with the requested output definition.
@@ -104,34 +107,33 @@ impl TestAudioSource {
             options.channels,
             options.frequency
         );
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::AudioFrame,
-                MemoryDomain::System,
-            )),
-        );
-        Self {
+        Self(ProducingSource::new(Generating {
             name,
             pp_log,
-            pad,
             sample_rate: options.sample_rate,
             channels: options.channels,
             format: ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
             channel_layout: ffmpeg::ChannelLayout::default(options.channels as i32),
             frequency: options.frequency,
             samples_emitted: 0,
-        }
+            started: None,
+        }))
     }
 
     /// The unit each emitted frame's `pts` is expressed in.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Generating {
+    fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.sample_rate as i32)
     }
 
     /// Fabricates the next `needed`-sample frame: the same sine tone on
     /// every channel, phase-continuous with whatever's already been
-    /// emitted (see [`TestAudioSource::samples_emitted`]'s own docs).
+    /// emitted (see `samples_emitted`).
     fn generate_frame(&mut self, needed: usize) -> ffmpeg::frame::Audio {
         let channels = self.channels as usize;
         let mut interleaved = vec![0f32; needed * channels];
@@ -164,7 +166,7 @@ impl TestAudioSource {
     }
 }
 
-impl Element for TestAudioSource {
+impl Element for Generating {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -182,61 +184,49 @@ impl Element for TestAudioSource {
     }
 }
 
-impl Source for TestAudioSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for TestAudioSource {
+impl Produce for Generating {
     fn is_live(&self) -> bool {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        let mut timeline = ActiveTimeline::new(Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            timeline.account_pause(outcome.paused_for);
-            thread::sleep(TICK_INTERVAL);
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
+    }
 
-            let expected =
-                (timeline.elapsed(Instant::now()).as_secs_f64() * self.sample_rate as f64) as i64;
-            let needed = (expected - self.samples_emitted).max(0) as usize;
-            if needed == 0 {
-                continue;
-            }
-            let frame = self.generate_frame(needed);
-            // A downstream failure drops just this one frame — same
-            // "report, don't die" contract every other source in this
-            // crate gives its own push.
-            if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::Error {
-                        element_type: ElementType::TestAudioSource,
-                        name: self.name.clone(),
-                        error,
-                    },
-                );
-            }
+    /// What the time since the first samples owes, a tick at a time — on
+    /// the clock a pause does not move, so playing on after one is not a
+    /// burst of what it would have owed.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let started = *self.started.get_or_insert_with(|| wait.now());
+        if !wait.until(wait.now() + TICK_INTERVAL) {
+            return Ok(Produced::Nothing);
         }
+        let elapsed = wait.now().saturating_duration_since(started);
+        let expected = (elapsed.as_secs_f64() * self.sample_rate as f64) as i64;
+        let needed = (expected - self.samples_emitted).max(0) as usize;
+        if needed == 0 {
+            return Ok(Produced::Nothing);
+        }
+        Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(
+            self.generate_frame(needed),
+        ))))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{sync::Mutex, thread};
 
     use crate::pp_log::PpLog;
 
     use super::*;
-    use crate::{element::Sink, pipeline::Pipeline};
+    use crate::{
+        element::{Sink, SourceElement},
+        pipeline::Pipeline,
+    };
 
     /// Captures every frame's `(format, rate, channels, pts, first_sample)`
     /// it sees, in order.

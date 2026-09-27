@@ -423,7 +423,7 @@ impl WasapiCaptureSource {
 
     /// Pushes `frame` downstream, reporting (rather than dying on) a
     /// failing `Sink` — same "drop this one buffer, keep going" contract
-    /// [`crate::elements::DxgiCaptureSource::run`]/[`crate::elements::TestVideoSource::run`]
+    /// `DxgiCaptureSource::run` and the framework's loop for a `Produce`
     /// give their own pushes.
     fn push_frame(&mut self, frame: ffmpeg::frame::Audio, bus: &Bus) {
         if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {

@@ -655,9 +655,26 @@ impl ControlSender {
     }
 }
 
+/// Every sender of a control channel has been dropped — see
+/// [`ControlReceiver::try_take`].
+pub(crate) struct ChannelGone;
+
 impl ControlReceiver {
     pub(crate) fn try_recv(&self) -> Option<(RequestKind, Sender<()>)> {
         self.rx.try_recv().ok().map(|r| (r.kind, r.ack))
+    }
+
+    /// The next request if there is one — `Err(Gone)` where every sender
+    /// has been dropped, which [`Self::try_recv`] cannot tell from an empty
+    /// channel.
+    pub(crate) fn try_take(
+        &self,
+    ) -> std::result::Result<Option<(RequestKind, Sender<()>)>, ChannelGone> {
+        match self.rx.try_recv() {
+            Ok(request) => Ok(Some((request.kind, request.ack))),
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Err(ChannelGone),
+        }
     }
 
     pub(crate) fn recv(&self) -> Option<(RequestKind, Sender<()>)> {

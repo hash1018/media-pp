@@ -47,6 +47,19 @@ compile error with no explanation.
 
 ### Added
 
+- **`Produce` writes a source as what it makes alone.** Asked for the next
+  thing, it makes it — a buffer, nothing yet, or the end of its stream —
+  waiting where it has to only through the `Wait` it is handed, which lets
+  go as soon as the pipeline has something for the thread, and whose clock
+  (`Wait::now`) stands still while the pipeline is paused, so a schedule
+  kept on it owes nothing after a pause. The framework runs the loop.
+  `Pipeline::new` and `PipelineBuilder::add_source` now take
+  `impl IntoSource<M>`, which a `SourceElement` and a `Produce` both are;
+  the wiring closure is handed the source itself, as before, or the
+  `ProducingSource` a `Produce` is made into. `TestVideoSource`,
+  `TestAudioSource` and `AppSource` are written this way now; a pause no
+  longer waits out `TestVideoSource`'s current frame interval.
+
 - **`Transform` writes a filter as its media work alone.** Its `transform`
   makes what each buffer answers to — nothing, one buffer or several — into
   an `Output`; `drain` hands on what it still holds before the end of the

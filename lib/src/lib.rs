@@ -236,6 +236,19 @@
 //! splits it, holds it back, waits on a clock — implements
 //! [`Sink`](element::Sink) and [`Source`](element::Source) instead.
 //!
+//! # Writing a source
+//!
+//! A source that makes one thing at a time on one output — a generator, a
+//! device read a frame at a time, buffers an application hands in —
+//! implements [`Produce`](element::Produce): asked for the next thing, it
+//! makes it, waiting where it has to only through the
+//! [`Wait`](element::Wait) it is handed. The framework runs the loop: what
+//! the pipeline asks in between, a pause kept out of the clock the source
+//! schedules on, and the end of its stream. [`Pipeline::new`](pipeline::Pipeline::new)
+//! takes one as it takes any [`SourceElement`](element::SourceElement). A
+//! source with several outputs, or one that can be sought, implements
+//! `SourceElement` itself.
+//!
 //! # Watching it run
 //!
 //! [`Pipeline::stats`](pipeline::Pipeline::stats) reads what every element is
@@ -306,6 +319,7 @@ pub use core::{
 // without also making them part of this crate's external API surface.
 pub(crate) use core::frame_size;
 pub(crate) use core::playback_state;
+pub(crate) use core::produce;
 pub(crate) use core::repeat;
 pub(crate) use core::stash;
 pub(crate) use core::stream;

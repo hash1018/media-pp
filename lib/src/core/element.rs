@@ -34,6 +34,9 @@ use crate::{
     stats::{ElementCounters, TickCounters},
 };
 
+pub use crate::produce::{
+    AsProduce, AsSourceElement, IntoSource, Produce, Produced, ProducingSource, Wait,
+};
 pub use crate::transform::{AsFilter, AsTransform, IntoFilter, Output, Transform};
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to

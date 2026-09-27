@@ -174,6 +174,13 @@ final source of truth when documentation and implementation differ.
 
 ## Control, lifetime, and concurrency
 
+- A source that makes one thing at a time on one output is a `Produce`: the
+  framework runs its loop — takes each request the one way every source
+  does, keeps a pause out of the clock `Wait::now` reads, and ends the
+  stream after `Produced::End` — and it waits only through its `Wait`,
+  which lets go the moment the pipeline has something for the thread. An
+  element of this crate moved onto one keeps its public name as a newtype
+  over `ProducingSource` (`produce_source!`).
 - Every `SourceElement` loop must remain responsive to Pause, Resume, Stop, and
   Seek. It drains its channel with `drain_control`, or, where it selects on the
   channel beside its data, hands each request it takes to
