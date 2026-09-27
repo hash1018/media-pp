@@ -544,10 +544,14 @@ mod tests {
         );
     }
 
-    /// ProRes has no Vulkan decoder. Answered from FFmpeg's own tables, so
+    /// Theora has no Vulkan decoder. Answered from FFmpeg's own tables, so
     /// it holds on a machine with no GPU.
+    ///
+    /// Not ProRes, which this used to ask about: FFmpeg 8.1 decodes it on
+    /// Vulkan's compute queues, and the answer is the FFmpeg's, not this
+    /// crate's.
     #[test]
     fn supports_says_no_for_a_codec_with_no_vulkan_decoder() {
-        assert!(!VulkanDecoder::supports(ffmpeg::codec::Id::PRORES));
+        assert!(!VulkanDecoder::supports(ffmpeg::codec::Id::THEORA));
     }
 }
