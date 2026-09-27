@@ -7,11 +7,9 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         windows::d3d12_gpu::D3d12Gpu,
@@ -19,6 +17,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// How many GPU frames [`D3d12Upload`]'s `hw_frames_ctx` pool starts with.
@@ -97,14 +96,19 @@ pub enum D3d12UploadError {
 /// `av_hwframe_ctx_init`, so the pool is made for the first frame's size
 /// and made again if a source changes resolution mid-stream — see
 /// `ForSize`.
-pub struct D3d12Upload {
+pub struct D3d12Upload(TransformStage<Uploading>);
+
+transform_filter!(D3d12Upload);
+
+/// What a [`D3d12Upload`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Uploading {
     pp_log: PpLog,
     name: Arc<str>,
     hw_device_ctx: AvBufferRef,
     /// The pool uploaded textures come from, made for the size of the
     /// frames actually arriving.
     hw_frames_ctx: ForSize<AvBufferRef>,
-    pad: SrcPad,
     /// Reused across every uploaded frame — see [`UnboundObjectPool`]'s
     /// docs. Only the small CPU-side `AVFrame` wrapper is actually reused
     /// here; the GPU texture behind it comes fresh from `hw_frames_ctx`'s
@@ -122,7 +126,7 @@ pub struct D3d12Upload {
 // buffers with no thread affinity; `&mut self` on every method that
 // touches them rules out concurrent access — same reasoning as
 // `D3d12Decoder`'s own `unsafe impl Send`.
-unsafe impl Send for D3d12Upload {}
+unsafe impl Send for Uploading {}
 
 impl D3d12Upload {
     /// `gpu` must be the [`D3d12Gpu`] every other D3D12 element in this
@@ -145,28 +149,20 @@ impl D3d12Upload {
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12UploadError::HwDeviceInit)?;
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
-                    .with_layouts(crate::contract::PixelLayoutSet::NV12),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened");
-        Ok(Self {
+        Ok(Self(TransformStage::new(Uploading {
             name,
             pp_log,
             hw_device_ctx,
             hw_frames_ctx: ForSize::new(),
-            pad,
             pool,
             repeated: RepeatedOutput::new(),
-        })
+        })))
     }
 }
 
-impl Element for D3d12Upload {
+impl Element for Uploading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -184,13 +180,7 @@ impl Element for D3d12Upload {
     }
 }
 
-impl Source for D3d12Upload {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d12Upload {
+impl Transform for Uploading {
     /// CPU-readable planes: the D3D12 counterpart of D3d11Upload.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -199,16 +189,18 @@ impl Sink for D3d12Upload {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same CPU buffer as last time is the same pixels as last
             // time, and uploading them again produces the texture already on
             // the GPU — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
-                let uploaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(uploaded))
+                let uploaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(uploaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(D3d12UploadError::UnsupportedBuffer("Packet").into())
@@ -220,17 +212,21 @@ impl Sink for D3d12Upload {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached upload — a pure
         // per-frame CPU->GPU transfer.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12),
+        )
     }
 }
 
-impl PerFrameTransform for D3d12Upload {
+impl PerFrameTransform for Uploading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -302,7 +298,7 @@ impl PerFrameTransform for D3d12Upload {
     }
 }
 
-impl Drop for D3d12Upload {
+impl Drop for Uploading {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_frames_ctx/hw_device_ctx");
     }

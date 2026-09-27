@@ -11,17 +11,16 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::{VulkanDevice, filter::upload::nv12},
     error::Result,
-    pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         vulkan::frames::{VulkanFramesContextError, create_frames_ctx},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to [`VulkanUpload`]. Converts into the crate-wide `Error`
@@ -97,7 +96,13 @@ const LAYOUTS: PixelLayoutSet =
 ///
 /// The pool frames come from is made for the first frame's size and layout,
 /// and made again when a source changes either mid-stream.
-pub struct VulkanUpload {
+pub struct VulkanUpload(TransformStage<Uploading>);
+
+transform_filter!(VulkanUpload);
+
+/// What a [`VulkanUpload`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Uploading {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the device, which frames are made on.
@@ -105,7 +110,6 @@ pub struct VulkanUpload {
     /// The pool uploaded frames come from, and the size and layout it was
     /// made for.
     frames: Option<(u32, u32, ffmpeg::format::Pixel, AvBufferRef)>,
-    pad: SrcPad,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the Vulkan image
     /// itself comes from `frames`' own pool.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -120,7 +124,7 @@ pub struct VulkanUpload {
 // SAFETY: the buffers are heap-allocated FFmpeg buffers with no thread
 // affinity of their own, and `&mut self` on every method that touches them
 // rules out concurrent access. Same reasoning as `CudaUpload`.
-unsafe impl Send for VulkanUpload {}
+unsafe impl Send for Uploading {}
 
 impl VulkanUpload {
     /// `device` must be the same [`VulkanDevice`] every other Vulkan element
@@ -129,26 +133,20 @@ impl VulkanUpload {
     pub fn new(name: impl Into<String>, device: &VulkanDevice) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VulkanUpload, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::SameLayout(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
-                    .with_layouts(LAYOUTS),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "opened: -> Vulkan on {}", device.name());
-        Self {
+        Self(TransformStage::new(Uploading {
             name,
             pp_log,
             hw_device_ctx: device.retain(),
             frames: None,
-            pad,
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
             staging: None,
             repeated: RepeatedOutput::new(),
-        }
+        }))
     }
+}
 
+impl Uploading {
     /// The pool for `width` by `height` frames holding `format`, made
     /// where there is none yet or the one held is for another size or
     /// layout. The previous one is kept if making the new one fails.
@@ -250,7 +248,7 @@ impl VulkanUpload {
     }
 }
 
-impl PerFrameTransform for VulkanUpload {
+impl PerFrameTransform for Uploading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -268,7 +266,7 @@ impl PerFrameTransform for VulkanUpload {
     }
 }
 
-impl Element for VulkanUpload {
+impl Element for Uploading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -286,13 +284,7 @@ impl Element for VulkanUpload {
     }
 }
 
-impl Source for VulkanUpload {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for VulkanUpload {
+impl Transform for Uploading {
     /// CPU-readable planes, in a layout that goes up — see the type's docs.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -307,29 +299,34 @@ impl Sink for VulkanUpload {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same CPU buffer as last time is the same pixels, and
             // uploading them again makes the image already on the GPU.
             MediaBuffer::Video(frame) => {
-                let uploaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(uploaded))
+                let uploaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(uploaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => Err(VulkanUploadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // A per-frame transfer: nothing held beyond the cached upload.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::SameLayout(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan).with_layouts(LAYOUTS),
+        )
     }
 }
 
-impl Drop for VulkanUpload {
+impl Drop for Uploading {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }

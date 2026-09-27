@@ -20,16 +20,15 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     frame_size::ForSize,
-    pad::SrcPad,
     platform::windows::{
         d3d11::protect_shared_device, d3d11_gpu::D3d11Gpu, d3d11va::d3d11va_texture,
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `D3d11Download`. Converts into the crate-wide `Error`
@@ -121,7 +120,13 @@ pub enum D3d11DownloadError {
 /// See [`D3d11Gpu`] on why a lone per-element context handle isn't enough to
 /// prevent two unrelated bind/draw/copy sequences from interleaving on the
 /// one underlying immediate context.
-pub struct D3d11Download {
+pub struct D3d11Download(TransformStage<Downloading>);
+
+transform_filter!(D3d11Download);
+
+/// What a [`D3d11Download`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Downloading {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
@@ -132,7 +137,6 @@ pub struct D3d11Download {
     /// `ForSize`. One for each layout, as a staging texture has one format.
     bgra: ForSize<Readback>,
     nv12: ForSize<Readback>,
-    pad: SrcPad,
     /// The last download and the texture it came from, so a producer that
     /// re-emits an unchanged picture is answered with the bytes already in
     /// system memory — see [`RepeatedOutput`]. This is the most expensive
@@ -147,7 +151,7 @@ pub struct D3d11Download {
 // behind `context`'s own `Mutex`) or plain data. `&mut self` on every
 // method that touches non-`Arc`/`Mutex` state already rules out concurrent
 // access to those parts from multiple threads.
-unsafe impl Send for D3d11Download {}
+unsafe impl Send for Downloading {}
 
 impl D3d11Download {
     /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
@@ -164,24 +168,16 @@ impl D3d11Download {
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
         protect_shared_device(device)?;
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::SameLayout(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "opened");
-        Ok(Self {
+        Ok(Self(TransformStage::new(Downloading {
             name,
             pp_log,
             device: device.clone(),
             context,
             bgra: ForSize::new(),
             nv12: ForSize::new(),
-            pad,
             repeated: RepeatedOutput::new(),
-        })
+        })))
     }
 }
 
@@ -296,7 +292,7 @@ impl Readback {
     }
 }
 
-impl Element for D3d11Download {
+impl Element for Downloading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -314,13 +310,7 @@ impl Element for D3d11Download {
     }
 }
 
-impl Source for D3d11Download {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d11Download {
+impl Transform for Downloading {
     /// The mirror of D3d11Upload: only a device texture has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -329,16 +319,18 @@ impl Sink for D3d11Download {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same texture as last time is the same pixels as last time,
             // and reading them back again produces the frame already in hand
             // — see [`PerFrameTransform`], which is where that is decided.
             MediaBuffer::Video(frame) => {
-                let downloaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(downloaded))
+                let downloaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(downloaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(D3d11DownloadError::UnsupportedBuffer("Packet").into())
@@ -350,18 +342,22 @@ impl Sink for D3d11Download {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached download — a pure
         // per-frame GPU->CPU transfer, same reasoning as
-        // `D3d11Upload::control`.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        // `D3d11Upload`.
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::SameLayout(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+        )
     }
 }
 
-impl PerFrameTransform for D3d11Download {
+impl PerFrameTransform for Downloading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -490,6 +486,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::platform::windows::d3d11va::wrap_d3d11_texture;
     use crate::test_support::try_d3d11_gpu;
 
@@ -590,7 +587,7 @@ mod tests {
     /// device that may have no video processor.
     #[test]
     fn an_nv12_texture_comes_back_as_nv12() {
-        use crate::{elements::D3d11Upload, repeat::PerFrameTransform};
+        use crate::elements::D3d11Upload;
 
         let Some(gpu) = try_d3d11_gpu() else {
             return;
@@ -605,12 +602,15 @@ mod tests {
         let MediaBuffer::Video(yuv) = MediaBuffer::video(yuv) else {
             unreachable!()
         };
-        let texture = D3d11Upload::new("upload", &gpu)
-            .transform(&yuv)
-            .expect("the frame uploads");
+        let texture = crate::test_support::one_frame(
+            &mut D3d11Upload::new("upload", &gpu),
+            MediaBuffer::Video(yuv),
+        )
+        .expect("the frame uploads");
 
         let mut download = D3d11Download::new("download", &gpu).unwrap();
-        let back = download.transform(&texture).expect("the texture downloads");
+        let back = crate::test_support::one_frame(&mut download, MediaBuffer::Video(texture))
+            .expect("the texture downloads");
         assert_eq!(back.format(), ffmpeg::format::Pixel::NV12);
         assert_eq!((back.width(), back.height()), (width, height));
         assert!(back.data(0)[..width as usize].iter().all(|&y| y == 72));

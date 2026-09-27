@@ -396,7 +396,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{color::ColorDescription, elements::D3d11Upload, repeat::PerFrameTransform};
+    use crate::{color::ColorDescription, elements::D3d11Upload};
 
     /// Takes what it is handed and keeps the colour an NV12 frame came with.
     struct Recording {
@@ -449,9 +449,11 @@ mod tests {
         let MediaBuffer::Video(picture) = MediaBuffer::video(picture) else {
             unreachable!()
         };
-        let texture = D3d11Upload::new("upload", &gpu)
-            .transform(&picture)
-            .expect("the frame uploads");
+        let texture = crate::test_support::one_frame(
+            &mut D3d11Upload::new("upload", &gpu),
+            MediaBuffer::Video(picture),
+        )
+        .expect("the frame uploads");
 
         let color = Arc::new(Mutex::new(None));
         let mut renderer = D3d11Renderer::new(

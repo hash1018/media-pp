@@ -7,13 +7,12 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to [`D3d12Download`].
@@ -67,10 +66,15 @@ pub enum D3d12DownloadError {
 /// [`crate::elements::D3d12Decoder`] and [`crate::elements::D3d12Upload`].
 /// PTS, duration, and color metadata are copied without creating a new
 /// timeline. The size of the frames comes from the frames themselves.
-pub struct D3d12Download {
+pub struct D3d12Download(TransformStage<Downloading>);
+
+transform_filter!(D3d12Download);
+
+/// What a [`D3d12Download`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Downloading {
     pp_log: PpLog,
     name: Arc<str>,
-    pad: SrcPad,
     /// CPU NV12 frames the transfer writes into, made for the size of the
     /// frames actually arriving and made again when that changes — see
     /// `ForSize`.
@@ -86,23 +90,17 @@ impl D3d12Download {
     pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Download, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::NV12),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "opened: D3D12 -> NV12");
-        Self {
+        Self(TransformStage::new(Downloading {
             pp_log,
             name,
-            pad,
             pool: ForSize::new(),
             repeated: RepeatedOutput::new(),
-        }
+        }))
     }
+}
 
+impl Downloading {
     fn download(
         &mut self,
         source: &ffmpeg::frame::Video,
@@ -162,7 +160,7 @@ impl D3d12Download {
     }
 }
 
-impl PerFrameTransform for D3d12Download {
+impl PerFrameTransform for Downloading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -180,7 +178,7 @@ impl PerFrameTransform for D3d12Download {
     }
 }
 
-impl Element for D3d12Download {
+impl Element for Downloading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -198,13 +196,7 @@ impl Element for D3d12Download {
     }
 }
 
-impl Source for D3d12Download {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d12Download {
+impl Transform for Downloading {
     /// The mirror of D3d12Upload: only a device resource has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -213,16 +205,18 @@ impl Sink for D3d12Download {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same texture as last time is the same pixels as last time,
             // and reading them back again produces the frame already in hand
             // — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
-                let downloaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(downloaded))
+                let downloaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(downloaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let error = D3d12DownloadError::UnsupportedBuffer(other.kind());
                 pp_error!(self, "{error}");
@@ -231,12 +225,16 @@ impl Sink for D3d12Download {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached download.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12),
+        )
     }
 }
 
@@ -246,6 +244,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::D3d12Upload;
     use crate::test_support::try_d3d12_gpu as try_device;
 

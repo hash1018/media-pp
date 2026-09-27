@@ -373,7 +373,7 @@ mod tests {
     /// to draw the frame in its own colours rather than a fixed matrix's.
     #[test]
     fn a_frames_colour_reaches_the_presenter() {
-        use crate::{color::ColorDescription, elements::CudaUpload, repeat::PerFrameTransform};
+        use crate::{color::ColorDescription, elements::CudaUpload};
 
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
@@ -383,9 +383,11 @@ mod tests {
         let MediaBuffer::Video(picture) = MediaBuffer::video(picture) else {
             unreachable!()
         };
-        let uploaded = CudaUpload::new("upload", &device, crate::elements::CudaFrameFormat::Nv12)
-            .transform(&picture)
-            .expect("the frame uploads");
+        let uploaded = crate::test_support::one_frame(
+            &mut CudaUpload::new("upload", &device, crate::elements::CudaFrameFormat::Nv12),
+            MediaBuffer::Video(picture),
+        )
+        .expect("the frame uploads");
 
         let inner = Arc::new(RecordingRenderer::default());
         let mut renderer = CudaRenderer::new("cuda-renderer", &device, Box::new(inner.clone()));

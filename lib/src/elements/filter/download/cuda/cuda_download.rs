@@ -8,11 +8,9 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     platform::{
         cuda::{
             CudaDevice, CudaFrameFormat,
@@ -22,6 +20,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `CudaDownload`. Converts into the crate-wide `Error`
@@ -78,7 +77,13 @@ pub enum CudaDownloadError {
 /// Every frame is a device-to-host copy over PCIe. Downloading a stream only
 /// to re-upload it is strictly worse than staying on the GPU; put this where
 /// the pipeline genuinely has to leave CUDA.
-pub struct CudaDownload {
+pub struct CudaDownload(TransformStage<Downloading>);
+
+transform_filter!(CudaDownload);
+
+/// What a [`CudaDownload`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Downloading {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in
@@ -90,7 +95,6 @@ pub struct CudaDownload {
     /// [`crate::elements::CudaEncoder`]'s.
     device_ctx: *const ffi::AVHWDeviceContext,
     format: CudaFrameFormat,
-    pad: SrcPad,
     /// CPU NV12 frames the transfer writes into. Unlike `CudaUpload`'s pool
     /// this recycles the pixel allocation itself, since the destination of a
     /// download is ordinary host memory rather than a surface from a frames
@@ -108,7 +112,7 @@ pub struct CudaDownload {
 // affinity of its own, `device_ctx` is only ever compared, and `&mut self`
 // on every method that touches them rules out concurrent access. Same
 // reasoning as `CudaUpload`.
-unsafe impl Send for CudaDownload {}
+unsafe impl Send for Downloading {}
 
 impl CudaDownload {
     /// `device` must be the same [`CudaDevice`] the upstream CUDA elements
@@ -131,26 +135,20 @@ impl CudaDownload {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(format.layouts()),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "opened: CUDA -> {:?}", format.pixel());
-        Self {
+        Self(TransformStage::new(Downloading {
             name,
             pp_log,
             _hw_device_ctx: hw_device_ctx,
             device_ctx,
             format,
-            pad,
             pool: ForSize::new(),
             repeated: RepeatedOutput::new(),
-        }
+        }))
     }
+}
 
+impl Downloading {
     fn download(
         &mut self,
         source: &ffmpeg::frame::Video,
@@ -199,7 +197,7 @@ impl CudaDownload {
     }
 }
 
-impl PerFrameTransform for CudaDownload {
+impl PerFrameTransform for Downloading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -217,7 +215,7 @@ impl PerFrameTransform for CudaDownload {
     }
 }
 
-impl Element for CudaDownload {
+impl Element for Downloading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -235,13 +233,7 @@ impl Element for CudaDownload {
     }
 }
 
-impl Source for CudaDownload {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for CudaDownload {
+impl Transform for Downloading {
     /// The mirror of CudaUpload: only device memory has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -250,32 +242,38 @@ impl Sink for CudaDownload {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same surface as last time is the same pixels as last time,
             // and reading them back again produces the frame already in hand
             // — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
-                let downloaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(downloaded))
+                let downloaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(downloaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => Err(CudaDownloadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached download — a pure
         // per-frame GPU->CPU transfer, same reasoning as
-        // `CudaUpload::control`.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        // `CudaUpload`.
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(self.format.layouts()),
+        )
     }
 }
 
-impl Drop for CudaDownload {
+impl Drop for Downloading {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
     }
@@ -287,6 +285,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::{
         elements::{CudaDecoder, CudaUpload},
         test_support::{try_cuda_device, try_test_video},

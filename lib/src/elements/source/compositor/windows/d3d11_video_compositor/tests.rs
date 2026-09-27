@@ -1214,11 +1214,12 @@ fn a_system_memory_frame_goes_in_through_an_upload() {
     );
     let mut upload = crate::elements::D3d11Upload::new("upload", &gpu);
     let mut uploaded = |frame| {
-        use crate::repeat::PerFrameTransform;
         let MediaBuffer::Video(frame) = MediaBuffer::video(frame) else {
             unreachable!()
         };
-        MediaBuffer::Video(upload.transform(&frame).unwrap())
+        MediaBuffer::Video(
+            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame)).unwrap(),
+        )
     };
     background.consume(uploaded(bgra)).unwrap();
     overlay.consume(uploaded(yuv)).unwrap();

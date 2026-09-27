@@ -1140,7 +1140,7 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     mod d3d11 {
         use super::*;
-        use crate::{elements::D3d11Upload, repeat::PerFrameTransform};
+        use crate::elements::D3d11Upload;
 
         /// Frames put on `gpu` as they come.
         fn uploaded(
@@ -1152,7 +1152,10 @@ mod tests {
                 let MediaBuffer::Video(frame) = frame else {
                     unreachable!()
                 };
-                MediaBuffer::Video(upload.transform(&frame).expect("the frame uploads"))
+                MediaBuffer::Video(
+                    crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
+                        .expect("the frame uploads"),
+                )
             })
         }
 
@@ -1237,7 +1240,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     mod cuda {
         use super::*;
-        use crate::{elements::CudaUpload, repeat::PerFrameTransform};
+        use crate::elements::CudaUpload;
 
         /// A format, what it holds, and how a frame of red is made in it.
         type Case = (
@@ -1268,7 +1271,10 @@ mod tests {
                         let MediaBuffer::Video(frame) = frame else {
                             unreachable!()
                         };
-                        MediaBuffer::Video(upload.transform(&frame).expect("the frame uploads"))
+                        MediaBuffer::Video(
+                            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
+                                .expect("the frame uploads"),
+                        )
                     });
                     let input = EncodeInput::Cuda {
                         device: device.clone(),
@@ -1284,7 +1290,7 @@ mod tests {
     #[cfg(feature = "vulkan")]
     mod vulkan {
         use super::*;
-        use crate::{elements::VulkanUpload, repeat::PerFrameTransform};
+        use crate::elements::VulkanUpload;
 
         /// A format, what it holds, and how a frame of red is made in it.
         type Case = (
@@ -1316,7 +1322,10 @@ mod tests {
                         let MediaBuffer::Video(frame) = frame else {
                             unreachable!()
                         };
-                        MediaBuffer::Video(upload.transform(&frame).expect("the frame uploads"))
+                        MediaBuffer::Video(
+                            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
+                                .expect("the frame uploads"),
+                        )
                     });
                     let input = EncodeInput::Vulkan {
                         device: device.clone(),

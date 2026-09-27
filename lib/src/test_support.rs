@@ -1030,3 +1030,24 @@ pub(crate) fn capture(
     }));
     received
 }
+
+/// The one picture `filter` makes of `buf` — for a test that uses a filter
+/// as a function, an upload to get a texture, say. Links `filter`'s pad to
+/// a capture of its own first.
+#[cfg(any(
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "windows", feature = "d3d11")
+))]
+pub(crate) fn one_frame(
+    filter: &mut impl crate::element::Filter,
+    buf: MediaBuffer,
+) -> crate::error::Result<Arc<crate::pool::UnboundObjectPoolRef<ffmpeg_next::frame::Video>>> {
+    let received = capture(filter);
+    filter.consume(buf)?;
+    let mut received = received.lock().unwrap();
+    match (received.pop(), received.is_empty()) {
+        (Some(MediaBuffer::Video(frame)), true) => Ok(frame),
+        _ => panic!("expected one picture from the filter"),
+    }
+}

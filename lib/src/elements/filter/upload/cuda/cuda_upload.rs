@@ -8,12 +8,10 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::filter::upload::nv12,
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         frame::{CudaFramesContextError, create_hw_frames_ctx},
@@ -21,6 +19,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `CudaUpload`. Converts into the crate-wide `Error` via
@@ -121,7 +120,13 @@ impl From<CudaFramesContextError> for CudaUploadError {
 /// `initial_pool_size` are all plain fields of the type-agnostic
 /// `AVHWFramesContext` that `ffmpeg-sys-next` binds directly, and FFmpeg's
 /// own code fills in everything else during `av_hwframe_ctx_init`.
-pub struct CudaUpload {
+pub struct CudaUpload(TransformStage<Uploading>);
+
+transform_filter!(CudaUpload);
+
+/// What a [`CudaUpload`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Uploading {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
@@ -132,7 +137,6 @@ pub struct CudaUpload {
     /// mid-stream — see `ForSize`.
     hw_frames_ctx: ForSize<AvBufferRef>,
     format: CudaFrameFormat,
-    pad: SrcPad,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the CUDA surface
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
     /// `D3d11Upload`.
@@ -150,7 +154,7 @@ pub struct CudaUpload {
 // SAFETY: both buffers are heap-allocated FFmpeg buffers with no thread
 // affinity of their own, and `&mut self` on every method that touches them
 // rules out concurrent access. Same reasoning as `CudaDecoder`.
-unsafe impl Send for CudaUpload {}
+unsafe impl Send for Uploading {}
 
 impl CudaUpload {
     /// `device` must be the same [`CudaDevice`] every other CUDA element in
@@ -162,28 +166,22 @@ impl CudaUpload {
 
         let hw_device_ctx = device.retain();
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                    .with_layouts(format.layouts()),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {:?} -> CUDA", format.pixel());
-        Self {
+        Self(TransformStage::new(Uploading {
             name,
             pp_log,
             hw_device_ctx,
             hw_frames_ctx: ForSize::new(),
             format,
-            pad,
             pool,
             staging: None,
             repeated: RepeatedOutput::new(),
-        }
+        }))
     }
+}
 
+impl Uploading {
     fn upload(
         &mut self,
         source: &ffmpeg::frame::Video,
@@ -274,7 +272,7 @@ impl CudaUpload {
     }
 }
 
-impl PerFrameTransform for CudaUpload {
+impl PerFrameTransform for Uploading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -292,7 +290,7 @@ impl PerFrameTransform for CudaUpload {
     }
 }
 
-impl Element for CudaUpload {
+impl Element for Uploading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -310,13 +308,7 @@ impl Element for CudaUpload {
     }
 }
 
-impl Source for CudaUpload {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for CudaUpload {
+impl Transform for Uploading {
     /// CPU-readable planes: uploading is what this does, so a frame already in device memory has no work here.
     fn input_contract(&self) -> InputContract {
         let layouts = match self.format {
@@ -331,32 +323,38 @@ impl Sink for CudaUpload {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same CPU buffer as last time is the same pixels as last
             // time, and uploading them again produces the surface already on
             // the GPU — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
-                let uploaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(uploaded))
+                let uploaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(uploaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => Err(CudaUploadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached upload — a pure
         // per-frame CPU->GPU transfer, same reasoning as
-        // `D3d11Upload::control`.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        // `D3d11Upload`.
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(self.format.layouts()),
+        )
     }
 }
 
-impl Drop for CudaUpload {
+impl Drop for Uploading {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -368,6 +366,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::test_support::try_cuda_device;
 
     fn nv12_frame(width: u32, height: u32, pts: i64) -> MediaBuffer {

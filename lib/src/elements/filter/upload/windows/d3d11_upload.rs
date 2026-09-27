@@ -14,14 +14,13 @@ use windows::Win32::Graphics::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::filter::upload::nv12,
     error::Result,
-    pad::SrcPad,
     platform::windows::{d3d11_gpu::D3d11Gpu, d3d11va::wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `D3d11Upload`. Converts into the crate-wide `Error`
@@ -111,11 +110,16 @@ pub enum D3d11UploadError {
 /// resolution mid-stream simply produces differently sized textures from
 /// then on — there is nothing here allocated ahead of a frame to disagree
 /// with it.
-pub struct D3d11Upload {
+pub struct D3d11Upload(TransformStage<Uploading>);
+
+transform_filter!(D3d11Upload);
+
+/// What a [`D3d11Upload`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Uploading {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
-    pad: SrcPad,
     /// Reused across every uploaded frame — see [`UnboundObjectPool`]'s
     /// docs. Only the small CPU-side `AVFrame` wrapper is actually reused
     /// here (each `consume` call overwrites it in place with a freshly
@@ -143,25 +147,19 @@ impl D3d11Upload {
         let device = gpu.device();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Upload, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::SameLayout(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
-                    .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened");
-        Self {
+        Self(TransformStage::new(Uploading {
             name,
             pp_log,
             device: device.clone(),
-            pad,
             pool,
             repeated: RepeatedOutput::new(),
-        }
+        }))
     }
+}
 
+impl Uploading {
     /// Repacks an NV12 frame into the single buffer D3D11 wants. NV12 is
     /// one GPU resource covering both planes, and D3D11 expects the source
     /// laid out as the full-height luma rows immediately followed by the
@@ -296,7 +294,7 @@ fn texture_format(format: ffmpeg::format::Pixel) -> Option<DXGI_FORMAT> {
     }
 }
 
-impl Element for D3d11Upload {
+impl Element for Uploading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -314,13 +312,7 @@ impl Element for D3d11Upload {
     }
 }
 
-impl Source for D3d11Upload {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d11Upload {
+impl Transform for Uploading {
     /// CPU-readable planes specifically: uploading is what this element does, so a frame already on the device has no work here.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -334,17 +326,19 @@ impl Sink for D3d11Upload {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same CPU buffer as last time is the same pixels as last
             // time, and uploading them again produces the texture already on
             // the GPU — see [`PerFrameTransform`], which is where that is
             // decided.
             MediaBuffer::Video(frame) => {
-                let uploaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(uploaded))
+                let uploaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(uploaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(D3d11UploadError::UnsupportedBuffer("Packet").into())
@@ -356,18 +350,22 @@ impl Sink for D3d11Upload {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached upload — a pure
         // per-frame CPU->GPU transfer, same reasoning as
-        // `D3d12Upload::control`.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        // `D3d12Upload`.
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::SameLayout(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+        )
     }
 }
 
-impl PerFrameTransform for D3d11Upload {
+impl PerFrameTransform for Uploading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -499,7 +497,7 @@ mod tests {
     /// SDR one downstream, and a presenter is handed all four.
     #[test]
     fn an_uploaded_frame_keeps_its_whole_colour_description() {
-        use crate::{color::ColorDescription, repeat::PerFrameTransform};
+        use crate::color::ColorDescription;
 
         let Some(gpu) = try_d3d11_gpu() else {
             return;
@@ -515,9 +513,11 @@ mod tests {
         let MediaBuffer::Video(picture) = MediaBuffer::video(picture) else {
             unreachable!()
         };
-        let uploaded = D3d11Upload::new("upload", &gpu)
-            .transform(&picture)
-            .expect("the frame uploads");
+        let uploaded = crate::test_support::one_frame(
+            &mut D3d11Upload::new("upload", &gpu),
+            MediaBuffer::Video(picture),
+        )
+        .expect("the frame uploads");
         assert_eq!(ColorDescription::of(&uploaded), hdr);
     }
 

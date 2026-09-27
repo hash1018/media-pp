@@ -11,17 +11,16 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::VulkanDevice,
     error::Result,
-    pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         vulkan::frames::{NotOurs, sw_format_of},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to [`VulkanDownload`]. Converts into the crate-wide
@@ -73,7 +72,13 @@ const LAYOUTS: PixelLayoutSet =
 ///
 /// Every frame is a copy from the GPU's memory, over PCIe on a discrete GPU:
 /// put this where the pipeline genuinely has to leave Vulkan.
-pub struct VulkanDownload {
+pub struct VulkanDownload(TransformStage<Downloading>);
+
+transform_filter!(VulkanDownload);
+
+/// What a [`VulkanDownload`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Downloading {
     pp_log: PpLog,
     name: Arc<str>,
     /// Held for `device_ctx`'s sake: the pointer stays a valid identity only
@@ -82,7 +87,6 @@ pub struct VulkanDownload {
     /// This element's device, to compare an incoming frame's against. Only
     /// ever compared.
     device_ctx: *const ffi::AVHWDeviceContext,
-    pad: SrcPad,
     /// CPU frames the transfer writes into, and the size and layout they are
     /// made for, made again when the frames arriving change either.
     pool: Option<(
@@ -99,7 +103,7 @@ pub struct VulkanDownload {
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
 // affinity of its own, `device_ctx` is only ever compared, and `&mut self`
 // on every method that touches them rules out concurrent access.
-unsafe impl Send for VulkanDownload {}
+unsafe impl Send for Downloading {}
 
 impl VulkanDownload {
     /// `device` must be the [`VulkanDevice`] the frames were made on — a
@@ -108,25 +112,19 @@ impl VulkanDownload {
     pub fn new(name: impl Into<String>, device: &VulkanDevice) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VulkanDownload, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::SameLayout(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(LAYOUTS),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "opened: Vulkan on {} ->", device.name());
-        Self {
+        Self(TransformStage::new(Downloading {
             name,
             pp_log,
             _hw_device_ctx: device.retain(),
             device_ctx: device.device_ctx(),
-            pad,
             pool: None,
             repeated: RepeatedOutput::new(),
-        }
+        }))
     }
+}
 
+impl Downloading {
     fn download(
         &mut self,
         source: &ffmpeg::frame::Video,
@@ -167,7 +165,7 @@ impl VulkanDownload {
     }
 }
 
-impl PerFrameTransform for VulkanDownload {
+impl PerFrameTransform for Downloading {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -185,7 +183,7 @@ impl PerFrameTransform for VulkanDownload {
     }
 }
 
-impl Element for VulkanDownload {
+impl Element for Downloading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -203,13 +201,7 @@ impl Element for VulkanDownload {
     }
 }
 
-impl Source for VulkanDownload {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for VulkanDownload {
+impl Transform for Downloading {
     /// Only device memory has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -217,29 +209,34 @@ impl Sink for VulkanDownload {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same image as last time is the same pixels, and reading it
             // back again makes the frame already in hand.
             MediaBuffer::Video(frame) => {
-                let downloaded = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(downloaded))
+                let downloaded = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(downloaded));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => Err(VulkanDownloadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // A per-frame transfer: nothing held beyond the cached download.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::SameLayout(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(LAYOUTS),
+        )
     }
 }
 
-impl Drop for VulkanDownload {
+impl Drop for Downloading {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
     }
@@ -250,6 +247,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::{
         elements::VulkanUpload,
         test_support::{CapturingSink, try_vulkan_device},
