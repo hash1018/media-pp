@@ -4,7 +4,6 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -14,20 +13,21 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    control::ControlMsg,
+    element::{
+        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        element_pp_log,
+    },
     elements::AudioFormat,
     elements::filter::audio::audio_resampler::AudioFrameResampler,
     elements::source::render_mode::RenderMode,
     error::Result,
-    pad::SrcPad,
     playback_state::{Bell, PlaybackState},
-    schedule::ActiveTimeline,
+    produce::produce_source,
 };
 
-/// How often [`AudioMixer::run`] mixes and emits a combined frame — same
+/// How often a live [`AudioMixer`] mixes and emits a combined frame — same
 /// role as [`crate::elements::DxgiCaptureSource`]'s own `POLL_GRANULARITY`/
 /// `crate::elements::WasapiCaptureSource`'s `POLL_INTERVAL`: bounds `Stop`
 /// latency and sets the mixer's own output granularity.
@@ -140,7 +140,7 @@ impl MixFormat {
 /// Not `Duration::ZERO` and zero samples, because the mix format can change
 /// while this runs and `elapsed × sample_rate` only means anything against
 /// the rate that produced the count it is compared to — see
-/// [`AudioMixer::mix_tick`].
+/// [`Mixing::mix_tick`].
 #[derive(Debug, Clone, Copy)]
 struct MixAnchor {
     format: MixFormat,
@@ -175,7 +175,7 @@ impl SharedMixFormat {
 
 /// One input's own resampler and accumulated (already-resampled,
 /// interleaved `f32`) samples, waiting to be drained by the next
-/// [`AudioMixer::mix_tick`]. The resampler is built lazily from the first
+/// [`Mixing::mix_tick`]. The resampler is built lazily from the first
 /// frame this input ever sees (its `format`/`channel_layout`/`rate`
 /// self-describe — no need for [`MixerHandle::add_source`] to be told
 /// this upfront).
@@ -192,7 +192,7 @@ struct InputBuffer {
     /// draining what the old context still held first.
     resampler: Option<(MixFormat, AudioFrameResampler)>,
     samples: VecDeque<f32>,
-    /// Set once this input's `Eos` arrives — [`AudioMixer::mix_tick`]
+    /// Set once this input's `Eos` arrives — [`Mixing::mix_tick`]
     /// drops the input entirely once it's both `eos` and fully drained,
     /// same as a `Tee` branch dropping out once removed. Unlike a fixed
     /// two-track muxer, `AudioMixer` has no fixed input count to wait on:
@@ -332,8 +332,9 @@ struct MixerShared {
     /// replacements registered under an existing name.
     next_input_id: AtomicU64,
     mode: RenderMode,
-    /// Rung by an offline mixer's input sinks as samples or their ends
-    /// arrive, which is what the mixer waits on.
+    /// Rung as anything an offline mix waits for changes — samples or an
+    /// end arriving at an input, an input added or removed — which is what
+    /// the mixer waits on.
     arrived: Bell,
     /// The mix position an offline mixer is making next — what its inputs
     /// are held against.
@@ -382,7 +383,8 @@ impl MixerHandle {
         if !shared.mode.is_live() {
             shared.fed.store(true, Ordering::Release);
         }
-        shared.inputs.lock().unwrap().insert(
+        let mut inputs = shared.inputs.lock().unwrap();
+        inputs.insert(
             name.clone(),
             InputBuffer {
                 id,
@@ -393,6 +395,8 @@ impl MixerHandle {
                 upstream: Weak::new(),
             },
         );
+        drop(inputs);
+        shared.arrived.ring();
         Ok(Box::new(MixerInputSink {
             name: name.clone(),
             id,
@@ -457,6 +461,7 @@ impl MixerHandle {
     pub fn remove_source(&self, name: &str) {
         if let Some(shared) = self.shared.upgrade() {
             shared.inputs.lock().unwrap().remove(name);
+            shared.arrived.ring();
         }
     }
 
@@ -474,7 +479,7 @@ impl MixerHandle {
 /// One [`AudioMixer`] input, returned by [`MixerHandle::add_source`].
 /// Resamples every incoming frame to the mixer's fixed output format and
 /// appends it to this input's own buffer — the actual summing happens
-/// later, on [`AudioMixer::run`]'s own thread, not here. `consume` runs on
+/// later, on the mixer's own thread, not here. `consume` runs on
 /// whatever thread is driving the *upstream* source this got linked to
 /// (a different pipeline's own thread, in the normal case), so every
 /// access to the shared input map goes through `MixerShared`'s lock.
@@ -642,6 +647,8 @@ impl Sink for MixerInputSink {
                 .is_some_and(|input| input.id == self.id)
             {
                 inputs.remove(&self.name);
+                drop(inputs);
+                shared.arrived.ring();
             }
         }
         Ok(())
@@ -655,7 +662,7 @@ impl Sink for MixerInputSink {
 /// [`MixerHandle`], from whatever thread each one's own source pipeline
 /// runs on) summed into one output. Unlike `Tee`, which is a passive
 /// [`Sink`] driven entirely by whatever calls `consume`, `AudioMixer` has
-/// to drive itself: it's a [`SourceElement`] with its own `run` thread,
+/// to drive itself: it's a source with a thread of its own,
 /// ticking every `TICK_INTERVAL` to sum however many samples each
 /// currently-attached input has ready — because mixing has to keep
 /// producing *something* on a steady clock even when some (or all) inputs
@@ -696,29 +703,38 @@ impl Sink for MixerInputSink {
 /// [`crate::queue::Queue`] somewhere in that pipeline to wait on. The mix
 /// ends at the mode's `end`, or, without one, once every input has ended
 /// and been mixed to its last sample; and its format is fixed.
-pub struct AudioMixer {
+pub struct AudioMixer(ProducingSource<Mixing>);
+
+produce_source!(AudioMixer);
+
+/// What an [`AudioMixer`] does when asked: the next stretch of the mix, once
+/// it is owed. All of its work, which the framework makes the source.
+struct Mixing {
     pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<MixerShared>,
-    pad: SrcPad,
     /// Cumulative sample count across every emitted frame — see
     /// [`AudioMixer::time_base`].
     samples_emitted: i64,
     /// What the deficit is measured from — see [`MixAnchor`].
     anchor: MixAnchor,
+    /// When a live mix began, on the clock a pause does not move — what
+    /// every tick counts the samples it owes from. Set as the first is
+    /// asked for.
+    started: Option<Instant>,
 }
 
 // SAFETY: see `MixerInputSink`'s own `unsafe impl Send` docs — same
 // reasoning, `channel_layout` here is always `ChannelLayout::default`'s
 // plain native layout.
-unsafe impl Send for AudioMixer {}
+unsafe impl Send for Mixing {}
 
 impl AudioMixer {
     /// Starts with no inputs — add some via the returned [`MixerHandle`]
     /// before (or any time after) wiring `AudioMixer` into a
     /// [`crate::pipeline::Pipeline`] (`Pipeline::new` registers it as that
     /// pipeline's own source automatically, same as any other
-    /// [`SourceElement`] — no [`crate::element::Context`] needed here,
+    /// source — no [`crate::element::Context`] needed here,
     /// unlike [`crate::element::Context::tee`], since `AudioMixer` has no
     /// chains of its own for a handle to build).
     pub fn new(name: impl Into<String>, options: AudioMixerOptions) -> (Self, MixerHandle) {
@@ -746,26 +762,19 @@ impl AudioMixer {
             position: AtomicI64::new(0),
             fed: AtomicBool::new(false),
         });
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::AudioFrame,
-                MemoryDomain::System,
-            )),
-        );
         (
-            Self {
-                name: name.clone(),
+            Self(ProducingSource::new(Mixing {
+                name,
                 pp_log,
                 shared: shared.clone(),
-                pad,
                 samples_emitted: 0,
                 anchor: MixAnchor {
                     format,
                     elapsed: Duration::ZERO,
                     samples: 0,
                 },
-            },
+                started: None,
+            })),
             MixerHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -774,6 +783,12 @@ impl AudioMixer {
 
     /// The unit each emitted frame's `pts` is expressed in.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Mixing {
+    fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.shared.format.get().sample_rate as i32)
     }
 
@@ -783,12 +798,12 @@ impl AudioMixer {
     /// [`crate::elements::WasapiCaptureSource::fill_silence_gap`], just
     /// summing real contributions from every input instead of emitting
     /// pure silence). `elapsed` already excludes time spent frozen inside
-    /// `Pause` (see [`crate::schedule::ActiveTimeline`]) so a `Pause`/
+    /// `Pause` (it is read on [`Wait::now`]'s clock) so a `Pause`/
     /// `Resume` pair doesn't get summed as a burst of owed samples the
     /// moment playback resumes. Drops any input that's both `eos` and
     /// fully drained — it contributed its last real samples on a previous
     /// tick and has nothing left to give.
-    fn mix_tick(&mut self, elapsed: Duration, bus: &Bus) {
+    fn mix_tick(&mut self, elapsed: Duration) -> Option<ffmpeg::frame::Audio> {
         let format = self.shared.format.get();
         // Re-anchored when the format moves. The deficit below is
         // `elapsed × sample_rate` against a running count, and those two are
@@ -817,7 +832,7 @@ impl AudioMixer {
             self.anchor.samples + (since.as_secs_f64() * format.sample_rate as f64) as i64;
         let needed = (expected - self.samples_emitted).max(0) as usize;
         if needed == 0 {
-            return;
+            return None;
         }
         let mut mixed = vec![0f32; needed * channels];
         {
@@ -831,12 +846,17 @@ impl AudioMixer {
                 input.samples.drain(0..take);
             }
         }
-        self.emit(mixed, needed, format, bus);
+        Some(self.emit(mixed, needed, format))
     }
 
-    /// Clips `mixed` — `samples` interleaved frames in `format` — and pushes
-    /// it as the next frame of the mix, stamped with where the mix has got to.
-    fn emit(&mut self, mut mixed: Vec<f32>, samples: usize, format: MixFormat, bus: &Bus) {
+    /// Clips `mixed` — `samples` interleaved frames in `format` — into the
+    /// next frame of the mix, stamped with where the mix has got to.
+    fn emit(
+        &mut self,
+        mut mixed: Vec<f32>,
+        samples: usize,
+        format: MixFormat,
+    ) -> ffmpeg::frame::Audio {
         for sample in &mut mixed {
             *sample = sample.clamp(-1.0, 1.0);
         }
@@ -861,21 +881,11 @@ impl AudioMixer {
         frame.set_pts(Some(self.samples_emitted));
         crate::buffer::set_time_base(&mut frame, self.time_base());
         self.samples_emitted += samples as i64;
-
-        if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
-            bus.post(
-                &self.pp_log,
-                BusEvent::Error {
-                    element_type: ElementType::AudioMixer,
-                    name: self.name.clone(),
-                    error,
-                },
-            );
-        }
+        frame
     }
 }
 
-impl Element for AudioMixer {
+impl Element for Mixing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -893,55 +903,48 @@ impl Element for AudioMixer {
     }
 }
 
-impl Source for AudioMixer {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for AudioMixer {
+impl Produce for Mixing {
     fn is_live(&self) -> bool {
         self.shared.mode.is_live()
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        match self.shared.mode {
-            RenderMode::Live => self.run_live(control, bus),
-            RenderMode::Offline { end } => self.run_offline(control, bus, end),
-        }
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
+    }
+
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        Ok(match self.shared.mode {
+            RenderMode::Live => self.produce_live(wait),
+            RenderMode::Offline { end } => self.produce_offline(wait, end),
+        })
     }
 }
 
-impl AudioMixer {
-    /// Mixes by the wall clock — see [`RenderMode::Live`].
-    fn run_live(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        let mut timeline = ActiveTimeline::new(Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            timeline.account_pause(outcome.paused_for);
-            thread::sleep(TICK_INTERVAL);
-            self.mix_tick(timeline.elapsed(Instant::now()), bus);
+impl Mixing {
+    /// What the time since the mix began owes, a tick at a time — see
+    /// [`RenderMode::Live`].
+    fn produce_live(&mut self, wait: &mut Wait<'_>) -> Produced {
+        let started = *self.started.get_or_insert_with(|| wait.now());
+        if !wait.until(wait.now() + TICK_INTERVAL) {
+            return Produced::Nothing;
+        }
+        match self.mix_tick(wait.now().saturating_duration_since(started)) {
+            Some(frame) => Produced::Buffer(MediaBuffer::Audio(Arc::new(frame))),
+            None => Produced::Nothing,
         }
     }
 
-    /// Mixes each stretch of the output once every input has what belongs
-    /// in it, or has ended — see [`RenderMode::Offline`].
+    /// The next stretch of the output, once every input has what belongs in
+    /// it or has ended — see [`RenderMode::Offline`].
     ///
-    /// The video compositors' offline loop in samples rather than frames: no
-    /// schedule, each pass a stretch of [`OFFLINE_CHUNK`] placed from the
-    /// inputs' own timestamps, silence where an input has nothing, and the
-    /// pipelines feeding the inputs rung as room is made.
-    fn run_offline(
-        &mut self,
-        control: &ControlReceiver,
-        bus: &Bus,
-        end: Option<Duration>,
-    ) -> Result<()> {
+    /// The video compositors' offline mix in samples rather than frames: no
+    /// schedule, each stretch [`OFFLINE_CHUNK`] placed from the inputs' own
+    /// timestamps, silence where an input has nothing, and the pipelines
+    /// feeding the inputs rung as room is made.
+    fn produce_offline(&mut self, wait: &mut Wait<'_>, end: Option<Duration>) -> Produced {
         let format = self.shared.format.get();
         let rate = i64::from(format.sample_rate);
         let channels = format.channels as usize;
@@ -951,114 +954,104 @@ impl AudioMixer {
             i64::try_from((end.as_nanos() * rate as u128 + 500_000_000) / 1_000_000_000)
                 .unwrap_or(i64::MAX)
         });
-        let arrived = self.shared.arrived.clone();
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
 
-            let at = self.samples_emitted;
-            if total.is_some_and(|total| at >= total) {
+        let at = self.samples_emitted;
+        if total.is_some_and(|total| at >= total) {
+            return self.finish(at);
+        }
+        let mut samples = total.map_or(chunk, |total| chunk.min(total - at));
+        let fed = self.shared.fed.load(Ordering::Acquire);
+        let (settled, ended_at) = {
+            let inputs = self.shared.inputs.lock().unwrap();
+            let mut settled = true;
+            // Where the last of everything reaches, once every input has
+            // ended; `None` while one has not.
+            let mut ended_at = Some(at);
+            for input in inputs.values() {
+                let end = input.end(channels);
+                if !input.eos && end.is_none_or(|end| end < at + samples) {
+                    settled = false;
+                }
+                ended_at = match (ended_at, input.eos) {
+                    (Some(last), true) => Some(last.max(end.unwrap_or(at))),
+                    _ => None,
+                };
+            }
+            (settled, ended_at)
+        };
+        // With no end of its own, the mix is over once every input it was
+        // fed has ended and been mixed to its last sample — but not before
+        // one has been added, when "every input" is none.
+        if total.is_none()
+            && fed
+            && let Some(last) = ended_at
+        {
+            if last <= at {
                 return self.finish(at);
             }
-            let mut samples = total.map_or(chunk, |total| chunk.min(total - at));
-            let fed = self.shared.fed.load(Ordering::Acquire);
-            let (settled, ended_at) = {
-                let inputs = self.shared.inputs.lock().unwrap();
-                let mut settled = true;
-                // Where the last of everything reaches, once every input has
-                // ended; `None` while one has not.
-                let mut ended_at = Some(at);
-                for input in inputs.values() {
-                    let end = input.end(channels);
-                    if !input.eos && end.is_none_or(|end| end < at + samples) {
-                        settled = false;
-                    }
-                    ended_at = match (ended_at, input.eos) {
-                        (Some(last), true) => Some(last.max(end.unwrap_or(at))),
-                        _ => None,
-                    };
-                }
-                (settled, ended_at)
-            };
-            // With no end of its own, the mix is over once every input it was
-            // fed has ended and been mixed to its last sample — but not before
-            // one has been added, when "every input" is none.
-            if total.is_none()
-                && fed
-                && let Some(last) = ended_at
-            {
-                if last <= at {
-                    return self.finish(at);
-                }
-                samples = samples.min(last - at);
-            }
-            if !settled || (total.is_none() && !fed) {
-                // Woken as anything arrives; the timeout is only so control is
-                // looked at while nothing does.
-                crossbeam_channel::select! {
-                    recv(arrived.rings()) -> _ => {}
-                    default(TICK_INTERVAL.min(Duration::from_millis(5))) => {}
-                }
-                continue;
-            }
+            samples = samples.min(last - at);
+        }
+        if !settled || (total.is_none() && !fed) {
+            // Asked again once anything it waits for changes, or once the
+            // pipeline has something for this thread.
+            let _ = wait.recv(self.shared.arrived.rings());
+            return Produced::Nothing;
+        }
 
-            let wanted = at + samples + rate / OFFLINE_LOOKAHEAD;
-            let mut mixed = vec![0f32; samples as usize * channels];
-            let mut room = Vec::new();
-            {
-                let mut inputs = self.shared.inputs.lock().unwrap();
-                for input in inputs.values_mut() {
-                    let Some(mut start) = input.start else {
-                        continue;
+        let wanted = at + samples + rate / OFFLINE_LOOKAHEAD;
+        let mut mixed = vec![0f32; samples as usize * channels];
+        let mut room = Vec::new();
+        {
+            let mut inputs = self.shared.inputs.lock().unwrap();
+            for input in inputs.values_mut() {
+                let Some(mut start) = input.start else {
+                    continue;
+                };
+                // Placed before this stretch: too late to be heard.
+                if start < at {
+                    let late = ((at - start) as usize).min(input.samples.len() / channels);
+                    input.samples.drain(..late * channels);
+                    start = if input.samples.is_empty() {
+                        at
+                    } else {
+                        start + late as i64
                     };
-                    // Placed before this stretch: too late to be heard.
-                    if start < at {
-                        let late = ((at - start) as usize).min(input.samples.len() / channels);
-                        input.samples.drain(..late * channels);
-                        start = if input.samples.is_empty() {
-                            at
-                        } else {
-                            start + late as i64
-                        };
-                    }
-                    let offset = (start - at) as usize;
-                    if offset < samples as usize {
-                        let take = (input.samples.len() / channels).min(samples as usize - offset);
-                        for (slot, sample) in mixed[offset * channels..]
-                            .iter_mut()
-                            .zip(input.samples.drain(..take * channels))
-                        {
-                            *slot += sample;
-                        }
-                        start += take as i64;
-                    }
-                    input.start = Some(start);
-                    if input.end(channels).is_some_and(|end| end < wanted) {
-                        room.push(input.upstream.clone());
-                    }
                 }
-                inputs.retain(|_, input| !(input.eos && input.samples.is_empty()));
+                let offset = (start - at) as usize;
+                if offset < samples as usize {
+                    let take = (input.samples.len() / channels).min(samples as usize - offset);
+                    for (slot, sample) in mixed[offset * channels..]
+                        .iter_mut()
+                        .zip(input.samples.drain(..take * channels))
+                    {
+                        *slot += sample;
+                    }
+                    start += take as i64;
+                }
+                input.start = Some(start);
+                if input.end(channels).is_some_and(|end| end < wanted) {
+                    room.push(input.upstream.clone());
+                }
             }
-            self.emit(mixed, samples as usize, format, bus);
-            self.shared
-                .position
-                .store(self.samples_emitted, Ordering::Release);
-            for upstream in room {
-                if let Some(upstream) = upstream.upgrade() {
-                    upstream.wake();
-                }
+            inputs.retain(|_, input| !(input.eos && input.samples.is_empty()));
+        }
+        let frame = self.emit(mixed, samples as usize, format);
+        self.shared
+            .position
+            .store(self.samples_emitted, Ordering::Release);
+        for upstream in room {
+            if let Some(upstream) = upstream.upgrade() {
+                upstream.wake();
             }
         }
+        Produced::Buffer(MediaBuffer::Audio(Arc::new(frame)))
     }
 
     /// Ends an offline mix at mix position `at`: an `Eos` after the last
     /// frame, and the source's run is over.
-    fn finish(&mut self, at: i64) -> Result<()> {
+    fn finish(&self, at: i64) -> Produced {
         pp_info!(self, "finished: {at} samples");
-        self.pad.push_eos(&self.pp_log)
+        Produced::End
     }
 }
 
@@ -1087,7 +1080,9 @@ mod tests {
     use crate::pp_log::PpLog;
 
     use super::*;
-    use crate::pipeline::Pipeline;
+    use std::thread;
+
+    use crate::{bus::BusEvent, element::SourceElement, pipeline::Pipeline};
 
     fn constant_frame(value: f32, samples: usize, rate: u32) -> ffmpeg::frame::Audio {
         let mut frame = ffmpeg::frame::Audio::new(

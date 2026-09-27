@@ -135,9 +135,10 @@ impl PeriodicSchedule {
 /// How much *active* (non-`Pause`d) wall-clock time has passed since this
 /// source started — the elapsed-time counterpart to [`PeriodicSchedule`]'s
 /// absolute deadline, for sources that decide how many samples/ticks are
-/// owed so far rather than waiting for one fixed-size tick at a time (e.g.
-/// `WasapiCaptureSource` filling a silence gap, `AudioMixer`/
-/// `TestAudioSource` deciding how many samples a mix tick owes).
+/// owed so far rather than waiting for one fixed-size tick at a time —
+/// `WasapiCaptureSource` filling a silence gap. A source written as a
+/// [`crate::element::Produce`] has this for free, on
+/// [`crate::element::Wait::now`]'s clock.
 ///
 /// Tracks a single shifting `anchor` rather than a separate elapsed-time
 /// accumulator: `now.saturating_duration_since(anchor)` after shifting
@@ -152,11 +153,13 @@ impl PeriodicSchedule {
 /// after the fact — one summed [`crate::control::ControlOutcome::paused_for`]
 /// per [`crate::control::drain_control`] call — so there is no in-progress
 /// "currently paused" state to represent here.
+#[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 #[derive(Debug, Clone, Copy)]
 pub struct ActiveTimeline {
     anchor: Instant,
 }
 
+#[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 impl ActiveTimeline {
     /// Starts an active timeline anchored at `now`.
     pub fn new(now: Instant) -> Self {
@@ -181,7 +184,7 @@ impl ActiveTimeline {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows", feature = "wasapi-capture"))]
 mod active_timeline_tests {
     use super::*;
 
