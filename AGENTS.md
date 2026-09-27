@@ -191,7 +191,11 @@ final source of truth when documentation and implementation differ.
   stream its own way — `Queue`, `Tee`, a bin's or a rack's line — sends it
   on itself, in order with its buffers, never dropping one for room nor
   waiting for any; and whatever joins a stream under way — a branch
-  attached, a line filled anew — is handed its last segment first.
+  attached, a line filled anew — is handed its last segment first. A time
+  compared against the buffers — a seek's target — is put on their
+  timeline through the segment (`Segment::on_timeline`), never compared as
+  the place in the media a caller named: a looping file keeps the two a lap
+  or more apart.
 - Where playback stands — paused, prerolling and for which seek, which
   timeline is current — is the pipeline's `PlaybackState`, given to every
   element in `attach_context` and written only by the pipeline, before the

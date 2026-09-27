@@ -1199,6 +1199,18 @@ impl SeekableSource for FileDemuxer {
         let target = self.locate_in_lap(target);
         self.reposition(target)
     }
+
+    /// On the lap the seek left the timeline on — see
+    /// [`FileDemuxer::locate_in_lap`]: a position in the file a lap further
+    /// on for every lap played, and one already past a lap's end where it
+    /// is.
+    fn on_timeline(&self, position: crate::stream::Position) -> Duration {
+        let lap = self.lap_length.saturating_mul(1000);
+        if lap > 0 && duration_ns(position.0) > lap {
+            return position.0;
+        }
+        position.0 + Duration::from_micros(self.loop_offset.max(0).unsigned_abs())
+    }
 }
 
 /// The picture's stream, read back a second at a time. What

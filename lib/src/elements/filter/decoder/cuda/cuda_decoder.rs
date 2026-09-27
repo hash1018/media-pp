@@ -374,6 +374,14 @@ impl Sink for CudaDecoder {
         }
     }
 
+    /// The segment the stream is in, which the preroll gate puts a seek's
+    /// target on the samples' timeline by.
+    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
+        let crate::stream::StreamEvent::Segment(segment) = event.0;
+        self.preroll_gate.begin_segment(segment);
+        Ok(())
+    }
+
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // Same reasoning as `D3d11Decoder::control`: nothing to do on `Stop`
         // (the hw device reference is released in `Drop`), flush

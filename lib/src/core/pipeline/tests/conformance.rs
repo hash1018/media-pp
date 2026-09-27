@@ -1503,7 +1503,17 @@ fn run_sequence_turning(
                 calls.returned(index, false);
                 model.paused = false;
                 model.sought(target, rig.duration);
-                let deadline = Instant::now() + OP_TIMEOUT;
+                // Backwards, a looping file ends at the start of its first
+                // lap, from whichever lap the source was on: as long as the
+                // furthest picture shown, played at the rate — for however
+                // many laps it went on while the calls before ran.
+                let back_over_laps = (model.looped && model.backwards())
+                    .then(|| rig.furthest_picture())
+                    .flatten()
+                    .map_or(Duration::ZERO, |furthest| {
+                        furthest.div_f64(model.rate.abs().max(0.1))
+                    });
+                let deadline = Instant::now() + OP_TIMEOUT + back_over_laps;
                 if model.endless() {
                     // Into the next lap. Not "and never `Finished`": one an
                     // earlier seek past the end posted can reach this log
@@ -1799,6 +1809,9 @@ fn judge(
     // is on — so its samples start a whole number of laps past the position
     // the timeline was announced at, and the first of them says how many.
     let mut unlapped = false;
+    // An accurate seek's target past the end of the file — see where it
+    // is set.
+    let mut past_end: Option<Duration> = None;
     for (at, entry) in log.iter().enumerate() {
         match entry {
             Entry::Call {
@@ -1845,6 +1858,14 @@ fn judge(
                     };
                     (Some(floor), None)
                 };
+                // Past the end of the file, a looping one's source reads a
+                // target as a place on the timeline once it has looped — a
+                // step back on a later lap goes there — and as the end of
+                // the file before; the first sample says which.
+                past_end = (!backwards
+                    && mode == SeekMode::Accurate
+                    && duration.is_some_and(|duration| *target > duration))
+                .then_some(*target);
                 seek += 1;
                 unlapped = lap.is_some();
             }
@@ -1873,6 +1894,13 @@ fn judge(
                     return Err(format!("entry {at}: sound played backwards, {pts:?}"));
                 }
                 let Some(pts) = *pts else { continue };
+                if let Some(target) = past_end.take()
+                    && pts + LANDING_TOLERANCE >= target
+                {
+                    // Read as a place on the timeline: shown where it is.
+                    floor = Some(target);
+                    unlapped = false;
+                }
                 if std::mem::take(&mut unlapped)
                     && let (Some(lap), Some(reference)) = (lap, floor.or(ceiling))
                     && pts > reference
@@ -1882,21 +1910,6 @@ fn judge(
                     let shift = Duration::from_nanos((laps * lap.as_nanos()) as u64);
                     floor = floor.map(|floor| floor + shift);
                     ceiling = ceiling.map(|ceiling| ceiling + shift);
-                    // A known bug, not a promise kept: an accurate seek on a
-                    // lap after the first shows the keyframe before its
-                    // target, since the decoders' preroll gate holds the
-                    // target as a position in the file and the pictures on
-                    // the timeline — see
-                    // `an_accurate_seek_on_a_later_lap_shows_its_target`.
-                    // Held to where the seek landed until the stream says
-                    // where its timeline starts (docs/stream-events.md).
-                    if laps > 0
-                        && floor.is_some()
-                        && let Some(landed) = seek.checked_sub(1).and_then(|at| landings.get(at))
-                    {
-                        floor =
-                            Some(floor.map_or(*landed + shift, |floor| floor.min(*landed + shift)));
-                    }
                 }
                 let gap_allowed = |last: Duration| crosses_lap(last, pts, lap);
                 if let Some(ceiling) = ceiling {
@@ -2111,15 +2124,14 @@ fn the_matrix_meets_every_pair_of_choices() {
 /// On a looping file, an accurate seek made on a lap after the first shows
 /// the picture at its target, on that lap — not the keyframe before it.
 ///
-/// It does not: found by the matrix, the first time it looped. A caller's
-/// seek is a position in the file, and the source keeps to the lap playback
-/// is on, so the pictures come stamped a lap further on; the decoders'
-/// preroll gate holds the target as the position in the file, finds the
-/// first picture past it, and shows it. Fixed where the stream says where
-/// its timeline starts, which is what `docs/stream-events.md` builds —
-/// ignored until then.
+/// Found by the matrix, the first time it looped. A caller's seek is a
+/// position in the file, and the source keeps to the lap playback is on, so
+/// the pictures come stamped a lap further on; the decoders' preroll gate
+/// held the target as the position in the file, found the first picture
+/// past it, and showed it. The segment the seek begins now says where that
+/// position is on the timeline — see `crate::stream` — and the gate
+/// compares like with like.
 #[test]
-#[ignore = "known bug: fixed by the stream carrying its segment (docs/stream-events.md, stages 3-4)"]
 fn an_accurate_seek_on_a_later_lap_shows_its_target() {
     let shape = FileShape::new(Branches::One, Pacing::Pacer, Sound::None, Depth::Normal);
     let Some(rig) = Rig::build_file(shape) else {

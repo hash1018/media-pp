@@ -93,7 +93,7 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
     };
     assert!(segment(
         "[element=AppSource] [name=source]",
-        "flushed=false phase=sent pad=source_src outcome=ok"
+        "phase=sent pad=source_src outcome=ok"
     ));
     assert!(segment(
         "[element=Queue] [name=queue]",

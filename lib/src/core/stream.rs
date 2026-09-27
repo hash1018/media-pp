@@ -2,8 +2,11 @@
 //! its buffers — see `docs/stream-events.md`.
 //!
 //! So far the one event is the [`Segment`] every stream begins with and
-//! every seek begins again, which says no more yet than which timeline it
-//! opens and whether it follows a flush. Its buffers are on that timeline:
+//! every seek begins again. It says which timeline it opens, whether it
+//! follows a flush, and where it begins both as a caller names a place in
+//! the media and on the timeline its buffers are stamped on — two places a
+//! looping file keeps a lap or more apart, which is what lets a decoder hold
+//! a seek's target against the pictures. Its buffers are on that timeline:
 //! every buffer after a segment, up to the next, carries the number
 //! [`crate::timeline`] gives it, and that number is the segment's `id`.
 //!
@@ -36,7 +39,7 @@
 //! is handed the stream through the framework's wrappers, which pass every
 //! event on around it.
 
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
 use crate::{
     buffer::MediaBuffer,
@@ -61,14 +64,31 @@ pub(crate) struct Segment {
     /// Whether it follows a flush, so that what an element holds from
     /// before it belongs to a timeline the pipeline has left.
     pub(crate) flushed: bool,
+    /// Where it begins, as a caller names a place in the media — a seek's
+    /// target.
+    pub(crate) position: Duration,
+    /// The same place on the timeline its buffers are stamped on, which a
+    /// looping file carries a lap further on for every lap played.
+    pub(crate) start: Duration,
+}
+
+impl Segment {
+    /// `position`, a place in the media, on this segment's timeline — where
+    /// a buffer that shows it is stamped.
+    pub(crate) fn on_timeline(&self, position: Duration) -> Duration {
+        (position + self.start).saturating_sub(self.position)
+    }
 }
 
 impl StreamEvent {
-    /// A segment opening the timeline this thread makes buffers on.
-    pub(crate) fn segment(flushed: bool) -> Self {
+    /// A segment opening the timeline this thread makes buffers on, at
+    /// `position` in the media and `start` on that timeline.
+    pub(crate) fn segment(flushed: bool, position: Duration, start: Duration) -> Self {
         Self::Segment(Arc::new(Segment {
             id: crate::timeline::current(),
             flushed,
+            position,
+            start,
         }))
     }
 }
@@ -77,9 +97,11 @@ impl StreamEvent {
 impl fmt::Display for StreamEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Segment(segment) => {
-                write!(f, "segment id={} flushed={}", segment.id, segment.flushed)
-            }
+            Self::Segment(segment) => write!(
+                f,
+                "segment id={} flushed={} position={:?} start={:?}",
+                segment.id, segment.flushed, segment.position, segment.start
+            ),
         }
     }
 }
@@ -96,6 +118,13 @@ pub(crate) enum Item {
 /// crate's own — see this module's docs.
 #[derive(Clone, Copy)]
 pub struct Event<'a>(pub(crate) &'a StreamEvent);
+
+/// A place in a source's media, as
+/// [`SeekableSource::on_timeline`](crate::element::SeekableSource::on_timeline)
+/// is asked about it: a type only this crate can name, for the reason
+/// [`Event`] is one.
+#[derive(Clone, Copy)]
+pub struct Position(pub(crate) Duration);
 
 /// Passes `event` through every one of `pads`, a failure on one keeping it
 /// from none of the others, and answers the first failure — as
@@ -115,8 +144,14 @@ pub(crate) fn forward(pads: &mut [SrcPad], event: &StreamEvent) -> Result<()> {
 /// on — what a source's thread does as it starts, and again as it applies a
 /// seek. Traced pad by pad, as a source's `Eos` is: this is where the
 /// segment enters the graph.
-pub(crate) fn begin_segment(pads: &mut [SrcPad], flushed: bool, pp_log: &PpLog) -> Result<()> {
-    let event = StreamEvent::segment(flushed);
+pub(crate) fn begin_segment(
+    pads: &mut [SrcPad],
+    flushed: bool,
+    position: Duration,
+    start: Duration,
+    pp_log: &PpLog,
+) -> Result<()> {
+    let event = StreamEvent::segment(flushed, position, start);
     let mut first = Ok(());
     for pad in pads.iter_mut().filter(|pad| pad.is_linked()) {
         pp_trace!(

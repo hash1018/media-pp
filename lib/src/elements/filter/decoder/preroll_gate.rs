@@ -1,11 +1,12 @@
 use ffmpeg_next::{self as ffmpeg, Rescale};
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::buffer::MediaBuffer;
 use crate::control::PrerollContext;
 use crate::playback_state::PlaybackState;
+use crate::stream::Segment;
 
 const NANOS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
 #[cfg(any(
@@ -99,6 +100,11 @@ pub(super) struct PrerollGate {
     state: Option<Arc<PlaybackState>>,
     /// The preroll this is armed for, to tell a new one from it.
     armed: Option<Arc<PrerollContext>>,
+    /// The segment the stream is in, which puts a target — a place in the
+    /// media — on the timeline the samples are stamped on: a looping file's
+    /// a lap further on for every lap played. `None` for a decoder handed
+    /// none, whose target is taken as it is.
+    segment: Option<Arc<Segment>>,
 }
 
 impl PrerollGate {
@@ -181,6 +187,21 @@ impl PrerollGate {
         self.time_base = None;
         self.candidate = None;
         self.after.clear();
+        self.segment = None;
+    }
+
+    /// The segment the stream is in from here — see `segment`.
+    pub(super) fn begin_segment(&mut self, segment: &Arc<Segment>) {
+        self.segment = Some(Arc::clone(segment));
+    }
+
+    /// `target_ns`, a place in the media, on the timeline the samples are
+    /// stamped on — see `segment`.
+    fn on_timeline(&self, target_ns: i64) -> i64 {
+        self.segment.as_ref().map_or(target_ns, |segment| {
+            let target = Duration::from_nanos(target_ns.max(0).unsigned_abs());
+            segment.on_timeline(target).as_nanos().min(i64::MAX as u128) as i64
+        })
     }
 
     /// Whether the decoder must not be fed for now: this preroll has its
@@ -221,7 +242,7 @@ impl PrerollGate {
         else {
             return false;
         };
-        pts.rescale(time_base, NANOS) < target_ns
+        pts.rescale(time_base, NANOS) < self.on_timeline(target_ns)
     }
 
     /// Admits one decoded sample, retaining at most one pre-target candidate.
@@ -237,6 +258,7 @@ impl PrerollGate {
         let Some(target_ns) = self.target_ns else {
             return Some(buffer);
         };
+        let target_ns = self.on_timeline(target_ns);
         let Some(time_base) = self.time_base else {
             return Some(buffer);
         };

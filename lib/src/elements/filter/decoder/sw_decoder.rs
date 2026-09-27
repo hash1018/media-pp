@@ -356,6 +356,14 @@ impl Sink for SwDecoder {
         }
     }
 
+    /// The segment the stream is in, which the preroll gate puts a seek's
+    /// target on the samples' timeline by.
+    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
+        let crate::stream::StreamEvent::Segment(segment) = event.0;
+        self.preroll_gate.begin_segment(segment);
+        Ok(())
+    }
+
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // `Stop`: no local reaction needed — abandon means there's
         // nothing to flush before this decoder's own `Drop` frees the

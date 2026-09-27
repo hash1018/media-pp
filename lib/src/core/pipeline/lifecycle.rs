@@ -6,6 +6,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use crate::pp_log::{pp_info, pp_trace, pp_warn};
@@ -123,9 +124,13 @@ impl Pipeline {
                     // has so much as looked at its control — see
                     // `crate::stream`, on why that never waits.
                     let source_log = source.pp_log().clone();
-                    if let Err(error) =
-                        crate::stream::begin_segment(source.src_pads(), false, &source_log)
-                    {
+                    if let Err(error) = crate::stream::begin_segment(
+                        source.src_pads(),
+                        false,
+                        Duration::ZERO,
+                        Duration::ZERO,
+                        &source_log,
+                    ) {
                         bus.post_downstream_error(
                             &source_log,
                             source_type,
@@ -188,12 +193,18 @@ impl Pipeline {
                     // acknowledgement is let go first, so it can take the
                     // `Stop` below.
                     drop(std::mem::take(&mut pause_acks));
+                    // Stopped before it is said, as `stop` does: a source
+                    // still pushing into a queue whose worker has stopped
+                    // abandons what it hands over rather than reporting it.
+                    self.state.enter(Phase::Stopped);
                     self.state.interrupt();
+                    // The workers first, as `send_to_threads` does, and
+                    // for the same reason.
                     for control_tx in self
-                        .control_txs
+                        .queue_workers
+                        .senders()
                         .iter()
-                        .take(index)
-                        .chain(&self.queue_workers.senders())
+                        .chain(self.control_txs.iter().take(index))
                     {
                         control_tx.send(ControlMsg::Stop);
                     }
@@ -299,10 +310,14 @@ impl Pipeline {
         } else {
             Vec::new()
         };
-        let acks: Vec<_> = self
-            .control_txs
+        // The workers' first: a source that takes a `Stop` ends and takes
+        // its line down with it, and a worker it joins on the way ends then
+        // whether or not its own request is there yet. Queued first, it is
+        // — and the worker hands it on as it ends — so what is on that
+        // thread hears the `Stop` however quickly the source got to it.
+        let acks: Vec<_> = workers
             .iter()
-            .chain(&workers)
+            .chain(&self.control_txs)
             .filter_map(enqueue)
             .collect();
         self.state.interrupt();

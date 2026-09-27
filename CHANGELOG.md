@@ -169,6 +169,15 @@ compile error with no explanation.
   workers behind it have ended, as `finish` does, rather than leaving that
   to be read from the bus.
 
+- **An accurate seek on a looping file shows its target on every lap.**
+  A seek is a place in the file, and `FileDemuxer` stays on the lap
+  playback is on, so the pictures after it are stamped a lap or more
+  further on; the decoders held the target as the place in the file, took
+  the first picture as past it, and showed the keyframe before the target
+  instead. The stream now says, as a seek begins it, where its target is
+  on the timeline the pictures are stamped on, and the decoders hold the
+  target there. Found by the conformance matrix.
+
 - **A file whose packets are fanned out to several branches steps
   backwards in every branch.** Played backwards, `FileDemuxer` handed each
   packet over without asking whether its pad could take it, and a branch

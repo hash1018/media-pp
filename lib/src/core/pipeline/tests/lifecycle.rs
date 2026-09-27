@@ -684,6 +684,16 @@ fn pausing_leaves_a_queue_backlog_in_the_queue() {
 /// behind every queue: once from the pipeline, once from upstream.
 #[test]
 fn every_element_hears_each_request_once() {
+    // Several times over: the `Stop` a source got to before the pipeline had
+    // queued it for every worker — a source takes its line down as it ends,
+    // and a worker that ended then took none — missed the elements on that
+    // worker's thread about one run in a few hundred of the whole suite.
+    for _ in 0..20 {
+        hear_each_request_once();
+    }
+}
+
+fn hear_each_request_once() {
     use crate::elements::AppSink;
 
     const NAMES: [&str; 3] = ["behind-two", "behind-three", "no-queue"];

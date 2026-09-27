@@ -709,6 +709,18 @@ pub trait SeekableSource: SourceElement {
     /// callers that need to know where playback actually resumed should
     /// watch that instead of assuming `target` took effect verbatim.
     fn seek(&mut self, target: Duration) -> Result<Duration>;
+
+    /// Where `position`, a place in the media this source was just sought
+    /// in, is on the timeline its buffers are stamped on — what the segment
+    /// a seek begins says, so that what compares a seek's target with the
+    /// buffers compares like with like. The same place by default; a
+    /// looping file's a lap further on for every lap played. Not for
+    /// sources outside this crate yet, which is why its argument is a type
+    /// nothing outside can name.
+    #[doc(hidden)]
+    fn on_timeline(&self, position: crate::stream::Position) -> Duration {
+        position.0
+    }
 }
 
 /// A source that can read its media backwards — what
@@ -934,7 +946,8 @@ mod tests {
                 sink.control(&ControlMsg::Pause).is_err(),
                 "not the default of doing nothing"
             );
-            let segment = crate::stream::StreamEvent::segment(false);
+            let segment =
+                crate::stream::StreamEvent::segment(false, Duration::ZERO, Duration::ZERO);
             assert!(
                 sink.stream_event(crate::stream::Event(&segment)).is_err(),
                 "nor for an event in the stream"

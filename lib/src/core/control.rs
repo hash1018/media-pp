@@ -901,9 +901,12 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
         let forwarded = forward(source.src_pads(), msg);
         // What it reads from here on begins a stream again, on the timeline
         // it has just followed — see `crate::stream`.
-        let begun = if matches!(msg, ControlMsg::Seek(_)) {
+        let begun = if let ControlMsg::Seek(target) = msg {
+            let start = source.as_seekable().map_or(*target, |seekable| {
+                seekable.on_timeline(crate::stream::Position(*target))
+            });
             let pp_log = source.pp_log().clone();
-            crate::stream::begin_segment(source.src_pads(), true, &pp_log)
+            crate::stream::begin_segment(source.src_pads(), true, *target, start, &pp_log)
         } else {
             Ok(())
         };

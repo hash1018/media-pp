@@ -299,6 +299,14 @@ impl Sink for VulkanDecoder {
         }
     }
 
+    /// The segment the stream is in, which the preroll gate puts a seek's
+    /// target on the samples' timeline by.
+    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
+        let crate::stream::StreamEvent::Segment(segment) = event.0;
+        self.preroll_gate.begin_segment(segment);
+        Ok(())
+    }
+
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // Reference-frame state belongs to the timeline a seek leaves; the
         // samples decoded while a preroll catches up exist only to warm the
