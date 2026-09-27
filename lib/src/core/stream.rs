@@ -81,6 +81,11 @@ pub(crate) struct Segment {
     /// The same place on the timeline its buffers are stamped on, which a
     /// looping file carries a lap further on for every lap played.
     pub(crate) start: Duration,
+    /// Whether its buffers come played backwards — a picture's stretches
+    /// read from the end, their `pts` going down. A rate that changes
+    /// without turning round begins no segment, so this says only which
+    /// way, and the playback clock says how fast.
+    pub(crate) backwards: bool,
 }
 
 impl Segment {
@@ -97,8 +102,8 @@ impl fmt::Display for StreamEvent {
         match self {
             Self::Segment(segment) => write!(
                 f,
-                "segment id={} flushed={} position={:?} start={:?}",
-                segment.id, segment.flushed, segment.position, segment.start
+                "segment id={} flushed={} position={:?} start={:?} backwards={}",
+                segment.id, segment.flushed, segment.position, segment.start, segment.backwards
             ),
         }
     }

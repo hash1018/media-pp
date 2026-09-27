@@ -951,6 +951,7 @@ mod tests {
                 flushed: false,
                 position: Duration::ZERO,
                 start: Duration::ZERO,
+                backwards: false,
             }));
             assert!(
                 sink.stream_event(crate::stream::Event(&segment)).is_err(),

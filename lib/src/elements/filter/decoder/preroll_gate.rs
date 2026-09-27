@@ -122,7 +122,11 @@ impl PrerollGate {
         // what each shows is cut by the source — see
         // `crate::element::ReversibleSource`. Selecting here would drop
         // everything below the target, which is all of it.
-        if self.state.as_ref().is_some_and(|state| state.backwards()) {
+        if self
+            .segment
+            .as_ref()
+            .is_some_and(|segment| segment.backwards)
+        {
             self.armed = None;
             self.clear();
             return;

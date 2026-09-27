@@ -125,6 +125,7 @@ impl Pipeline {
                         flushed: false,
                         position: Duration::ZERO,
                         start: Duration::ZERO,
+                        backwards: false,
                     };
                     if let Err(error) =
                         crate::stream::begin_segment(source.src_pads(), segment, &source_log)

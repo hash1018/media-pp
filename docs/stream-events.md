@@ -316,7 +316,7 @@ pub struct Segment {
     pub start: Duration,            // where the segment starts, on the stream's timeline
     pub show_from: Option<Duration>, // accurate seek: decode from start, show from here — on the timeline
     pub position: Duration,         // `start` as a position in the media, for a caller
-    pub rate: f64,                  // negative: backwards
+    pub backwards: bool,            // which way; how fast is the playback clock's — a rate change without a turn begins no segment
     pub step: Option<usize>,        // a frame step's count, where this segment is one
 }
 ```
@@ -350,7 +350,7 @@ What moves out of `PlaybackState` and the control messages:
 | Today | Becomes |
 |---|---|
 | timeline number, thread-local, checked at `Queue` | done: `Segment.id` from the pipeline's count, and every pad and `Queue` worker the pipeline's own `Flush` reaches refusing what arrives until the flushed `Segment` passes (§4.3). A simplification, not a fix; `what_was_read_before_a_seek_does_not_arrive_after_it` fails with neither and passes with either. |
-| `PlaybackState::backwards` | `Segment.rate < 0` |
+| `PlaybackState::backwards` | done for the elements: `Segment.backwards`, read by the stage that marks a decoder's stretches and by the decoders' preroll gate. A bool, not a rate: a rate that changes without a turn begins no segment, so a rate there would go stale. The pipeline and a source still read the state to decide how to seek. |
 | `PrerollContext` target and step count | `Segment.show_from`, `Segment.step` |
 | `Flush` resetting per-element state | the flushed `Segment`, arriving exactly where the old data ends |
 | "first sample of the new timeline" | first buffer a terminal takes after the flushed `Segment` — exact, per terminal |

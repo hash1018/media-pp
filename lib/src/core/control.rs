@@ -903,6 +903,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
                 flushed: true,
                 position: *target,
                 start,
+                backwards: state.backwards(),
             };
             crate::stream::begin_segment(source.src_pads(), segment, &pp_log)
         } else {

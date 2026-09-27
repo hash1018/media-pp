@@ -19,7 +19,7 @@ use crate::{
     playback_state::PlaybackState,
     queue::{OverflowPolicy, Queue},
     stats::ElementCounters,
-    stream::Event,
+    stream::{Event, StreamEvent},
 };
 
 /// Builds one chain segment (a run of elements that all execute on the same
@@ -110,7 +110,8 @@ pub(crate) struct FlowTracer<T> {
 /// [`crate::element::ReversibleSource`]. One place for every decoder, so
 /// none of them works it out from the packets on its own.
 struct Stretches {
-    state: Arc<PlaybackState>,
+    /// Whether the stream is played backwards, as its segment says.
+    backwards: bool,
     /// The decode time of the packet before, to see a stretch begin by.
     last: Option<i64>,
     /// Whether a stretch is under way.
@@ -230,6 +231,10 @@ impl<T: Filter> Sink for FlowTracer<T> {
             pp_log: self.inner.pp_log(),
             "event={carried} phase=received"
         );
+        let StreamEvent::Segment(segment) = carried;
+        if let Some(stretches) = &mut self.stretches {
+            stretches.backwards = segment.backwards;
+        }
         let reacted = self.inner.stream_event(event);
         let forwarded = crate::stream::forward(self.inner.src_pads(), carried);
         let result = reacted.and(forwarded);
@@ -259,7 +264,7 @@ fn mark_stretch<T: Filter>(
     let Some(stretches) = stretches else {
         return Ok(());
     };
-    if !stretches.state.backwards() {
+    if !stretches.backwards {
         stretches.open = false;
         stretches.last = None;
         return Ok(());
@@ -346,7 +351,7 @@ where
             inner: element,
             counters: Some(counters),
             stretches: Some(Stretches {
-                state: Arc::clone(&context.state),
+                backwards: false,
                 last: None,
                 open: false,
             }),
