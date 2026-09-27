@@ -18,10 +18,8 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         windows::d3d12_gpu::D3d12Gpu,
@@ -29,6 +27,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 use super::d3d12_video_processor::{D3d12VideoProcessor, ProcessorShape, VideoProcessFrame};
@@ -161,7 +160,13 @@ pub enum D3d12ScalerError {
 /// are learned from the first frame and the video processor is rebuilt after
 /// a later input renegotiation. PTS, duration, and color metadata are copied
 /// to the scaled frame unchanged.
-pub struct D3d12Scaler {
+pub struct D3d12Scaler(TransformStage<Scaling>);
+
+transform_filter!(D3d12Scaler);
+
+/// What a [`D3d12Scaler`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Scaling {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D12Device,
@@ -170,7 +175,6 @@ pub struct D3d12Scaler {
     hw_frames_ctx: AvBufferRef,
     width: u32,
     height: u32,
-    pad: SrcPad,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// The last scale and the texture it was made from, so a producer that
     /// re-emits an unchanged picture is answered with it instead of another
@@ -182,7 +186,7 @@ pub struct D3d12Scaler {
 // SAFETY: D3D12 COM interfaces and the FFmpeg buffer owners are free-threaded;
 // the video processor documents its own `Send` contract, and all mutable
 // scaler/pool state is accessible only through `&mut self`.
-unsafe impl Send for D3d12Scaler {}
+unsafe impl Send for Scaling {}
 
 impl D3d12Scaler {
     /// Creates a fixed-size NV12 scaler on `gpu`, which must be the
@@ -215,16 +219,9 @@ impl D3d12Scaler {
             Err(code) => return Err(D3d12ScalerError::HwFramesInit(code)),
         };
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
-                    .with_layouts(crate::contract::PixelLayoutSet::NV12),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: NV12 -> {width}x{height} NV12");
-        Ok(Self {
+        Ok(Self(TransformStage::new(Scaling {
             pp_log,
             name,
             device: device.clone(),
@@ -233,12 +230,13 @@ impl D3d12Scaler {
             hw_frames_ctx,
             width,
             height,
-            pad,
             pool,
             repeated: RepeatedOutput::new(),
-        })
+        })))
     }
+}
 
+impl Scaling {
     fn scale(
         &mut self,
         source: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
@@ -386,7 +384,7 @@ impl D3d12Scaler {
     }
 }
 
-impl Element for D3d12Scaler {
+impl Element for Scaling {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -401,13 +399,7 @@ impl Element for D3d12Scaler {
     }
 }
 
-impl Source for D3d12Scaler {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d12Scaler {
+impl Transform for Scaling {
     /// Scales on the GPU; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -416,19 +408,18 @@ impl Sink for D3d12Scaler {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same texture as last time is the same pixels as last time,
             // and scaling them again produces the surface already in hand —
             // see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
-                let scaled = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(scaled))
+                let scaled = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(scaled));
+                Ok(())
             }
-            MediaBuffer::Eos => {
-                self.processor.wait_all()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let error = D3d12ScalerError::UnsupportedBuffer(other.kind());
                 pp_error!(self, "{error}");
@@ -437,16 +428,25 @@ impl Sink for D3d12Scaler {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        // Nothing local to react to beyond the cached scale.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    /// What the GPU still has queued finishes before the end goes on.
+    fn drain(&mut self, _out: &mut Output) -> Result<()> {
+        Ok(self.processor.wait_all()?)
+    }
+
+    fn reset(&mut self) {
+        // Nothing to let go of beyond the cached scale.
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12),
+        )
     }
 }
 
-impl PerFrameTransform for D3d12Scaler {
+impl PerFrameTransform for Scaling {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -464,7 +464,7 @@ impl PerFrameTransform for D3d12Scaler {
     }
 }
 
-impl Drop for D3d12Scaler {
+impl Drop for Scaling {
     fn drop(&mut self) {
         if let Err(error) = self.processor.wait_all() {
             pp_error!(self, "failed to drain GPU work during drop: {error}");
@@ -513,6 +513,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::{D3d12Download, D3d12Upload};
     use crate::test_support::try_d3d12_gpu as try_device;
 

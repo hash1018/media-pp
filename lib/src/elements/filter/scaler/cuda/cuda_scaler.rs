@@ -10,10 +10,9 @@ use super::scale_graph::CudaScaleGraph;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
     frame_size::OutputSize,
-    pad::SrcPad,
     platform::{
         cuda::{
             CudaDevice, CudaFrameFormat,
@@ -21,6 +20,7 @@ use crate::{
         },
         ffmpeg::AvBufferRef,
     },
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `CudaScaler`. Converts into the crate-wide `Error`
@@ -153,7 +153,13 @@ impl CudaScalerInterp {
 /// its `libswscale` context. The output size is whatever the constructor
 /// settled: one it was given, or the input's own through
 /// [`CudaScaler::to_format`].
-pub struct CudaScaler {
+pub struct CudaScaler(TransformStage<Scaling>);
+
+transform_filter!(CudaScaler);
+
+/// What a [`CudaScaler`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Scaling {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in
@@ -171,7 +177,6 @@ pub struct CudaScaler {
     /// Built from the first frame and rebuilt when the input changes — see
     /// this type's own docs.
     graph: CudaScaleGraph,
-    pad: SrcPad,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -180,7 +185,7 @@ pub struct CudaScaler {
 // already marks `filter::Graph` itself `Send`. `&mut self` on every method
 // that touches them rules out concurrent access. Same reasoning as
 // `CudaUpload`.
-unsafe impl Send for CudaScaler {}
+unsafe impl Send for Scaling {}
 
 impl CudaScaler {
     /// `device` must be the same [`CudaDevice`] the upstream CUDA elements
@@ -270,18 +275,6 @@ impl CudaScaler {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
-        // Built for a layout, it puts out that one; built to keep the
-        // input's, whichever that is.
-        let cuda_video = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            match format {
-                Some(format) => OutputContract::Fixed(cuda_video.with_layouts(format.layouts())),
-                None => OutputContract::SameLayout(
-                    cuda_video.with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
-                ),
-            },
-        );
         match size {
             OutputSize::Fixed { width, height } => pp_info!(
                 pp_log: &pp_log,
@@ -292,7 +285,7 @@ impl CudaScaler {
                 "created: dst=the input's own size, interp={interp:?}, format={format:?}"
             ),
         }
-        Self {
+        Self(TransformStage::new(Scaling {
             name,
             pp_log,
             _hw_device_ctx: hw_device_ctx,
@@ -300,16 +293,17 @@ impl CudaScaler {
             size,
             format,
             graph: CudaScaleGraph::converting(interp, format),
-            pad,
-        }
+        }))
     }
+}
 
+impl Scaling {
     /// Rejects anything that is not a CUDA frame from this element's own
     /// device in a layout it can put out, so a bad frame fails here rather
     /// than as an opaque libavfilter error code — or, worse, as device
     /// pointers read against the wrong context. Returns the frame's own frames context, which is what the
     /// graph has to be configured against.
-    pub(crate) fn validate(
+    fn validate(
         &self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<*mut ffi::AVBufferRef, CudaScalerError> {
@@ -333,7 +327,7 @@ impl CudaScaler {
         Ok(surface.frames_ctx)
     }
 
-    fn scale(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+    fn scale(&mut self, frame: &ffmpeg::frame::Video, out: &mut Output) -> Result<()> {
         let (width, height) = self.size.of(frame);
         let frames_ctx = self
             .validate(frame)
@@ -356,13 +350,13 @@ impl CudaScaler {
             .scale(frame, frames_ctx, width, height)
             .inspect_err(|error| pp_error!(self, "scale failed: {error}"))?;
         for output in scaled {
-            self.pad.push(MediaBuffer::Video(Arc::new(output)))?;
+            out.push(MediaBuffer::Video(Arc::new(output)));
         }
         Ok(())
     }
 }
 
-impl Element for CudaScaler {
+impl Element for Scaling {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -380,13 +374,7 @@ impl Element for CudaScaler {
     }
 }
 
-impl Source for CudaScaler {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for CudaScaler {
+impl Transform for Scaling {
     /// Resizes on the device; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -400,25 +388,41 @@ impl Sink for CudaScaler {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.scale(&frame),
-            MediaBuffer::Eos => {
-                let drained = self
-                    .graph
-                    .flush()
-                    .inspect_err(|error| pp_error!(self, "failed to flush the graph: {error}"))?;
-                for output in drained {
-                    self.pad.push(MediaBuffer::Video(Arc::new(output)))?;
-                }
-                self.pad.push(MediaBuffer::Eos)
-            }
+            MediaBuffer::Video(frame) => self.scale(&frame, out),
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             other => Err(CudaScalerError::UnsupportedBuffer(other.kind()).into()),
+        }
+    }
+
+    /// What the graph still holds goes on before the end.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        let drained = self
+            .graph
+            .flush()
+            .inspect_err(|error| pp_error!(self, "failed to flush the graph: {error}"))?;
+        for output in drained {
+            out.push(MediaBuffer::Video(Arc::new(output)));
+        }
+        Ok(())
+    }
+
+    /// Built for a layout, it puts out that one; built to keep the input's,
+    /// whichever that is.
+    fn output_contract(&self) -> OutputContract {
+        let cuda_video = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda);
+        match self.format {
+            Some(format) => OutputContract::Fixed(cuda_video.with_layouts(format.layouts())),
+            None => OutputContract::SameLayout(
+                cuda_video.with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
+            ),
         }
     }
 }
 
-impl Drop for CudaScaler {
+impl Drop for Scaling {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
     }
@@ -430,6 +434,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::{
         elements::{CudaDecoder, CudaDownload, CudaUpload},
         test_support::{try_cuda_device, try_test_video},

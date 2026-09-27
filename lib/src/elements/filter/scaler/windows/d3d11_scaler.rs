@@ -25,11 +25,9 @@ use super::d3d11_video_processor::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     frame_size::OutputSize,
-    pad::SrcPad,
     platform::windows::{
         d3d11::protect_shared_device,
         d3d11_gpu::D3d11Gpu,
@@ -37,6 +35,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `D3d11Scaler`. Converts into the crate-wide `Error`
@@ -250,7 +249,13 @@ impl D3d11ScalerFormat {
 /// one lock every element shares — and this element holds that lock for a
 /// whole configure-and-`Blt` sequence, for the same reason
 /// [`crate::elements::D3d11Download`] holds it across its own copy and map.
-pub struct D3d11Scaler {
+pub struct D3d11Scaler(TransformStage<Scaling>);
+
+transform_filter!(D3d11Scaler);
+
+/// What a [`D3d11Scaler`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Scaling {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
@@ -268,7 +273,6 @@ pub struct D3d11Scaler {
     /// Built from the first frame and rebuilt when the input changes — see
     /// this type's own docs.
     processor: Option<ScaleProcessor>,
-    pad: SrcPad,
     /// Reused across every scaled frame — see [`UnboundObjectPool`]'s docs.
     /// Only the small CPU-side `AVFrame` wrapper is actually reused; the
     /// output texture itself is a fresh allocation per frame, since
@@ -292,7 +296,7 @@ struct ValidatedInput {
 // own `Mutex`) or plain data. `&mut self` on every method that touches
 // non-`Arc`/`Mutex` state already rules out concurrent access to those parts
 // from multiple threads — same reasoning as `D3d11Download`.
-unsafe impl Send for D3d11Scaler {}
+unsafe impl Send for Scaling {}
 
 /// The colorimetry an output frame should be tagged with, given what came
 /// in and what surface format is being written.
@@ -436,23 +440,6 @@ impl D3d11Scaler {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .cast()?;
         let video_device: ID3D11VideoDevice = device.cast()?;
-        // Built for a layout, it puts out that one; `Preserve` keeps the
-        // input's, whichever that is.
-        let d3d11_video = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            match format {
-                D3d11ScalerFormat::Nv12 => OutputContract::Fixed(
-                    d3d11_video.with_layouts(crate::contract::PixelLayoutSet::NV12),
-                ),
-                D3d11ScalerFormat::Bgra => OutputContract::Fixed(
-                    d3d11_video.with_layouts(crate::contract::PixelLayoutSet::BGRA),
-                ),
-                D3d11ScalerFormat::Preserve => OutputContract::SameLayout(
-                    d3d11_video.with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
-                ),
-            },
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         match size {
             OutputSize::Fixed { width, height } => {
@@ -462,7 +449,7 @@ impl D3d11Scaler {
                 pp_info!(pp_log: &pp_log, "opened: dst=the input's own size {format:?}")
             }
         }
-        Ok(Self {
+        Ok(Self(TransformStage::new(Scaling {
             name,
             pp_log,
             device: device.clone(),
@@ -472,12 +459,13 @@ impl D3d11Scaler {
             size,
             format,
             processor: None,
-            pad,
             pool,
             repeated: RepeatedOutput::new(),
-        })
+        })))
     }
+}
 
+impl Scaling {
     /// Rejects anything that is not a texture this element can actually
     /// scale, so a bad frame fails here rather than as an opaque D3D11
     /// error code — or, worse, as a `Blt` reading a texture that belongs to
@@ -694,7 +682,7 @@ impl D3d11Scaler {
     }
 }
 
-impl PerFrameTransform for D3d11Scaler {
+impl PerFrameTransform for Scaling {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -712,7 +700,7 @@ impl PerFrameTransform for D3d11Scaler {
     }
 }
 
-impl Element for D3d11Scaler {
+impl Element for Scaling {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -730,13 +718,7 @@ impl Element for D3d11Scaler {
     }
 }
 
-impl Source for D3d11Scaler {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d11Scaler {
+impl Transform for Scaling {
     /// Scaling happens on the GPU; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -745,18 +727,19 @@ impl Sink for D3d11Scaler {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same texture as last time is the same pixels as last time,
             // and scaling them again produces the surface already in hand —
             // see [`PerFrameTransform`], which is where that is decided.
             MediaBuffer::Video(frame) => {
-                let scaled = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(scaled))
+                let scaled = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(scaled));
+                Ok(())
             }
-            // Nothing is buffered here — one `Blt` per frame, pushed
-            // before `consume` returns — so there is nothing to drain.
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here. Nothing is buffered — one
+            // `Blt` per frame — so there is nothing to drain either.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -765,14 +748,27 @@ impl Sink for D3d11Scaler {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        // Nothing local to react to beyond the cached scale — a pure
-        // per-frame spatial transform, same reasoning as
-        // `CudaScaler::control`.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
+    fn reset(&mut self) {
+        // Nothing to let go of beyond the cached scale — a pure per-frame
+        // spatial transform.
+        self.repeated.clear();
+    }
+
+    /// Built for a layout, it puts out that one; `Preserve` keeps the
+    /// input's, whichever that is.
+    fn output_contract(&self) -> OutputContract {
+        let d3d11_video = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11);
+        match self.format {
+            D3d11ScalerFormat::Nv12 => OutputContract::Fixed(
+                d3d11_video.with_layouts(crate::contract::PixelLayoutSet::NV12),
+            ),
+            D3d11ScalerFormat::Bgra => OutputContract::Fixed(
+                d3d11_video.with_layouts(crate::contract::PixelLayoutSet::BGRA),
+            ),
+            D3d11ScalerFormat::Preserve => OutputContract::SameLayout(
+                d3d11_video.with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
+            ),
         }
-        Ok(())
     }
 }
 
@@ -825,6 +821,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::{D3d11Download, D3d11Upload};
     use crate::test_support::try_d3d11_gpu as try_device;
 

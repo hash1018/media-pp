@@ -11,12 +11,10 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::VulkanDevice,
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         vulkan::{
@@ -28,6 +26,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/scale.wgsl");
@@ -131,7 +130,13 @@ impl VulkanScalerInterp {
 ///
 /// The colour description and the timing are carried through unchanged; so
 /// is the layout, since this converts nothing.
-pub struct VulkanScaler {
+pub struct VulkanScaler(TransformStage<Scaling>);
+
+transform_filter!(VulkanScaler);
+
+/// What a [`VulkanScaler`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Scaling {
     pp_log: PpLog,
     name: Arc<str>,
     gpu: Arc<DeviceShared>,
@@ -157,13 +162,12 @@ pub struct VulkanScaler {
     scratch: Option<(Image, View)>,
     wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
     repeated: RepeatedOutput,
-    pad: SrcPad,
 }
 
 // SAFETY: the FFmpeg buffers have no thread affinity, `device_ctx` is only
 // compared, and the Vulkan objects are touched only through `&mut self`;
 // queue access goes through FFmpeg's lock.
-unsafe impl Send for VulkanScaler {}
+unsafe impl Send for Scaling {}
 
 /// One plane of the work: its source and output size, the view it is read
 /// through, where the across pass leaves it, and the output view or image
@@ -211,19 +215,12 @@ impl VulkanScaler {
         let down_rg = kernel(c"down_rg", &[down[0], (4, D::STORAGE_IMAGE)])?;
         let down_bgra = kernel(c"down_bgra", &[down[0], (5, D::STORAGE_IMAGE)])?;
         let recording = Recording::new(&gpu)?;
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::SameLayout(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
-                    .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
-            ),
-        );
         pp_info!(
             pp_log: &pp_log,
             "opened: to {width}x{height}, {interp:?}, on {}",
             device.name()
         );
-        Ok(Self {
+        Ok(Self(TransformStage::new(Scaling {
             pp_log,
             name,
             gpu,
@@ -243,10 +240,11 @@ impl VulkanScaler {
             scratch: None,
             wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
             repeated: RepeatedOutput::new(),
-            pad,
-        })
+        })))
     }
+}
 
+impl Scaling {
     fn scale(
         &mut self,
         source: &ffmpeg::frame::Video,
@@ -670,7 +668,7 @@ impl VulkanScaler {
     }
 }
 
-impl PerFrameTransform for VulkanScaler {
+impl PerFrameTransform for Scaling {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -690,7 +688,7 @@ impl PerFrameTransform for VulkanScaler {
     }
 }
 
-impl Element for VulkanScaler {
+impl Element for Scaling {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -708,13 +706,7 @@ impl Element for VulkanScaler {
     }
 }
 
-impl Source for VulkanScaler {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for VulkanScaler {
+impl Transform for Scaling {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
@@ -722,19 +714,22 @@ impl Sink for VulkanScaler {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // Already the size asked for: nothing to do to it.
             MediaBuffer::Video(frame)
                 if frame.width() == self.width && frame.height() == self.height =>
             {
-                self.pad.push(MediaBuffer::Video(frame))
+                out.push(MediaBuffer::Video(frame));
+                Ok(())
             }
             MediaBuffer::Video(frame) => {
-                let scaled = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(scaled))
+                let scaled = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(scaled));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -743,15 +738,19 @@ impl Sink for VulkanScaler {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::SameLayout(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
+                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
+        )
     }
 }
 
-impl Drop for VulkanScaler {
+impl Drop for Scaling {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -760,6 +759,7 @@ impl Drop for VulkanScaler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::Sink;
     use crate::{
         elements::{VulkanDownload, VulkanUpload},
         platform::vulkan::gpu::compile,
