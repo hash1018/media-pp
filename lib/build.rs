@@ -109,8 +109,24 @@ mod vulkan {
             .derive_default(true)
             .layout_tests(true)
             .generate_comments(false)
-            .generate()
-            .unwrap_or_else(|error| panic!("generating bindings to {HEADER}: {error}"));
+            .generate();
+        let bindings = match bindings {
+            Ok(bindings) => bindings,
+            // On Linux the headers are looked for where the compiler looks,
+            // so a machine without them is only found out here — said as
+            // plainly as the check above says it elsewhere.
+            Err(error) if error.to_string().contains("vulkan/vulkan.h") => {
+                println!(
+                    "cargo::error=the `vulkan` feature needs the Vulkan headers, which \
+                     {HEADER} includes, and the compiler found none: install your \
+                     distribution's (`libvulkan-dev` on Debian and Ubuntu, \
+                     `vulkan-headers` on Fedora and Arch), or set VULKAN_SDK to a \
+                     directory with them under `include`."
+                );
+                return;
+            }
+            Err(error) => panic!("generating bindings to {HEADER}: {error}"),
+        };
         let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
         bindings
             .write_to_file(out.join("hwcontext_vulkan.rs"))
