@@ -256,14 +256,18 @@ never had, in its first hours. Each is reproduced by an ignored test in
   steps** (`packets_fanned_out_backwards_step_on_in_every_branch`). A
   stretch's end is inferred from the next stretch's first packet; with the
   slower branch full and the source waiting on it, the faster branch never
-  gets that packet and holds its pictures for good. `StreamEvent::Stretch`
-  from the source is the fix.
+  gets that packet and holds its pictures for good — with one-deep queues
+  every time, with ordinary ones now and then. `StreamEvent::Stretch` from
+  the source is the fix; until then the matrix plays no packet fan-out
+  backwards.
 - **A paused seek to the end, with one-deep queues and sound, never
   prerolls the sound**
   (`a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues`).
-  The demuxer parks packets per pad but pushes each pad's `Eos` with a wait
-  for room, the picture's first; the sound's parked packets and `Eos` wait
-  behind it. The single read cursor — §5 — not fixed by this design.
+  The demuxer parked packets per pad but pushed each pad's `Eos` with a
+  wait for room, the picture's first, and the sound's `Eos` — which a seek
+  past its last sample needs — waited behind it. The single read cursor,
+  §5, which this design does not fix; so it was fixed on its own, each pad
+  handed its end as it can take one.
 
 ---
 

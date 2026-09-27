@@ -329,6 +329,16 @@ pub struct FileDemuxer {
     backwards: Option<Backwards>,
 }
 
+/// How handing every pad its end went — see [`FileDemuxer::end_every_pad`].
+enum Ending {
+    /// Every pad has its `Eos`.
+    Ended,
+    /// Stopped, or finished, on the way.
+    Stopped,
+    /// A seek moved the source back into the file first.
+    Sought,
+}
+
 /// Reading the picture backwards: a stretch at a time from the end, each
 /// stretch in its own order, for a decoder to hand on last picture first.
 ///
@@ -796,6 +806,60 @@ impl FileDemuxer {
         Ok(())
     }
 
+    /// Hands every pad its `Eos`, each as soon as it can take one, answering
+    /// control between tries — and says how it ended: every pad ended, the
+    /// source stopped, or a seek moved it back into the file first.
+    ///
+    /// Not each in turn with a push that waits for room. In a preroll a
+    /// branch that has its sample takes nothing more, so the queue in front
+    /// of it stays full; the pad after it, whose branch may need its `Eos`
+    /// to preroll at all — a seek past the last of the sound is answered by
+    /// the sample before it, handed on at the end of the stream — waited
+    /// behind that push on this one thread until the preroll timed out.
+    /// Packets were parked per pad for exactly this; the end was not. Found
+    /// by the conformance matrix, with one-deep queues and sound.
+    ///
+    /// A `Finish` that arrives meanwhile ends in order: the ends still owed
+    /// go out, waited for, since a finish plays on to them — and no pad is
+    /// handed a second.
+    fn end_every_pad(
+        &mut self,
+        control: &ControlReceiver,
+        bus: &Bus,
+    ) -> crate::error::Result<Ending> {
+        self.sought = false;
+        let mut owed = vec![true; self.pads.len()];
+        loop {
+            for (index, pad) in self.pads.iter_mut().enumerate() {
+                if owed[index] && (!pad.is_linked() || pad.ready_consume()) {
+                    pad.push_eos(&self.pp_log)?;
+                    owed[index] = false;
+                }
+            }
+            if !owed.contains(&true) {
+                return Ok(Ending::Ended);
+            }
+            while let Some((request, ack)) = control.try_recv() {
+                if matches!(request, RequestKind::Finish) {
+                    for (index, pad) in self.pads.iter_mut().enumerate() {
+                        if owed[index] {
+                            pad.push_eos(&self.pp_log)?;
+                        }
+                    }
+                    let _ = ack.send(());
+                    return Ok(Ending::Stopped);
+                }
+                if handle_request(control, self, bus, request, ack)?.stopped {
+                    return Ok(Ending::Stopped);
+                }
+                if self.sought {
+                    return Ok(Ending::Sought);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// Waits at the end of the file, passing every control request on to
     /// the branches — pausing and resuming them as the pipeline does — until
     /// it is stopped or finished, `Ok(false)`, or a seek moves it back into
@@ -1074,8 +1138,15 @@ impl SourceElement for FileDemuxer {
                 // leaves this source through it, parked or not.
                 self.deliver_or_park((index, time_base, packet), bus)?;
             }
-            for pad in self.pads.iter_mut() {
-                pad.push_eos(&self.pp_log)?;
+            match self.end_every_pad(control, bus)? {
+                Ending::Ended => {}
+                Ending::Stopped => {
+                    pp_info!(self, "stopped");
+                    return Ok(());
+                }
+                // Back into the file before every pad had its end: what is
+                // still owed belongs to the timeline just left.
+                Ending::Sought => continue,
             }
             pp_info!(self, "event=eos phase=source_completed outcome=ok");
             // The end of the file is not the end of playback: the queues after

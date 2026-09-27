@@ -159,6 +159,15 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A paused seek to the end of a file prerolls every branch, however
+  shallow its queues.** At the end of a file `FileDemuxer` handed each pad
+  its `Eos` in turn, waiting for room — the picture's first. In a preroll a
+  branch that has its sample takes nothing more, so with one-deep queues
+  the push waited there, and the sound's `Eos`, which answers a seek past
+  its last sample with the sample before it, waited behind it until the
+  seek timed out. Each pad is now handed its end as soon as it can take
+  one. Found by the conformance matrix.
+
 - **`Player` turns round to play backwards at once on Linux.** Turning
   round pauses and flushes the sound, and as the picture is read back to
   the start of its file the sound's branch gets its `Eos` — which

@@ -24,9 +24,9 @@ returned, nothing from before a seek after it, an `Eos` after a finish, and
 no call that fails to return. The file shapes are a matrix of six axes —
 how the picture fans out, what decodes it, what filters it, what paces it,
 what the sound goes through, how deep the queues are — covering every pair
-of choices; `MEDIA_PP_CONTROL_FULL=1` runs every combination. A pair a known
+of choices; `MEDIA_PP_CONTROL_FULL=1` runs every combination. What a known
 bug breaks is listed in `KNOWN_BROKEN`, beside the ignored test that
-reproduces it, and comes back into the matrix when the bug is fixed. An
+reproduces it, and comes back into the sequences when the bug is fixed. An
 ordinary test run plays a few fixed sequences. The races these are for show
 when threads are short of cores, so CI also runs them pinned to two, seeded
 from the clock:

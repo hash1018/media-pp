@@ -404,73 +404,45 @@ fn every_shape() -> Vec<FileShape> {
 #[derive(Debug, Clone, Copy)]
 enum Choice {
     Branches(Branches),
-    Sound(Sound),
-    Depth(Depth),
 }
 
 impl Choice {
-    /// Its axis and its place on it, in [`FileShape::axes`]' order.
-    fn on_axis(self) -> (usize, usize) {
-        let at = |found: Option<usize>| found.expect("every choice is listed");
+    fn made_by(self, shape: FileShape) -> bool {
         match self {
-            Choice::Branches(branches) => (0, at(BRANCHES.iter().position(|b| *b == branches))),
-            Choice::Sound(sound) => (4, at(SOUND.iter().position(|s| *s == sound))),
-            Choice::Depth(depth) => (5, at(DEPTH.iter().position(|d| *d == depth))),
+            Choice::Branches(branches) => shape.branches == branches,
         }
     }
 }
 
-/// A pair of choices a known bug breaks, and the test that reproduces it —
-/// which is where the bug is described.
+/// What a known bug breaks, and the test that reproduces it — which is
+/// where the bug is described.
 struct KnownBroken {
-    choices: [Choice; 2],
+    /// A shape making this choice is never played backwards: it runs, and
+    /// turns round no more until the bug is fixed.
+    backwards: Choice,
     test: &'static str,
 }
 
-/// What known bugs break, left out of the matrix until each is fixed: a
-/// shape making any of these pairs is not run. Remove an entry with the
-/// `#[ignore]` on its test, once the test passes.
-const KNOWN_BROKEN: [KnownBroken; 3] = [
-    KnownBroken {
-        choices: [
-            Choice::Branches(Branches::PacketTee),
-            Choice::Depth(Depth::Tight),
-        ],
-        test: "packets_fanned_out_backwards_step_on_in_every_branch",
-    },
-    KnownBroken {
-        choices: [Choice::Sound(Sound::Stretched), Choice::Depth(Depth::Tight)],
-        test: "a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues",
-    },
-    KnownBroken {
-        choices: [Choice::Sound(Sound::Resampled), Choice::Depth(Depth::Tight)],
-        test: "a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues",
-    },
-];
+/// What known bugs break, left out of the sequences until each is fixed.
+/// Remove an entry with the `#[ignore]` on its test, once the test passes.
+const KNOWN_BROKEN: [KnownBroken; 1] = [KnownBroken {
+    backwards: Choice::Branches(Branches::PacketTee),
+    test: "packets_fanned_out_backwards_step_on_in_every_branch",
+}];
 
-fn known_broken(pair: (usize, usize, usize, usize)) -> bool {
-    KNOWN_BROKEN.iter().any(|known| {
-        let mut ends = known.choices.map(Choice::on_axis);
-        ends.sort();
-        let [(a, choice_a), (b, choice_b)] = ends;
-        pair == (a, choice_a, b, choice_b)
-    })
-}
-
-/// Every combination of choices no known bug breaks.
-fn runnable_shapes() -> Vec<FileShape> {
-    every_shape()
-        .into_iter()
-        .filter(|shape| !shape.pairs().into_iter().any(known_broken))
-        .collect()
+/// Whether `shape` may be played backwards: no known bug breaks it there.
+fn turns_round(shape: FileShape) -> bool {
+    !KNOWN_BROKEN
+        .iter()
+        .any(|known| known.backwards.made_by(shape))
 }
 
 /// The shapes a run covers: [`NAMED`], then — greedily, and the same every
 /// time — whichever shape meets most pairs of choices no shape so far has,
-/// until every pair has been met but those [`KNOWN_BROKEN`]. Every such
-/// combination instead with `MEDIA_PP_CONTROL_FULL=1`.
+/// until every pair has been met. Every combination instead with
+/// `MEDIA_PP_CONTROL_FULL=1`.
 fn matrix() -> Vec<FileShape> {
-    let all = runnable_shapes();
+    let all = every_shape();
     if std::env::var_os("MEDIA_PP_CONTROL_FULL").is_some() {
         return all;
     }
@@ -979,7 +951,9 @@ impl Rng {
     }
 }
 
-fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
+/// The next step of a sequence — never a turn backwards where `turns` is
+/// false, a known bug breaking it there.
+fn op(rng: &mut Rng, duration: Option<Duration>, turns: bool) -> Op {
     let Some(duration) = duration else {
         return match rng.below(6) {
             0 => Op::Pause,
@@ -1026,7 +1000,10 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
         }),
         // Not four times: the model counts only the waits as playing, and
         // what the other calls take is played too, four times as far.
-        12 => Op::Rate([0.5, 1.0, 2.0, -0.5, -1.0, -2.0][rng.below(6) as usize]),
+        12 => {
+            let rate = [0.5, 1.0, 2.0, -0.5, -1.0, -2.0][rng.below(6) as usize];
+            Op::Rate(if turns { rate } else { rate.abs() })
+        }
         13 => Op::Loop(rng.below(2) == 0),
         _ => Op::Wait(Duration::from_millis(rng.below(400))),
     }
@@ -1211,8 +1188,23 @@ impl Calls<'_> {
 }
 
 /// Runs one sequence against a fresh pipeline of `shape`, and says what it
-/// broke, if anything.
+/// broke, if anything — turning round only where no known bug breaks it.
 fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<(), String> {
+    let turns = match shape {
+        Shape::File(shape) => turns_round(shape),
+        Shape::Live | Shape::Offline | Shape::OfflineMix => true,
+    };
+    run_sequence_turning(shape, seed, steps, turns)
+}
+
+/// The same, turning round where `turns` says — which a known bug's own
+/// test sets to reproduce it.
+fn run_sequence_turning(
+    shape: Shape,
+    seed: u64,
+    steps: usize,
+    turns: bool,
+) -> std::result::Result<(), String> {
     let Some(rig) = Rig::build(shape) else {
         return Ok(());
     };
@@ -1269,7 +1261,7 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
         if !model.paced && !model.paused && !model.endless() {
             model.far_from_end = false;
         }
-        let step = op(&mut rng, rig.duration);
+        let step = op(&mut rng, rig.duration, turns);
         history.push(format!("{step:?}"));
         let before = rig.data_counts();
         // What a call made while paused may hand a terminal; one made
@@ -1575,7 +1567,7 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                 Some(duration) => match rng.below(4) {
                     0 => Op::Seek(duration.mul_f64(0.5), SeekMode::Accurate),
                     1 => Op::Step(1),
-                    2 => Op::Rate(Pipeline::REVERSE_RATE),
+                    2 if turns => Op::Rate(Pipeline::REVERSE_RATE),
                     _ => Op::Resume,
                 },
                 None => Op::Resume,
@@ -2018,7 +2010,10 @@ fn conform_matrix(shard: usize) {
 fn the_matrix_meets_every_pair_of_choices() {
     let matrix = matrix();
     for known in &KNOWN_BROKEN {
-        eprintln!("left out: {:?} — see {}", known.choices, known.test);
+        eprintln!(
+            "never backwards: {:?} — see {}",
+            known.backwards, known.test
+        );
     }
     eprintln!(
         "{} shapes: {}",
@@ -2033,7 +2028,6 @@ fn the_matrix_meets_every_pair_of_choices() {
     let every: HashSet<_> = every_shape()
         .iter()
         .flat_map(|shape| shape.pairs())
-        .filter(|pair| !known_broken(*pair))
         .collect();
     assert_eq!(met, every, "a pair of choices no shape makes");
     for named in NAMED {
@@ -2099,22 +2093,19 @@ fn an_accurate_seek_on_a_later_lap_shows_its_target() {
 /// A paused seek to the last of a file, with one-deep queues and its sound
 /// played, prerolls every terminal — the sound's as much as the picture's.
 ///
-/// It does not: found by the matrix. The preroll reads to the end of the
-/// file, and the source hands every pad its `Eos` in turn with a push that
-/// waits for room — first the picture's, whose branch has its sample and
-/// takes nothing more, so the one-deep queue in front of it stays full.
-/// The sound's packets, parked while its own queue was full, and its `Eos`
-/// wait behind that push on the source's one thread; the sound never gets
-/// its sample and the seek times out. Packets are parked per pad; the end
-/// of the stream is not. Not fixed by `docs/stream-events.md` — it is the
-/// single read cursor that document leaves to work of its own.
+/// Found by the matrix. The preroll reads to the end of the file, and the
+/// source handed every pad its `Eos` in turn with a push that waits for
+/// room — first the picture's, whose branch had its sample and took
+/// nothing more, so the one-deep queue in front of it stayed full. The
+/// sound's `Eos`, which answers a seek past its last sample with the sample
+/// before it, waited behind that push on the source's one thread, and the
+/// seek timed out. Now each pad is handed its end as it can take one — see
+/// `FileDemuxer::end_every_pad`.
 ///
 /// A race on where the fixture's last packets fall, so it replays the
 /// sequence that found it rather than build one by hand: about one run in
-/// three fails, and a hand-built one near the end has not been seen to.
-/// Normal-depth queues were never seen to fail at all.
+/// three failed, and a hand-built one near the end was not seen to.
 #[test]
-#[ignore = "known bug: FileDemuxer's end of stream waits on a full pad while another's packets are parked"]
 fn a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues() {
     // The sequence the matrix found it with: paused, played to the end, a
     // picture back, and two accurate seeks near the end.
@@ -2137,7 +2128,9 @@ fn a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues() {
 /// every packet of the stretch it is on and never learns that the stretch
 /// is over, so it shows nothing and the step times out. Fixed where the
 /// source says where each stretch ends, which is what
-/// `docs/stream-events.md` builds — ignored until then.
+/// `docs/stream-events.md` builds — ignored until then. Normal-depth queues
+/// show it too, less often; until then no shape of packets fanned out is
+/// played backwards in the matrix — see [`KNOWN_BROKEN`].
 #[test]
 #[ignore = "known bug: fixed by the source marking each stretch (docs/stream-events.md, stages 3-4)"]
 fn packets_fanned_out_backwards_step_on_in_every_branch() {
@@ -2152,7 +2145,9 @@ fn packets_fanned_out_backwards_step_on_in_every_branch() {
             Depth::Tight,
         )
     };
-    if let Err(failure) = run_sequence(Shape::File(shape), 1_790_491_301_682_327_112, 12) {
+    if let Err(failure) =
+        run_sequence_turning(Shape::File(shape), 1_790_491_301_682_327_112, 12, true)
+    {
         panic!("{failure}");
     }
 }
