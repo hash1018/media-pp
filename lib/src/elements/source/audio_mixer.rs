@@ -2328,6 +2328,40 @@ mod tests {
         assert!(samples.iter().all(|sample| near(*sample, 0.75)));
     }
 
+    /// An input removed while the mix waits for it is waited for no longer:
+    /// the mix goes on at once with what is left, though nothing arrives to
+    /// say so but the removal itself.
+    #[test]
+    fn an_offline_mix_stops_waiting_for_an_input_that_is_removed() {
+        let (mixer, handle) = AudioMixer::new("offline", offline(None));
+        let (_quiet_feed, quiet) = feed(&handle, "quiet");
+        let (_silent_feed, _silent) = feed(&handle, "silent");
+        let feeding = thread::spawn(move || {
+            let samples = ffmpeg::Rational::new(1, 48_000);
+            for index in 0..24 {
+                quiet
+                    .push(timed_audio(0.25, 1000, 48_000, index * 1000, samples))
+                    .unwrap();
+            }
+        });
+        let removing = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                handle.remove_source("silent");
+            })
+        };
+
+        let (samples, finished, pipeline) = mix(mixer, Duration::from_secs(5));
+        feeding.join().unwrap();
+        removing.join().unwrap();
+        pipeline.stop();
+
+        assert!(finished, "the mix goes on without the removed input");
+        assert_eq!(samples.len(), 24_000);
+        assert!(samples.iter().all(|sample| near(*sample, 0.25)));
+    }
+
     /// An offline mixer is not live, its format stays what it was built
     /// with, and a frame it cannot place in time is refused.
     #[test]

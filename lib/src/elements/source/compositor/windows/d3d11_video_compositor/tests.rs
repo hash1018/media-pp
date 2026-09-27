@@ -1,10 +1,11 @@
 use crate::test_support::CapturingSink;
-use std::collections::HashSet;
+use std::{collections::HashSet, thread};
 
 use super::*;
 use crate::test_support::try_d3d11_gpu as try_device;
 use crate::{
     color::Color,
+    element::Source,
     elements::{D3d11Download, VideoRect},
 };
 
@@ -237,6 +238,7 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
         .unwrap();
 
     let composed = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     assert_eq!(composed.format(), ffmpeg::format::Pixel::D3D11);
@@ -285,6 +287,7 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
         ))
         .unwrap();
         let composed = compositor
+            .compositing()
             .compose_frame(&test_bus())
             .expect("compose_frame failed");
         let downloaded = download_frame(&gpu, composed);
@@ -361,6 +364,7 @@ fn a_layer_draws_only_its_source_region() {
     .unwrap();
 
     let composed = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     let downloaded = download_frame(&gpu, composed);
@@ -416,6 +420,7 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
     .unwrap();
 
     let composed = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     let downloaded = download_frame(&gpu, composed);
@@ -503,6 +508,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
     ))
     .unwrap();
     let first = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("first compose failed");
 
@@ -518,6 +524,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
         .unwrap();
         later.push(
             compositor
+                .compositing()
                 .compose_frame(&test_bus())
                 .expect("later compose failed"),
         );
@@ -565,6 +572,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
     bt601.set_color_range(ffmpeg::color::Range::MPEG);
     sink.consume(MediaBuffer::video(bt601)).unwrap();
     let bt601 = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("BT.601 compose failed");
     let bt601 = download_frame(&gpu, bt601);
@@ -574,6 +582,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
     bt709.set_color_range(ffmpeg::color::Range::MPEG);
     sink.consume(MediaBuffer::video(bt709)).unwrap();
     let bt709 = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("BT.709 compose failed");
     let bt709 = download_frame(&gpu, bt709);
@@ -643,12 +652,14 @@ fn an_unchanged_scene_is_composed_once() {
     .unwrap();
 
     let composed = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("first compose failed");
     let picture = texture_key(&composed);
     assert_eq!(composed.pts(), Some(0));
 
     let repeated = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("repeat failed");
     assert_eq!(
@@ -670,6 +681,7 @@ fn an_unchanged_scene_is_composed_once() {
 
     layer_handle.set_rect(VideoRect::new(1, 1, 1, 1)).unwrap();
     let moved = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose after the move failed");
     assert_ne!(
@@ -717,10 +729,12 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
     // still refers to this picture.
     drop(
         compositor
+            .compositing()
             .compose_frame(&test_bus())
             .expect("first compose failed"),
     );
     let in_flight = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("repeat failed");
     let showing = texture_key(&in_flight);
@@ -732,6 +746,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
     for _ in 0..(OUTPUT_POOL_SIZE * 2 + 2) {
         sink.consume(blue(gpu.device())).unwrap();
         let composed = compositor
+            .compositing()
             .compose_frame(&test_bus())
             .expect("later compose failed");
         assert_ne!(
@@ -779,6 +794,7 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
     layer_handle.set_rect(VideoRect::new(1, 0, 1, 1)).unwrap();
     layer_handle.set_opacity(0.5).unwrap();
     let blended = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     let downloaded = download_frame(&gpu, blended);
@@ -803,6 +819,7 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
 
     layer_handle.set_visible(false).unwrap();
     let hidden = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     assert_eq!(hidden.pts(), Some(1));
@@ -841,6 +858,7 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
 
     let (bus, bus_rx) = Bus::new();
     let composed = compositor
+        .compositing()
         .compose_frame(&bus)
         .expect("a mismatched-device layer must be skipped, not fail the whole frame");
 
@@ -862,6 +880,79 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
         [0, 0, 0, 255],
         "mismatched-device layer must not be drawn — background only"
     );
+}
+
+/// In a pipeline the same layer is reported on the pipeline's own bus, as
+/// the compositor's error, and the compositor goes on drawing.
+#[test]
+fn a_layer_it_cannot_draw_is_reported_on_its_pipeline_s_bus() {
+    use crate::pipeline::Pipeline;
+
+    let Some(gpu) = try_device() else {
+        return;
+    };
+    let Some(other) = try_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        width: 1,
+        height: 1,
+        frame_rate: ffmpeg::Rational::new(30, 1),
+        background: Color::BLACK,
+        background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
+    };
+    let (compositor, handle) = D3d11VideoCompositor::new("reporting", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
+    let mut sink = handle
+        .add_source("mismatched", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
+        .unwrap()
+        .sink;
+    let foreign_texture = bgra_texture(other.device(), 1, 1, [255, 255, 255, 255]);
+    sink.consume(MediaBuffer::video(
+        wrap_d3d11_texture(foreign_texture, 1, 1).unwrap(),
+    ))
+    .unwrap();
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let recorder = TimestampSink {
+        tx,
+        pp_log: element_pp_log(ElementType::Other, "timestamp-recorder", None),
+    };
+    let (pipeline, ()) = Pipeline::new("reports", compositor, |source, ctx| {
+        let branch = ctx.branch().to(recorder)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+    pipeline.run().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (element_type, name, error) = loop {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .expect("the skipped layer is reported on the pipeline's bus");
+        match pipeline.bus().recv_timeout(left) {
+            Ok(BusEvent::Error {
+                element_type,
+                name,
+                error,
+            }) => break (element_type, name, error),
+            Ok(_) => {}
+            Err(_) => panic!("the skipped layer is reported on the pipeline's bus"),
+        }
+    };
+    assert_eq!(element_type, ElementType::D3d11VideoCompositor);
+    assert_eq!(&*name, "reporting");
+    assert!(matches!(
+        error,
+        crate::error::Error::D3d11VideoCompositorError(D3d11VideoCompositorError::DeviceMismatch)
+    ));
+    for _ in 0..2 {
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("and it goes on drawing");
+    }
+    pipeline.stop();
 }
 
 struct TimestampSink {
@@ -1142,6 +1233,7 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
     .unwrap();
 
     let composed = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     let downloaded = download_frame(&gpu, composed);
@@ -1225,6 +1317,7 @@ fn a_system_memory_frame_goes_in_through_an_upload() {
     overlay.consume(uploaded(yuv)).unwrap();
 
     let composed = compositor
+        .compositing()
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     let downloaded = download_frame(&gpu, composed);
@@ -1370,7 +1463,7 @@ fn the_backend_independent_traits_drive_it() {
         unreachable!()
     };
     crate::elements::VideoLayerControl::set_frame(&still, picture).unwrap();
-    let composed = compositor.compose_frame(&test_bus()).unwrap();
+    let composed = compositor.compositing().compose_frame(&test_bus()).unwrap();
     let downloaded = download_frame(&gpu, composed);
     assert_eq!(pixel(&downloaded, 0, 0), [255, 0, 0, 255]);
 }

@@ -14,7 +14,6 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -43,7 +42,7 @@ pub use video_handle::D3d11VideoLayerHandle;
 
 use super::super::{
     text_layer::{TextLayer, load_font},
-    timed_inputs::{OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, run_offline},
+    timed_inputs::{OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, produce_offline},
     video_layer::{
         self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError, VideoSourceRect,
     },
@@ -54,23 +53,29 @@ use crate::{
     buffer::{MediaBuffer, picture_id, picture_is_referenced, release_picture},
     bus::{Bus, BusEvent},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    control::ControlMsg,
+    element::{
+        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        element_pp_log,
+    },
     elements::VideoCompositorOptions,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
-    pad::SrcPad,
     platform::windows::{
         d3d11::{compile_shader, protect_shared_device},
         d3d11_gpu::D3d11Gpu,
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    produce::produce_source,
     schedule::PeriodicSchedule,
     stats::TickCounters,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
-const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// How long a live compositor waits at a time before looking at its rate
+/// again: a rate set while it waits is kept from then, rather than a tick of
+/// the old one later.
+const RATE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 const BGRA_SHADER_SOURCE: &[u8] =
     include_bytes!("../../../../../shaders/d3d11/composite_bgra.hlsl");
@@ -284,8 +289,8 @@ struct D3d11CompositorShared {
     /// drift from the real one.
     device: ID3D11Device,
     mode: RenderMode,
-    /// Rung by an offline compositor's input sinks as frames or their ends
-    /// arrive.
+    /// Rung as anything an offline compositor waits for changes — a frame
+    /// or an end arriving at an input, an input added or removed.
     arrived: Bell,
     /// The output frame an offline compositor is making next.
     next_output: AtomicI64,
@@ -348,6 +353,7 @@ impl D3d11VideoCompositorHandle {
             .lock()
             .unwrap()
             .insert(name.clone(), input.clone());
+        shared.arrived.ring();
 
         Ok(D3d11VideoLayerHandle {
             id,
@@ -405,6 +411,7 @@ impl D3d11VideoCompositorHandle {
     pub fn remove_source(&self, name: &str) {
         if let Some(shared) = self.shared.upgrade() {
             shared.inputs.lock().unwrap().remove(name);
+            shared.arrived.ring();
         }
     }
 
@@ -537,6 +544,8 @@ impl D3d11VideoCompositorInputSink {
             .is_some_and(|current| Arc::ptr_eq(current, &input));
         if is_current {
             inputs.remove(&self.name);
+            drop(inputs);
+            shared.arrived.ring();
         }
     }
 }
@@ -852,11 +861,17 @@ fn visible_uv_window(
 /// [`D3d11VideoCompositor::new`]'s own docs on why `context` specifically
 /// must be shared, not just the device.
 ///
-/// Like [`crate::elements::SwVideoCompositor`], this is a [`SourceElement`],
-/// not a conventional one-input filter: upstream pipelines terminate at
+/// Like [`crate::elements::SwVideoCompositor`], this is a source, not a
+/// conventional one-input filter: upstream pipelines terminate at
 /// the sinks returned by [`D3d11VideoCompositorHandle::add_source`], while
 /// this element's own pipeline drives output on its independent clock.
-pub struct D3d11VideoCompositor {
+pub struct D3d11VideoCompositor(ProducingSource<Compositing>);
+
+produce_source!(D3d11VideoCompositor);
+
+/// What a [`D3d11VideoCompositor`] does when asked: the next frame of the
+/// composition. All of its work, which the framework makes the source.
+struct Compositing {
     pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<D3d11CompositorShared>,
@@ -897,10 +912,18 @@ pub struct D3d11VideoCompositor {
     retired: Vec<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
     /// Immutable RTVs cached by the corresponding texture's COM pointer.
     output_views: HashMap<usize, ID3D11RenderTargetView>,
-    pad: SrcPad,
     /// Where each tick is recorded, once the pipeline has handed it over
     /// — see [`crate::stats::TickStats`].
     ticks: Option<Arc<TickCounters>>,
+    /// Where a layer that cannot be drawn is reported: the pipeline's bus,
+    /// once it has handed it over, and until then one nobody reads.
+    bus: Bus,
+    /// When each live tick is due, on the clock a pause does not move —
+    /// made as the first is asked for.
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a frame went on since the schedule last moved: it moves on
+    /// once that frame has been handed on, as the next is asked for.
+    ticked: bool,
 }
 
 // SAFETY: every field is either a `windows-rs` COM interface wrapper
@@ -908,7 +931,7 @@ pub struct D3d11VideoCompositor {
 // `context`'s own `Mutex`) or plain data. `&mut self` on every
 // method that touches non-`Arc`/`Mutex` state rules out concurrent access
 // to those parts from multiple threads.
-unsafe impl Send for D3d11VideoCompositor {}
+unsafe impl Send for Compositing {}
 
 impl D3d11VideoCompositor {
     /// `gpu` must be the [`D3d11Gpu`] every producer feeding this
@@ -966,8 +989,8 @@ impl D3d11VideoCompositor {
             options.frame_rate
         );
         Ok((
-            Self {
-                name: name.clone(),
+            Self(ProducingSource::new(Compositing {
+                name,
                 pp_log,
                 shared: shared.clone(),
                 options,
@@ -995,15 +1018,11 @@ impl D3d11VideoCompositor {
                 composed: None,
                 retired: Vec::new(),
                 output_views: HashMap::new(),
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(
-                        PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
-                            .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-                    ),
-                ),
                 ticks: None,
-            },
+                bus: Bus::new().0,
+                schedule: None,
+                ticked: false,
+            })),
             D3d11VideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -1012,18 +1031,18 @@ impl D3d11VideoCompositor {
 
     /// Returns the fixed output width in pixels.
     pub fn width(&self) -> u32 {
-        self.options.width
+        self.0.inner().options.width
     }
 
     /// Returns the fixed output height in pixels.
     pub fn height(&self) -> u32 {
-        self.options.height
+        self.0.inner().options.height
     }
 
     /// The output frame rate, which is what construction was given unless
     /// [`D3d11VideoCompositorHandle::set_frame_rate`] has changed it since.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        self.shared.frame_rate.get()
+        self.0.inner().frame_rate()
     }
 
     /// The reciprocal of [`Self::frame_rate`], used as output PTS units —
@@ -1031,6 +1050,24 @@ impl D3d11VideoCompositor {
     /// [`D3d11VideoCompositorHandle::set_frame_rate`] for what that means for
     /// anything already reading this compositor's timestamps.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+#[cfg(test)]
+impl D3d11VideoCompositor {
+    /// What it is made of, for the tests that compose by hand.
+    fn compositing(&mut self) -> &mut Compositing {
+        self.0.inner_mut()
+    }
+}
+
+impl Compositing {
+    fn frame_rate(&self) -> ffmpeg::Rational {
+        self.shared.frame_rate.get()
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         let rate = self.frame_rate();
         ffmpeg::Rational::new(rate.denominator(), rate.numerator())
     }
@@ -1059,9 +1096,9 @@ impl D3d11VideoCompositor {
     /// skipped and reported on `bus` as a [`BusEvent::Error`] rather than
     /// failing the whole call — same "elements don't die on data errors"
     /// contract as the rest of this crate (see
-    /// [`crate::element::SourceElement::run`]'s own docs: a `Result::Err`
-    /// returned from here would propagate all the way out of `run()` and
-    /// end this compositor's output permanently, which one misbehaving
+    /// [`crate::element::Produce::produce`]'s own docs: a `Result::Err`
+    /// returned from here would end the source, and this compositor's
+    /// output with it permanently, which one misbehaving
     /// input has no business doing). Only a genuine infrastructure failure
     /// (e.g. `create_output_target` failing) still returns `Err`.
     ///
@@ -1386,27 +1423,19 @@ impl D3d11VideoCompositor {
         Ok(())
     }
 
-    fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), D3d11VideoCompositorError> {
+    /// This tick's frame, with what composing it took recorded.
+    fn make_frame(&mut self) -> std::result::Result<MediaBuffer, D3d11VideoCompositorError> {
         let composing = Instant::now();
-        let output = self.compose_frame(bus)?;
+        let bus = self.bus.clone();
+        let output = self.compose_frame(&bus)?;
         if let Some(ticks) = &self.ticks {
             ticks.made(composing.elapsed());
         }
-        if let Err(error) = self.pad.push(MediaBuffer::Video(output)) {
-            bus.post(
-                &self.pp_log,
-                BusEvent::Error {
-                    element_type: ElementType::D3d11VideoCompositor,
-                    name: self.name.clone(),
-                    error,
-                },
-            );
-        }
-        Ok(())
+        Ok(MediaBuffer::Video(output))
     }
 }
 
-impl Element for D3d11VideoCompositor {
+impl Element for Compositing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -1425,62 +1454,66 @@ impl Element for D3d11VideoCompositor {
 
     fn attach_context(&mut self, context: &Arc<Context>) {
         self.ticks = Some(context.source_ticks());
+        self.bus = context.bus.for_element(context.source_id);
     }
 }
 
-impl Source for D3d11VideoCompositor {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for D3d11VideoCompositor {
+impl Produce for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
+    }
+
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         match self.options.mode {
-            RenderMode::Live => self.run_live(control, bus),
-            RenderMode::Offline { end } => run_offline(self, control, bus, end),
+            RenderMode::Live => self.produce_live(wait),
+            RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
     }
 }
 
-impl D3d11VideoCompositor {
-    /// Emits at its own rate by the wall clock — see [`RenderMode::Live`].
-    fn run_live(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            if outcome.paused_for > Duration::ZERO {
-                schedule.resume_after_pause(outcome.paused_for, Instant::now());
-            }
-
-            // Followed here rather than at construction, so a rate set while
-            // this is running is kept from the next tick on.
-            let interval = self.shared.frame_rate.interval();
-            let now = Instant::now();
-            if schedule.interval() != interval {
-                pp_info!(self, "frame rate is now {}", self.frame_rate());
-                schedule.set_interval(interval, now);
-            }
-            if !schedule.is_due(now) {
-                thread::sleep(schedule.remaining(now).min(CONTROL_POLL_INTERVAL));
-                continue;
-            }
-
-            self.push_frame(bus)?;
-            let missed = schedule.advance_after_tick(Instant::now());
-            if let Some(ticks) = &self.ticks {
-                ticks.missed(missed);
-            }
+impl Compositing {
+    /// This tick's frame, once it is due at its own rate — see
+    /// [`RenderMode::Live`] and the software compositor's own.
+    fn produce_live(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let now = wait.now();
+        // Followed here rather than at construction, so a rate set while
+        // this is running is kept from the next tick on.
+        let interval = self.shared.frame_rate.interval();
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
+        // Moved on only once the last frame has been handed on: a push a
+        // slow downstream holds is part of its tick, and the deadlines it
+        // overran are ticks missed.
+        let missed = if std::mem::take(&mut self.ticked) {
+            schedule.advance_after_tick(now)
+        } else {
+            0
+        };
+        let rate_changed = schedule.interval() != interval;
+        if rate_changed {
+            schedule.set_interval(interval, now);
         }
+        let due = now + schedule.remaining(now);
+        if let Some(ticks) = &self.ticks {
+            ticks.missed(missed);
+        }
+        if rate_changed {
+            pp_info!(self, "frame rate is now {}", self.frame_rate());
+        }
+        if !wait.until(due.min(now + RATE_POLL_INTERVAL)) || wait.now() < due {
+            return Ok(Produced::Nothing);
+        }
+        let frame = self.make_frame()?;
+        self.ticked = true;
+        Ok(Produced::Buffer(frame))
     }
 }
 
@@ -1494,7 +1527,7 @@ impl TimedInput for GpuVideoInput {
     }
 }
 
-impl OfflineCompositor for D3d11VideoCompositor {
+impl OfflineCompositor for Compositing {
     type Input = GpuVideoInput;
 
     fn inputs(&self) -> Vec<Arc<GpuVideoInput>> {
@@ -1527,12 +1560,8 @@ impl OfflineCompositor for D3d11VideoCompositor {
         self.shared.next_output.store(index, Ordering::Release);
     }
 
-    fn draw(&mut self, bus: &Bus) -> Result<()> {
-        Ok(self.push_frame(bus)?)
-    }
-
-    fn end_render(&mut self) -> Result<()> {
-        self.pad.push_eos(&self.pp_log)
+    fn draw(&mut self) -> Result<MediaBuffer> {
+        Ok(self.make_frame()?)
     }
 }
 

@@ -4,6 +4,7 @@ use super::super::super::text_layer::TextLayer;
 use super::super::super::video_layer::VideoFit;
 use super::*;
 use crate::{
+    bus::BusEvent,
     color::Color,
     elements::{CudaDownload, CudaUpload},
     test_support::try_cuda_device,
@@ -165,7 +166,7 @@ fn a_layer_draws_only_its_source_region() {
     };
     input.sink.consume(frame).expect("frame");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
 
     for (x, y) in [(4, 4), (64, 64), (123, 123)] {
@@ -219,7 +220,7 @@ fn a_region_that_changes_every_frame_keeps_composing() {
             .set_source(Some(VideoSourceRect::new(cut, 0, 640 - cut, 480)))
             .expect("set source");
 
-        let composed = compositor.compose_frame().expect("compose");
+        let composed = compositor.compositing().compose_frame().expect("compose");
         let out = download(&device, composed);
         let luma = luma_at(&out, 128, 128);
         assert!(
@@ -266,7 +267,7 @@ fn a_layer_scaled_along_one_axis_is_not_blank() {
     };
     input.sink.consume(frame).expect("frame");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
 
     // Inside the layer: the source's own value, within the one level a
@@ -333,7 +334,7 @@ fn composes_layers_in_z_order_at_their_rectangles() {
     back.sink.consume(back_frame).expect("back frame");
     front.sink.consume(front_frame).expect("front frame");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     assert_eq!(composed.format(), ffmpeg::format::Pixel::CUDA);
     assert_eq!(composed.pts(), Some(0));
     let out = download(&device, composed);
@@ -410,7 +411,7 @@ fn a_bgra_overlay_leaves_the_layer_under_it_showing() {
         .consume(overlay_frame)
         .expect("the compositor takes a BGRA overlay");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
 
     assert_eq!(
@@ -448,11 +449,11 @@ fn an_unchanged_scene_is_composed_once() {
     };
     input.sink.consume(frame).expect("frame");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let surface = picture_id(&composed);
     assert_eq!(composed.pts(), Some(0));
 
-    let repeated = compositor.compose_frame().expect("repeat");
+    let repeated = compositor.compositing().compose_frame().expect("repeat");
     assert_eq!(
         picture_id(&repeated),
         surface,
@@ -468,7 +469,10 @@ fn an_unchanged_scene_is_composed_once() {
         .layer
         .set_layer(VideoLayer::new(VideoRect::new(16, 16, 64, 64)))
         .expect("move the layer");
-    let moved = compositor.compose_frame().expect("compose again");
+    let moved = compositor
+        .compositing()
+        .compose_frame()
+        .expect("compose again");
     assert_ne!(
         picture_id(&moved),
         surface,
@@ -540,7 +544,7 @@ fn layer_handle_moves_and_hides_a_live_source() {
     };
     input.sink.consume(frame).expect("frame");
 
-    let first = compositor.compose_frame().expect("compose");
+    let first = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, first);
     assert_eq!(luma_at(&out, 10, 10), 180);
     assert_eq!(luma_at(&out, 74, 74), 16);
@@ -549,13 +553,13 @@ fn layer_handle_moves_and_hides_a_live_source() {
         .layer
         .set_rect(VideoRect::new(64, 64, 32, 32))
         .expect("move");
-    let moved = compositor.compose_frame().expect("compose");
+    let moved = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, moved);
     assert_eq!(luma_at(&out, 10, 10), 16, "the layer did not leave");
     assert_eq!(luma_at(&out, 74, 74), 180, "the layer did not arrive");
 
     input.layer.set_visible(false).expect("hide");
-    let hidden = compositor.compose_frame().expect("compose");
+    let hidden = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, hidden);
     assert_eq!(luma_at(&out, 74, 74), 16, "a hidden layer was still drawn");
 }
@@ -587,7 +591,7 @@ fn cover_fills_its_rectangle_where_contain_letterboxes() {
             .expect("add");
         let frame = cuda_frame(&device, 64, 16, 200).expect("frame");
         input.sink.consume(frame).expect("frame");
-        let composed = compositor.compose_frame().expect("compose");
+        let composed = compositor.compositing().compose_frame().expect("compose");
         download(&device, composed)
     };
 
@@ -651,7 +655,7 @@ fn a_translucent_layer_is_blended_with_the_background() {
     };
     input.sink.consume(frame).expect("frame");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
 
     // Background is `Color::BLACK`, which is luma 16 in limited range.
@@ -671,12 +675,12 @@ fn a_translucent_layer_is_blended_with_the_background() {
     // The endpoints still behave as before: fully opaque replaces,
     // fully transparent draws nothing.
     input.layer.set_opacity(1.0).expect("opaque");
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     assert_eq!(luma_at(&out, 10, 10), 200);
 
     input.layer.set_opacity(0.0).expect("transparent");
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     assert_eq!(luma_at(&out, 10, 10), 16);
 }
@@ -727,13 +731,13 @@ fn a_text_layer_draws_after_set_text_and_clears_when_emptied() {
         .expect("add a text layer");
 
     // Nothing rasterized yet: the canvas is pure background.
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     let background = luma_at(&out, 10, 10);
     assert_eq!(background, 16, "an empty text layer drew something");
 
     text.set_text("HELLO").expect("set_text");
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     let lit = (0..64u32)
         .flat_map(|y| (0..200u32).map(move |x| (x, y)))
@@ -746,7 +750,7 @@ fn a_text_layer_draws_after_set_text_and_clears_when_emptied() {
 
     // Text with no drawable glyphs clears the layer rather than erroring.
     text.set_text("   ").expect("blank set_text");
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     for y in 0..64usize {
         for x in 0..200usize {
@@ -792,7 +796,7 @@ fn text_position_visibility_and_opacity_take_effect() {
             .unwrap_or(0)
     };
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     assert!(brightest(&out, 0, 100) > 100, "text is not at the origin");
     assert_eq!(
@@ -802,7 +806,7 @@ fn text_position_visibility_and_opacity_take_effect() {
     );
 
     text.set_position(150, 0);
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     assert_eq!(brightest(&out, 0, 100), 16, "the text did not leave");
     assert!(brightest(&out, 150, 250) > 100, "the text did not arrive");
@@ -810,7 +814,7 @@ fn text_position_visibility_and_opacity_take_effect() {
     // Half opacity over a luma-16 background must land near the midpoint
     // rather than at either end.
     text.set_opacity(0.5).expect("half opacity");
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     let half = brightest(&out, 150, 250);
     assert!(
@@ -819,7 +823,7 @@ fn text_position_visibility_and_opacity_take_effect() {
     );
 
     text.set_visible(false);
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     assert_eq!(brightest(&out, 150, 250), 16, "a hidden text layer drew");
 }
@@ -905,7 +909,7 @@ fn output_pts_are_contiguous_ticks_of_its_own_time_base() {
     input.sink.consume(frame).expect("frame");
 
     for expected in 0..3 {
-        let composed = compositor.compose_frame().expect("compose");
+        let composed = compositor.compositing().compose_frame().expect("compose");
         assert_eq!(composed.pts(), Some(expected));
     }
 }
@@ -936,7 +940,7 @@ fn the_canvas_says_it_is_bt709_and_reads_back_as_the_colour_it_was_filled_with()
         return;
     };
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     assert_eq!(composed.color_space(), ffmpeg::color::Space::BT709);
     assert_eq!(composed.color_range(), ffmpeg::color::Range::MPEG);
     assert_eq!(composed.color_primaries(), ffmpeg::color::Primaries::BT709);
@@ -1048,7 +1052,7 @@ fn a_bgra_canvas_keeps_what_no_layer_covered_transparent() {
     under.sink.consume(red).expect("frame");
     over.sink.consume(green).expect("frame");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download_bgra(&device, composed);
     let pixel = |x: usize, y: usize| {
         let at = y * out.stride(0) + x * 4;
@@ -1120,7 +1124,7 @@ fn an_nv12_layer_lands_opaque_on_a_bgra_canvas() {
     };
     input.sink.consume(frame).expect("frame");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download_bgra(&device, composed);
     let pixel = |x: usize, y: usize| {
         let at = y * out.stride(0) + x * 4;
@@ -1183,7 +1187,7 @@ fn a_text_layer_draws_on_a_bgra_canvas() {
         .expect("add a text layer");
     text.set_text("Hi").expect("the text rasterizes");
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download_bgra(&device, composed);
     let drawn = (0..height as usize)
         .flat_map(|y| (0..width as usize).map(move |x| (x, y)))
@@ -1237,7 +1241,10 @@ fn an_nv12_layer_is_composed_by_its_own_colour() {
         let layer_frame = uploaded.lock().unwrap().remove(0);
         layer.sink.consume(layer_frame).expect("layer frame");
 
-        let out = download(&device, compositor.compose_frame().expect("compose"));
+        let out = download(
+            &device,
+            compositor.compositing().compose_frame().expect("compose"),
+        );
         let chroma = &out.data(1)[out.stride(1) * 16 + 32..];
         Some([luma_at(&out, 32, 32), chroma[0], chroma[1]])
     };
@@ -1445,7 +1452,10 @@ fn a_text_layer_stacks_among_video_layers_by_its_z_index() {
     text.set_text("HELLO").expect("set_text");
 
     let lit = |compositor: &mut CudaVideoCompositor| {
-        let out = download(&device, compositor.compose_frame().expect("compose"));
+        let out = download(
+            &device,
+            compositor.compositing().compose_frame().expect("compose"),
+        );
         (0..64usize)
             .flat_map(|y| (0..200usize).map(move |x| (x, y)))
             .filter(|(x, y)| luma_at(&out, *x, *y) > 120)
@@ -1483,7 +1493,10 @@ fn the_backend_independent_traits_drive_it() {
         return;
     };
     crate::elements::VideoLayerControl::set_frame(&still, picture).unwrap();
-    let out = download(&device, compositor.compose_frame().expect("compose"));
+    let out = download(
+        &device,
+        compositor.compositing().compose_frame().expect("compose"),
+    );
     assert_eq!(luma_at(&out, 10, 10), 200);
 }
 

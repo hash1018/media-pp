@@ -49,6 +49,12 @@ pub trait Produce: Element {
 
     /// The next thing it makes. Blocks, where it has to, only through
     /// `wait`; let go, it answers [`Produced::Nothing`] and is asked again.
+    ///
+    /// An `Err` ends the source, as one [`SourceElement::run`] returns
+    /// does. What goes wrong with one part of what it makes and not the
+    /// rest — a compositor's layer it cannot draw — is posted on the bus
+    /// its [`Context`] carries, kept from
+    /// [`attach_context`](Element::attach_context), and it goes on.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced>;
 
     /// What it hands on — see [`SrcPad::with_contract`]. Nothing said by
@@ -189,6 +195,13 @@ impl<P: Produce> ProducingSource<P> {
     /// over what the framework makes of it, to reach what it is made of.
     pub(crate) fn inner(&self) -> &P {
         &self.inner
+    }
+
+    /// The same, to change — for a test that drives what it is made of by
+    /// hand.
+    #[cfg(test)]
+    pub(crate) fn inner_mut(&mut self) -> &mut P {
+        &mut self.inner
     }
 
     fn report(&self, bus: &Bus, error: crate::error::Error) {

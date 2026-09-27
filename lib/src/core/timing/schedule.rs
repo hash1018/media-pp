@@ -44,6 +44,10 @@ impl PeriodicSchedule {
     }
 
     /// `true` once `next_due` has arrived.
+    #[cfg(all(
+        target_os = "windows",
+        any(feature = "dxgi-capture", feature = "wgc-capture")
+    ))]
     pub fn is_due(&self, now: Instant) -> bool {
         now >= self.next_due
     }
@@ -66,6 +70,18 @@ impl PeriodicSchedule {
     /// "one interval from now" resync [`PeriodicSchedule::advance_after_tick`]
     /// uses, for the same reason: no caller of this type may ever emit a
     /// back-to-back burst, regardless of why it fell behind.
+    ///
+    /// Built only for the capture sources whose own loops still take a
+    /// pause as a duration; a [`crate::element::Produce`] keeps its
+    /// schedule on [`crate::element::Wait::now`], which a pause does not
+    /// move.
+    #[cfg(any(
+        all(
+            target_os = "windows",
+            any(feature = "dxgi-capture", feature = "wgc-capture")
+        ),
+        all(target_os = "linux", feature = "pipewire-screen-capture")
+    ))]
     pub fn resume_after_pause(&mut self, paused_for: Duration, now: Instant) {
         self.next_due += paused_for;
         self.resync_if_behind(now);
@@ -78,7 +94,7 @@ impl PeriodicSchedule {
     /// with no sleep between them the next time this loop runs, and
     /// resumes cadence anchored at "one interval from now" rather than the
     /// stale deadline. This is a different cause of falling behind than
-    /// [`PeriodicSchedule::resume_after_pause`]'s (real work taking too
+    /// `resume_after_pause`'s (real work taking too
     /// long vs. time frozen by `Pause`) but the same corrective action.
     ///
     /// Returns how many deadlines were skipped that way, which is the count
@@ -237,6 +253,13 @@ mod tests {
     const INTERVAL: Duration = Duration::from_millis(100);
 
     #[test]
+    #[cfg(any(
+        all(
+            target_os = "windows",
+            any(feature = "dxgi-capture", feature = "wgc-capture")
+        ),
+        all(target_os = "linux", feature = "pipewire-screen-capture")
+    ))]
     fn resume_after_pause_preserves_phase_when_the_shift_is_enough() {
         let t0 = Instant::now();
         let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
@@ -256,6 +279,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(
+        all(
+            target_os = "windows",
+            any(feature = "dxgi-capture", feature = "wgc-capture")
+        ),
+        all(target_os = "linux", feature = "pipewire-screen-capture")
+    ))]
     fn resume_after_pause_resyncs_when_the_shift_still_lands_in_the_past() {
         let t0 = Instant::now();
         let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
@@ -332,6 +362,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(
+        target_os = "windows",
+        any(feature = "dxgi-capture", feature = "wgc-capture")
+    ))]
     fn is_due_and_remaining_agree() {
         let t0 = Instant::now();
         let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
@@ -358,9 +392,12 @@ mod tests {
         let now = start + Duration::from_millis(10);
         schedule.set_interval(Duration::from_millis(25), now);
         assert_eq!(schedule.interval(), Duration::from_millis(25));
-        assert!(!schedule.is_due(now));
         assert_eq!(schedule.remaining(now), Duration::from_millis(25));
-        assert!(schedule.is_due(now + Duration::from_millis(25)));
+        assert!(
+            schedule
+                .remaining(now + Duration::from_millis(25))
+                .is_zero()
+        );
     }
 
     /// And fast to slow must not leave a deadline already behind, which
@@ -371,7 +408,6 @@ mod tests {
         let mut schedule = PeriodicSchedule::new(Duration::from_millis(10), start);
         let now = start + Duration::from_millis(500);
         schedule.set_interval(Duration::from_millis(200), now);
-        assert!(!schedule.is_due(now));
         assert_eq!(schedule.remaining(now), Duration::from_millis(200));
     }
 }

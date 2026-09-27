@@ -4,7 +4,9 @@ use super::super::super::text_layer::TextLayer;
 use super::super::super::video_layer::{VideoFit, VideoSourceRect};
 use super::*;
 use crate::{
+    bus::BusEvent,
     color::Color,
+    element::Source,
     elements::{VulkanDownload, VulkanUpload},
     test_support::{CapturingSink, try_vulkan_device},
 };
@@ -150,7 +152,7 @@ fn composes_layers_in_z_order_at_their_rectangles() {
         .consume(nv12_frame(&device, 32, 32, 200))
         .unwrap();
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     assert_eq!(composed.format(), ffmpeg::format::Pixel::VULKAN);
     assert_eq!(composed.pts(), Some(0));
     let out = download(&device, composed);
@@ -225,7 +227,7 @@ fn a_bgra_canvas_blends_by_alpha_and_keeps_its_transparency() {
         }))
         .unwrap();
 
-    let composed = compositor.compose_frame().expect("compose");
+    let composed = compositor.compositing().compose_frame().expect("compose");
     let out = download(&device, composed);
     assert_eq!(out.format(), ffmpeg::format::Pixel::BGRA);
     assert_eq!(bgra_at(&out, 10, 10), [0, 0, 255, 255], "opaque red covers");
@@ -263,7 +265,7 @@ fn cover_fills_its_rectangle_where_contain_letterboxes() {
             .sink
             .consume(nv12_frame(&device, 64, 32, 200))
             .unwrap();
-        let out = download(&device, compositor.compose_frame().unwrap());
+        let out = download(&device, compositor.compositing().compose_frame().unwrap());
         near(luma_at(&out, 32, 32), 200, "the middle is the picture");
         near(
             luma_at(&out, 32, 2),
@@ -301,7 +303,7 @@ fn a_layer_draws_only_its_source_region() {
     }
     frame.data_mut(1).fill(128);
     input.sink.consume(upload(&device, frame)).unwrap();
-    let out = download(&device, compositor.compose_frame().unwrap());
+    let out = download(&device, compositor.compositing().compose_frame().unwrap());
     for (x, y) in [(4, 4), (60, 4), (4, 60), (32, 32)] {
         near(
             luma_at(&out, x, y),
@@ -331,7 +333,7 @@ fn a_translucent_layer_is_blended_with_the_background() {
         .sink
         .consume(nv12_frame(&device, 32, 32, 235))
         .unwrap();
-    let out = download(&device, compositor.compose_frame().unwrap());
+    let out = download(&device, compositor.compositing().compose_frame().unwrap());
     // Half of white over black is grey 128 in RGB, luma 126.
     near(luma_at(&out, 32, 32), 126, "half of white over black");
 }
@@ -351,9 +353,9 @@ fn an_unchanged_scene_is_composed_once() {
         .sink
         .consume(nv12_frame(&device, 32, 32, 100))
         .unwrap();
-    let composed = compositor.compose_frame().unwrap();
+    let composed = compositor.compositing().compose_frame().unwrap();
     let picture = picture_id(&composed);
-    let repeated = compositor.compose_frame().unwrap();
+    let repeated = compositor.compositing().compose_frame().unwrap();
     assert_eq!(
         picture_id(&repeated),
         picture,
@@ -364,7 +366,7 @@ fn an_unchanged_scene_is_composed_once() {
         .layer
         .set_rect(VideoRect::new(16, 16, 32, 32))
         .unwrap();
-    let moved = compositor.compose_frame().unwrap();
+    let moved = compositor.compositing().compose_frame().unwrap();
     assert_ne!(
         picture_id(&moved),
         picture,
@@ -418,7 +420,10 @@ fn a_text_layer_draws_and_stacks_by_its_z_index() {
             })
             .count()
     };
-    let drawn = red(&download(&device, compositor.compose_frame().unwrap()));
+    let drawn = red(&download(
+        &device,
+        compositor.compositing().compose_frame().unwrap(),
+    ));
     assert!(
         drawn > 500,
         "the text is drawn in its colour: {drawn} red pixels"
@@ -439,14 +444,23 @@ fn a_text_layer_draws_and_stacks_by_its_z_index() {
         .sink
         .consume(nv12_frame(&device, 32, 32, 126))
         .unwrap();
-    let covered = red(&download(&device, compositor.compose_frame().unwrap()));
+    let covered = red(&download(
+        &device,
+        compositor.compositing().compose_frame().unwrap(),
+    ));
     assert_eq!(covered, 0, "under a video layer of a higher z_index");
     text.set_z_index(2);
-    let raised = red(&download(&device, compositor.compose_frame().unwrap()));
+    let raised = red(&download(
+        &device,
+        compositor.compositing().compose_frame().unwrap(),
+    ));
     assert!(raised > 500, "raised over it again: {raised}");
 
     text.set_text("").unwrap();
-    let cleared = red(&download(&device, compositor.compose_frame().unwrap()));
+    let cleared = red(&download(
+        &device,
+        compositor.compositing().compose_frame().unwrap(),
+    ));
     assert_eq!(cleared, 0, "empty text draws nothing");
 }
 
@@ -572,7 +586,7 @@ fn decoded_pictures_are_composited() {
         .sink
         .consume(MediaBuffer::Video(picture.clone()))
         .unwrap();
-    let out = download(&device, compositor.compose_frame().unwrap());
+    let out = download(&device, compositor.compositing().compose_frame().unwrap());
     let mean = |other: &ffmpeg::frame::Video| {
         let total: u64 = (0..height as usize)
             .flat_map(|y| (0..width as usize).map(move |x| (x, y)))
@@ -606,7 +620,7 @@ fn the_backend_independent_traits_drive_it() {
         panic!("a frame");
     };
     VideoLayerControl::set_frame(&still, frame).unwrap();
-    let out = download(&device, compositor.compose_frame().unwrap());
+    let out = download(&device, compositor.compositing().compose_frame().unwrap());
     near(
         luma_at(&out, 32, 32),
         200,
@@ -792,7 +806,7 @@ fn a_composition_encodes_without_leaving_the_gpu() {
             .layer
             .set_rect(VideoRect::new(index % 2, 0, width / 2, height))
             .unwrap();
-        let composed = compositor.compose_frame().expect("compose");
+        let composed = compositor.compositing().compose_frame().expect("compose");
         encoder
             .consume(MediaBuffer::Video(Arc::new(composed)))
             .expect("the composition encodes");

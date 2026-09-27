@@ -4,7 +4,6 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -16,7 +15,7 @@ use thiserror::Error as ThisError;
 
 use super::control::{CompositorInput, compositor_control};
 use super::timed_inputs::{
-    OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, run_offline,
+    OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, produce_offline,
 };
 use super::video_layer::{
     self, LayerGeometry, MAX_DIMENSION, VideoFit, VideoInputId, VideoLayer, VideoLayerError,
@@ -26,20 +25,25 @@ use crate::elements::source::render_mode::{MediaTime, RenderMode};
 use crate::playback_state::Bell;
 use crate::{
     buffer::{MediaBuffer, picture_id, picture_is_referenced, release_picture},
-    bus::{Bus, BusEvent},
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    control::ControlMsg,
+    element::{
+        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        element_pp_log,
+    },
     error::Result,
-    pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    produce::produce_source,
     schedule::PeriodicSchedule,
     stats::TickCounters,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
-const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// How long a live compositor waits at a time before looking at its rate
+/// again: a rate set while it waits is kept from then, rather than a tick of
+/// the old one later.
+const RATE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The compositor's fixed output definition. Every emitted frame is an
 /// [`ffmpeg::format::Pixel::BGRA`] frame at `width` x `height`, opaque unless
@@ -207,8 +211,9 @@ struct CompositorShared {
     /// [`SwVideoCompositorHandle::set_frame_rate`] writes.
     frame_rate: Arc<FrameRate>,
     mode: RenderMode,
-    /// Rung by an offline compositor's input sinks as frames or their ends
-    /// arrive, which is what the compositor waits on.
+    /// Rung as anything an offline compositor waits for changes — a frame
+    /// or an end arriving at an input, an input added or removed — which is
+    /// what it waits on.
     arrived: Bell,
     /// The output frame an offline compositor is making next, so an input
     /// added while it runs starts from there.
@@ -329,6 +334,7 @@ impl SwVideoCompositorHandle {
             .lock()
             .unwrap()
             .insert(name.clone(), input.clone());
+        shared.arrived.ring();
         Ok(SwVideoLayerHandle {
             id,
             name,
@@ -341,6 +347,7 @@ impl SwVideoCompositorHandle {
     pub fn remove_source(&self, name: &str) {
         if let Some(shared) = self.shared.upgrade() {
             shared.inputs.lock().unwrap().remove(name);
+            shared.arrived.ring();
         }
     }
 
@@ -538,6 +545,8 @@ impl SwVideoCompositorInputSink {
             .is_some_and(|current| Arc::ptr_eq(current, &input));
         if is_current {
             inputs.remove(&self.name);
+            drop(inputs);
+            shared.arrived.ring();
         }
     }
 }
@@ -768,13 +777,19 @@ impl InputScaler {
 /// Composites the latest frames from any number of independent input
 /// pipelines into one fixed-rate opaque BGRA video stream.
 ///
-/// Like [`crate::elements::AudioMixer`], this is a [`SourceElement`], not
-/// a conventional one-input filter: upstream pipelines terminate at the
+/// Like [`crate::elements::AudioMixer`], this is a source, not a
+/// conventional one-input filter: upstream pipelines terminate at the
 /// sinks returned by [`SwVideoCompositorHandle::add_source`], while this
 /// element's own pipeline drives output on its independent clock. Input
 /// frame PTS values therefore do not become output PTS; output advances by
 /// one tick in [`SwVideoCompositor::time_base`] for every composed frame.
-pub struct SwVideoCompositor {
+pub struct SwVideoCompositor(ProducingSource<Compositing>);
+
+produce_source!(SwVideoCompositor);
+
+/// What a [`SwVideoCompositor`] does when asked: the next frame of the
+/// composition. All of its work, which the framework makes the source.
+struct Compositing {
     pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<CompositorShared>,
@@ -799,16 +814,21 @@ pub struct SwVideoCompositor {
     /// checked on every composite, so this holds only what is genuinely
     /// still in flight.
     retired: Vec<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
-    pad: SrcPad,
     /// Where each tick is recorded, once the pipeline has handed it over
     /// — see [`crate::stats::TickStats`].
     ticks: Option<Arc<TickCounters>>,
+    /// When each live tick is due, on the clock a pause does not move —
+    /// made as the first is asked for.
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a frame went on since the schedule last moved: it moves on
+    /// once that frame has been handed on, as the next is asked for.
+    ticked: bool,
 }
 
 // SAFETY: `SwsContext` has no thread affinity and every scaling context is
 // exclusively accessed through `&mut self` on the compositor's one source
 // thread. ffmpeg-next simply omits Send for this wrapper, as with SwScaler.
-unsafe impl Send for SwVideoCompositor {}
+unsafe impl Send for Compositing {}
 
 impl SwVideoCompositor {
     /// Creates a compositor and a weak runtime handle for registering inputs.
@@ -844,8 +864,8 @@ impl SwVideoCompositor {
             options.mode
         );
         Ok((
-            Self {
-                name: name.clone(),
+            Self(ProducingSource::new(Compositing {
+                name,
                 pp_log,
                 shared: shared.clone(),
                 options,
@@ -859,15 +879,10 @@ impl SwVideoCompositor {
                 ),
                 composed: None,
                 retired: Vec::new(),
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(
-                        PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                            .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-                    ),
-                ),
                 ticks: None,
-            },
+                schedule: None,
+                ticked: false,
+            })),
             SwVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -881,23 +896,41 @@ impl SwVideoCompositor {
 
     /// Returns the fixed output width in pixels.
     pub fn width(&self) -> u32 {
-        self.options.width
+        self.0.inner().options.width
     }
 
     /// Returns the fixed output height in pixels.
     pub fn height(&self) -> u32 {
-        self.options.height
+        self.0.inner().options.height
     }
 
     /// The output frame rate, which is what construction was given unless
     /// [`SwVideoCompositorHandle::set_frame_rate`] has changed it since.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        self.shared.frame_rate.get()
+        self.0.inner().frame_rate()
     }
 
     /// The reciprocal of [`Self::frame_rate`], used as output PTS units — and
     /// so a value that moves with it.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+#[cfg(test)]
+impl SwVideoCompositor {
+    /// What it is made of, for the tests that compose by hand.
+    fn compositing(&mut self) -> &mut Compositing {
+        self.0.inner_mut()
+    }
+}
+
+impl Compositing {
+    fn frame_rate(&self) -> ffmpeg::Rational {
+        self.shared.frame_rate.get()
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         self.frame_rate().invert()
     }
 
@@ -1041,27 +1074,18 @@ impl SwVideoCompositor {
         Ok(Arc::new(output))
     }
 
-    fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), SwVideoCompositorError> {
+    /// This tick's frame, with what composing it took recorded.
+    fn make_frame(&mut self) -> std::result::Result<MediaBuffer, SwVideoCompositorError> {
         let composing = Instant::now();
         let output = self.compose_frame()?;
         if let Some(ticks) = &self.ticks {
             ticks.made(composing.elapsed());
         }
-        if let Err(error) = self.pad.push(MediaBuffer::Video(output)) {
-            bus.post(
-                &self.pp_log,
-                BusEvent::Error {
-                    element_type: ElementType::SwVideoCompositor,
-                    name: self.name.clone(),
-                    error,
-                },
-            );
-        }
-        Ok(())
+        Ok(MediaBuffer::Video(output))
     }
 }
 
-impl Element for SwVideoCompositor {
+impl Element for Compositing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -1083,59 +1107,63 @@ impl Element for SwVideoCompositor {
     }
 }
 
-impl Source for SwVideoCompositor {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for SwVideoCompositor {
+impl Produce for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
+    }
+
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         match self.options.mode {
-            RenderMode::Live => self.run_live(control, bus),
-            RenderMode::Offline { end } => run_offline(self, control, bus, end),
+            RenderMode::Live => self.produce_live(wait),
+            RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
     }
 }
 
-impl SwVideoCompositor {
-    /// Emits at its own rate by the wall clock — see [`RenderMode::Live`].
-    fn run_live(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            if outcome.paused_for > Duration::ZERO {
-                schedule.resume_after_pause(outcome.paused_for, Instant::now());
-            }
-
-            // Followed here rather than at construction, so a rate set while
-            // this is running is kept from the next tick on.
-            let interval = self.shared.frame_rate.interval();
-            let now = Instant::now();
-            if schedule.interval() != interval {
-                pp_info!(self, "frame rate is now {}", self.frame_rate());
-                schedule.set_interval(interval, now);
-            }
-            if !schedule.is_due(now) {
-                thread::sleep(schedule.remaining(now).min(CONTROL_POLL_INTERVAL));
-                continue;
-            }
-
-            self.push_frame(bus)?;
-            let missed = schedule.advance_after_tick(Instant::now());
-            if let Some(ticks) = &self.ticks {
-                ticks.missed(missed);
-            }
+impl Compositing {
+    /// This tick's frame, once it is due at its own rate — see
+    /// [`RenderMode::Live`]. Kept on the clock a pause does not move, so
+    /// playing on after one is not a burst of the ticks it would have owed.
+    fn produce_live(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let now = wait.now();
+        // Followed here rather than at construction, so a rate set while
+        // this is running is kept from the next tick on.
+        let interval = self.shared.frame_rate.interval();
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
+        // Moved on only once the last frame has been handed on: a push a
+        // slow downstream holds is part of its tick, and the deadlines it
+        // overran are ticks missed.
+        let missed = if std::mem::take(&mut self.ticked) {
+            schedule.advance_after_tick(now)
+        } else {
+            0
+        };
+        let rate_changed = schedule.interval() != interval;
+        if rate_changed {
+            schedule.set_interval(interval, now);
         }
+        let due = now + schedule.remaining(now);
+        if let Some(ticks) = &self.ticks {
+            ticks.missed(missed);
+        }
+        if rate_changed {
+            pp_info!(self, "frame rate is now {}", self.frame_rate());
+        }
+        if !wait.until(due.min(now + RATE_POLL_INTERVAL)) || wait.now() < due {
+            return Ok(Produced::Nothing);
+        }
+        let frame = self.make_frame()?;
+        self.ticked = true;
+        Ok(Produced::Buffer(frame))
     }
 }
 
@@ -1149,7 +1177,7 @@ impl TimedInput for VideoInput {
     }
 }
 
-impl OfflineCompositor for SwVideoCompositor {
+impl OfflineCompositor for Compositing {
     type Input = VideoInput;
 
     fn inputs(&self) -> Vec<Arc<VideoInput>> {
@@ -1182,12 +1210,8 @@ impl OfflineCompositor for SwVideoCompositor {
         self.shared.next_output.store(index, Ordering::Release);
     }
 
-    fn draw(&mut self, bus: &Bus) -> Result<()> {
-        Ok(self.push_frame(bus)?)
-    }
-
-    fn end_render(&mut self) -> Result<()> {
-        self.pad.push_eos(&self.pp_log)
+    fn draw(&mut self) -> Result<MediaBuffer> {
+        Ok(self.make_frame()?)
     }
 }
 
@@ -1385,6 +1409,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::element::SourceElement;
     use crate::elements::{SwTextLayerError, TextLayer};
 
     fn options(width: u32, height: u32) -> VideoCompositorOptions {
@@ -1465,7 +1490,7 @@ mod tests {
         sink.consume(MediaBuffer::Video(quadrant_frame(8, 8)))
             .unwrap();
 
-        let frame = compositor.compose_frame().unwrap();
+        let frame = compositor.compositing().compose_frame().unwrap();
 
         for (x, y) in [(0, 0), (3, 0), (0, 3), (3, 3)] {
             assert_eq!(
@@ -1489,7 +1514,7 @@ mod tests {
         sink.consume(MediaBuffer::Video(solid_frame(8, 8, Color::new(255, 0, 0))))
             .unwrap();
 
-        let frame = compositor.compose_frame().unwrap();
+        let frame = compositor.compositing().compose_frame().unwrap();
 
         assert_eq!(
             pixel(&frame, 0, 0),
@@ -1548,7 +1573,7 @@ mod tests {
             .consume(MediaBuffer::Video(solid_frame(2, 2, Color::new(0, 0, 255))))
             .unwrap();
 
-        let frame = compositor.compose_frame().unwrap();
+        let frame = compositor.compositing().compose_frame().unwrap();
         assert_eq!(frame.format(), ffmpeg::format::Pixel::BGRA);
         assert_eq!((frame.width(), frame.height()), (4, 4));
         assert_eq!(frame.pts(), Some(0));
@@ -1571,8 +1596,8 @@ mod tests {
 
         // Composed, pushed, and consumed downstream: only the repeat below
         // still refers to this picture.
-        drop(compositor.compose_frame().unwrap());
-        let in_flight = compositor.compose_frame().unwrap();
+        drop(compositor.compositing().compose_frame().unwrap());
+        let in_flight = compositor.compositing().compose_frame().unwrap();
         let showing = picture_id(&in_flight);
 
         // Every one of these gives the input a new frame, so every one really
@@ -1582,7 +1607,7 @@ mod tests {
         for _ in 0..(OUTPUT_POOL_SIZE * 2 + 2) {
             sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(0, 255, 0))))
                 .unwrap();
-            let composed = compositor.compose_frame().unwrap();
+            let composed = compositor.compositing().compose_frame().unwrap();
             assert_ne!(
                 picture_id(&composed),
                 showing,
@@ -1609,11 +1634,11 @@ mod tests {
         sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(255, 0, 0))))
             .unwrap();
 
-        let composed = compositor.compose_frame().unwrap();
+        let composed = compositor.compositing().compose_frame().unwrap();
         let picture = picture_id(&composed);
         assert_eq!(composed.pts(), Some(0));
 
-        let repeated = compositor.compose_frame().unwrap();
+        let repeated = compositor.compositing().compose_frame().unwrap();
         assert_eq!(
             picture_id(&repeated),
             picture,
@@ -1631,7 +1656,7 @@ mod tests {
         );
 
         layer_handle.set_rect(VideoRect::new(1, 1, 2, 2)).unwrap();
-        let moved = compositor.compose_frame().unwrap();
+        let moved = compositor.compositing().compose_frame().unwrap();
         assert_ne!(
             picture_id(&moved),
             picture,
@@ -1654,12 +1679,12 @@ mod tests {
 
         layer_handle.set_rect(VideoRect::new(1, 0, 1, 1)).unwrap();
         layer_handle.set_opacity(0.5).unwrap();
-        let blended = compositor.compose_frame().unwrap();
+        let blended = compositor.compositing().compose_frame().unwrap();
         assert_eq!(pixel(&blended, 0, 0), [0, 0, 0, 255]);
         assert_eq!(pixel(&blended, 1, 0), [128, 128, 128, 255]);
 
         layer_handle.set_visible(false).unwrap();
-        let hidden = compositor.compose_frame().unwrap();
+        let hidden = compositor.compositing().compose_frame().unwrap();
         assert_eq!(pixel(&hidden, 1, 0), [0, 0, 0, 255]);
         assert_eq!(hidden.pts(), Some(1));
     }
@@ -1685,7 +1710,7 @@ mod tests {
         sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(0, 255, 0))))
             .unwrap();
 
-        let frame = compositor.compose_frame().unwrap();
+        let frame = compositor.compositing().compose_frame().unwrap();
         assert_eq!(pixel(&frame, 0, 0), [0, 255, 0, 255]);
     }
 
@@ -1743,14 +1768,14 @@ mod tests {
         });
 
         while !done.load(AtomicOrdering::Acquire) {
-            let frame = compositor.compose_frame().unwrap();
+            let frame = compositor.compositing().compose_frame().unwrap();
             assert!(matches!(
                 pixel(&frame, 0, 0),
                 [0, 0, 0, 255] | [0, 0, 255, 255] | [0, 255, 0, 255]
             ));
         }
         producer.join().unwrap();
-        let final_frame = compositor.compose_frame().unwrap();
+        let final_frame = compositor.compositing().compose_frame().unwrap();
         assert_eq!(pixel(&final_frame, 0, 0), [0, 255, 0, 255]);
     }
 
@@ -1771,7 +1796,7 @@ mod tests {
             .consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(0, 0, 255))))
             .unwrap();
 
-        let frame = compositor.compose_frame().unwrap();
+        let frame = compositor.compositing().compose_frame().unwrap();
         assert_eq!(pixel(&frame, 0, 0), [255, 0, 0, 255]);
         assert_eq!(handle.source_count(), 1);
     }
@@ -1830,22 +1855,11 @@ mod tests {
     }
 
     #[test]
-    fn pushes_fixed_format_frames_with_contiguous_pts() {
+    fn makes_frames_with_contiguous_pts() {
         let (mut compositor, _) = SwVideoCompositor::new("compositor", options(2, 2)).unwrap();
-        let received = Arc::new(StdMutex::new(Vec::new()));
-        compositor.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        let (bus, _) = Bus::new();
-        compositor.push_frame(&bus).unwrap();
-        compositor.push_frame(&bus).unwrap();
-
-        let received = received.lock().unwrap();
-        let pts: Vec<_> = received
-            .iter()
-            .filter_map(|buffer| match buffer {
-                MediaBuffer::Video(frame) => Some(frame.pts()),
+        let pts: Vec<_> = (0..2)
+            .map(|_| match compositor.compositing().make_frame().unwrap() {
+                MediaBuffer::Video(frame) => frame.pts(),
                 _ => None,
             })
             .collect();
@@ -1991,8 +2005,9 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(2))
                 .expect("the compositor keeps drawing");
         }
-        // Stopped before reading, so every tick that was drawn has also
-        // been advanced past and its misses recorded.
+        // Stopped before reading, so nothing moves while it is read. A tick
+        // is looked back on as the next is asked for, so the one being
+        // handed on as the stop came never has its misses counted.
         pipeline.stop();
 
         let stats = pipeline.stats();
@@ -2004,8 +2019,8 @@ mod tests {
             .expect("a compositor reports its ticks");
         assert!(ticks.made >= 3, "{ticks:?}");
         assert!(
-            ticks.missed >= ticks.made,
-            "every tick overran its deadline, so each missed one: {ticks:?}"
+            ticks.missed + 1 >= ticks.made,
+            "every tick overran its deadline, so each one looked back on missed one: {ticks:?}"
         );
         assert!(
             ticks.work < HOLD / 2 * ticks.made as u32,
@@ -2129,12 +2144,12 @@ mod tests {
         label.y = 10;
         let text = handle.add_text_layer("label", label).unwrap();
         assert!(
-            bright(&compositor.compose_frame().unwrap()).is_empty(),
+            bright(&compositor.compositing().compose_frame().unwrap()).is_empty(),
             "nothing before the first text"
         );
 
         text.set_text("LIVE").unwrap();
-        let drawn = bright(&compositor.compose_frame().unwrap());
+        let drawn = bright(&compositor.compositing().compose_frame().unwrap());
         assert!(drawn.len() > 50, "only {} pixels of text", drawn.len());
         assert!(
             drawn.iter().all(|&(x, y)| x >= 10 && y >= 10),
@@ -2143,13 +2158,13 @@ mod tests {
 
         text.set_text("  ").unwrap();
         assert!(
-            bright(&compositor.compose_frame().unwrap()).is_empty(),
+            bright(&compositor.compositing().compose_frame().unwrap()).is_empty(),
             "empty text hides it"
         );
 
         text.set_text("A").unwrap();
         text.set_position(120, 10).unwrap();
-        let moved = bright(&compositor.compose_frame().unwrap());
+        let moved = bright(&compositor.compositing().compose_frame().unwrap());
         assert!(
             !moved.is_empty() && moved.iter().all(|&(x, _)| x >= 120),
             "it moved"
@@ -2161,7 +2176,7 @@ mod tests {
         ));
         assert_eq!(handle.source_count(), 1);
         assert!(
-            !bright(&compositor.compose_frame().unwrap()).is_empty(),
+            !bright(&compositor.compositing().compose_frame().unwrap()).is_empty(),
             "a refused font replaces nothing"
         );
         drop(compositor);
@@ -2376,6 +2391,41 @@ mod tests {
         );
     }
 
+    /// An input removed while the render waits for it is waited for no
+    /// longer: the render goes on at once with what is left, though nothing
+    /// arrives to say so but the removal itself.
+    #[test]
+    fn an_offline_render_stops_waiting_for_an_input_that_is_removed() {
+        let (compositor, handle) =
+            SwVideoCompositor::new("offline", offline(None, ffmpeg::Rational::new(10, 1))).unwrap();
+        let (_red_feed, red) = feed(&handle, "red", 0);
+        let (_silent_feed, _silent) = feed(&handle, "silent", 1);
+        let base = ffmpeg::Rational::new(1, 10);
+        let feeding = thread::spawn(move || {
+            for index in 0..5 {
+                red.push(timed_frame(RED, index, base, 1)).unwrap();
+            }
+        });
+        let removing = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                handle.remove_source("silent");
+            })
+        };
+
+        let (frames, finished, pipeline) = render(compositor, Duration::from_secs(5));
+        feeding.join().unwrap();
+        removing.join().unwrap();
+        pipeline.stop();
+
+        assert!(finished, "the render goes on without the removed input");
+        assert_eq!(
+            frames,
+            (0..5).map(|index| (index, BGRA_RED)).collect::<Vec<_>>()
+        );
+    }
+
     /// With an end of its own, a render stops exactly there: short of what
     /// its inputs hold, or past it with the background filling the rest.
     #[test]
@@ -2476,7 +2526,7 @@ mod tests {
         let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
         let still = super::super::control::arrange(&handle, 4, 4);
         VideoLayerControl::set_frame(&still, solid_frame(4, 4, BLUE)).unwrap();
-        let composed = compositor.compose_frame().unwrap();
+        let composed = compositor.compositing().compose_frame().unwrap();
         assert_eq!(pixel(&composed, 0, 0), BGRA_BLUE);
     }
 }

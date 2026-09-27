@@ -4,7 +4,6 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -17,7 +16,7 @@ use crate::rate::FrameRate;
 
 use super::super::sw_video_compositor::VideoCompositorOptions;
 use super::super::timed_inputs::{
-    OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, run_offline,
+    OfflineCompositor, Picture, TimedFeed, TimedInput, Untimed, produce_offline,
 };
 use super::super::video_layer::{
     self, LayerGeometry, MAX_DIMENSION, VideoInputId, VideoLayer, VideoLayerError, VideoRect,
@@ -27,14 +26,15 @@ use crate::elements::source::render_mode::{MediaTime, RenderMode};
 use crate::playback_state::Bell;
 use crate::{
     buffer::{MediaBuffer, picture_id, release_picture},
-    bus::{Bus, BusEvent},
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    control::ControlMsg,
+    element::{
+        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        element_pp_log,
+    },
     elements::{CudaScalerInterp, filter::scaler::cuda::scale_graph::CudaScaleGraph},
     error::Result,
-    pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{
@@ -45,6 +45,7 @@ use crate::{
     },
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    produce::produce_source,
     schedule::PeriodicSchedule,
     stats::TickCounters,
 };
@@ -57,7 +58,10 @@ use text_handle::TextLayerState;
 pub use video_handle::CudaVideoLayerHandle;
 
 const OUTPUT_POOL_SIZE: usize = 4;
-const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// How long a live compositor waits at a time before looking at its rate
+/// again: a rate set while it waits is kept from then, rather than a tick of
+/// the old one later.
+const RATE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Errors specific to [`CudaVideoCompositor`].
 #[derive(Debug, ThisError)]
@@ -246,8 +250,8 @@ pub(crate) struct CompositorShared {
     /// device pointer. Only ever compared.
     device_ctx: *const ffi::AVHWDeviceContext,
     mode: RenderMode,
-    /// Rung by an offline compositor's input sinks as frames or their ends
-    /// arrive.
+    /// Rung as anything an offline compositor waits for changes — a frame
+    /// or an end arriving at an input, an input added or removed.
     arrived: Bell,
     /// The output frame an offline compositor is making next.
     next_output: AtomicI64,
@@ -365,6 +369,7 @@ impl CudaVideoCompositorHandle {
             .lock()
             .unwrap()
             .insert(name.clone(), input.clone());
+        shared.arrived.ring();
         Ok(CudaVideoLayerHandle {
             id,
             name,
@@ -377,6 +382,7 @@ impl CudaVideoCompositorHandle {
     pub fn remove_source(&self, name: &str) {
         if let Some(shared) = self.shared.upgrade() {
             shared.inputs.lock().unwrap().remove(name);
+            shared.arrived.ring();
         }
     }
 
@@ -459,6 +465,8 @@ impl CudaVideoCompositorInputSink {
             .is_some_and(|current| current.id == self.id)
         {
             inputs.remove(&self.name);
+            drop(inputs);
+            shared.arrived.ring();
         }
     }
 }
@@ -673,7 +681,7 @@ impl Composed {
 /// `D3d11VideoCompositor`, driving the same
 /// [`VideoLayer`]/[`VideoRect`]/[`VideoFit`](video_layer::VideoFit) API.
 ///
-/// Like the other two, this is a [`SourceElement`], not a one-input filter:
+/// Like the other two, this is a source, not a one-input filter:
 /// upstream pipelines terminate at the sinks returned by
 /// [`CudaVideoCompositorHandle::add_source`], while this element's own
 /// pipeline drives output on its independent clock. Input frame PTS values
@@ -752,7 +760,13 @@ impl Composed {
 /// NV12 chroma is subsampled 2x2, so a layer's placement and size are
 /// aligned to even pixels. A rectangle at an odd coordinate is drawn up to
 /// one pixel away from where it was asked for; nothing else changes.
-pub struct CudaVideoCompositor {
+pub struct CudaVideoCompositor(ProducingSource<Compositing>);
+
+produce_source!(CudaVideoCompositor);
+
+/// What a [`CudaVideoCompositor`] does when asked: the next frame of the
+/// composition. All of its work, which the framework makes the source.
+struct Compositing {
     pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<CompositorShared>,
@@ -777,7 +791,6 @@ pub struct CudaVideoCompositor {
     /// Reuses only the small CPU-side `AVFrame` wrapper; the surface itself
     /// comes from `hw_frames_ctx`'s own pool.
     output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
-    pad: SrcPad,
     /// Where each tick is recorded, once the pipeline has handed it over
     /// — see [`crate::stats::TickStats`].
     ticks: Option<Arc<TickCounters>>,
@@ -787,13 +800,19 @@ pub struct CudaVideoCompositor {
     /// it is drawn — on a BGRA canvas, or in a colour not the NV12 canvas's
     /// own — kept between frames for the reason the overlay scratches are.
     canvas_scratch: HashMap<VideoInputId, CudaBgraScratch>,
+    /// When each live tick is due, on the clock a pause does not move —
+    /// made as the first is asked for.
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a frame went on since the schedule last moved: it moves on
+    /// once that frame has been handed on, as the next is asked for.
+    ticked: bool,
 }
 
 // SAFETY: both buffers are heap-allocated FFmpeg buffers with no thread
 // affinity of their own, `CudaDriver` pushes its context onto whichever
 // thread calls it, and every field is otherwise touched only through
 // `&mut self` on this element's single source thread.
-unsafe impl Send for CudaVideoCompositor {}
+unsafe impl Send for Compositing {}
 
 impl CudaVideoCompositor {
     /// `device` must be the same [`CudaDevice`] every input pipeline's CUDA
@@ -872,8 +891,8 @@ impl CudaVideoCompositor {
             options.frame_rate
         );
         Ok((
-            Self {
-                name: name.clone(),
+            Self(ProducingSource::new(Compositing {
+                name,
                 pp_log,
                 shared: shared.clone(),
                 options,
@@ -899,15 +918,10 @@ impl CudaVideoCompositor {
                     // to the moment the wrapper comes back.
                     release_picture,
                 ),
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(
-                        PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                            .with_layouts(format.layouts()),
-                    ),
-                ),
                 ticks: None,
-            },
+                schedule: None,
+                ticked: false,
+            })),
             CudaVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -921,23 +935,41 @@ impl CudaVideoCompositor {
 
     /// Returns the fixed output width in pixels.
     pub fn width(&self) -> u32 {
-        self.options.width
+        self.0.inner().options.width
     }
 
     /// Returns the fixed output height in pixels.
     pub fn height(&self) -> u32 {
-        self.options.height
+        self.0.inner().options.height
     }
 
     /// The output frame rate, which is what construction was given unless
     /// [`CudaVideoCompositorHandle::set_frame_rate`] has changed it since.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        self.shared.frame_rate.get()
+        self.0.inner().frame_rate()
     }
 
     /// The reciprocal of [`Self::frame_rate`] — output PTS advance by one
     /// tick in this base per composed frame, so this moves with the rate.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+#[cfg(test)]
+impl CudaVideoCompositor {
+    /// What it is made of, for the tests that compose by hand.
+    fn compositing(&mut self) -> &mut Compositing {
+        self.0.inner_mut()
+    }
+}
+
+impl Compositing {
+    fn frame_rate(&self) -> ffmpeg::Rational {
+        self.shared.frame_rate.get()
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         self.frame_rate().invert()
     }
 
@@ -1371,27 +1403,18 @@ impl CudaVideoCompositor {
         Ok(output)
     }
 
-    fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), CudaVideoCompositorError> {
+    /// This tick's frame, with what composing it took recorded.
+    fn make_frame(&mut self) -> std::result::Result<MediaBuffer, CudaVideoCompositorError> {
         let composing = Instant::now();
         let output = self.compose_frame()?;
         if let Some(ticks) = &self.ticks {
             ticks.made(composing.elapsed());
         }
-        if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
-            bus.post(
-                &self.pp_log,
-                BusEvent::Error {
-                    element_type: ElementType::CudaVideoCompositor,
-                    name: self.name.clone(),
-                    error,
-                },
-            );
-        }
-        Ok(())
+        Ok(MediaBuffer::Video(Arc::new(output)))
     }
 }
 
-impl Element for CudaVideoCompositor {
+impl Element for Compositing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -1413,59 +1436,62 @@ impl Element for CudaVideoCompositor {
     }
 }
 
-impl Source for CudaVideoCompositor {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for CudaVideoCompositor {
+impl Produce for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(self.format.layouts()),
+        )
+    }
+
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         match self.options.mode {
-            RenderMode::Live => self.run_live(control, bus),
-            RenderMode::Offline { end } => run_offline(self, control, bus, end),
+            RenderMode::Live => self.produce_live(wait),
+            RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
     }
 }
 
-impl CudaVideoCompositor {
-    /// Emits at its own rate by the wall clock — see [`RenderMode::Live`].
-    fn run_live(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            if outcome.paused_for > Duration::ZERO {
-                schedule.resume_after_pause(outcome.paused_for, Instant::now());
-            }
-
-            // Followed here rather than at construction, so a rate set while
-            // this is running is kept from the next tick on.
-            let interval = self.shared.frame_rate.interval();
-            let now = Instant::now();
-            if schedule.interval() != interval {
-                pp_info!(self, "frame rate is now {}", self.frame_rate());
-                schedule.set_interval(interval, now);
-            }
-            if !schedule.is_due(now) {
-                thread::sleep(schedule.remaining(now).min(CONTROL_POLL_INTERVAL));
-                continue;
-            }
-
-            self.push_frame(bus)?;
-            let missed = schedule.advance_after_tick(Instant::now());
-            if let Some(ticks) = &self.ticks {
-                ticks.missed(missed);
-            }
+impl Compositing {
+    /// This tick's frame, once it is due at its own rate — see
+    /// [`RenderMode::Live`] and the software compositor's own.
+    fn produce_live(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let now = wait.now();
+        // Followed here rather than at construction, so a rate set while
+        // this is running is kept from the next tick on.
+        let interval = self.shared.frame_rate.interval();
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
+        // Moved on only once the last frame has been handed on: a push a
+        // slow downstream holds is part of its tick, and the deadlines it
+        // overran are ticks missed.
+        let missed = if std::mem::take(&mut self.ticked) {
+            schedule.advance_after_tick(now)
+        } else {
+            0
+        };
+        let rate_changed = schedule.interval() != interval;
+        if rate_changed {
+            schedule.set_interval(interval, now);
         }
+        let due = now + schedule.remaining(now);
+        if let Some(ticks) = &self.ticks {
+            ticks.missed(missed);
+        }
+        if rate_changed {
+            pp_info!(self, "frame rate is now {}", self.frame_rate());
+        }
+        if !wait.until(due.min(now + RATE_POLL_INTERVAL)) || wait.now() < due {
+            return Ok(Produced::Nothing);
+        }
+        let frame = self.make_frame()?;
+        self.ticked = true;
+        Ok(Produced::Buffer(frame))
     }
 }
 
@@ -1479,7 +1505,7 @@ impl TimedInput for VideoInput {
     }
 }
 
-impl OfflineCompositor for CudaVideoCompositor {
+impl OfflineCompositor for Compositing {
     type Input = VideoInput;
 
     fn inputs(&self) -> Vec<Arc<VideoInput>> {
@@ -1512,16 +1538,12 @@ impl OfflineCompositor for CudaVideoCompositor {
         self.shared.next_output.store(index, Ordering::Release);
     }
 
-    fn draw(&mut self, bus: &Bus) -> Result<()> {
-        Ok(self.push_frame(bus)?)
-    }
-
-    fn end_render(&mut self) -> Result<()> {
-        self.pad.push_eos(&self.pp_log)
+    fn draw(&mut self) -> Result<MediaBuffer> {
+        Ok(self.make_frame()?)
     }
 }
 
-impl Drop for CudaVideoCompositor {
+impl Drop for Compositing {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -1700,7 +1722,7 @@ struct CropScratch {
     format: LayerFormat,
 }
 
-impl CudaVideoCompositor {
+impl Compositing {
     /// The cropped copy of `frame`, or `None` when the layer draws all of it.
     ///
     /// Takes the map rather than `&mut self` so the caller can keep its own

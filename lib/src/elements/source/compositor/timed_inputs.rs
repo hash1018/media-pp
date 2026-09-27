@@ -17,10 +17,8 @@ use std::{
 use ffmpeg_next as ffmpeg;
 
 use crate::{
-    buffer,
-    bus::Bus,
-    control::{ControlReceiver, drain_control},
-    element::SourceElement,
+    buffer::{self, MediaBuffer},
+    element::{Element, Produced, Wait},
     elements::source::render_mode::MediaTime,
     error::Result,
     playback_state::{Bell, PlaybackState},
@@ -239,7 +237,7 @@ impl TimedFeed {
     }
 }
 
-/// One input of an offline compositor, as [`run_offline`] sees it.
+/// One input of an offline compositor, as [`produce_offline`] sees it.
 pub(crate) trait TimedInput {
     /// Its frames, where it is fed through a sink.
     fn timed(&self) -> Option<&TimedFeed>;
@@ -247,9 +245,9 @@ pub(crate) trait TimedInput {
     fn show(&self, picture: Option<Picture>);
 }
 
-/// What [`run_offline`] needs of a compositor. The backends differ in how
-/// they draw, and in nothing this loop does.
-pub(crate) trait OfflineCompositor: SourceElement {
+/// What [`produce_offline`] needs of a compositor. The backends differ in
+/// how they draw, and in nothing this does.
+pub(crate) trait OfflineCompositor: Element {
     type Input: TimedInput;
     /// Every input registered now.
     fn inputs(&self) -> Vec<Arc<Self::Input>>;
@@ -259,99 +257,83 @@ pub(crate) trait OfflineCompositor: SourceElement {
     fn output_time(&self, index: i64) -> MediaTime;
     /// Whether an input has ever been fed through a sink.
     fn fed(&self) -> bool;
-    /// What the input sinks ring as anything arrives.
+    /// What is rung as anything [`produce_offline`] waits for changes: a
+    /// frame or an end arriving at an input, an input added or removed.
     fn arrived(&self) -> Bell;
     /// Says output frame `index` is the one being made next, which is where
     /// an input added from now on starts.
     fn making(&self, index: i64);
-    /// Composes and pushes one frame from what the inputs show, moving
+    /// Composes one frame from what the inputs show, moving
     /// [`Self::frame_index`] on by one.
-    fn draw(&mut self, bus: &Bus) -> Result<()>;
-    /// Pushes the `Eos` that ends the render.
-    fn end_render(&mut self) -> Result<()>;
+    fn draw(&mut self) -> Result<MediaBuffer>;
 }
 
-/// An offline compositor's run: each output time's frame once every input
+/// An offline compositor's next frame: the output time's, once every input
 /// has said what it shows then — see [`RenderMode::Offline`].
 ///
 /// No schedule: what paces this is the inputs arriving and the pad taking
-/// what is pushed. Each pass settles every input fed through a sink for the
+/// what is made. Each frame settles every input fed through a sink for the
 /// output time [`OfflineCompositor::frame_index`] stands for, draws, and
 /// moves those inputs on, which rings their pipelines to send the next.
 ///
 /// [`RenderMode::Offline`]: crate::elements::RenderMode::Offline
-pub(crate) fn run_offline<C: OfflineCompositor>(
+pub(crate) fn produce_offline<C: OfflineCompositor>(
     compositor: &mut C,
-    control: &ControlReceiver,
-    bus: &Bus,
+    wait: &mut Wait<'_>,
     end: Option<Duration>,
-) -> Result<()> {
+) -> Result<Produced> {
     let end = end.map(MediaTime::from_duration);
-    let arrived = compositor.arrived();
-    loop {
-        let outcome = drain_control(control, compositor, bus)?;
-        if outcome.stopped {
-            pp_info!(pp_log: compositor.pp_log(), "stopped");
-            return Ok(());
-        }
-
-        let index = compositor.frame_index();
-        let at = compositor.output_time(index);
-        if end.is_some_and(|end| at >= end) {
-            return finish(compositor, index);
-        }
-        let inputs = compositor.inputs();
-        let mut settled = true;
-        let mut over = true;
-        for input in &inputs {
-            let Some(timed) = input.timed() else {
-                continue;
-            };
-            match timed.shown_at(at) {
-                Shown::Pending => settled = false,
-                Shown::Nothing => input.show(None),
-                Shown::Frame(picture) => input.show(Some(picture)),
-            }
-            over &= timed.over_at(at);
-        }
-        // With no end of its own, the render is over once every input it was
-        // fed has ended and shown its last frame — but not before one has
-        // been added, when "every input" is none.
-        let fed = compositor.fed();
-        if end.is_none() && fed && over {
-            return finish(compositor, index);
-        }
-        if !settled || (end.is_none() && !fed) {
-            // Woken as anything arrives; the timeout is only so control is
-            // looked at while nothing does.
-            crossbeam_channel::select! {
-                recv(arrived.rings()) -> _ => {}
-                default(CONTROL_POLL_INTERVAL) => {}
-            }
+    let index = compositor.frame_index();
+    let at = compositor.output_time(index);
+    if end.is_some_and(|end| at >= end) {
+        return Ok(finish(compositor, index));
+    }
+    let inputs = compositor.inputs();
+    let mut settled = true;
+    let mut over = true;
+    for input in &inputs {
+        let Some(timed) = input.timed() else {
             continue;
+        };
+        match timed.shown_at(at) {
+            Shown::Pending => settled = false,
+            Shown::Nothing => input.show(None),
+            Shown::Frame(picture) => input.show(Some(picture)),
         }
+        over &= timed.over_at(at);
+    }
+    // With no end of its own, the render is over once every input it was
+    // fed has ended and shown its last frame — but not before one has
+    // been added, when "every input" is none.
+    let fed = compositor.fed();
+    if end.is_none() && fed && over {
+        return Ok(finish(compositor, index));
+    }
+    if !settled || (end.is_none() && !fed) {
+        // Asked again once anything it waits for changes, or once the
+        // pipeline has something for this thread.
+        let _ = wait.recv(compositor.arrived().rings());
+        return Ok(Produced::Nothing);
+    }
 
-        compositor.draw(bus)?;
-        let next = compositor.frame_index();
-        compositor.making(next);
-        let wanted = compositor.output_time(next);
-        for input in &inputs {
-            if let Some(timed) = input.timed() {
-                timed.advance(wanted);
-            }
+    let frame = compositor.draw()?;
+    let next = compositor.frame_index();
+    compositor.making(next);
+    let wanted = compositor.output_time(next);
+    for input in &inputs {
+        if let Some(timed) = input.timed() {
+            timed.advance(wanted);
         }
     }
+    Ok(Produced::Buffer(frame))
 }
 
-/// Ends an offline render before output frame `index`: an `Eos` after the
-/// last frame, and the source's run is over.
-fn finish<C: OfflineCompositor>(compositor: &mut C, index: i64) -> Result<()> {
+/// Ends an offline render before output frame `index`: the end goes on
+/// after the last frame, and the source is not asked again.
+fn finish<C: OfflineCompositor>(compositor: &C, index: i64) -> Produced {
     pp_info!(pp_log: compositor.pp_log(), "finished: {index} frames");
-    compositor.end_render()
+    Produced::End
 }
-
-/// How long the loop waits for an input before looking at control again.
-const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[cfg(test)]
 mod tests {

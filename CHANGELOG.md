@@ -57,9 +57,10 @@ compile error with no explanation.
   `impl IntoSource<M>`, which a `SourceElement` and a `Produce` both are;
   the wiring closure is handed the source itself, as before, or the
   `ProducingSource` a `Produce` is made into. `TestVideoSource`,
-  `TestAudioSource`, `AppSource` and `AudioMixer` are written this way now;
-  a pause no longer waits out `TestVideoSource`'s current frame interval,
-  nor a request a live mixer's tick.
+  `TestAudioSource`, `AppSource`, `AudioMixer` and the four video
+  compositors are written this way now; a pause no longer waits out
+  `TestVideoSource`'s current frame interval, nor a request a live mixer's
+  tick.
 
 - **`Transform` writes a filter as its media work alone.** Its `transform`
   makes what each buffer answers to — nothing, one buffer or several — into
