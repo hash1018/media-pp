@@ -13,12 +13,11 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_info},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Why an [`AudioWaveform`] could not be made or could not draw.
@@ -106,10 +105,15 @@ impl Default for AudioWaveformOptions {
 ///
 /// A `Flush` — a seek — forgets what it had, and the next sound it is given
 /// starts the pictures again from there. `Eos` is passed on as it comes.
-pub struct AudioWaveform {
+pub struct AudioWaveform(TransformStage<Drawing>);
+
+transform_filter!(AudioWaveform);
+
+/// What an [`AudioWaveform`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Drawing {
     pp_log: PpLog,
     name: Arc<str>,
-    pad: SrcPad,
     options: AudioWaveformOptions,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// The most recent sound, channels averaged, at most a picture's worth
@@ -155,14 +159,7 @@ impl AudioWaveform {
         let pp_log = element_pp_log(ElementType::AudioWaveform, &name, None);
         let (width, height) = (options.width, options.height);
         pp_info!(pp_log: &pp_log, "created: {width}x{height} at {rate}");
-        Ok(Self {
-            pad: SrcPad::with_contract(
-                format!("{name}_src"),
-                OutputContract::Fixed(
-                    PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                        .with_layouts(PixelLayoutSet::BGRA),
-                ),
-            ),
+        Ok(Self(TransformStage::new(Drawing {
             pp_log,
             name,
             options,
@@ -173,9 +170,11 @@ impl AudioWaveform {
             ),
             samples: VecDeque::new(),
             clock: None,
-        })
+        })))
     }
+}
 
+impl Drawing {
     /// Samples a picture spans at `sample_rate`.
     fn span(&self, sample_rate: u32) -> f64 {
         let rate = self.options.frame_rate;
@@ -183,7 +182,7 @@ impl AudioWaveform {
     }
 
     /// Takes in `frame`'s sound and pushes every picture it completes.
-    fn take(&mut self, frame: &ffmpeg::frame::Audio) -> Result<()> {
+    fn take(&mut self, frame: &ffmpeg::frame::Audio, out: &mut Output) -> Result<()> {
         let channels = audio_f32::read(frame).map_err(AudioWaveformError::from)?;
         let sample_rate = frame.rate();
         let samples = frame.samples();
@@ -241,7 +240,7 @@ impl AudioWaveform {
             .collect();
         self.samples.drain(..stale);
         for picture in pictures {
-            self.pad.push(picture)?;
+            out.push(picture);
         }
         Ok(())
     }
@@ -295,7 +294,7 @@ impl AudioWaveform {
     }
 }
 
-impl Element for AudioWaveform {
+impl Element for Drawing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -313,13 +312,14 @@ impl Element for AudioWaveform {
     }
 }
 
-impl Source for AudioWaveform {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Drawing {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(PixelLayoutSet::BGRA),
+        )
     }
-}
 
-impl Sink for AudioWaveform {
     /// Decoded sound in system memory.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -328,27 +328,27 @@ impl Sink for AudioWaveform {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Audio(frame) => self.take(&frame),
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            MediaBuffer::Audio(frame) => self.take(&frame, out),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioWaveformError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioWaveformError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.samples.clear();
-            self.clock = None;
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.samples.clear();
+        self.clock = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::ControlMsg;
+    use crate::element::Sink;
     use crate::test_support::capture;
 
     const RATE: u32 = 48_000;

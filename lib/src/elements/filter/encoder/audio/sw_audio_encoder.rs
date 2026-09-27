@@ -7,10 +7,9 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 use crate::elements::AudioFormat;
@@ -141,11 +140,16 @@ pub struct SwAudioEncoderOptions {
 /// [`ffmpeg::software::resampling::Context::flush`]) and whatever's left
 /// in `pending` (as one final, possibly short, frame — allowed for the
 /// last frame only) before flushing the encoder itself.
-pub struct SwAudioEncoder {
+pub struct SwAudioEncoder(TransformStage<Encoding>);
+
+transform_filter!(SwAudioEncoder);
+
+/// What a [`SwAudioEncoder`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Encoding {
     pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::audio::Encoder,
-    pad: SrcPad,
     target_format: ffmpeg::format::Sample,
     target_layout: ffmpeg::ChannelLayout,
     sample_rate: u32,
@@ -173,7 +177,7 @@ pub struct SwAudioEncoder {
 // reasoning, `target_layout` here is always `ChannelLayout::default`'s
 // plain native layout (built in `SwAudioEncoder::new`), never a custom
 // one with a real pointer in it.
-unsafe impl Send for SwAudioEncoder {}
+unsafe impl Send for Encoding {}
 
 impl SwAudioEncoder {
     /// Opens the requested audio encoder and configures its output definition.
@@ -255,10 +259,6 @@ impl SwAudioEncoder {
 
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwAudioEncoder, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::packet(MediaKind::AudioPacket)),
-        );
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}Hz, {} channel(s), format={:?}, frame_size={}, bit_rate={}",
@@ -268,11 +268,10 @@ impl SwAudioEncoder {
             frame_size,
             options.bit_rate
         );
-        Ok(Self {
+        Ok(Self(TransformStage::new(Encoding {
             name,
             pp_log,
             encoder,
-            pad,
             target_format,
             target_layout,
             sample_rate: options.sample_rate,
@@ -284,14 +283,14 @@ impl SwAudioEncoder {
             }),
             pending: (0..options.channels).map(|_| VecDeque::new()).collect(),
             samples_emitted: 0,
-        })
+        })))
     }
 
     /// This encoder's own codec parameters — what a
     /// [`crate::elements::FileMuxer`] track needs, same pattern
     /// [`crate::elements::SwEncoder::parameters`] documents for video.
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
-        ffmpeg::codec::Parameters::from(&self.encoder)
+        self.0.inner().parameters()
     }
 
     /// The unit each produced packet's `pts` is expressed in: one sample at
@@ -299,6 +298,16 @@ impl SwAudioEncoder {
     /// the encoder counts the samples it has encoded — so nothing here has
     /// to be told what unit they were in.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Encoding {
+    fn parameters(&self) -> ffmpeg::codec::Parameters {
+        ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.sample_rate as i32)
     }
 
@@ -318,7 +327,7 @@ impl SwAudioEncoder {
     /// next call, except when `flush_all` (only `Eos` sets this) forces
     /// out whatever's left as one final, possibly-short frame — valid for
     /// the last frame a codec ever sees, not for any frame before it.
-    fn drain_pending(&mut self, flush_all: bool) -> Result<()> {
+    fn drain_pending(&mut self, flush_all: bool, out: &mut Output) -> Result<()> {
         loop {
             let available = self.pending.iter().map(VecDeque::len).min().unwrap_or(0);
             let take = if self.frame_size == 0 {
@@ -344,7 +353,7 @@ impl SwAudioEncoder {
                 .send_frame(&frame)
                 .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
                 .map_err(SwAudioEncoderError::from)?;
-            self.drain_packets()?;
+            self.drain_packets(out)?;
 
             if flush_all && take < self.frame_size.max(1) {
                 return Ok(()); // that was the short final chunk — nothing more to take
@@ -352,7 +361,7 @@ impl SwAudioEncoder {
         }
     }
 
-    fn drain_packets(&mut self) -> Result<()> {
+    fn drain_packets(&mut self, out: &mut Output) -> Result<()> {
         let mut packet = ffmpeg::Packet::empty();
         loop {
             match self.encoder.receive_packet(&mut packet) {
@@ -364,7 +373,7 @@ impl SwAudioEncoder {
                     // from a packet's own declared time_base. `pts` above is
                     // already expressed in this same `1/sample_rate` unit.
                     packet.set_time_base(self.time_base());
-                    self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    out.push(MediaBuffer::Packet(Arc::new(packet)));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -499,7 +508,7 @@ impl From<&SwAudioEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for SwAudioEncoder {
+impl Element for Encoding {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -517,13 +526,11 @@ impl Element for SwAudioEncoder {
     }
 }
 
-impl Source for SwAudioEncoder {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Encoding {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::packet(MediaKind::AudioPacket))
     }
-}
 
-impl Sink for SwAudioEncoder {
     /// The audio mirror of SwEncoder: decoded samples in, encoded packets out.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -532,42 +539,45 @@ impl Sink for SwAudioEncoder {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
                 self.resample(&frame)
                     .inspect_err(|error| pp_error!(self, "resample failed: {error}"))
                     .map_err(SwAudioEncoderError::from)?;
-                self.drain_pending(false)
+                self.drain_pending(false, out)
             }
-            MediaBuffer::Eos => {
-                self.flush_resampler()
-                    .inspect_err(|error| pp_error!(self, "resampler flush failed: {error}"))
-                    .map_err(SwAudioEncoderError::from)?;
-                self.drain_pending(true)?;
-                self.encoder
-                    .send_eof()
-                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(SwAudioEncoderError::from)?;
-                self.drain_packets()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             other => Err(SwAudioEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
-        // Nothing to reset, for the same reason as `SwEncoder::control`: a
+    /// Sends the end of the stream in and hands on what comes out.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        self.flush_resampler()
+            .inspect_err(|error| pp_error!(self, "resampler flush failed: {error}"))
+            .map_err(SwAudioEncoderError::from)?;
+        self.drain_pending(true, out)?;
+        self.encoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(SwAudioEncoderError::from)?;
+        self.drain_packets(out)
+    }
+
+    fn reset(&mut self) {
+        // Nothing to reset, for the same reason as `SwEncoder::reset`: a
         // `Flush` or `Seek` leaves the encoder as it is (delayed packets from
         // before the seek can still surface later), and `Stop` abandons it
         // without flushing.
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::{Sink, Source};
 
     /// `SwAudioEncoder::new` should fail cleanly (not panic) when the
     /// linked ffmpeg build wasn't compiled with `aac` — vanishingly

@@ -9,15 +9,14 @@ use crate::color::ColorDescription;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::{VulkanDevice, filter::is_codec_drain_boundary},
     error::Result,
-    pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         vulkan::frames::{NotOurs, create_frames_ctx, sw_format_of},
     },
+    transform::{TransformStage, transform_filter},
 };
 
 // The video-encoder helpers every backend shares, a module up from this one.
@@ -145,7 +144,13 @@ pub enum VulkanEncoderError {
 /// As `CudaEncoder`'s: packets are drained after every frame and at `Eos`,
 /// and each is stamped with this encoder's [`Self::time_base`] and a
 /// nominal duration.
-pub struct VulkanEncoder {
+pub struct VulkanEncoder(TransformStage<Encoding>);
+
+transform_filter!(VulkanEncoder);
+
+/// What a [`VulkanEncoder`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Encoding {
     pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
@@ -159,14 +164,13 @@ pub struct VulkanEncoder {
     /// Nominal frame duration in `time_base` ticks, which the encoder
     /// leaves at zero.
     packet_duration: i64,
-    pad: SrcPad,
 }
 
 // SAFETY: both buffers are heap-allocated FFmpeg buffers with no thread
 // affinity, `device_ctx` is only ever compared, and `encoder`'s own `Send`
 // covers the codec context. `&mut self` on every method that touches them
 // rules out concurrent access — same reasoning as `CudaEncoder`.
-unsafe impl Send for VulkanEncoder {}
+unsafe impl Send for Encoding {}
 
 fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rational) -> i64 {
     if frame_rate.numerator() <= 0 || time_base.numerator() <= 0 {
@@ -272,10 +276,6 @@ impl VulkanEncoder {
         })();
         let encoder = opened?;
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket)),
-        );
         pp_info!(
             pp_log: &pp_log,
             "opened: {} {}x{} on {}, {} bps, gop={}",
@@ -286,7 +286,7 @@ impl VulkanEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self {
+        Ok(Self(TransformStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -296,23 +296,32 @@ impl VulkanEncoder {
             width: options.width,
             height: options.height,
             packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
-            pad,
-        })
+        })))
     }
 
     /// The encoded stream's parameters, for
     /// [`crate::elements::FileMuxer::add_stream`].
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
-        ffmpeg::codec::Parameters::from(&self.encoder)
+        self.0.inner().parameters()
     }
 
     /// The unit each packet's `pts`, `dts` and duration are counted in — the
     /// encoder's own, into which each frame's timestamp is converted.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Encoding {
+    fn parameters(&self) -> ffmpeg::codec::Parameters {
+        ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         shared::TIME_BASE
     }
 
-    fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+    fn encode(&mut self, frame: &ffmpeg::frame::Video, out: &mut Output) -> Result<()> {
         match sw_format_of(frame, self.device_ctx) {
             Ok(ffmpeg::format::Pixel::NV12) => {}
             Ok(other) => return Err(self.refused(VulkanEncoderError::UnsupportedLayout(other))),
@@ -339,7 +348,7 @@ impl VulkanEncoder {
             .send_frame(&frame)
             .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
             .map_err(VulkanEncoderError::from)?;
-        self.drain()
+        self.receive_packets(out)
     }
 
     fn refused(&self, error: VulkanEncoderError) -> crate::error::Error {
@@ -347,7 +356,7 @@ impl VulkanEncoder {
         error.into()
     }
 
-    fn drain(&mut self) -> Result<()> {
+    fn receive_packets(&mut self, out: &mut Output) -> Result<()> {
         let mut packet = ffmpeg::Packet::empty();
         loop {
             match self.encoder.receive_packet(&mut packet) {
@@ -357,7 +366,7 @@ impl VulkanEncoder {
                     if owned.duration() == 0 && self.packet_duration > 0 {
                         owned.set_duration(self.packet_duration);
                     }
-                    self.pad.push(MediaBuffer::Packet(Arc::new(owned)))?;
+                    out.push(MediaBuffer::Packet(Arc::new(owned)));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -398,7 +407,7 @@ impl From<&VulkanEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for VulkanEncoder {
+impl Element for Encoding {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -416,13 +425,11 @@ impl Element for VulkanEncoder {
     }
 }
 
-impl Source for VulkanEncoder {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Encoding {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
-}
 
-impl Sink for VulkanEncoder {
     /// Vulkan Video reads device memory; a system-memory frame needs a
     /// VulkanUpload first.
     fn input_contract(&self) -> InputContract {
@@ -432,29 +439,31 @@ impl Sink for VulkanEncoder {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.encode(&frame),
-            MediaBuffer::Eos => {
-                self.encoder
-                    .send_eof()
-                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(VulkanEncoderError::from)?;
-                self.drain()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            MediaBuffer::Video(frame) => self.encode(&frame, out),
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             other => Err(VulkanEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+    /// Sends the end of the stream in and hands on what comes out.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        self.encoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(VulkanEncoderError::from)?;
+        self.receive_packets(out)
+    }
+
+    fn reset(&mut self) {
         // Nothing to reset, as for every encoder here: a caller needing a
         // hard encoded-stream discontinuity rebuilds the encoder.
-        Ok(())
     }
 }
 
-impl Drop for VulkanEncoder {
+impl Drop for Encoding {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -465,6 +474,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::{
         elements::{SwDecoder, VulkanUpload},
         test_support::{CapturingSink, try_vulkan_device},

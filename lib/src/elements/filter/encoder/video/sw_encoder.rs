@@ -12,10 +12,9 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 use crate::elements::filter::is_codec_drain_boundary;
@@ -250,7 +249,13 @@ pub struct SwEncoderOptions {
 /// until `Eos` flushes whatever's left) — `consume` drains `receive_packet`
 /// in a loop after every `send_frame`/`send_eof`, same shape as
 /// `SwDecoder`'s own `receive_frame` drain loop.
-pub struct SwEncoder {
+pub struct SwEncoder(TransformStage<Encoding>);
+
+transform_filter!(SwEncoder);
+
+/// What a [`SwEncoder`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Encoding {
     pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
@@ -273,7 +278,6 @@ pub struct SwEncoder {
     pixel_format: ffmpeg::format::Pixel,
     width: u32,
     height: u32,
-    pad: SrcPad,
 }
 
 /// `YUVJ*` is the deprecated full-range spelling of the same planes; a frame
@@ -386,10 +390,6 @@ impl SwEncoder {
 
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwEncoder, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket)),
-        );
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}x{}, bit_rate={}",
@@ -397,7 +397,7 @@ impl SwEncoder {
             options.height,
             options.bit_rate
         );
-        Ok(Self {
+        Ok(Self(TransformStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -406,8 +406,7 @@ impl SwEncoder {
             pixel_format: options.pixel_format,
             width: options.width,
             height: options.height,
-            pad,
-        })
+        })))
     }
 
     /// This encoder's own codec parameters — what you need to construct
@@ -418,7 +417,7 @@ impl SwEncoder {
     /// to get them from otherwise (e.g. encoding straight into a `Tee`/RTSP
     /// sink, or decoding straight back out for a round-trip smoke test).
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
-        ffmpeg::codec::Parameters::from(&self.encoder)
+        self.0.inner().parameters()
     }
 
     /// The unit each packet's `pts`, `dts` and duration are counted in —
@@ -426,10 +425,20 @@ impl SwEncoder {
     /// for its codec, and not the unit of the frames it is fed: those it
     /// reads off each frame and converts.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Encoding {
+    fn parameters(&self) -> ffmpeg::codec::Parameters {
+        ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         self.time_base
     }
 
-    fn drain(&mut self) -> Result<()> {
+    fn receive_packets(&mut self, out: &mut Output) -> Result<()> {
         let mut packet = ffmpeg::Packet::empty();
         loop {
             match self.encoder.receive_packet(&mut packet) {
@@ -438,7 +447,7 @@ impl SwEncoder {
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
-                    self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    out.push(MediaBuffer::Packet(Arc::new(packet)));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -457,7 +466,7 @@ impl From<&SwEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for SwEncoder {
+impl Element for Encoding {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -475,13 +484,11 @@ impl Element for SwEncoder {
     }
 }
 
-impl Source for SwEncoder {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Encoding {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
-}
 
-impl Sink for SwEncoder {
     /// System memory specifically: this encoder reads the frame's planes
     /// on the CPU, so a D3D11 or CUDA frame is not merely the wrong
     /// format here, it is unreachable memory.
@@ -495,7 +502,7 @@ impl Sink for SwEncoder {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
                 if !same_layout(frame.format(), self.pixel_format)
@@ -520,21 +527,24 @@ impl Sink for SwEncoder {
                     .send_frame(&frame)
                     .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
                     .map_err(SwEncoderError::from)?;
-                self.drain()
+                self.receive_packets(out)
             }
-            MediaBuffer::Eos => {
-                self.encoder
-                    .send_eof()
-                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(SwEncoderError::from)?;
-                self.drain()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             other => Err(SwEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+    /// Sends the end of the stream in and hands on what comes out.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        self.encoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(SwEncoderError::from)?;
+        self.receive_packets(out)
+    }
+
+    fn reset(&mut self) {
         // Nothing to reset, deliberately: a `Flush` or `Seek` leaves the
         // encoder as it is. Encoders may retain delayed/reordered frames (see
         // the type docs), so packets originating before the seek can still
@@ -542,7 +552,6 @@ impl Sink for SwEncoder {
         // hard encoded-stream discontinuity must rebuild the encoder; this
         // implementation does not promise that boundary. `Stop` abandons
         // the codec context without flushing it.
-        Ok(())
     }
 }
 
@@ -551,6 +560,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
+    use crate::element::{Sink, Source};
 
     #[test]
     fn nominal_frame_duration_is_expressed_in_encoder_time_base_ticks() {

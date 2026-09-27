@@ -9,16 +9,15 @@ use crate::color::ColorDescription;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     error::Result,
-    pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         frame::{self, CudaFrameError, CudaSurfaces, create_hw_frames_ctx},
     },
     platform::ffmpeg::AvBufferRef,
+    transform::{TransformStage, transform_filter},
 };
 
 // The video-encoder helpers every backend shares, a module up from this one.
@@ -166,7 +165,13 @@ pub enum CudaEncoderError {
 /// shape as `SwEncoder`'s own drain loop, and stamps each packet's
 /// `time_base` and nominal duration since `avcodec_receive_packet` sets
 /// neither.
-pub struct CudaEncoder {
+pub struct CudaEncoder(TransformStage<Encoding>);
+
+transform_filter!(CudaEncoder);
+
+/// What a [`CudaEncoder`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Encoding {
     pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
@@ -182,14 +187,13 @@ pub struct CudaEncoder {
     /// `AVPacket::duration` at zero; muxers such as
     /// [`crate::elements::HlsMuxer`] need it for precise segment durations.
     packet_duration: i64,
-    pad: SrcPad,
 }
 
 // SAFETY: both buffers are heap-allocated FFmpeg buffers with no thread
 // affinity, `device_ctx` is only ever compared, and `encoder`'s own `Send`
 // covers the codec context. `&mut self` on every method that touches them
 // rules out concurrent access — same reasoning as `CudaDecoder`.
-unsafe impl Send for CudaEncoder {}
+unsafe impl Send for Encoding {}
 
 fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rational) -> i64 {
     if frame_rate.numerator() <= 0 || time_base.numerator() <= 0 {
@@ -315,10 +319,6 @@ impl CudaEncoder {
 
         let encoder = opened?;
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket)),
-        );
         pp_info!(
             pp_log: &pp_log,
             "opened: {} {}x{} {:?}, {} bps, gop={}",
@@ -329,7 +329,7 @@ impl CudaEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self {
+        Ok(Self(TransformStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -340,15 +340,14 @@ impl CudaEncoder {
             width: options.width,
             height: options.height,
             packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
-            pad,
-        })
+        })))
     }
 
     /// The encoded stream's parameters, for
     /// [`crate::elements::FileMuxer::add_stream`] — same accessor
     /// `SwEncoder`/`D3d11VideoEncoder` expose for the same reason.
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
-        ffmpeg::codec::Parameters::from(&self.encoder)
+        self.0.inner().parameters()
     }
 
     /// The unit each packet's `pts`, `dts` and duration are counted in —
@@ -356,10 +355,20 @@ impl CudaEncoder {
     /// the unit of the frames it is fed: those it reads off each frame and
     /// converts, as [`crate::elements::SwEncoder::time_base`] does.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Encoding {
+    fn parameters(&self) -> ffmpeg::codec::Parameters {
+        ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         shared::TIME_BASE
     }
 
-    fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+    fn encode(&mut self, frame: &ffmpeg::frame::Video, out: &mut Output) -> Result<()> {
         // NVENC was configured for one surface layout at `open`. A frame
         // in another one would be read through the wrong plane layout
         // rather than rejected by the driver.
@@ -389,10 +398,10 @@ impl CudaEncoder {
             .send_frame(&frame)
             .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
             .map_err(CudaEncoderError::from)?;
-        self.drain()
+        self.receive_packets(out)
     }
 
-    fn drain(&mut self) -> Result<()> {
+    fn receive_packets(&mut self, out: &mut Output) -> Result<()> {
         let mut packet = ffmpeg::Packet::empty();
         loop {
             match self.encoder.receive_packet(&mut packet) {
@@ -401,7 +410,7 @@ impl CudaEncoder {
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
-                    self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    out.push(MediaBuffer::Packet(Arc::new(packet)));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -420,7 +429,7 @@ impl From<&CudaEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for CudaEncoder {
+impl Element for Encoding {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -438,13 +447,11 @@ impl Element for CudaEncoder {
     }
 }
 
-impl Source for CudaEncoder {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Encoding {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
-}
 
-impl Sink for CudaEncoder {
     /// NVENC reads device memory directly; a system-memory frame needs a CudaUpload first.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -453,32 +460,34 @@ impl Sink for CudaEncoder {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.encode(&frame),
-            MediaBuffer::Eos => {
-                self.encoder
-                    .send_eof()
-                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(CudaEncoderError::from)?;
-                self.drain()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            MediaBuffer::Video(frame) => self.encode(&frame, out),
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             other => Err(CudaEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+    /// Sends the end of the stream in and hands on what comes out.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        self.encoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(CudaEncoderError::from)?;
+        self.receive_packets(out)
+    }
+
+    fn reset(&mut self) {
         // Nothing to reset, the same deliberate choice as `SwEncoder` and
         // `D3d11VideoEncoder`: a `Flush` or `Seek` leaves NVENC as it is, so
         // packets from before the seek can still come out of later
         // `send_frame` calls. A caller needing a hard encoded-stream
         // discontinuity rebuilds the encoder.
-        Ok(())
     }
 }
 
-impl Drop for CudaEncoder {
+impl Drop for Encoding {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -490,6 +499,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::{
         elements::{CudaDecoder, CudaUpload, FileDemuxer, PacketCounter},
         pipeline::Pipeline,

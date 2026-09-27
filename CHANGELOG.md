@@ -58,11 +58,11 @@ compile error with no explanation.
   `Transform` both are, with the marker worked out by the compiler — and
   `into_filter()` makes one of it for a list, as a `Rack` takes. A filter
   written as `Sink` and `Source` is unchanged. The scalers, uploads,
-  downloads, converters, chroma keys and video effects of every backend,
-  `D3d11ToneMap`, the audio filters and `ChangeGate` are the first elements
-  of this crate written this way, with their names, constructors, handles
-  and behaviour as they were, but for two edges the stage settles: a
-  `D3d12Scaler` whose wait for the GPU fails at the end still ends the
+  downloads, converters, chroma keys, video effects and encoders of every
+  backend, `D3d11ToneMap`, the audio filters, `AudioWaveform` and
+  `ChangeGate` are written this way now, with their names, constructors,
+  handles and accessors as they were, but for two edges the stage settles:
+  a `D3d12Scaler` whose wait for the GPU fails at the end still ends the
   stream, and a `CudaScaler` hands on every frame its graph made even where
   downstream refuses one.
 

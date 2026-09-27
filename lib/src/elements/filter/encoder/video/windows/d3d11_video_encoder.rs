@@ -21,17 +21,16 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     error::{D3d11SharedDeviceError, Result},
-    pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
         windows::d3d11::protect_shared_device,
         windows::d3d11_gpu::D3d11Gpu,
         windows::d3d11va::{create_hw_device_ctx, d3d11va_texture, or_frames_bind_flags},
     },
+    transform::{TransformStage, transform_filter},
 };
 
 // The video-encoder helpers every backend shares, a module up from this one.
@@ -357,7 +356,13 @@ pub struct D3d11VideoEncoderOptions {
 /// arrive, or until `Eos` flushes what's left. `consume` drains
 /// `receive_packet` in a loop after every `send_frame`/`send_eof`, the same
 /// shape as [`crate::elements::SwEncoder`]'s own drain loop.
-pub struct D3d11VideoEncoder {
+pub struct D3d11VideoEncoder(TransformStage<Encoding>);
+
+transform_filter!(D3d11VideoEncoder);
+
+/// What a [`D3d11VideoEncoder`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Encoding {
     pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
@@ -383,14 +388,13 @@ pub struct D3d11VideoEncoder {
     /// `AVPacket::duration` at zero; muxers such as
     /// [`crate::elements::HlsMuxer`] need it for precise segment durations.
     packet_duration: i64,
-    pad: SrcPad,
 }
 
 // SAFETY: `hw_device_ctx`/`hw_frames_ctx` are heap-allocated FFmpeg buffers
 // with no thread affinity, and `encoder`'s own `Send` covers the codec
 // context. `&mut self` on every method that touches them rules out
 // concurrent access — same reasoning as `D3d11Decoder`.
-unsafe impl Send for D3d11VideoEncoder {}
+unsafe impl Send for Encoding {}
 
 fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rational) -> i64 {
     if frame_rate.numerator() <= 0 || time_base.numerator() <= 0 || time_base.denominator() <= 0 {
@@ -592,10 +596,6 @@ impl D3d11VideoEncoder {
 
         let encoder = opened?;
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket)),
-        );
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}x{}, input={:?}, bit_rate={}, gop_size={}",
@@ -605,7 +605,7 @@ impl D3d11VideoEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self {
+        Ok(Self(TransformStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -617,8 +617,7 @@ impl D3d11VideoEncoder {
             height: options.height,
             input_format: options.input_format,
             packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
-            pad,
-        })
+        })))
     }
 
     /// This encoder's own codec parameters — what a
@@ -626,7 +625,7 @@ impl D3d11VideoEncoder {
     /// container/demuxer in the loop to get them from, same as
     /// [`crate::elements::SwEncoder::parameters`].
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
-        ffmpeg::codec::Parameters::from(&self.encoder)
+        self.0.inner().parameters()
     }
 
     /// The unit each packet's `pts`, `dts` and duration are counted in —
@@ -634,6 +633,16 @@ impl D3d11VideoEncoder {
     /// the unit of the frames it is fed: those it reads off each frame and
     /// converts, as [`crate::elements::SwEncoder::time_base`] does.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Encoding {
+    fn parameters(&self) -> ffmpeg::codec::Parameters {
+        ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    fn time_base(&self) -> ffmpeg::Rational {
         shared::TIME_BASE
     }
 
@@ -706,7 +715,7 @@ impl D3d11VideoEncoder {
         Ok(staged)
     }
 
-    fn drain(&mut self) -> Result<()> {
+    fn receive_packets(&mut self, out: &mut Output) -> Result<()> {
         let mut packet = ffmpeg::Packet::empty();
         loop {
             match self.encoder.receive_packet(&mut packet) {
@@ -715,7 +724,7 @@ impl D3d11VideoEncoder {
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
-                    self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    out.push(MediaBuffer::Packet(Arc::new(packet)));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -725,7 +734,7 @@ impl D3d11VideoEncoder {
         Ok(())
     }
 
-    fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+    fn encode(&mut self, frame: &ffmpeg::frame::Video, out: &mut Output) -> Result<()> {
         // Before any GPU work: a frame that cannot be placed on the timeline
         // is not worth staging.
         let pts = shared::pts_in(frame, shared::TIME_BASE)
@@ -821,7 +830,7 @@ impl D3d11VideoEncoder {
             .send_frame(&staged)
             .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
             .map_err(D3d11VideoEncoderError::from)?;
-        self.drain()
+        self.receive_packets(out)
     }
 }
 
@@ -833,13 +842,13 @@ impl From<&D3d11VideoEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Drop for D3d11VideoEncoder {
+impl Drop for Encoding {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_frames_ctx and hw_device_ctx");
     }
 }
 
-impl Element for D3d11VideoEncoder {
+impl Element for Encoding {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -857,13 +866,11 @@ impl Element for D3d11VideoEncoder {
     }
 }
 
-impl Source for D3d11VideoEncoder {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Encoding {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
-}
 
-impl Sink for D3d11VideoEncoder {
     /// The encoder reads the texture directly; a system-memory frame needs a D3d11Upload first.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -872,34 +879,37 @@ impl Sink for D3d11VideoEncoder {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.encode(&frame),
-            MediaBuffer::Eos => {
-                self.encoder
-                    .send_eof()
-                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(D3d11VideoEncoderError::from)?;
-                self.drain()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            MediaBuffer::Video(frame) => self.encode(&frame, out),
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             other => Err(D3d11VideoEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
-        // Nothing to reset, the same deliberate choice as `SwEncoder::control`:
+    /// Sends the end of the stream in and hands on what comes out.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        self.encoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(D3d11VideoEncoderError::from)?;
+        self.receive_packets(out)
+    }
+
+    fn reset(&mut self) {
+        // Nothing to reset, the same deliberate choice as `SwEncoder::reset`:
         // a `Flush` or `Seek` leaves the encoder as it is, so packets from
         // before the seek can still come out of later `send_frame` calls. A
         // caller needing a hard encoded-stream discontinuity rebuilds the
         // encoder.
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::test_support::try_d3d11_gpu as try_device;
 
     fn options(
