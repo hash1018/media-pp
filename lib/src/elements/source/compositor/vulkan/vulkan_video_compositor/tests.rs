@@ -971,3 +971,14 @@ fn a_file_is_decoded_composed_and_encoded_on_the_gpu() {
     let distinct: std::collections::HashSet<u8> = luma.iter().step_by(97).copied().collect();
     assert!(distinct.len() > 8, "a picture, not a flat field");
 }
+
+#[test]
+fn an_input_that_ends_is_shown_again() {
+    let Some(device) = try_vulkan_device() else {
+        return;
+    };
+    let (_compositor, handle) = nv12_compositor(&device, 64, 64);
+    super::super::super::control::an_input_that_ends_is_shown_again(&handle, || {
+        nv12_frame(&device, 32, 32, 200)
+    });
+}

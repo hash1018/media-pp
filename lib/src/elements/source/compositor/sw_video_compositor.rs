@@ -606,8 +606,11 @@ impl Sink for SwVideoCompositorInputSink {
                 })
                 .into()
             }),
+            // Live, an input's end shows nothing from here — its layer goes
+            // with its stream — but the input stays, so a file sought back
+            // after its end is shown again. A `Stop` is what removes it.
             (MediaBuffer::Eos, None) => {
-                self.detach();
+                input.latest_frame.store(None);
                 Ok(())
             }
             // Offline an input's end is part of the picture: what it holds is
@@ -1659,6 +1662,14 @@ mod tests {
         let hidden = compositor.compose_frame().unwrap();
         assert_eq!(pixel(&hidden, 1, 0), [0, 0, 0, 255]);
         assert_eq!(hidden.pts(), Some(1));
+    }
+
+    #[test]
+    fn an_input_that_ends_is_shown_again() {
+        let (_compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
+        super::super::control::an_input_that_ends_is_shown_again(&handle, || {
+            MediaBuffer::Video(solid_frame(1, 1, Color::WHITE))
+        });
     }
 
     #[test]

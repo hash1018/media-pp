@@ -1373,3 +1373,23 @@ fn the_backend_independent_traits_drive_it() {
     let downloaded = download_frame(&gpu, composed);
     assert_eq!(pixel(&downloaded, 0, 0), [255, 0, 0, 255]);
 }
+
+#[test]
+fn an_input_that_ends_is_shown_again() {
+    let Some(gpu) = try_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        width: 4,
+        height: 4,
+        ..VideoCompositorOptions::default()
+    };
+    let (_compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options).unwrap();
+    crate::elements::source::compositor::control::an_input_that_ends_is_shown_again(
+        &handle,
+        || {
+            let texture = bgra_texture(gpu.device(), 4, 4, [0, 0, 255, 255]);
+            MediaBuffer::video(wrap_d3d11_texture(texture, 4, 4).unwrap())
+        },
+    );
+}

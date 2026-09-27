@@ -143,7 +143,10 @@ holds frames.
   reading the phase, and they disagree. WASAPI drops a paused seek's preroll
   sample; PipeWire queues it and plays it on `Resume`.
 - The Sw and D3D11 compositor inputs clear their latest frame on `Flush` and
-  detach on a live `Eos`. The Vulkan and CUDA inputs do neither.
+  detach on a live `Eos`. The Vulkan and CUDA inputs do neither. (Since
+  made one answer on every backend: `Flush` and a live `Eos` both clear the
+  frame and keep the input, since a detached one could not be shown again
+  after a seek back.)
 - The playback clock is reset for a seek in four places (`reposition`, `step`,
   `Pacer` on `Seek`, the WASAPI renderer on `Flush`). `VideoSynchronizer`
   resets it nowhere.

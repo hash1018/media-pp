@@ -13,7 +13,7 @@ use ash::vk;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
-use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::rate::FrameRate;
 
 use super::super::sw_video_compositor::VideoCompositorOptions;
@@ -543,13 +543,14 @@ impl Sink for VulkanVideoCompositorInputSink {
             }
             MediaBuffer::Eos => {
                 // Offline an input's end is part of the picture: what it holds
-                // is still shown to its last frame's end.
-                if let Some(input) = self.input.upgrade()
-                    && let Some(timed) = &input.timed
-                {
-                    timed.end();
-                } else {
-                    pp_debug!(self, "input reached eos; leaving its last frame in place");
+                // is still shown to its last frame's end. Live, it shows
+                // nothing from here — its layer goes with its stream — but
+                // stays, so a file sought back after its end is shown again.
+                if let Some(input) = self.input.upgrade() {
+                    match &input.timed {
+                        Some(timed) => timed.end(),
+                        None => input.latest_frame.store(None),
+                    }
                 }
                 Ok(())
             }
@@ -567,12 +568,15 @@ impl Sink for VulkanVideoCompositorInputSink {
         if matches!(msg, ControlMsg::Stop) {
             self.detach();
         }
-        // Offline, what an input held before a flush is not what comes after.
+        // What an input held before a seek's flush is not what comes after:
+        // live, nothing is shown until the new position's first picture.
         if matches!(msg, ControlMsg::Flush)
             && let Some(input) = self.input.upgrade()
-            && let Some(timed) = &input.timed
         {
-            timed.clear();
+            input.latest_frame.store(None);
+            if let Some(timed) = &input.timed {
+                timed.clear();
+            }
         }
         Ok(())
     }

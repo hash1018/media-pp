@@ -610,11 +610,13 @@ impl Sink for D3d11VideoCompositorInputSink {
                 })
             }
             // Offline an input's end is part of the picture: what it holds is
-            // still shown to its last frame's end.
+            // still shown to its last frame's end. Live, it shows nothing from
+            // here — its layer goes with its stream — but stays, so a file
+            // sought back after its end is shown again.
             MediaBuffer::Eos => {
                 match &input.timed {
                     Some(timed) => timed.end(),
-                    None => self.detach(),
+                    None => input.latest_frame.store(None),
                 }
                 Ok(())
             }

@@ -51,6 +51,11 @@ pub trait VideoCompositorControl: Clone + Send + 'static {
 
     /// Registers an input fed through a pipeline, replacing any of the
     /// same name.
+    ///
+    /// Live, an `Eos` through its sink leaves the input showing nothing
+    /// until its next picture — a file sought back after its end — and so
+    /// does a seek's `Flush` until the new position's first; a `Stop`, or
+    /// [`Self::remove_source`], removes it.
     fn add_source(
         &self,
         name: impl Into<String>,
@@ -273,4 +278,37 @@ pub(crate) fn arrange<C: VideoCompositorControl>(handle: &C, width: u32, height:
     handle.remove_source("fed");
     assert_eq!(handle.source_count(), 1);
     still
+}
+
+/// What a live input's end and a seek do to it, the same on every backend,
+/// run by each backend's tests with pictures of its own. Its end shows
+/// nothing from then on — its layer goes with its stream — but the input
+/// stays, and a file sought back after its end is shown again; a seek's
+/// `Flush` shows nothing until the new position's first picture; and only a
+/// `Stop` removes it.
+#[cfg(test)]
+pub(crate) fn an_input_that_ends_is_shown_again<C: VideoCompositorControl>(
+    handle: &C,
+    picture: impl Fn() -> crate::buffer::MediaBuffer,
+) {
+    use crate::buffer::MediaBuffer;
+    use crate::control::ControlMsg;
+
+    let CompositorInput { mut sink, layer } = handle
+        .add_source("ends", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
+        .expect("add an input");
+    sink.consume(picture()).expect("a picture");
+    assert!(layer.latest_frame().is_some(), "shown");
+
+    sink.consume(MediaBuffer::Eos).expect("its end");
+    assert!(layer.latest_frame().is_none(), "nothing once it has ended");
+    assert_eq!(handle.source_count(), 1, "and still there");
+    sink.consume(picture()).expect("sought back");
+    assert!(layer.latest_frame().is_some(), "shown again");
+
+    sink.control(&ControlMsg::Flush).expect("a seek");
+    assert!(layer.latest_frame().is_none(), "nothing from before a seek");
+
+    sink.control(&ControlMsg::Stop).expect("stopped");
+    assert_eq!(handle.source_count(), 0, "gone once stopped");
 }

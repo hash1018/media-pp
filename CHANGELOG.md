@@ -159,6 +159,17 @@ compile error with no explanation.
 
 ### Fixed
 
+- **Every video compositor does the same with an input that ends, or is
+  sought.** A live input's `Eos` removed it from `SwVideoCompositor` and
+  `D3d11VideoCompositor`, so a file played to its end and then sought
+  back was never shown again; `VulkanVideoCompositor` and
+  `CudaVideoCompositor` kept its input, and its last picture on screen,
+  and kept the picture from before a seek until the new one came. Now on
+  every one an `Eos` and a seek's `Flush` leave the input showing nothing
+  until its next picture, and only a `Stop` or `remove_source` removes
+  it — so `source_count` counts an ended input on the first two, as it
+  already did on the others.
+
 - **A pause, seek or stop reaches every queue, whatever the thread before
   it is doing.** A request went from each source down its line, one thread
   handing it to the next, so a queue whose upstream thread was blocked

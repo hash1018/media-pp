@@ -1486,3 +1486,23 @@ fn the_backend_independent_traits_drive_it() {
     let out = download(&device, compositor.compose_frame().expect("compose"));
     assert_eq!(luma_at(&out, 10, 10), 200);
 }
+
+#[test]
+fn an_input_that_ends_is_shown_again() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let Ok((_compositor, handle)) =
+        CudaVideoCompositor::new("compositor", &device, options(64, 64))
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+    if cuda_frame(&device, 64, 64, 200).is_none() {
+        return;
+    }
+    crate::elements::source::compositor::control::an_input_that_ends_is_shown_again(
+        &handle,
+        || cuda_frame(&device, 64, 64, 200).expect("a frame, as a moment ago"),
+    );
+}
