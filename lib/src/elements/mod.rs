@@ -127,8 +127,8 @@ pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorE
 pub use filter::{
     VulkanChromaKey, VulkanChromaKeyError, VulkanCodec, VulkanConverter, VulkanConverterError,
     VulkanDecoder, VulkanDecoderError, VulkanDownload, VulkanDownloadError, VulkanEncoder,
-    VulkanEncoderError, VulkanEncoderOptions, VulkanUpload, VulkanUploadError, VulkanVideoEffect,
-    VulkanVideoEffectError,
+    VulkanEncoderError, VulkanEncoderOptions, VulkanScaler, VulkanScalerError, VulkanScalerInterp,
+    VulkanUpload, VulkanUploadError, VulkanVideoEffect, VulkanVideoEffectError,
 };
 pub use sink::{
     AppSink, CounterHandle, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer,

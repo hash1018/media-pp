@@ -305,6 +305,11 @@ pub enum Error {
     #[error(transparent)]
     VulkanConverterError(#[from] crate::elements::VulkanConverterError),
 
+    /// A Vulkan resize failed.
+    #[cfg(feature = "vulkan")]
+    #[error(transparent)]
+    VulkanScalerError(#[from] crate::elements::VulkanScalerError),
+
     /// A Vulkan chroma key failed.
     #[cfg(feature = "vulkan")]
     #[error(transparent)]

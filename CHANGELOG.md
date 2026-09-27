@@ -47,6 +47,17 @@ compile error with no explanation.
 
 ### Added
 
+- **`VulkanScaler` resizes NV12 and BGRA Vulkan frames on the GPU**, the
+  Vulkan counterpart of `CudaScaler`: `VulkanDecoder -> VulkanScaler ->
+  VulkanEncoder`, or a compositor into a smaller encode, stays on the
+  device, where it went `VulkanDownload -> SwScaler -> VulkanUpload`. Its
+  kernels are this crate's own WGSL, not FFmpeg's `scale_vulkan`, which
+  only an FFmpeg built with a GLSL compiler has — the pinned vcpkg one is
+  not. `VulkanScalerInterp` chooses nearest, bilinear, bicubic or Lanczos,
+  each spread over the source it covers when shrinking, so a picture made
+  smaller is averaged rather than sampled. One 1080p frame of a real video
+  made 720p measures 65 dB PSNR against libswscale's Lanczos.
+
 - **Vulkan frames, on Windows and Linux: `VulkanDevice`, `VulkanDecoder`,
   `VulkanUpload` and `VulkanDownload`.** `VulkanDevice` is the one Vulkan
   device a pipeline's Vulkan elements share, made by FFmpeg with whatever

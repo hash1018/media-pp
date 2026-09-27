@@ -109,6 +109,8 @@ pub enum ElementType {
     VulkanChromaKey,
     /// Vulkan NV12-to-BGRA converter filter.
     VulkanConverter,
+    /// Vulkan-resident scaler filter.
+    VulkanScaler,
     /// System-memory to Vulkan upload filter.
     VulkanUpload,
     /// Vulkan to system-memory download filter.
