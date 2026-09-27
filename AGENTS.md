@@ -103,9 +103,19 @@ final source of truth when documentation and implementation differ.
 - Match the `MediaBuffer` variant before reading it and return a typed error for
   incompatible input. Before FFI or GPU calls, validate format, dimensions,
   plane/stride bounds, texture array index, and device ownership as applicable.
+- A filter that makes each buffer into none, one or several is a
+  `Transform`: its media work, with `drain` for what it still holds at the
+  end and `reset` for what a `Flush` or `Stop` lets go of. The framework's
+  stage owns its pad, hands `Eos` on after the drain, and never shows it a
+  control message. Write `Sink` and `Source` directly only for an element
+  that routes the stream itself — `Queue`, `Tee`, a bin or a rack, a muxer,
+  a compositor or mixer input — or reads the stream plane. An element of
+  this crate moved onto one keeps its public name, constructors and
+  `Filter` as a newtype over `TransformStage` (`transform_filter!`).
 - Declare a new element's link contract through `Sink::input_contract` and
-  `SrcPad::with_contract`, limited to what construction already settles: the
-  `MediaKind`s a port deals in, and for a decoded one the `MemoryDomain`s its
+  `SrcPad::with_contract` — a `Transform`'s own `input_contract` and
+  `output_contract` — limited to what construction already settles:
+  the `MediaKind`s a port deals in, and for a decoded one the `MemoryDomain`s its
   frames may live in and the `PixelLayout`s (NV12, P010, BGRA, other) they may
   be in. `PortContract::Packets` has no domain or layout at all, since encoded
   media is always host memory; `PortContract::Frames` always states both, and

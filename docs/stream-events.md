@@ -504,6 +504,25 @@ The framework's wrapper around a `Transform`:
 
 The element never sees a control message, the phase, a preroll or a seek.
 
+As built, `Transform` is `Transform: Element`, since the logs and the bus
+need its identity, and it declares its link contract and whether it follows
+a seek through defaults beside its three methods. It has no `segment` yet:
+the stream plane is this crate's own until stage 6, and the few elements
+that read a segment — the decoders' preroll gate — stay on `Sink` until then.
+It goes where a `Filter` does, with no second verb: `ChainBuilder::pipe`
+takes `impl IntoFilter<M>`, a sealed trait with one impl for a `Filter` and
+one for a `Transform`, whose marker `M` the compiler works out, and which
+names both in the error for a type that is neither. A list of filters, as a
+rack takes, takes `into_filter()`. An in-tree element moved onto one keeps
+its public name, constructors and `Filter` as a newtype over the crate's own
+stage, so nothing that builds one changes. The stage hands on everything the
+element made even where downstream refuses one, and ends the stream after a
+drain that fails. The output stash waits for the renderers' sink-side
+preroll, which is what makes a stage wait on readiness; until then an
+element that keeps a repeat cache clears it in its own `reset`. `reset` runs on
+a `Flush` or a `Stop`, which reach a filter driven by hand as well; the
+flushed `Segment` takes over when stage 6 moves the end into the stream.
+
 ```rust
 /// A terminal. The framework delivers events and runs the preroll counting.
 trait Render: Send {
@@ -593,7 +612,7 @@ cross-channel rules to take apart again.
 | **2. The stream plane** — done | `crate::stream`: `Item`, `StreamEvent`, and a hook on `Sink` that only this crate can override, since its argument is a type nothing outside can name. An event goes as control does on one thread — the element's reaction, which pushes what it answers the event with ahead of it, then the framework on through its pads — but in order with the data: a `Queue` carries it in its channel, a `Tee` hands it to each branch and keeps it with what a preroll holds back, a bin or a rack sends it down its line. It is never dropped for room and never waited for, since a source begins its stream before it looks at its control. What joins a stream under way — a branch attached to a `Tee`, a line filled anew — is handed its last segment first. The one event is a `Segment` saying which timeline it opens and whether a flush came before it, emitted by the framework as each source's thread starts and after each seek it applies — a turn included; the conformance matrix checks that every buffer a terminal is handed is on the timeline of the segment before it. `Eos` stays `MediaBuffer::Eos` until stage 6, which moves it in one step rather than mirroring it. | nothing public |
 | **3. Sources emit the rest** | A `Segment` at each lap of a loop, and from a live source where its timestamps break, unflushed; a `PipelineBridge` passing its feeding side's flush on as a flushed `Segment`. The segment's `start` and `position` are in, which the decoders' preroll gate already reads to hold a seek's target against the pictures (§3.1); `show_from`, rate and step to come. A caller's seek on a looping file stays on the lap the source has read to, which near a lap's end is already the next one rather than the one shown; the segment is where the lap shown can come from. Done: pads and queue workers refuse what arrives between a seek's `Flush` and its segment, and the thread-local timeline number is gone; only the pipeline's own `Flush` flushes pads, so an element driven by hand behaves as before. Left: the lap, live and bridge segments, and `show_from`, rate and step, each with what reads it. | nothing public |
 | **4. Readers move to the segment** | `backwards`, the seek target, the step count, clipping, completion, the clock anchor. `PlaybackState` shrinks to the flow phase, the interrupt and the preroll bookkeeping. | `crate`-internal only |
-| **5. `Transform` / `Render` / `Produce` / `Device`** | Every in-tree element migrated, one family at a time, each family deleting its `control()` and its holds. Sink-side preroll (§4.4) lands with the renderers. With the source loop the framework's, threads live until `Stop` and "linger at the end" is the framework's; every blocking wait goes through one `Wait` (§4.3). | custom elements: they keep compiling against raw `Sink`/`Source` |
+| **5. `Transform` / `Render` / `Produce` / `Device`** | Every in-tree element migrated, one family at a time, each family deleting its `control()` and its holds. Sink-side preroll (§4.4) lands with the renderers. With the source loop the framework's, threads live until `Stop` and "linger at the end" is the framework's; every blocking wait goes through one `Wait` (§4.3). Begun: `Transform`, its stage and `pipe` taking either kind are in, with `SwScaler` the first element moved; the other scalers follow as the first family. | custom elements: they keep compiling against raw `Sink`/`Source` |
 | **6. Remove the old surface** | `MediaBuffer::Eos` becomes `StreamEvent::Eos`, and the stream plane is made public. `ControlMsg` in `Sink`, `drain_control`, `handle_request` and the `pub` preroll types go. | **breaking**: custom elements, obs-rs |
 
 obs-rs impact: it implements no element of its own — no `Sink`, no

@@ -47,6 +47,20 @@ compile error with no explanation.
 
 ### Added
 
+- **`Transform` writes a filter as its media work alone.** Its `transform`
+  makes what each buffer answers to — nothing, one buffer or several — into
+  an `Output`; `drain` hands on what it still holds before the end of the
+  stream, and `reset` lets go of what a seek or a stop leaves behind. The
+  framework gives it its one pad, forwards `Eos` after the drain, resets it
+  on a `Flush` or a `Stop`, and answers whether it can take a buffer; it
+  never sees a control message. `ChainBuilder::pipe` takes one as it takes
+  any filter — it now takes `impl IntoFilter<M>`, which a `Filter` and a
+  `Transform` both are, with the marker worked out by the compiler — and
+  `into_filter()` makes one of it for a list, as a `Rack` takes. A filter
+  written as `Sink` and `Source` is unchanged. `SwScaler` is the first
+  element of this crate written this way, with its name, constructors and
+  behaviour as they were.
+
 - **`VulkanScaler` resizes NV12 and BGRA Vulkan frames on the GPU**, the
   Vulkan counterpart of `CudaScaler`: `VulkanDecoder -> VulkanScaler ->
   VulkanEncoder`, or a compositor into a smaller encode, stays on the

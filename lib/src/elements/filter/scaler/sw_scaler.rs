@@ -10,13 +10,12 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract, check_link,
     },
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Sink, Transform, element_pp_log},
     error::Result,
     frame_size::{ForSize, OutputSize},
-    pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// How many output frames [`SwScaler`] pre-allocates as soon as it knows
@@ -74,7 +73,13 @@ pub enum SwScalerError {
 /// produces planar YUV, which is the case a refused link names most often.
 /// A resolution change is then passed on rather than hidden, so what is
 /// downstream has to be able to take one.
-pub struct SwScaler {
+pub struct SwScaler(TransformStage<Scaling>);
+
+transform_filter!(SwScaler);
+
+/// What a [`SwScaler`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Scaling {
     pp_log: PpLog,
     name: Arc<str>,
     dst_format: ffmpeg::format::Pixel,
@@ -103,7 +108,6 @@ pub struct SwScaler {
     /// re-emits an unchanged frame is answered with it instead of another
     /// pass over every pixel — see [`RepeatedOutput`].
     repeated: RepeatedOutput,
-    pad: SrcPad,
 }
 
 // SAFETY: `ffmpeg::software::scaling::Context` wraps a heap-allocated
@@ -113,7 +117,7 @@ pub struct SwScaler {
 // `&mut self` on every method that touches it (see `D3d12Decoder`'s
 // `hw_device_ctx` for the same reasoning) already rules out concurrent
 // access from multiple threads.
-unsafe impl Send for SwScaler {}
+unsafe impl Send for Scaling {}
 
 impl SwScaler {
     /// `dst_format`/`dst_width`/`dst_height` describe what every output
@@ -217,17 +221,7 @@ impl SwScaler {
                 "created: dst_format={dst_format:?}, dst=the input's own size"
             ),
         }
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(
-                    crate::contract::PixelLayoutSet::of(crate::contract::PixelLayout::of(
-                        dst_format,
-                    )),
-                ),
-            ),
-        );
-        Self {
+        Self(TransformStage::new(Scaling {
             name,
             pp_log,
             dst_format,
@@ -237,10 +231,11 @@ impl SwScaler {
             colour: None,
             pool: ForSize::new(),
             repeated: RepeatedOutput::new(),
-            pad,
-        }
+        }))
     }
+}
 
+impl Scaling {
     /// Whether `self.context` (if any) is already configured for `frame`'s
     /// own format/dimensions — if not, `consume` has to (re)build it
     /// before scaling can proceed.
@@ -257,7 +252,7 @@ impl SwScaler {
     }
 }
 
-impl Element for SwScaler {
+impl Element for Scaling {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -275,13 +270,7 @@ impl Element for SwScaler {
     }
 }
 
-impl Source for SwScaler {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for SwScaler {
+impl Transform for Scaling {
     /// swscale reads the planes on the CPU, so a device texture is unreachable memory here rather than merely the wrong format.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -290,17 +279,19 @@ impl Sink for SwScaler {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same picture as last time scales to the frame already in
             // hand — see [`PerFrameTransform`], which is where that is
             // decided. `DxgiCaptureSource` under `CaptureMode::Cpu` re-emits
             // one on every tick of a still screen.
             MediaBuffer::Video(frame) => {
-                let scaled = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(scaled))
+                let scaled = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(scaled));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(SwScalerError::UnsupportedBuffer("Packet").into())
@@ -312,19 +303,22 @@ impl Sink for SwScaler {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        // Nothing local to react to beyond the cached scale: unlike a
-        // decoder, this has no reference-frame/reordering state to flush on
-        // `Seek`, and nothing buffered to drop on `Stop` — a pure per-frame
+    fn reset(&mut self) {
+        // Nothing to let go of beyond the cached scale: unlike a decoder,
+        // this holds no reference or reordered frames — a pure per-frame
         // spatial transform.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(PixelLayoutSet::of(PixelLayout::of(self.dst_format))),
+        )
     }
 }
 
-impl PerFrameTransform for SwScaler {
+impl PerFrameTransform for Scaling {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -432,7 +426,7 @@ impl PerFrameTransform for SwScaler {
     }
 }
 
-impl SwScaler {
+impl Scaling {
     /// Sets the context up to read frames that say `colour`.
     ///
     /// Only for a YUV source, which is the only kind a matrix and a range
@@ -547,6 +541,7 @@ fn is_rgb(pixel: ffmpeg::format::Pixel) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::element::Source;
     use crate::test_support::CapturingSink;
     use std::sync::Mutex;
 
@@ -956,7 +951,7 @@ mod tests {
         let scaled_to = |params, sink: &Takes| {
             SwScaler::if_needed("fit", &params, sink)
                 .expect("the parameters open")
-                .map(|scaler| scaler.dst_format)
+                .map(|scaler| scaler.0.inner().dst_format)
         };
         assert_eq!(scaled_to(decoding_to(Pixel::YUV420P), &window), None);
         assert_eq!(

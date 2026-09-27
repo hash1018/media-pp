@@ -222,6 +222,20 @@
 //! choices itself: it decodes onto the device on whichever path can, and
 //! says what it will put out through [`output_format`](elements::VideoDecodeBin::output_format).
 //!
+//! # Writing a filter
+//!
+//! A filter that makes buffers of buffers — converts, scales, analyses —
+//! implements [`Transform`](element::Transform): what each buffer becomes,
+//! what it still holds when the stream ends (`drain`), and what it lets go
+//! of when a seek leaves the timeline behind (`reset`). The framework gives
+//! it its one pad, hands the end of the stream on after the drain and resets
+//! it on a seek; it never sees a control message. `pipe` takes one as it
+//! takes any filter, and [`IntoFilter::into_filter`](element::IntoFilter::into_filter)
+//! makes one of it where a list of filters is asked for, as a
+//! [`Rack`](elements::Rack)'s is. A filter that routes the stream itself —
+//! splits it, holds it back, waits on a clock — implements
+//! [`Sink`](element::Sink) and [`Source`](element::Source) instead.
+//!
 //! # Watching it run
 //!
 //! [`Pipeline::stats`](pipeline::Pipeline::stats) reads what every element is
@@ -297,6 +311,7 @@ pub(crate) use core::stream;
 pub(crate) use core::timing::{schedule, time};
 #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) use core::tone_map;
+pub(crate) use core::transform;
 
 pub use error::{Error, Result};
 

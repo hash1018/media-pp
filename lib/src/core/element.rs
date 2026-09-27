@@ -7,6 +7,9 @@
 //! and [`ReversibleSource`] and [`ReversibleDecoder`] what a source and a
 //! decoder add to play backwards.
 //!
+//! [`Transform`] is the other way to write a filter: the media work alone,
+//! with the pad and the stream's rules left to the framework.
+//!
 //! [`Element`] itself is the identity half — an element's type and its
 //! caller-chosen name, which every log record and every
 //! [`BusEvent`](crate::bus::BusEvent) is attributed to.
@@ -30,6 +33,8 @@ use crate::{
     playback_clock::PlaybackClock,
     stats::{ElementCounters, TickCounters},
 };
+
+pub use crate::transform::{AsFilter, AsTransform, IntoFilter, Output, Transform};
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
 /// compare/match, unlike the accompanying `name: Arc<str>` (an

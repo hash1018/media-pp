@@ -8,7 +8,8 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, ReversibleDecoder, Sink, Source, element_pp_log,
+        Context, Element, ElementType, Filter, IntoFilter, ReversibleDecoder, Sink, Source,
+        element_pp_log,
     },
     error::Result,
     graph::{
@@ -614,11 +615,15 @@ impl ChainBuilder {
         }
     }
 
-    /// Adds a single-output `Filter` (decoder, encoder, filter, ...) that
-    /// receives via `Sink` and produces through its own (single) src pad.
-    /// It runs on the same thread as whatever is upstream of it — direct
-    /// function call, no queue.
-    pub fn pipe<T: Filter + 'static>(mut self, mut element: T) -> Self {
+    /// Adds a single-output filter (decoder, encoder, filter, ...) that
+    /// receives what is upstream of it and hands on through its one pad —
+    /// either a [`Filter`] or a [`Transform`], which the framework makes one
+    /// of (see [`IntoFilter`]). It runs on the same thread as whatever is
+    /// upstream of it — direct function call, no queue.
+    ///
+    /// [`Transform`]: crate::element::Transform
+    pub fn pipe<M>(mut self, element: impl IntoFilter<M>) -> Self {
+        let mut element = element.into_filter();
         let name = element.name();
         let pad_count = element.src_pads().len();
         if pad_count != 1 && self.error.is_none() {

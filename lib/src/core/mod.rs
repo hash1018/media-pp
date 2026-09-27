@@ -40,3 +40,4 @@ pub mod subtitle;
 pub mod timing;
 #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) mod tone_map;
+pub(crate) mod transform;

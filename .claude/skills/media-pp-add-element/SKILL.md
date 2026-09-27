@@ -13,8 +13,10 @@ name.
 
 ## Establish the contract
 
-- Classify the component as a pure `SourceElement`, a `Sink` with output (a
-  filter), a terminal `Sink`, a padless driver, or a plain control-plane object.
+- Classify the component as a pure `SourceElement`, a `Transform` (a filter
+  written as its media work, which the framework makes a `Filter`), a `Sink`
+  with output (a filter that routes the stream itself), a terminal `Sink`, a
+  padless driver, or a plain control-plane object.
   Do not force an `Element`, builder, handle, or module split onto a type whose
   behavior does not require it.
 - Define accepted and produced `MediaBuffer` variants, formats, dimensions,
