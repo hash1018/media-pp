@@ -486,9 +486,6 @@ struct Capturing {
     /// This element's `pts` tick counter — one per *emitted* frame (see
     /// [`DxgiCaptureSource::time_base`]'s own docs), not per real capture.
     frame_index: i64,
-    /// Whether it emits in D3D11 textures or in system memory — see
-    /// [`CaptureMode`]; what its output contract says.
-    gpu_mode_domain: MemoryDomain,
     /// Reused across every emitted frame — see [`UnboundObjectPool`]'s
     /// docs. Pre-sized to `width`/`height` up front, same reasoning as
     /// `SwScaler`'s own pool.
@@ -807,15 +804,6 @@ impl DxgiCaptureSource {
                 has_captured: false,
             });
         }
-
-        // Which domain this emits in is settled by `capture_mode` right
-        // here, so downstream can be checked against it even though the
-        // captured size and format are runtime values.
-        let gpu_mode_domain = if gpu_mode {
-            MemoryDomain::D3d11
-        } else {
-            MemoryDomain::System
-        };
         // Gpu: only the small CPU-side `AVFrame` wrapper is ever pooled
         // (`ffmpeg::frame::Video::empty` — same as `D3d11Upload`'s own
         // pool); the GPU texture itself is a fresh allocation every
@@ -867,7 +855,6 @@ impl DxgiCaptureSource {
                 staging,
                 frame_rate: FrameRate::new(frame_rate),
                 frame_index: 0,
-                gpu_mode_domain,
                 pool,
                 wrapper_pool: UnboundObjectPool::new(
                     0,
@@ -1759,9 +1746,17 @@ impl Produce for Capturing {
         true
     }
 
+    /// Which domain it emits in is settled by `capture_mode` at
+    /// construction, so downstream can be checked against it even though
+    /// the captured size and format are runtime values.
     fn output_contract(&self) -> OutputContract {
+        let domain = if self.gpu_mode {
+            MemoryDomain::D3d11
+        } else {
+            MemoryDomain::System
+        };
         OutputContract::Fixed(
-            PortContract::frame(MediaKind::VideoFrame, self.gpu_mode_domain)
+            PortContract::frame(MediaKind::VideoFrame, domain)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
     }
