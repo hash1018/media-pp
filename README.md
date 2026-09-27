@@ -284,6 +284,9 @@ What an element needs at run time — one shared `D3d11Gpu`, one
 `CudaDevice` per process, a portal for screen capture on Linux, a server to
 publish RTSP to — is on that element's documentation page.
 
+macOS has no capture, audio output or GPU backend yet; what a port needs,
+and how to set a Mac up for it, is in [`docs/macos.md`](docs/macos.md).
+
 Building, testing and the stress scenarios are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
