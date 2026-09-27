@@ -182,6 +182,9 @@ pub(crate) struct PlaybackState {
     pictures: Mutex<HashMap<ElementId, Picture>>,
     /// Whether the current timeline runs backwards — see [`Self::backwards`].
     backwards: AtomicBool,
+    /// Whether the timeline about to begin shows from the seek's target —
+    /// see [`Self::accurate`].
+    accurate: AtomicBool,
     /// How late, in nanoseconds of wall time, the last picture handed on
     /// was — see [`Self::picture_late`].
     picture_late_ns: AtomicU64,
@@ -215,6 +218,7 @@ impl PlaybackState {
             listeners: Mutex::new(Vec::new()),
             pictures: Mutex::new(HashMap::new()),
             backwards: AtomicBool::new(false),
+            accurate: AtomicBool::new(false),
             picture_late_ns: AtomicU64::new(0),
             decodes_everything: AtomicBool::new(false),
         })
@@ -388,6 +392,22 @@ impl PlaybackState {
     /// call, before [`Self::begin_timeline`].
     pub(crate) fn set_backwards(&self, backwards: bool) {
         self.backwards.store(backwards, Ordering::Release);
+    }
+
+    /// Whether the timeline begun by the last seek shows from its target —
+    /// an accurate seek — rather than from wherever each source landed.
+    /// Read once, by a source beginning the segment after the seek, which
+    /// says so to everything downstream through
+    /// [`show_from`](crate::stream::Segment::show_from); nothing else reads
+    /// it here.
+    pub(crate) fn accurate(&self) -> bool {
+        self.accurate.load(Ordering::Acquire)
+    }
+
+    /// Sets whether the timeline about to begin shows from its target — the
+    /// pipeline's to call, before [`Self::begin_timeline`].
+    pub(crate) fn set_accurate(&self, accurate: bool) {
+        self.accurate.store(accurate, Ordering::Release);
     }
 
     /// Records how late a picture was as it was handed on to be shown —

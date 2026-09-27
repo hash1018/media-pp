@@ -1,7 +1,7 @@
 use ffmpeg_next::{self as ffmpeg, Rescale};
 
 use std::collections::VecDeque;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crate::buffer::MediaBuffer;
 use crate::control::PrerollContext;
@@ -62,18 +62,20 @@ pub(super) fn hw_surface_budget(downstream_frames: i32) -> Option<i32> {
 pub(super) struct PrerollGate {
     /// Whether a preroll is still selecting its one preview sample.
     ///
-    /// Kept separately from `target_ns`: keyframe preroll has no exact target
-    /// but must still close after its first decoded sample.
+    /// Kept apart from the target: a keyframe preroll has none but must
+    /// still close after its first decoded sample.
     active: bool,
-    /// Exact target for accurate seek. `None` also covers keyframe preroll;
-    /// `active` distinguishes that from ordinary playback.
+    /// Whether a sample has gone on that shows the segment's
+    /// [`show_from`](Segment::show_from), after which nothing more is
+    /// dropped for coming before it.
     ///
-    /// Kept past the end of a preroll this decoder never reached it in — a
-    /// step back's, which waits on the pictures and not on the sound — and
-    /// what precedes it is dropped until a sample reaches it, as it would
-    /// have been during the preroll. Let go at the end of the preroll, the
-    /// sound from before the target played on once playback went on.
-    target_ns: Option<i64>,
+    /// The segment's, not a preroll's: a preroll can end before this
+    /// decoder reaches the target — a step back's, which waits on the
+    /// pictures and not on the sound — and what precedes it is dropped until
+    /// a sample reaches it, as it would have been during the preroll. Let
+    /// go at the end of the preroll, the sound from before the target played
+    /// on once playback went on.
+    reached: bool,
     /// Whether this decoder already forwarded its one sample for the active
     /// preroll. A decoder may return several frames from one `receive_frame`
     /// drain, before downstream readiness can be checked again, so the gate
@@ -100,10 +102,10 @@ pub(super) struct PrerollGate {
     state: Option<Arc<PlaybackState>>,
     /// The preroll this is armed for, to tell a new one from it.
     armed: Option<Arc<PrerollContext>>,
-    /// The segment the stream is in, which puts a target — a place in the
-    /// media — on the timeline the samples are stamped on: a looping file's
-    /// a lap further on for every lap played. `None` for a decoder handed
-    /// none, whose target is taken as it is.
+    /// The segment the stream is in, which says where what is shown begins
+    /// — on the timeline the samples are stamped on, a looping file's a lap
+    /// further on for every lap played. `None` for a decoder handed none,
+    /// which has no target.
     segment: Option<Arc<Segment>>,
 }
 
@@ -145,48 +147,42 @@ impl PrerollGate {
                     .as_ref()
                     .is_some_and(|armed| Arc::ptr_eq(armed, &context))
                 {
-                    self.begin(&context);
+                    self.begin();
                     self.armed = Some(context);
                 }
             }
             None => {
                 if self.armed.take().is_some() {
-                    // Still owed where the preroll ended before this decoder
-                    // reached its target — see `target_ns`.
-                    let owed = self.target_ns.filter(|_| !self.delivered);
                     self.clear();
-                    self.target_ns = owed;
                 }
             }
         }
     }
 
-    /// Arms the gate for `context`. A targetless keyframe preroll forwards its
-    /// first sample, while accurate seek first suppresses samples before its
-    /// target; both then stay closed until the preroll ends.
-    pub(super) fn begin(&mut self, context: &PrerollContext) {
+    /// Arms the gate for a preroll. Where the segment shows everything from
+    /// where the source landed, the first sample goes on; where it shows
+    /// from a target, the first that shows the target does. Either way the
+    /// gate then stays closed until the preroll ends.
+    pub(super) fn begin(&mut self) {
         self.active = true;
         self.delivered = false;
         self.candidate = None;
-        self.target_ns = context
-            .target()
-            .map(|target| target.as_nanos().min(i64::MAX as u128) as i64);
     }
 
     /// Ends suppression. Pause and Resume both restore ordinary delivery: the
-    /// preroll they belong to is over either way.
+    /// preroll they belong to is over either way. A target not reached yet
+    /// is still the segment's — see `reached`.
     pub(super) fn clear(&mut self) {
         self.active = false;
-        self.target_ns = None;
         self.delivered = false;
         self.candidate = None;
     }
 
-    /// Forgets the learned time base along with any target, for a `Flush` that
-    /// begins a new timeline.
+    /// Forgets the learned time base along with the segment, for a `Flush`
+    /// that begins a new timeline.
     pub(super) fn reset(&mut self) {
         self.active = false;
-        self.target_ns = None;
+        self.reached = false;
         self.delivered = false;
         self.time_base = None;
         self.candidate = None;
@@ -197,15 +193,22 @@ impl PrerollGate {
     /// The segment the stream is in from here — see `segment`.
     pub(super) fn begin_segment(&mut self, segment: &Arc<Segment>) {
         self.segment = Some(Arc::clone(segment));
+        self.reached = false;
     }
 
-    /// `target_ns`, a place in the media, on the timeline the samples are
-    /// stamped on — see `segment`.
-    fn on_timeline(&self, target_ns: i64) -> i64 {
-        self.segment.as_ref().map_or(target_ns, |segment| {
-            let target = Duration::from_nanos(target_ns.max(0).unsigned_abs());
-            segment.on_timeline(target).as_nanos().min(i64::MAX as u128) as i64
-        })
+    /// Where what is shown begins, in nanoseconds on the samples' timeline,
+    /// while no sample has reached it yet — see `reached`.
+    ///
+    /// None played backwards: there it is where the stretches start from,
+    /// and what each shows is cut by the source — see
+    /// `crate::element::ReversibleSource` — so every sample is below it.
+    fn target_ns(&self) -> Option<i64> {
+        if self.reached {
+            return None;
+        }
+        let segment = self.segment.as_ref().filter(|segment| !segment.backwards)?;
+        let show_from = segment.show_from?;
+        Some(show_from.as_nanos().min(i64::MAX as u128) as i64)
     }
 
     /// Whether the decoder must not be fed for now: this preroll has its
@@ -242,16 +245,17 @@ impl PrerollGate {
     /// shows none is not.
     #[cfg(test)]
     pub(super) fn suppresses(&self, pts: Option<i64>) -> bool {
-        let (Some(target_ns), Some(time_base), Some(pts)) = (self.target_ns, self.time_base, pts)
+        let (Some(target_ns), Some(time_base), Some(pts)) = (self.target_ns(), self.time_base, pts)
         else {
             return false;
         };
-        pts.rescale(time_base, NANOS) < self.on_timeline(target_ns)
+        pts.rescale(time_base, NANOS) < target_ns
     }
 
     /// Admits one decoded sample, retaining at most one pre-target candidate.
     fn admit(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
-        if !self.active && self.target_ns.is_none() {
+        let target_ns = self.target_ns();
+        if !self.active && target_ns.is_none() {
             return Some(buffer);
         }
         if self.active && self.delivered {
@@ -259,10 +263,9 @@ impl PrerollGate {
             self.after.push_back(buffer);
             return None;
         }
-        let Some(target_ns) = self.target_ns else {
+        let Some(target_ns) = target_ns else {
             return Some(buffer);
         };
-        let target_ns = self.on_timeline(target_ns);
         let Some(time_base) = self.time_base else {
             return Some(buffer);
         };
@@ -294,7 +297,7 @@ impl PrerollGate {
         // first sample precedes the target.
         if audio_end_ns.is_some_and(|end| start_ns <= target_ns && end > target_ns) {
             if !self.active {
-                self.target_ns = None;
+                self.reached = true;
             }
             return Some(buffer);
         }
@@ -308,7 +311,7 @@ impl PrerollGate {
             return None;
         }
         if !self.active {
-            self.target_ns = None;
+            self.reached = true;
             return Some(buffer);
         }
 
@@ -382,7 +385,7 @@ impl PrerollGate {
         if !self.active {
             return;
         }
-        self.target_ns = None;
+        self.reached = true;
         self.delivered = true;
         self.candidate = None;
     }
@@ -439,6 +442,19 @@ mod tests {
         MediaBuffer::Video(std::sync::Arc::new(frame))
     }
 
+    /// The segment an accurate seek to `at` begins: what is shown begins at
+    /// `at`.
+    fn showing(at: Duration) -> Arc<Segment> {
+        Arc::new(Segment {
+            id: 2,
+            flushed: true,
+            position: at,
+            start: at,
+            show_from: Some(at),
+            backwards: false,
+        })
+    }
+
     #[test]
     fn hardware_surface_budget_includes_the_internal_seek_candidate() {
         assert_eq!(hw_surface_budget(8), Some(9));
@@ -450,7 +466,8 @@ mod tests {
     fn suppresses_only_what_precedes_the_target() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
 
         assert!(gate.suppresses(Some(1_999)));
         assert!(!gate.suppresses(Some(2_000)), "the target itself passes");
@@ -462,7 +479,8 @@ mod tests {
     #[test]
     fn reads_the_pts_in_the_packets_own_time_base() {
         let mut gate = PrerollGate::default();
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
 
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000_000)));
         assert!(gate.suppresses(Some(1_999_999)));
@@ -473,7 +491,7 @@ mod tests {
     fn a_preroll_without_a_target_has_no_timestamp_cutoff() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::new([]));
+        gate.begin();
 
         assert!(!gate.suppresses(Some(0)));
     }
@@ -483,7 +501,8 @@ mod tests {
     #[test]
     fn missing_time_base_or_pts_fails_open() {
         let mut gate = PrerollGate::default();
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
         assert!(!gate.suppresses(Some(0)), "no time base yet");
 
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
@@ -491,26 +510,69 @@ mod tests {
         assert!(gate.suppresses(Some(0)), "both known again");
     }
 
+    /// The end of a preroll ends its selection, not the segment's target,
+    /// which is dropped up to until a sample reaches it; a `Flush` forgets
+    /// both, and the unit with them.
     #[test]
-    fn pause_and_resume_end_suppression_but_flush_also_forgets_the_unit() {
+    fn a_target_outlives_the_preroll_but_not_a_flush() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
 
         gate.clear();
-        assert!(!gate.suppresses(Some(0)));
+        assert!(
+            gate.suppresses(Some(0)),
+            "the segment's target is still owed"
+        );
+        assert!(!gate.suppresses(Some(2_000)));
         assert!(gate.time_base.is_some(), "the unit outlives one preroll");
 
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
         gate.reset();
         assert!(gate.time_base.is_none());
+        assert!(gate.target_ns().is_none(), "nor is the target kept");
+    }
+
+    /// Played backwards the target is where the stretches start from, and
+    /// every sample is below it: none is dropped for being so. What the
+    /// conformance matrix found when the target first came from the
+    /// segment — a backwards accurate seek showed nothing at all.
+    #[test]
+    fn a_backwards_segment_drops_nothing_below_its_target() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin_segment(&Arc::new(Segment {
+            backwards: true,
+            ..Arc::into_inner(showing(Duration::from_secs(2))).expect("only one")
+        }));
+        assert!(gate.admit(video(1_000)).is_some());
+        assert!(!gate.suppresses(Some(0)));
+    }
+
+    /// A segment begun anew owes its own target, whatever the one before
+    /// reached.
+    #[test]
+    fn each_segment_owes_its_own_target() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        assert!(gate.admit(video(2_000)).is_some());
+        assert!(
+            gate.admit(video(1_000)).is_some(),
+            "reached: nothing more cut"
+        );
+
+        gate.begin_segment(&showing(Duration::from_secs(3)));
+        assert!(gate.admit(video(2_500)).is_none(), "before the new target");
+        assert!(gate.admit(video(3_000)).is_some());
     }
 
     #[test]
     fn video_selects_the_frame_covering_the_target() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
 
         assert!(gate.admit(video(1_967)).is_none());
         let selected = gate.admit(video(2_033)).expect("one frame selected");
@@ -531,10 +593,8 @@ mod tests {
         let mut gate = PrerollGate::default();
         gate.attach(&state);
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::for_seek(
-            [],
-            Duration::from_secs(2),
-        )));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::new([])));
         state.observe(&preroll);
         let mut pushed = Vec::new();
         let mut push = |pts: i64, gate: &mut PrerollGate| {
@@ -559,7 +619,7 @@ mod tests {
         state.observe(&preroll);
         state.observe(&ControlMsg::Pause);
         state.observe(&ControlMsg::Resume);
-        assert!(gate.target_ns.is_none());
+        assert!(gate.target_ns().is_none());
     }
 
     /// What is decoded after the preroll's sample is not dropped: it follows
@@ -570,7 +630,8 @@ mod tests {
     fn what_follows_the_preroll_sample_is_kept_for_after_it() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
         let mut pushed = Vec::new();
         let push = |pts: i64, gate: &mut PrerollGate, pushed: &mut Vec<i64>| {
             gate.push_admitted(video(pts), |buffer| {
@@ -603,7 +664,8 @@ mod tests {
     fn a_decoder_burst_stops_after_the_accurate_preroll_sample() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
 
         assert!(gate.admit(video(1_967)).is_none());
         let selected = gate.admit(video(2_033)).expect("one frame selected");
@@ -622,7 +684,7 @@ mod tests {
     #[test]
     fn a_keyframe_preroll_also_stops_after_its_first_sample() {
         let mut gate = PrerollGate::default();
-        gate.begin(&PrerollContext::new([]));
+        gate.begin();
 
         assert!(gate.admit(video(1_000)).is_some());
         gate.commit_delivery();
@@ -636,7 +698,8 @@ mod tests {
     fn a_failed_downstream_push_leaves_the_gate_open_for_the_next_sample() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
 
         let failed: Result<(), &'static str> =
             gate.push_admitted(video(2_000), |_| Err("simulated downstream failure"));
@@ -662,7 +725,8 @@ mod tests {
     fn eos_selects_the_last_presentable_frame() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        gate.begin_segment(&showing(Duration::from_secs(2)));
+        gate.begin();
 
         assert!(gate.admit(video(1_967)).is_none());
         let selected = gate.finish_on_eos().expect("last frame selected");
@@ -676,7 +740,8 @@ mod tests {
     fn audio_frame_crossing_the_target_is_not_discarded() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 48_000)));
-        gate.begin(&PrerollContext::for_seek([], Duration::from_millis(10)));
+        gate.begin_segment(&showing(Duration::from_millis(10)));
+        gate.begin();
         let mut frame = ffmpeg::frame::Audio::new(
             ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
             1_024,

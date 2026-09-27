@@ -918,6 +918,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
                 flushed: true,
                 position: *target,
                 start,
+                show_from: state.accurate().then_some(start),
                 backwards: state.backwards(),
             };
             if let Err(error) = crate::stream::begin_segment(source.src_pads(), segment, &pp_log) {

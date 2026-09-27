@@ -3,10 +3,11 @@
 //!
 //! So far the one event is the [`Segment`] every stream begins with and
 //! every seek begins again. It says which timeline it opens, whether it
-//! follows a flush, and where it begins both as a caller names a place in
-//! the media and on the timeline its buffers are stamped on — two places a
-//! looping file keeps a lap or more apart, which is what lets a decoder hold
-//! a seek's target against the pictures.
+//! follows a flush, where it begins both as a caller names a place in the
+//! media and on the timeline its buffers are stamped on — two places a
+//! looping file keeps a lap or more apart — and, for an accurate seek,
+//! where on that timeline what is shown begins, which is what a decoder
+//! drops what comes before by.
 //!
 //! # How an event travels
 //!
@@ -81,19 +82,17 @@ pub(crate) struct Segment {
     /// The same place on the timeline its buffers are stamped on, which a
     /// looping file carries a lap further on for every lap played.
     pub(crate) start: Duration,
+    /// Where what is shown begins, on the same timeline, for an accurate
+    /// seek: the source lands on a keyframe before it and what is decoded
+    /// from there up to it is only there to decode what follows. `None`
+    /// where everything is shown from wherever the source landed — a
+    /// stream starting, a seek to a keyframe.
+    pub(crate) show_from: Option<Duration>,
     /// Whether its buffers come played backwards — a picture's stretches
     /// read from the end, their `pts` going down. A rate that changes
     /// without turning round begins no segment, so this says only which
     /// way, and the playback clock says how fast.
     pub(crate) backwards: bool,
-}
-
-impl Segment {
-    /// `position`, a place in the media, on this segment's timeline — where
-    /// a buffer that shows it is stamped.
-    pub(crate) fn on_timeline(&self, position: Duration) -> Duration {
-        (position + self.start).saturating_sub(self.position)
-    }
 }
 
 /// Read by the trace records at each boundary an event crosses.
@@ -102,8 +101,13 @@ impl fmt::Display for StreamEvent {
         match self {
             Self::Segment(segment) => write!(
                 f,
-                "segment id={} flushed={} position={:?} start={:?} backwards={}",
-                segment.id, segment.flushed, segment.position, segment.start, segment.backwards
+                "segment id={} flushed={} position={:?} start={:?} show_from={:?} backwards={}",
+                segment.id,
+                segment.flushed,
+                segment.position,
+                segment.start,
+                segment.show_from,
+                segment.backwards
             ),
         }
     }

@@ -2054,8 +2054,11 @@ mod tests {
             let frames = collect(&mut bin, None);
 
             // Frame 3 of five at 30 a second.
-            // As a pipeline does it: its playback state first, then the
-            // message. The line inside reads the state through the bin.
+            // As a pipeline does it: the seek's segment in the stream, saying
+            // where what is shown begins; then the preroll, its playback
+            // state first and the message after. The line inside reads the
+            // state through the bin, and is handed the segment again when
+            // the software line replaces it.
             let context = Arc::new(crate::element::Context::for_test_with_clock(
                 crate::bus::Bus::new().0,
                 "test",
@@ -2064,10 +2067,17 @@ mod tests {
                 Arc::new(crate::clock::Clock::new()),
             ));
             bin.attach_context(&context);
-            let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::for_seek(
-                [],
-                Duration::from_millis(100),
-            )));
+            let at = Duration::from_millis(100);
+            let segment = crate::stream::StreamEvent::Segment(Arc::new(crate::stream::Segment {
+                id: 2,
+                flushed: true,
+                position: at,
+                start: at,
+                show_from: Some(at),
+                backwards: false,
+            }));
+            bin.stream_event(crate::stream::Event(&segment)).unwrap();
+            let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::new([])));
             context.state.observe(&preroll);
             bin.control(&preroll).unwrap();
             for packet in packets {

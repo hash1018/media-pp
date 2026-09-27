@@ -125,6 +125,7 @@ impl Pipeline {
                         flushed: false,
                         position: Duration::ZERO,
                         start: Duration::ZERO,
+                        show_from: None,
                         backwards: false,
                     };
                     if let Err(error) =

@@ -41,7 +41,7 @@ impl Pipeline {
         let Some((at, _)) = self.state.picture_at(&terminals) else {
             return false;
         };
-        self.reposition(at);
+        self.reposition(at, true);
         let preroll = self.preroll_for(|terminals| PrerollContext::for_seek(terminals, at));
         if let Err(error) = self.preroll(&preroll, PREROLL_TIMEOUT) {
             pp_warn!(
@@ -223,7 +223,7 @@ impl Pipeline {
         if playing {
             self.pause_runtime();
         }
-        self.reposition(target);
+        self.reposition(target, mode == SeekMode::Accurate);
         let preroll = self.preroll_for(|terminals| match mode {
             SeekMode::Keyframe => PrerollContext::new(terminals),
             SeekMode::Accurate => PrerollContext::for_seek(terminals, target),
@@ -249,7 +249,11 @@ impl Pipeline {
     /// queue the `Flush` has reached, until the segment each source begins
     /// after the seek passes it — see `crate::stream`. Nothing has moved:
     /// every source is still paused.
-    fn reposition(&self, target: Duration) {
+    ///
+    /// `accurate` says whether what is shown begins at `target` rather than
+    /// wherever each source lands — which each source's segment then says,
+    /// so that what decodes it drops what comes before.
+    fn reposition(&self, target: Duration, accurate: bool) {
         let msg = ControlMsg::Seek(target);
         pp_trace!(
             pp_log: &self.pp_log,
@@ -257,6 +261,7 @@ impl Pipeline {
         );
         self.state.interrupt();
         self.state.set_backwards(self.rate() < 0.0);
+        self.state.set_accurate(accurate);
         self.state.picture_late(Duration::ZERO);
         self.state.begin_timeline();
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
@@ -432,7 +437,7 @@ impl Pipeline {
             self.pause_runtime();
         }
         self.playback_clock.set_rate(rate);
-        self.reposition(at);
+        self.reposition(at, true);
         let preroll = self.preroll_for(|terminals| PrerollContext::for_seek(terminals, at));
         let prerolled = self.preroll(&preroll, PREROLL_TIMEOUT);
         self.end_preroll(playing);
@@ -548,7 +553,7 @@ impl Pipeline {
                     .saturating_add(spacing / 2),
                 (true, None) => at,
             };
-            self.reposition(target);
+            self.reposition(target, true);
             let preroll = self.preroll_expecting(terminals.clone(), |terminals| {
                 PrerollContext::for_seek(terminals, target).silencing(quiet)
             });

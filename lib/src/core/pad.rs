@@ -284,6 +284,7 @@ mod tests {
             flushed: false,
             position: Duration::ZERO,
             start: Duration::ZERO,
+            show_from: None,
             backwards: false,
         }))
     }
