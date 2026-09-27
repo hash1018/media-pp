@@ -491,8 +491,8 @@ the four holds cover is where it does not reach, and none of them only
 stands in for it:
 
 - `Tee.owed` keeps up to 512 items for a branch whose terminal has its
-  sample, and `FileDemuxer` parks without bound while a preroll runs, both
-  while a sibling branch decodes on to its own target — up to a GOP of the
+  sample, and `FileDemuxer` parks up to 4 096 packets or 64 MB while a
+  preroll runs, both while a sibling branch decodes on to its own target — up to a GOP of the
   other stream, which the one read cursor interleaves with it. A `Queue` at
   the head of each branch would have to take that much past its capacity
   while its terminal holds: the same hold in another place. Blocking there
