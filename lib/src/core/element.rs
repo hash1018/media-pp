@@ -444,17 +444,19 @@ impl Context {
         clock: Arc<Clock>,
     ) -> Self {
         let pipeline_id: Arc<str> = pipeline_id.into();
+        let state = crate::playback_state::PlaybackState::new();
         Self {
             bus,
             completion: crate::pipeline::completion::Completion::new(
                 graph.clone(),
+                Arc::clone(&state),
                 pipeline_pp_log(&pipeline_id),
             ),
             pipeline_id,
             graph,
             playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
             clock,
-            state: crate::playback_state::PlaybackState::new(),
+            state,
             operation: Arc::new(Mutex::new(())),
             source_id,
             source_counters: ElementCounters::new(),

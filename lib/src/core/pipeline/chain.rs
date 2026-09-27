@@ -384,10 +384,13 @@ struct TerminalTracer {
     /// its sample to — the pipeline's to say.
     state: Arc<PlaybackState>,
     counters: Arc<ElementCounters>,
-    /// Told when this terminal ends, and when a seek flushes it, so the
-    /// pipeline can say when every terminal has — see
-    /// [`BusEvent::Finished`].
+    /// Told when this terminal ends, and on which timeline, so the
+    /// pipeline can say when every terminal has ended the current one —
+    /// see [`BusEvent::Finished`].
     completion: Arc<crate::pipeline::completion::Completion>,
+    /// The timeline of the last segment this terminal was handed: what its
+    /// `Eos` ends. `None` before its first, when the current one is taken.
+    timeline: Option<u64>,
 }
 
 impl Element for TerminalTracer {
@@ -494,7 +497,8 @@ impl Sink for TerminalTracer {
                             name: self.inner.name(),
                         },
                     );
-                    self.completion.terminal_ended(self.id, &self.bus);
+                    let on = self.timeline.unwrap_or_else(|| self.state.timeline());
+                    self.completion.terminal_ended(self.id, on, &self.bus);
                 }
                 Err(error) => pp_trace!(
                     pp_log: self.inner.pp_log(),
@@ -517,10 +521,10 @@ impl Sink for TerminalTracer {
             .control(msg)
             .map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()));
         // Whether or not the sink managed its own flush: a seek is under way
-        // either way, and what this terminal ended belongs to the stream
-        // before it.
+        // either way, and the picture it showed belongs to the stream before
+        // it. What it ended does too, which the timeline the seek moved on
+        // to already says.
         if matches!(msg, ControlMsg::Flush) {
-            self.completion.terminal_flushed(self.id);
             self.state.picture_flushed(self.id);
         }
         match &result {
@@ -542,6 +546,8 @@ impl Sink for TerminalTracer {
             pp_log: self.inner.pp_log(),
             "event={carried} phase=received"
         );
+        let StreamEvent::Segment(segment) = carried;
+        self.timeline = Some(segment.id);
         let result = self
             .inner
             .stream_event(event)
@@ -791,6 +797,7 @@ impl ChainBuilder {
             state: Arc::clone(&self.context.state),
             counters: terminal_counters,
             completion: Arc::clone(&self.context.completion),
+            timeline: None,
         });
         let plan = BranchPlan {
             nodes,
@@ -1050,8 +1057,10 @@ mod tests {
             counters: ElementCounters::new(),
             completion: crate::pipeline::completion::Completion::new(
                 crate::graph::PipelineGraph::new(),
+                Arc::clone(state),
                 element_pp_log(ElementType::Other, "pipeline", None),
             ),
+            timeline: None,
         }
     }
 

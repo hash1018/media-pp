@@ -72,14 +72,15 @@ impl PipelineBuilder {
         let (bus, bus_rx) = Bus::new();
         let clock = Arc::new(Clock::new());
         let graph = PipelineGraph::new();
+        let state = crate::playback_state::PlaybackState::new();
         Self {
-            completion: Completion::new(graph.clone(), pipeline_pp_log(&id)),
+            completion: Completion::new(graph.clone(), Arc::clone(&state), pipeline_pp_log(&id)),
             id,
             bus,
             bus_rx,
             playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
             clock,
-            state: crate::playback_state::PlaybackState::new(),
+            state,
             graph,
             sources: Vec::new(),
             control_pairs: Vec::new(),

@@ -8,13 +8,14 @@
 //! terminals, so it is the one to say when they have all ended.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 use crate::{
     bus::{Bus, BusEvent},
     graph::{ElementId, PipelineGraph},
+    playback_state::PlaybackState,
     pp_log::PpLog,
 };
 
@@ -27,46 +28,46 @@ use crate::{
 /// end. Whoever reports a change lends its own.
 pub(crate) struct Completion {
     graph: PipelineGraph,
+    /// Which timeline is current: an end counts only on it, so a seek,
+    /// which moves the pipeline on to another, leaves every end before it
+    /// behind without anything having to be told.
+    state: Arc<PlaybackState>,
     pp_log: PpLog,
-    state: Mutex<State>,
+    ends: Mutex<Ends>,
 }
 
 #[derive(Default)]
-struct State {
-    /// Terminals that accepted `Eos` and have not been flushed since.
-    ended: HashSet<ElementId>,
-    /// Whether `Finished` went out for the stream these terminals ended.
-    posted: bool,
+struct Ends {
+    /// The timeline each terminal took the end of its stream on — the id of
+    /// the last segment it was handed before its `Eos`.
+    ended: HashMap<ElementId, u64>,
+    /// The timeline `Finished` went out for, where it has.
+    posted: Option<u64>,
 }
 
 impl Completion {
-    pub(crate) fn new(graph: PipelineGraph, pp_log: PpLog) -> Arc<Self> {
+    pub(crate) fn new(graph: PipelineGraph, state: Arc<PlaybackState>, pp_log: PpLog) -> Arc<Self> {
         Arc::new(Self {
             graph,
+            state,
             pp_log,
-            state: Mutex::new(State::default()),
+            ends: Mutex::new(Ends::default()),
         })
     }
 
-    /// `terminal` accepted `Eos`. Called after its own `Eos` is on the bus,
-    /// so `Finished` always follows the last one.
-    pub(crate) fn terminal_ended(&self, terminal: ElementId, bus: &Bus) {
-        self.lock().ended.insert(terminal);
+    /// `terminal` accepted the `Eos` of the stream it was on timeline `on`
+    /// of. Called after its own `Eos` is on the bus, so `Finished` always
+    /// follows the last one.
+    pub(crate) fn terminal_ended(&self, terminal: ElementId, on: u64, bus: &Bus) {
+        self.lock().ended.insert(terminal, on);
         self.check(bus);
     }
 
-    /// Whether `terminal` has taken the end of its stream and not been
-    /// flushed since — a step has no more pictures to ask it for.
+    /// Whether `terminal` has taken the end of the stream on the current
+    /// timeline — a step has no more pictures to ask it for.
     pub(crate) fn has_ended(&self, terminal: ElementId) -> bool {
-        self.lock().ended.contains(&terminal)
-    }
-
-    /// `terminal` was flushed by a seek: what it ended is gone, and it has a
-    /// new stream to end before the pipeline is finished again.
-    pub(crate) fn terminal_flushed(&self, terminal: ElementId) {
-        let mut state = self.lock();
-        state.ended.remove(&terminal);
-        state.posted = false;
+        let current = self.state.timeline();
+        self.lock().ended.get(&terminal) == Some(&current)
     }
 
     /// The graph lost a branch without its terminal ending — detached, not
@@ -84,14 +85,17 @@ impl Completion {
     /// with a lock held.
     fn check(&self, bus: &Bus) {
         let terminals = self.graph.snapshot().terminal_ids();
+        let current = self.state.timeline();
         let finished = {
-            let mut state = self.lock();
+            let mut ends = self.lock();
             let all_ended = !terminals.is_empty()
                 && terminals
                     .iter()
-                    .all(|terminal| state.ended.contains(terminal));
-            let finished = all_ended && !state.posted;
-            state.posted |= finished;
+                    .all(|terminal| ends.ended.get(terminal) == Some(&current));
+            let finished = all_ended && ends.posted != Some(current);
+            if finished {
+                ends.posted = Some(current);
+            }
             finished
         };
         if finished {
@@ -99,8 +103,8 @@ impl Completion {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
+    fn lock(&self) -> std::sync::MutexGuard<'_, Ends> {
+        self.ends
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
