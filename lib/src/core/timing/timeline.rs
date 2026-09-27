@@ -28,36 +28,39 @@
 //! [`UNNUMBERED`], which is never behind: failing open is the old
 //! behaviour, where failing closed would drop a stream outright.
 //!
-//! # What is here for later
+//! # What replaces it
 //!
-//! Only the number, for now: what a timeline *is* — where it starts, at
-//! what rate and in which direction it runs — is what a rate or a reverse
-//! seek will add to the state beside it, and each buffer can then be read
-//! against its own.
+//! The [`Segment`](crate::stream::Segment) each stream begins with, and
+//! each seek begins again, is numbered as the timeline it opens, and a
+//! `Queue` carries it in order with the buffers: what a timeline *is* —
+//! where it starts, at what rate and in which direction — goes there, next
+//! to its data, rather than beside the number. Once the elements that read
+//! the number read the segment instead, the number goes (docs/stream-events.md,
+//! stages 3 and 4).
 
 use std::{
     cell::{Cell, RefCell},
     sync::Arc,
 };
 
-use crate::buffer::MediaBuffer;
 use crate::playback_state::PlaybackState;
+use crate::stream::Item;
 
 /// The number of a buffer made on a thread that no pipeline numbered.
 pub(crate) const UNNUMBERED: u64 = 0;
 
-/// A buffer and the number of the timeline it was made on — what a queue
-/// carries across a thread.
+/// A buffer or an event and the number of the timeline it was made on — what
+/// a queue carries across a thread.
 pub(crate) struct Numbered {
     pub(crate) number: u64,
-    pub(crate) buf: MediaBuffer,
+    pub(crate) item: Item,
 }
 
 impl Numbered {
-    /// `buf`, numbered as this thread's buffers are in the pipeline whose
+    /// `item`, numbered as this thread's buffers are in the pipeline whose
     /// state is `state` — a queue's own, `None` for one spawned by hand — or
     /// [`UNNUMBERED`] where this thread is not one of that pipeline's.
-    pub(crate) fn on(state: Option<&Arc<PlaybackState>>, buf: MediaBuffer) -> Self {
+    pub(crate) fn on(state: Option<&Arc<PlaybackState>>, item: Item) -> Self {
         let number = state.map_or(UNNUMBERED, |state| {
             let ours = PIPELINE.with(|slot| {
                 slot.borrow()
@@ -66,7 +69,7 @@ impl Numbered {
             });
             if ours { current() } else { UNNUMBERED }
         });
-        Self { number, buf }
+        Self { number, item }
     }
 }
 
@@ -139,7 +142,7 @@ mod tests {
         let theirs = PlaybackState::new();
         ours.begin_timeline();
         std::thread::spawn(move || {
-            let eos = || MediaBuffer::Eos;
+            let eos = || Item::Buffer(crate::buffer::MediaBuffer::Eos);
             assert_eq!(Numbered::on(Some(&ours), eos()).number, UNNUMBERED);
             enter(&ours);
             assert_eq!(Numbered::on(Some(&ours), eos()).number, ours.timeline());

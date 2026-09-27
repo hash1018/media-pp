@@ -11,6 +11,7 @@ use crate::{
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
+    stream::Event,
 };
 
 /// Errors produced while filling a [`Rack`].
@@ -286,6 +287,18 @@ impl Sink for Rack {
         // inside sees a Flush before the element after the rack does, exactly
         // as it would if the two were linked directly.
         self.line.control(msg)
+    }
+
+    /// Into the rack here, what it answers pushed ahead of it, and past it
+    /// once this returns — as control goes.
+    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+        let mut first = Ok(());
+        for buf in self.line.stream_event(event.0)? {
+            if let Err(error) = self.pad.push(buf) {
+                first = first.and(Err(error));
+            }
+        }
+        first
     }
 }
 

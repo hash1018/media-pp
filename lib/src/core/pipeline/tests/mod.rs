@@ -37,6 +37,7 @@ mod reverse;
 mod seek;
 mod stats;
 mod step;
+mod stream;
 
 struct BurstSource {
     pp_log: PpLog,

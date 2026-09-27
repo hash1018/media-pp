@@ -16,6 +16,7 @@ use crate::{
     error::Result,
     pp_log::{PpLog, pp_trace},
     stats::PadCounters,
+    stream::{Event, Item, StreamEvent},
 };
 
 /// An output port an [`Element`](crate::element::Element) owns. Data only
@@ -165,6 +166,25 @@ impl SrcPad {
             ),
         }
         result
+    }
+
+    /// Hands `event` to whatever this pad is linked to, where it goes in
+    /// order with what was pushed before it — see [`crate::stream`]. Not
+    /// counted: it is not data. An unlinked pad drops it, as `push` does.
+    pub(crate) fn push_event(&mut self, event: &StreamEvent) -> Result<()> {
+        match &mut self.peer {
+            Some(sink) => sink.stream_event(Event(event)),
+            None => Ok(()),
+        }
+    }
+
+    /// Pushes a buffer or hands on an event, whichever `item` is — for an
+    /// element that keeps both, in order, to hand on later.
+    pub(crate) fn push_item(&mut self, item: Item) -> Result<()> {
+        match item {
+            Item::Buffer(buf) => self.push(buf),
+            Item::Event(event) => self.push_event(&event),
+        }
     }
 
     /// Forwards a [`ControlMsg`] to whatever this pad is linked to —

@@ -17,6 +17,7 @@ use crate::{
     graph::{BranchId, ElementId, GraphError, Incoming, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
     pipeline::{ChainBuilder, DetachedBranch},
+    stream::{Event, Item, StreamEvent},
 };
 
 /// Fans a single input out to multiple sinks. [`TeeBuilder`] owns the
@@ -42,7 +43,10 @@ pub struct Tee {
     shared: Arc<TeeShared>,
     /// What arrived for a branch — by its root — while a preroll held it,
     /// in order, owed to it once playback goes on. See [`Tee::consume`].
-    owed: Vec<(ElementId, VecDeque<MediaBuffer>)>,
+    owed: Vec<(ElementId, VecDeque<Item>)>,
+    /// The segment the stream it is handed is in, for a branch attached
+    /// since it went past — see [`crate::stream`].
+    segment: Option<StreamEvent>,
 }
 
 /// The most a `Tee` keeps for one branch while a preroll holds it. A
@@ -111,6 +115,9 @@ struct TeeBranch {
     id: Option<BranchId>,
     root_id: ElementId,
     active: AtomicBool,
+    /// Whether this branch has been handed the stream's segment, which one
+    /// attached while the stream runs has not.
+    has_segment: AtomicBool,
     pad: Mutex<SrcPad>,
 }
 
@@ -174,6 +181,7 @@ impl Tee {
                 pp_log: pp_log.clone(),
                 shared: shared.clone(),
                 owed: Vec::new(),
+                segment: None,
             },
             TeeHandle {
                 id,
@@ -313,6 +321,7 @@ impl TeeBuilder {
                 id: None,
                 root_id,
                 active: AtomicBool::new(true),
+                has_segment: AtomicBool::new(false),
                 pad: Mutex::new(pad),
             }));
         }
@@ -374,6 +383,7 @@ impl TeeHandle {
                     id: Some(branch_id),
                     root_id,
                     active: AtomicBool::new(true),
+                    has_segment: AtomicBool::new(false),
                     pad: Mutex::new(pad),
                 }));
                 Ok(())
@@ -576,8 +586,8 @@ impl Element for Tee {
 }
 
 impl Tee {
-    /// Keeps `buf` for the branch rooted at `root`, which a preroll holds.
-    fn owe(&mut self, root: ElementId, buf: &MediaBuffer) {
+    /// Keeps `item` for the branch rooted at `root`, which a preroll holds.
+    fn owe(&mut self, root: ElementId, item: &Item) {
         let index = match self.owed.iter().position(|(owed, _)| *owed == root) {
             Some(index) => index,
             None => {
@@ -586,7 +596,10 @@ impl Tee {
             }
         };
         let kept = &mut self.owed[index].1;
-        if kept.len() >= MAX_OWED && !buf.is_eos() {
+        // What describes the stream is kept however much of it is dropped,
+        // and so is its end.
+        let droppable = matches!(item, Item::Buffer(buf) if !buf.is_eos());
+        if kept.len() >= MAX_OWED && droppable {
             if kept.len() == MAX_OWED {
                 pp_warn!(
                     self,
@@ -595,12 +608,12 @@ impl Tee {
             }
             return;
         }
-        kept.push_back(buf.clone());
+        kept.push_back(item.clone());
     }
 
     /// What a preroll kept for the branch rooted at `root`, taken to be
     /// handed on.
-    fn take_owed(&mut self, root: ElementId) -> Option<VecDeque<MediaBuffer>> {
+    fn take_owed(&mut self, root: ElementId) -> Option<VecDeque<Item>> {
         let index = self.owed.iter().position(|(owed, _)| *owed == root)?;
         Some(self.owed.swap_remove(index).1)
     }
@@ -617,17 +630,94 @@ impl Tee {
             let Some(branch) = branches.iter().find(|branch| branch.root_id == root) else {
                 continue;
             };
-            for buf in kept {
+            for item in kept {
                 if !branch.active.load(Ordering::Acquire) {
                     break;
                 }
                 let mut pad = lock_unpoisoned(&branch.pad);
                 let peer = pad.peer_identity();
-                let outcome = pad.push(buf);
+                let outcome = pad.push_item(item);
                 drop(pad);
                 if let Err(error) = outcome {
                     self.report_branch_error(branch.root_id, peer, error);
                 }
+            }
+        }
+    }
+
+    /// Hands `item` to every branch, in order with what went before it.
+    ///
+    /// One branch failing must not stop it from reaching its siblings —
+    /// same "errors never kill anything, just get reported" rule `Queue`'s
+    /// worker loop follows. It is dropped for the failing branch only; the
+    /// branch itself stays wired and gets retried on the next one. Whoever's
+    /// watching the bus decides whether to call `TeeHandle::detach` for it.
+    fn hand_out(&mut self, item: Item) {
+        let branches = lock_unpoisoned(&self.shared.branches).clone();
+        // The preroll, if one is running, holds the branches that have
+        // their sample — the pipeline's to say.
+        let preroll = self.shared.context.state.preroll();
+        let graph = preroll
+            .as_ref()
+            .map(|_| self.shared.context.graph.snapshot());
+        let is_segment = matches!(item, Item::Event(StreamEvent::Segment(_)));
+        if let (true, Item::Event(event)) = (is_segment, &item) {
+            self.segment = Some(event.clone());
+        }
+        for branch in branches {
+            if !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            // A branch attached since the stream's segment went past is
+            // handed it before anything else — see `crate::stream`.
+            let catch_up = if branch.has_segment.swap(true, Ordering::AcqRel) || is_segment {
+                None
+            } else {
+                self.segment.clone().map(Item::Event)
+            };
+            if let (Some(context), Some(graph)) = (&preroll, &graph) {
+                let terminals = graph.terminal_ids_from(branch.root_id);
+                if context.are_ready(&terminals) {
+                    // This branch has its sample and its siblings do not yet:
+                    // what comes meanwhile is kept for it, and handed on once
+                    // playback goes on. It was dropped, which kept the
+                    // branches level but cost this one whatever came while
+                    // the others caught up — packets, where the `Tee` is in
+                    // front of the decoders, and the pictures that depended
+                    // on them; the `Eos` too, where a seek past the end of a
+                    // file delivered it with the last picture, so the branch
+                    // never ended at all. Pushing it now instead could block
+                    // this thread on a branch that is waiting for exactly
+                    // the preroll to end.
+                    let root = branch.root_id;
+                    if let Some(segment) = &catch_up {
+                        self.owe(root, segment);
+                    }
+                    self.owe(root, &item);
+                    continue;
+                }
+            }
+            // Held back until now: what was kept for it goes first, so the
+            // branch has its stream in order however this learned the hold
+            // was over — from this buffer, or from the `Resume` behind it.
+            let owed = self.take_owed(branch.root_id);
+            let mut pad = lock_unpoisoned(&branch.pad);
+            // Detach may have won the race while this thread waited for a
+            // previous push on the same branch to finish.
+            if !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let peer = pad.peer_identity();
+            let mut failures = Vec::new();
+            let pending = owed.into_iter().flatten().chain(catch_up);
+            for kept in pending.chain(std::iter::once(item.clone())) {
+                if let Err(error) = pad.push_item(kept) {
+                    failures.push(error);
+                }
+            }
+            drop(pad);
+            for error in failures {
+                self.report_branch_error(branch.root_id, peer.clone(), error);
             }
         }
     }
@@ -663,67 +753,14 @@ impl Sink for Tee {
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let branches = lock_unpoisoned(&self.shared.branches).clone();
-        // The preroll, if one is running, holds the branches that have
-        // their sample — the pipeline's to say.
-        let preroll = self.shared.context.state.preroll();
-        let graph = preroll
-            .as_ref()
-            .map(|_| self.shared.context.graph.snapshot());
-        // One branch failing must not stop the buffer from reaching its
-        // siblings — same "errors never kill anything, just get reported"
-        // rule `Queue`'s worker loop follows. That buffer is dropped for
-        // the failing branch only; the branch itself stays wired and gets
-        // retried on the next one. Whoever's watching the bus decides
-        // whether to call `TeeHandle::detach` for it.
-        for branch in branches {
-            if !branch.active.load(Ordering::Acquire) {
-                continue;
-            }
-            if let (Some(context), Some(graph)) = (&preroll, &graph) {
-                let terminals = graph.terminal_ids_from(branch.root_id);
-                if context.are_ready(&terminals) {
-                    // This branch has its sample and its siblings do not yet:
-                    // what comes meanwhile is kept for it, and handed on once
-                    // playback goes on. It was dropped, which kept the
-                    // branches level but cost this one whatever came while
-                    // the others caught up — packets, where the `Tee` is in
-                    // front of the decoders, and the pictures that depended
-                    // on them; the `Eos` too, where a seek past the end of a
-                    // file delivered it with the last picture, so the branch
-                    // never ended at all. Pushing it now instead could block
-                    // this thread on a branch that is waiting for exactly
-                    // the preroll to end.
-                    let root = branch.root_id;
-                    self.owe(root, &buf);
-                    continue;
-                }
-            }
-            // Held back until now: what was kept for it goes first, so the
-            // branch has its stream in order however this learned the hold
-            // was over — from this buffer, or from the `Resume` behind it.
-            let owed = self.take_owed(branch.root_id);
-            let mut pad = lock_unpoisoned(&branch.pad);
-            // Detach may have won the race while this thread waited for a
-            // previous push on the same branch to finish.
-            if !branch.active.load(Ordering::Acquire) {
-                continue;
-            }
-            let peer = pad.peer_identity();
-            let mut failures = Vec::new();
-            for kept in owed.into_iter().flatten() {
-                if let Err(error) = pad.push(kept) {
-                    failures.push(error);
-                }
-            }
-            if let Err(error) = pad.push(buf.clone()) {
-                failures.push(error);
-            }
-            drop(pad);
-            for error in failures {
-                self.report_branch_error(branch.root_id, peer.clone(), error);
-            }
-        }
+        self.hand_out(Item::Buffer(buf));
+        Ok(())
+    }
+
+    /// Handed to every branch as a buffer is: in order with the buffers,
+    /// kept with what a preroll holds back for one.
+    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+        self.hand_out(Item::Event(event.0.clone()));
         Ok(())
     }
 

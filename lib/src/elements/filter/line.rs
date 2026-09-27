@@ -5,7 +5,8 @@
 //! holds and replaces once if the hardware refuses a stream. Both need the
 //! same three things of it — the elements wired into a line and given what a
 //! chain stage is given, buffers run down it with what came out handed back,
-//! and control sent down it — and neither is the other's to own.
+//! and control and the stream's events sent down it — and neither is the
+//! other's to own.
 
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +17,7 @@ use crate::{
     core::pipeline::chain::FlowTracer,
     element::{Context, Element, ElementType, Filter, ReversibleDecoder, Sink, element_pp_log},
     error::Result,
+    stream::{Event, StreamEvent},
 };
 
 /// A straight line of elements run inside another element, which pushes on
@@ -42,6 +44,11 @@ pub(crate) struct Line {
     /// answers a frame with none, or several, is a scaler this has to carry
     /// unchanged.
     made: Arc<Mutex<Vec<MediaBuffer>>>,
+    /// The segment the stream it is handed is in, for a line filled anew
+    /// while the stream runs — see [`crate::stream`].
+    segment: Option<StreamEvent>,
+    /// Whether what is in the line has yet to be handed [`Self::segment`].
+    behind: bool,
 }
 
 impl Line {
@@ -51,6 +58,8 @@ impl Line {
             name: name.clone(),
             head: None,
             made: Arc::new(Mutex::new(Vec::new())),
+            segment: None,
+            behind: false,
         }
     }
 
@@ -123,6 +132,8 @@ impl Line {
                 Box::new(FlowTracer::new(element)) as Box<dyn Sink>
             });
         self.head = Some(head);
+        // Handed the stream's segment ahead of its first buffer.
+        self.behind = self.segment.is_some();
         Some(line)
     }
 
@@ -135,7 +146,27 @@ impl Line {
     /// out stays for the next call to answer, still in order.
     pub(crate) fn consume(&mut self, buf: MediaBuffer) -> Result<Vec<MediaBuffer>> {
         if let Some(head) = &mut self.head {
+            if std::mem::take(&mut self.behind)
+                && let Some(segment) = &self.segment
+            {
+                head.stream_event(Event(segment))?;
+            }
             head.consume(buf)?;
+        }
+        Ok(self.take_made())
+    }
+
+    /// Sends `event` down the line, which stops at its end as control does,
+    /// and answers what came out of the end ahead of it, for the owner to
+    /// push on before the graph passes the event on through the owner's pad.
+    pub(crate) fn stream_event(&mut self, event: &StreamEvent) -> Result<Vec<MediaBuffer>> {
+        // Every event so far is a segment, and what a line filled anew is
+        // handed first.
+        let StreamEvent::Segment(_) = event;
+        self.segment = Some(event.clone());
+        self.behind = false;
+        if let Some(head) = &mut self.head {
+            head.stream_event(Event(event))?;
         }
         Ok(self.take_made())
     }
@@ -172,7 +203,8 @@ impl Line {
 }
 
 /// The terminal of a [`Line`], which is not a terminal at all: what it
-/// receives is what the line's owner pushes onward.
+/// receives is what the line's owner pushes onward. An event goes no
+/// further than this: the graph passes it on through the owner's own pad.
 struct Collector {
     pp_log: PpLog,
     owner: ElementType,

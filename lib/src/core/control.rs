@@ -898,7 +898,16 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
         // worker too, directly: passed on from here it reaches this source's
         // own line and stops at them. A queue built by hand carries it on.
         let _direct = Direct::enter(true);
-        forward(source.src_pads(), msg)?;
+        let forwarded = forward(source.src_pads(), msg);
+        // What it reads from here on begins a stream again, on the timeline
+        // it has just followed — see `crate::stream`.
+        let begun = if matches!(msg, ControlMsg::Seek(_)) {
+            let pp_log = source.pp_log().clone();
+            crate::stream::begin_segment(source.src_pads(), true, &pp_log)
+        } else {
+            Ok(())
+        };
+        forwarded.and(begun)?;
         Ok(*msg == ControlMsg::Stop)
     })();
     match &result {

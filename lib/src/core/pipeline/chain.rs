@@ -19,6 +19,7 @@ use crate::{
     playback_state::PlaybackState,
     queue::{OverflowPolicy, Queue},
     stats::ElementCounters,
+    stream::Event,
 };
 
 /// Builds one chain segment (a run of elements that all execute on the same
@@ -215,6 +216,31 @@ impl<T: Filter> Sink for FlowTracer<T> {
             Err(error) => pp_trace!(
                 pp_log: self.inner.pp_log(),
                 "event=control control={msg:?} phase=completed outcome=error error={error}"
+            ),
+        }
+        self.trace_origin(result)
+    }
+
+    /// As [`Self::control`]: the filter's reaction — which pushes whatever
+    /// it answers the event with, ahead of it — and then the event on
+    /// through its pads, every one of them even where one fails.
+    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+        let Event(carried) = event;
+        pp_trace!(
+            pp_log: self.inner.pp_log(),
+            "event={carried} phase=received"
+        );
+        let reacted = self.inner.stream_event(event);
+        let forwarded = crate::stream::forward(self.inner.src_pads(), carried);
+        let result = reacted.and(forwarded);
+        match &result {
+            Ok(()) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event={carried} phase=completed outcome=ok"
+            ),
+            Err(error) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event={carried} phase=completed outcome=error error={error}"
             ),
         }
         self.trace_origin(result)
@@ -499,6 +525,29 @@ impl Sink for TerminalTracer {
             Err(error) => pp_trace!(
                 pp_log: self.inner.pp_log(),
                 "event=control control={msg:?} phase=completed outcome=error error={error}"
+            ),
+        }
+        result
+    }
+
+    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+        let Event(carried) = event;
+        pp_trace!(
+            pp_log: self.inner.pp_log(),
+            "event={carried} phase=received"
+        );
+        let result = self
+            .inner
+            .stream_event(event)
+            .map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()));
+        match &result {
+            Ok(()) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event={carried} phase=completed outcome=ok"
+            ),
+            Err(error) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event={carried} phase=completed outcome=error error={error}"
             ),
         }
         result

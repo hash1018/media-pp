@@ -119,6 +119,20 @@ impl Pipeline {
 
                     let source_name = source.name();
                     let source_type = source.element_type();
+                    // Every stream begins with a segment, before the source
+                    // has so much as looked at its control — see
+                    // `crate::stream`, on why that never waits.
+                    let source_log = source.pp_log().clone();
+                    if let Err(error) =
+                        crate::stream::begin_segment(source.src_pads(), false, &source_log)
+                    {
+                        bus.post_downstream_error(
+                            &source_log,
+                            source_type,
+                            source_name.clone(),
+                            error,
+                        );
+                    }
                     // `source.run()` itself already reports non-fatal,
                     // per-buffer failures to `bus` as it goes (see
                     // `SourceElement::run`'s docs) — a returned `Err` here

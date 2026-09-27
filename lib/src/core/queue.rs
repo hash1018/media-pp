@@ -38,6 +38,7 @@ use crate::{
     error::{Result, ThreadSpawnError},
     playback_state::{Bell, PlaybackState},
     stats::ElementCounters,
+    stream::{Event, Item, StreamEvent},
     timeline::{Numbered, UNNUMBERED},
 };
 
@@ -452,7 +453,10 @@ impl Queue {
             // one that was not yet counted in.
             self.ends_owed.fetch_add(1, Ordering::AcqRel);
             let result = self
-                .hand_over(Numbered::on(self.state.as_ref(), buf), Duration::MAX)
+                .hand_over(
+                    Numbered::on(self.state.as_ref(), Item::Buffer(buf)),
+                    Duration::MAX,
+                )
                 .map_err(|_| QueueError::ChannelClosed.into());
             if result.is_err() {
                 self.ends_owed.fetch_sub(1, Ordering::AcqRel);
@@ -476,7 +480,7 @@ impl Queue {
         }
         // Numbered as the thread handing it over is, and carried so: see
         // `crate::timeline`.
-        let buf = Numbered::on(self.state.as_ref(), buf);
+        let buf = Numbered::on(self.state.as_ref(), Item::Buffer(buf));
         let result = match self.policy {
             OverflowPolicy::Block(timeout) => {
                 // Timed only when it had to wait: a send into room is not
@@ -590,6 +594,42 @@ impl Sink for Queue {
             "event=control control={msg:?} phase=completed outcome=ok"
         );
         Ok(())
+    }
+
+    /// Carried across behind what came before it, as a buffer is — but
+    /// never dropped for want of room, whatever the policy, and never waited
+    /// for: it goes in past the capacity at once. Waiting could not be made
+    /// safe for it: a source begins its stream with one before it looks at
+    /// its control, so it would wait on a queue a pause had already stopped.
+    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+        let Event(carried) = event;
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event={carried} phase=received"
+        );
+        let item = Numbered::on(self.state.as_ref(), Item::Event(carried.clone()));
+        let result = if self.worker_gone() {
+            Err(())
+        } else {
+            self.tx.send(item).map_err(|_| ())
+        };
+        let result = match result {
+            Ok(()) => Ok(()),
+            // Abandoned, as `consume` abandons a buffer once stopped.
+            Err(()) if self.state.as_deref().is_some_and(PlaybackState::is_stopped) => Ok(()),
+            Err(()) => Err(QueueError::ChannelClosed.into()),
+        };
+        match &result {
+            Ok(()) => pp_trace!(
+                pp_log: &self.pp_log,
+                "event={carried} phase=queued outcome=ok"
+            ),
+            Err(error) => pp_trace!(
+                pp_log: &self.pp_log,
+                "event={carried} phase=queued outcome=error error={error}"
+            ),
+        }
+        result
     }
 }
 
@@ -957,7 +997,7 @@ struct Worker<'a> {
 /// Hands one buffer to `downstream`, counting it and reporting a failure on
 /// the bus — a failure drops that buffer and nothing else.
 fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_>) {
-    let Numbered { number, buf } = carried;
+    let Numbered { number, item } = carried;
     if worker
         .inbox
         .state
@@ -972,13 +1012,17 @@ fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_
                 "dropping what arrives from timeline {number}, which a seek has left"
             );
         }
-        if buf.is_eos() {
+        if matches!(item, Item::Buffer(MediaBuffer::Eos)) {
             worker.inbox.discarded(1);
         }
         return;
     }
     // What the elements after this make of it is on the same timeline.
     crate::timeline::carry_on(number);
+    let buf = match item {
+        Item::Buffer(buf) => buf,
+        Item::Event(event) => return forward_event(downstream, number, &event, worker),
+    };
     let is_eos = buf.is_eos();
     let call = worker
         .counters
@@ -1024,6 +1068,30 @@ fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_
             // `Pipeline::stop`.
             worker.errors.post(error);
         }
+    }
+}
+
+/// Hands one event to `downstream`, reporting a failure on the bus as a
+/// buffer's is.
+fn forward_event(
+    downstream: &mut Box<dyn Sink>,
+    number: u64,
+    event: &StreamEvent,
+    worker: &Worker<'_>,
+) {
+    // A segment is numbered as the timeline it opens: both are this
+    // thread's number as the source began it — see `crate::stream`.
+    let StreamEvent::Segment(segment) = event;
+    debug_assert!(
+        number == UNNUMBERED || number == segment.id,
+        "{event} carried as timeline {number}"
+    );
+    pp_trace!(
+        pp_log: worker.pp_log,
+        "event={event} phase=forwarding"
+    );
+    if let Err(error) = downstream.stream_event(Event(event)) {
+        worker.errors.post(error);
     }
 }
 
@@ -1214,7 +1282,7 @@ fn discard_stale_data(data_rx: &Receiver<Numbered>, msg: &ControlMsg) -> usize {
     let mut ends = 0;
     if *msg == ControlMsg::Flush {
         while let Ok(held) = data_rx.try_recv() {
-            ends += usize::from(held.buf.is_eos());
+            ends += usize::from(matches!(held.item, Item::Buffer(MediaBuffer::Eos)));
         }
     }
     ends
@@ -1237,12 +1305,12 @@ mod tests {
     #[test]
     fn flush_discards_backlog_but_seek_does_not() {
         let (tx, rx) = crossbeam_channel::bounded(2);
-        tx.send(Numbered::on(None, packet())).unwrap();
+        tx.send(Numbered::on(None, Item::Buffer(packet()))).unwrap();
 
         discard_stale_data(&rx, &ControlMsg::Seek(Duration::from_secs(1)));
         assert!(rx.try_recv().is_ok(), "Seek must not own Queue flushing");
 
-        tx.send(Numbered::on(None, packet())).unwrap();
+        tx.send(Numbered::on(None, Item::Buffer(packet()))).unwrap();
         discard_stale_data(&rx, &ControlMsg::Flush);
         assert!(rx.try_recv().is_err(), "Flush must discard queued data");
     }

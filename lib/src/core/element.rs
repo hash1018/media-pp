@@ -555,6 +555,17 @@ pub trait Sink: Element {
     fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
         Ok(())
     }
+
+    /// Reacts to an event carried in the stream, in order with the buffers
+    /// around it — only the reaction, as with [`Self::control`]: the graph
+    /// passes the event on through a filter's pads once this returns. Not
+    /// for elements outside this crate yet, which is why its argument is a
+    /// type nothing outside can name; the graph passes every event on
+    /// around such an element.
+    #[doc(hidden)]
+    fn stream_event(&mut self, _event: crate::stream::Event<'_>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// An element with one or more output ports. It sends data downstream by
@@ -838,6 +849,10 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         (**self).control(msg)
     }
+
+    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> Result<()> {
+        (**self).stream_event(event)
+    }
 }
 
 #[cfg(test)]
@@ -887,6 +902,10 @@ mod tests {
         fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
             Err(crate::error::Error::Other("opinionated".into()))
         }
+
+        fn stream_event(&mut self, _event: crate::stream::Event<'_>) -> Result<()> {
+            Err(crate::error::Error::Other("opinionated".into()))
+        }
     }
 
     fn opinionated() -> Opinionated {
@@ -914,6 +933,11 @@ mod tests {
             assert!(
                 sink.control(&ControlMsg::Pause).is_err(),
                 "not the default of doing nothing"
+            );
+            let segment = crate::stream::StreamEvent::segment(false);
+            assert!(
+                sink.stream_event(crate::stream::Event(&segment)).is_err(),
+                "nor for an event in the stream"
             );
         }
         check(Box::new(opinionated()));

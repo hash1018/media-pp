@@ -83,6 +83,27 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
     ));
     assert!(contents.contains("[element=Queue] [name=queue] event=eos phase=completed outcome=ok"));
     assert!(contents.contains("[element=AppSink] [name=sink] event=eos phase=received"));
+    // The segment the stream begins with, at each boundary it crosses: into
+    // the graph at the source's pad, into and out of the queue, and taken
+    // by the sink.
+    let segment = |element: &str, phase: &str| {
+        contents.lines().any(|line| {
+            line.contains(element) && line.contains("event=segment") && line.contains(phase)
+        })
+    };
+    assert!(segment(
+        "[element=AppSource] [name=source]",
+        "flushed=false phase=sent pad=source_src outcome=ok"
+    ));
+    assert!(segment(
+        "[element=Queue] [name=queue]",
+        "phase=queued outcome=ok"
+    ));
+    assert!(segment("[element=Queue] [name=queue]", "phase=forwarding"));
+    assert!(segment(
+        "[element=AppSink] [name=sink]",
+        "phase=completed outcome=ok"
+    ));
     // Under the pipeline's own identity, once its one terminal has ended.
     assert!(contents.contains("[element=Pipeline] [name=flow-test] event=finished"));
 

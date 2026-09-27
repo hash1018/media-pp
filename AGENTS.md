@@ -183,6 +183,15 @@ final source of truth when documentation and implementation differ.
   carries across only what is sent without the pipeline — a `Stop` after a
   source failed, a `Flush` a bridge injects. A Queue control failure is
   reported without leaving the control cascade permanently blocked.
+- What describes the stream travels in it (`crate::stream`): so far the
+  `Segment` each stream begins with and each seek begins again, in order
+  with the buffers. An element reacts through `Sink::stream_event`, pushing
+  from there whatever it answers the event with; the graph passes the event
+  on through its pads, as it does control. Only an element that routes the
+  stream its own way — `Queue`, `Tee`, a bin's or a rack's line — sends it
+  on itself, in order with its buffers, never dropping one for room nor
+  waiting for any; and whatever joins a stream under way — a branch
+  attached, a line filled anew — is handed its last segment first.
 - Where playback stands — paused, prerolling and for which seek, which
   timeline is current — is the pipeline's `PlaybackState`, given to every
   element in `attach_context` and written only by the pipeline, before the

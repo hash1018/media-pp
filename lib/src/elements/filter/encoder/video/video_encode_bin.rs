@@ -36,6 +36,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     pp_log::{PpLog, pp_info},
+    stream::Event,
 };
 
 /// What the software path hands its encoder when the frames were RGB:
@@ -776,6 +777,19 @@ impl Sink for VideoEncodeBin {
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         self.install();
         self.line.control(msg)
+    }
+
+    /// Down the line, what it answers pushed ahead of it — the graph passes
+    /// the event on through this bin's pad once this returns.
+    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+        self.install();
+        let mut first = Ok(());
+        for made in self.line.stream_event(event.0)? {
+            if let Err(error) = self.pad.push(made) {
+                first = first.and(Err(error));
+            }
+        }
+        first
     }
 }
 

@@ -47,6 +47,7 @@ use crate::{
     error::{Error, Result},
     pad::SrcPad,
     pp_log::{PpLog, pp_info, pp_warn},
+    stream::Event,
 };
 
 /// Errors specific to [`VideoDecodeBin`]. Converts into the crate-wide
@@ -685,6 +686,29 @@ impl Sink for VideoDecodeBin {
         // message; the first failure is the answer.
         let line = self.line.control(msg);
         let tail = self.tail.control(msg);
+        line.and(tail)
+    }
+
+    /// Down the line and then the tail, as a buffer goes, what either answers
+    /// it with pushed ahead of it — the graph passes the event on through
+    /// this bin's pad once this returns. Both, whatever the first answers.
+    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+        self.install();
+        let line = self
+            .line
+            .stream_event(event.0)
+            .and_then(|made| self.push(made));
+        let mut tail = Ok(());
+        match self.tail.stream_event(event.0) {
+            Ok(made) => {
+                for buf in made {
+                    if let Err(error) = self.pad.push(buf) {
+                        tail = tail.and(Err(error));
+                    }
+                }
+            }
+            Err(error) => tail = Err(error),
+        }
         line.and(tail)
     }
 }

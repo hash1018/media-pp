@@ -28,6 +28,9 @@
 //! - played to the end, the pipeline says [`BusEvent::Finished`], unless it
 //!   loops, when it goes on into the next lap instead;
 //! - finished, every terminal's last word is an `Eos`;
+//! - every buffer a terminal is handed belongs to the segment it was handed
+//!   last, and a segment on a new timeline follows a flush — see
+//!   [`crate::stream`];
 //! - and nothing reports an error.
 //!
 //! # Every shape, not a chosen few
@@ -115,6 +118,14 @@ enum Entry {
     Eos,
     /// The stream moved to a new timeline, beginning at this position.
     Timeline(Duration),
+    /// The stream began a segment — see [`crate::stream`].
+    Segment {
+        id: u64,
+        flushed: bool,
+    },
+    /// Something was handed outside the segment it belongs to, or a segment
+    /// came out of turn: what, for the failure to say.
+    Outside(String),
     /// A call on the pipeline began, or returned — written by the harness
     /// into every terminal's record. What it was is `calls[index]`.
     Call {
@@ -133,6 +144,8 @@ struct Recorder {
     /// How long it takes over each buffer — a slower terminal than its
     /// siblings, so one branch prerolls after the other.
     delay: Duration,
+    /// The timeline of the segment it was handed last.
+    segment: Option<u64>,
 }
 
 impl Recorder {
@@ -145,6 +158,7 @@ impl Recorder {
                 fallback,
                 log: Arc::clone(&log),
                 delay: Duration::ZERO,
+                segment: None,
             },
             log,
         )
@@ -185,6 +199,16 @@ impl Element for Recorder {
 
 impl Sink for Recorder {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        // What it is handed is on the timeline of the thread handing it —
+        // which has to be the one the last segment opened.
+        let number = crate::timeline::current();
+        if number != crate::timeline::UNNUMBERED && self.segment != Some(number) {
+            self.log.lock().unwrap().push(Entry::Outside(format!(
+                "{} on timeline {number}, in the segment of {:?}",
+                buf.kind(),
+                self.segment
+            )));
+        }
         thread::sleep(self.delay);
         let entry = match &buf {
             MediaBuffer::Video(frame) => Entry::Data {
@@ -206,6 +230,27 @@ impl Sink for Recorder {
         if let ControlMsg::Seek(target) = msg {
             self.log.lock().unwrap().push(Entry::Timeline(*target));
         }
+        Ok(())
+    }
+
+    /// Each segment once, each on a later timeline than the one before it,
+    /// and — but for the stream's first — after a flush.
+    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> Result<()> {
+        let crate::stream::StreamEvent::Segment(segment) = event.0;
+        let mut log = self.log.lock().unwrap();
+        if let Some(before) = self.segment
+            && (segment.id <= before || !segment.flushed)
+        {
+            log.push(Entry::Outside(format!(
+                "segment on timeline {} after one on {before}, flushed: {}",
+                segment.id, segment.flushed
+            )));
+        }
+        self.segment = Some(segment.id);
+        log.push(Entry::Segment {
+            id: segment.id,
+            flushed: segment.flushed,
+        });
         Ok(())
     }
 }
@@ -1635,6 +1680,18 @@ fn run_sequence_turning(
     let lap = rig.duration.filter(|_| model.looped);
     for (name, log) in &rig.terminals {
         let log = log.lock().unwrap();
+        // Whatever the calls did: past a stop as much as before it, which is
+        // where the promises about data end.
+        if let Some(what) = log.iter().find_map(|entry| match entry {
+            Entry::Outside(what) => Some(what),
+            _ => None,
+        }) {
+            let handed = sketch(&log, &calls.made);
+            return fail(
+                &history,
+                format!("{name}: {what}\n  it was handed: {handed}"),
+            );
+        }
         if let Err(why) = judge(
             &log,
             &calls.made,
@@ -1669,6 +1726,10 @@ fn sketch(log: &[Entry], calls: &[Call]) -> String {
             Entry::Data { pts: None } => "?".into(),
             Entry::Eos => "Eos".into(),
             Entry::Timeline(target) => format!("Timeline({})", target.as_millis()),
+            Entry::Segment { id, flushed } => {
+                format!("Segment({id}{})", if *flushed { "f" } else { "" })
+            }
+            Entry::Outside(what) => format!("<{what}>"),
             Entry::Call {
                 index,
                 returned: false,
@@ -1784,6 +1845,8 @@ fn judge(
                 seek += 1;
                 unlapped = lap.is_some();
             }
+            Entry::Segment { .. } => {}
+            Entry::Outside(what) => return Err(format!("entry {at}: {what}")),
             Entry::Eos => {}
             Entry::Data { pts } => {
                 match &mut under_way {
@@ -1907,7 +1970,12 @@ fn crosses_lap(a: Duration, b: Duration, lap: Option<Duration>) -> bool {
 /// last of the file rather than the one picture it asked for.
 fn ends_the_stream(rest: &[Entry]) -> bool {
     rest.iter()
-        .find(|entry| !matches!(entry, Entry::Data { .. } | Entry::Call { .. }))
+        .find(|entry| {
+            !matches!(
+                entry,
+                Entry::Data { .. } | Entry::Call { .. } | Entry::Segment { .. }
+            )
+        })
         .is_some_and(|entry| matches!(entry, Entry::Eos))
 }
 
