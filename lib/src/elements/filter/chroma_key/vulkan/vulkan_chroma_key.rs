@@ -10,17 +10,16 @@ use super::super::options::{ChromaKeyOptions, feather_band};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::VulkanDevice,
     error::Result,
-    pad::SrcPad,
     platform::vulkan::{
         bgra_pass::{BgraPass, BgraPassError, PassInput, immediates},
         gpu::VulkanError,
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/chroma_key.wgsl");
@@ -65,7 +64,13 @@ impl From<BgraPassError> for VulkanChromaKeyError {
 /// written, multiplied by the key; the colour, PTS, duration and colour tags
 /// pass through. Tuned while it runs through the [`ChromaKeyHandle`]
 /// [`Self::new`] returns; a disabled one hands every frame straight through.
-pub struct VulkanChromaKey {
+pub struct VulkanChromaKey(TransformStage<Keying>);
+
+transform_filter!(VulkanChromaKey);
+
+/// What a [`VulkanChromaKey`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Keying {
     pp_log: PpLog,
     name: Arc<str>,
     pass: BgraPass,
@@ -77,7 +82,6 @@ pub struct VulkanChromaKey {
     options: ChromaKeyOptions,
     control: Arc<ChromaKeyControl>,
     enabled: bool,
-    pad: SrcPad,
 }
 
 impl VulkanChromaKey {
@@ -92,13 +96,6 @@ impl VulkanChromaKey {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VulkanChromaKey, &name, None);
         let pass = BgraPass::new(device, SHADER, c"main", 48, PassInput::Bgra)?;
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         pp_info!(
             pp_log: &pp_log,
             "opened: BGRA, key_color={:?}, threshold={}, smoothing={}",
@@ -109,7 +106,7 @@ impl VulkanChromaKey {
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
         Ok((
-            Self {
+            Self(TransformStage::new(Keying {
                 name,
                 pp_log,
                 pass,
@@ -117,12 +114,13 @@ impl VulkanChromaKey {
                 options,
                 control,
                 enabled: true,
-                pad,
-            },
+            })),
             handle,
         ))
     }
+}
 
+impl Keying {
     /// Picks up whatever the handle has been set to, once per frame.
     fn refresh(&mut self) {
         let options = self.control.get();
@@ -175,7 +173,7 @@ impl VulkanChromaKey {
     }
 }
 
-impl PerFrameTransform for VulkanChromaKey {
+impl PerFrameTransform for Keying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -193,7 +191,7 @@ impl PerFrameTransform for VulkanChromaKey {
     }
 }
 
-impl Element for VulkanChromaKey {
+impl Element for Keying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -211,13 +209,7 @@ impl Element for VulkanChromaKey {
     }
 }
 
-impl Source for VulkanChromaKey {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for VulkanChromaKey {
+impl Transform for Keying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
@@ -225,17 +217,20 @@ impl Sink for VulkanChromaKey {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
                 self.refresh();
                 if !self.enabled {
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let keyed = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(keyed))
+                let keyed = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(keyed));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -244,15 +239,19 @@ impl Sink for VulkanChromaKey {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
-impl Drop for VulkanChromaKey {
+impl Drop for Keying {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -261,6 +260,7 @@ impl Drop for VulkanChromaKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::Sink;
     use crate::{
         elements::{ChromaKeyMethod, VulkanDownload, VulkanUpload},
         test_support::{capture, try_vulkan_device},

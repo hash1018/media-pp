@@ -8,12 +8,10 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver, Nv12Surface, YuvToBgra},
@@ -22,6 +20,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `CudaConverter`. Converts into the crate-wide `Error`
@@ -120,7 +119,13 @@ pub enum CudaConverterError {
 /// `RGB`/full pair `DxgiCaptureSource` puts on its own BGRA frames coming
 /// back. That is the one part of a frame's metadata this element
 /// deliberately replaces; PTS and duration cross unchanged.
-pub struct CudaConverter {
+pub struct CudaConverter(TransformStage<Converting>);
+
+transform_filter!(CudaConverter);
+
+/// What a [`CudaConverter`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Converting {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
@@ -141,7 +146,6 @@ pub struct CudaConverter {
     /// wrong context.
     device_ctx: *mut ffi::AVHWDeviceContext,
     driver: CudaDriver,
-    pad: SrcPad,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the CUDA surface
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
     /// `CudaUpload`.
@@ -152,7 +156,7 @@ pub struct CudaConverter {
 // affinity of their own, `device_ctx` only ever has its address compared, and
 // `&mut self` on every method that touches them rules out concurrent access.
 // Same reasoning as `CudaUpload`.
-unsafe impl Send for CudaConverter {}
+unsafe impl Send for Converting {}
 
 impl CudaConverter {
     /// `device` must be the same [`CudaDevice`] every other CUDA element in
@@ -175,20 +179,13 @@ impl CudaConverter {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                    .with_layouts(output.layouts()),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
             pp_log: &pp_log,
             "opened: {:?} -> {output:?}",
             input_of(output)
         );
-        Ok(Self {
+        Ok(Self(TransformStage::new(Converting {
             name,
             pp_log,
             hw_device_ctx,
@@ -196,12 +193,13 @@ impl CudaConverter {
             output,
             device_ctx,
             driver,
-            pad,
             repeated: RepeatedOutput::new(),
             pool,
-        })
+        })))
     }
+}
 
+impl Converting {
     /// Rejects anything this cannot convert before a device pointer is read
     /// out of it: the format, the frames context and its device, the surface
     /// layout, and the size this element was built for.
@@ -369,7 +367,7 @@ fn input_of(output: CudaFrameFormat) -> CudaFrameFormat {
     }
 }
 
-impl PerFrameTransform for CudaConverter {
+impl PerFrameTransform for Converting {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -387,7 +385,7 @@ impl PerFrameTransform for CudaConverter {
     }
 }
 
-impl Element for CudaConverter {
+impl Element for Converting {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -405,13 +403,7 @@ impl Element for CudaConverter {
     }
 }
 
-impl Source for CudaConverter {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for CudaConverter {
+impl Transform for Converting {
     /// Converts pixel layout on the device; the layout itself is a runtime value, not part of this.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -424,31 +416,37 @@ impl Sink for CudaConverter {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same surface as last time is the same pixels as last time,
             // and converting them again produces the frame already in hand —
             // see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
-                let converted = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(converted))
+                let converted = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(converted));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => Err(CudaConverterError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached conversion — a pure
-        // per-frame conversion, same reasoning as `CudaUpload::control`.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        // per-frame conversion, same reasoning as `CudaUpload`.
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(self.output.layouts()),
+        )
     }
 }
 
-impl Drop for CudaConverter {
+impl Drop for Converting {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -460,6 +458,7 @@ mod tests {
 
     use super::*;
     use crate::buffer::picture_id;
+    use crate::element::Sink;
     use crate::elements::CudaUpload;
     use crate::test_support::try_cuda_device;
 

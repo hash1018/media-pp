@@ -18,10 +18,8 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
-    pad::SrcPad,
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
     platform::windows::d3d11_gpu::D3d11Gpu,
@@ -29,6 +27,7 @@ use crate::{
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
     tone_map::ToneMap,
+    transform::{TransformStage, transform_filter},
 };
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/tone_map.hlsl");
@@ -150,13 +149,18 @@ struct ToneMapConstants {
 /// every draw and the context flushed after it, for `D3d11VideoEffect`'s
 /// reasons. A repeated input texture is answered with the output already
 /// made from it.
-pub struct D3d11ToneMap {
+pub struct D3d11ToneMap(TransformStage<Mapping>);
+
+transform_filter!(D3d11ToneMap);
+
+/// What a [`D3d11ToneMap`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Mapping {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
     context: Arc<Mutex<ID3D11DeviceContext>>,
     pass: FullFramePass<ToneMapConstants>,
-    pad: SrcPad,
     /// Only the CPU-side `AVFrame` wrapper is reused; each output texture is
     /// new, since downstream may still hold the last one.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -169,7 +173,7 @@ pub struct D3d11ToneMap {
 // device-level ones free-threaded, the context-level ones behind `context`'s
 // own `Mutex`) or plain data, and `&mut self` on every method that touches the
 // rest rules out concurrent access — the reasoning `D3d11VideoEffect` gives.
-unsafe impl Send for D3d11ToneMap {}
+unsafe impl Send for Mapping {}
 
 /// One validated input: the texture, which slice of it, the view formats
 /// of its two planes, the visible size, the fraction of the texture that
@@ -203,26 +207,20 @@ impl D3d11ToneMap {
             s!("ps_tone_map"),
         )?;
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "created");
-        Ok(Self {
+        Ok(Self(TransformStage::new(Mapping {
             name,
             pp_log,
             device: device.clone(),
             context,
             pass,
-            pad,
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
             repeated: RepeatedOutput::new(),
-        })
+        })))
     }
+}
 
+impl Mapping {
     /// Rejects anything this element cannot draw from, so a bad frame fails
     /// here naming the problem rather than as a `Draw` sampling nothing.
     fn validate(
@@ -367,7 +365,7 @@ impl D3d11ToneMap {
     }
 }
 
-impl PerFrameTransform for D3d11ToneMap {
+impl PerFrameTransform for Mapping {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -385,7 +383,7 @@ impl PerFrameTransform for D3d11ToneMap {
     }
 }
 
-impl Element for D3d11ToneMap {
+impl Element for Mapping {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -403,13 +401,7 @@ impl Element for D3d11ToneMap {
     }
 }
 
-impl Source for D3d11ToneMap {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d11ToneMap {
+impl Transform for Mapping {
     /// Drawn on the GPU from a D3D11 texture.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -418,15 +410,17 @@ impl Sink for D3d11ToneMap {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
-                let drawn = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(drawn))
+                let drawn = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(drawn));
+                Ok(())
             }
             // One `Draw` per frame, pushed before `consume` returns, so
             // there is nothing to drain.
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -435,11 +429,15 @@ impl Sink for D3d11ToneMap {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
@@ -451,6 +449,7 @@ mod tests {
     use windows::Win32::Graphics::Direct3D11::D3D11_SUBRESOURCE_DATA;
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::D3d11Download;
     use crate::test_support::try_d3d11_gpu as try_device;
     use crate::tone_map::HdrTransfer;

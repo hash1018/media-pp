@@ -9,12 +9,11 @@ use super::options::{EffectParams, VideoEffect, apply};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Output frames allocated once the input size is known — the same count
@@ -64,7 +63,13 @@ pub enum SwVideoEffectError {
 ///
 /// [`ColorCorrection::default`]: super::ColorCorrection::default
 /// [`LumaKey`]: super::LumaKey
-pub struct SwVideoEffect {
+pub struct SwVideoEffect(TransformStage<Applying>);
+
+transform_filter!(SwVideoEffect);
+
+/// What a [`SwVideoEffect`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Applying {
     pp_log: PpLog,
     name: Arc<str>,
     /// The effect in force and what it resolves to, refreshed from `control`
@@ -81,7 +86,6 @@ pub struct SwVideoEffect {
     /// corrected one way is not an answer to the same picture corrected
     /// another.
     repeated: RepeatedOutput,
-    pad: SrcPad,
 }
 
 impl SwVideoEffect {
@@ -91,16 +95,9 @@ impl SwVideoEffect {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwVideoEffect, &name, None);
         pp_info!(pp_log: &pp_log, "created: {} {effect:?}", effect.name());
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self {
+        let element = Self(TransformStage::new(Applying {
             name,
             pp_log,
             effect,
@@ -110,11 +107,12 @@ impl SwVideoEffect {
             dims: None,
             pool: None,
             repeated: RepeatedOutput::new(),
-            pad,
-        };
+        }));
         (element, handle)
     }
+}
 
+impl Applying {
     /// Picks up whatever the handle has been set to, once per frame.
     fn refresh(&mut self) {
         let effect = self.control.get();
@@ -148,7 +146,7 @@ impl SwVideoEffect {
     }
 }
 
-impl Element for SwVideoEffect {
+impl Element for Applying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -166,13 +164,7 @@ impl Element for SwVideoEffect {
     }
 }
 
-impl Source for SwVideoEffect {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for SwVideoEffect {
+impl Transform for Applying {
     /// Works pixel by pixel on the CPU; the GPU counterparts take frames
     /// resident on their own device.
     fn input_contract(&self) -> InputContract {
@@ -182,18 +174,21 @@ impl Sink for SwVideoEffect {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
                 self.refresh();
                 if !self.enabled || self.params.is_identity() {
                     // Straight through: the same picture, not a copy of it.
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let output = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(output))
+                let output = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(output));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -202,17 +197,21 @@ impl Sink for SwVideoEffect {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // A pure per-pixel transform: nothing buffered beyond the cached
         // output.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
-impl PerFrameTransform for SwVideoEffect {
+impl PerFrameTransform for Applying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -279,6 +278,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::{ColorCorrection, LumaKey};
 
     fn new_effect(

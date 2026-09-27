@@ -9,17 +9,16 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::VulkanDevice,
     error::Result,
-    pad::SrcPad,
     platform::vulkan::{
         bgra_pass::{BgraPass, BgraPassError, PassInput, immediates},
         gpu::VulkanError,
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/convert.wgsl");
@@ -65,12 +64,17 @@ impl From<BgraPassError> for VulkanConverterError {
 /// BT.709 above 576 rows and BT.601 at or below where it names none — and
 /// comes out full-range RGB, opaque, with its timing carried through and
 /// tagged as what it now is.
-pub struct VulkanConverter {
+pub struct VulkanConverter(TransformStage<Converting>);
+
+transform_filter!(VulkanConverter);
+
+/// What a [`VulkanConverter`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Converting {
     pp_log: PpLog,
     name: Arc<str>,
     pass: BgraPass,
     repeated: RepeatedOutput,
-    pad: SrcPad,
 }
 
 impl VulkanConverter {
@@ -84,23 +88,17 @@ impl VulkanConverter {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VulkanConverter, &name, None);
         let pass = BgraPass::new(device, SHADER, c"main", 64, PassInput::Nv12)?;
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "opened: NV12 -> BGRA on {}", device.name());
-        Ok(Self {
+        Ok(Self(TransformStage::new(Converting {
             name,
             pp_log,
             pass,
             repeated: RepeatedOutput::new(),
-            pad,
-        })
+        })))
     }
+}
 
+impl Converting {
     fn convert(
         &mut self,
         source: &ffmpeg::frame::Video,
@@ -130,7 +128,7 @@ impl VulkanConverter {
     }
 }
 
-impl PerFrameTransform for VulkanConverter {
+impl PerFrameTransform for Converting {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -148,7 +146,7 @@ impl PerFrameTransform for VulkanConverter {
     }
 }
 
-impl Element for VulkanConverter {
+impl Element for Converting {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -166,13 +164,7 @@ impl Element for VulkanConverter {
     }
 }
 
-impl Source for VulkanConverter {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for VulkanConverter {
+impl Transform for Converting {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
@@ -180,13 +172,15 @@ impl Sink for VulkanConverter {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
-                let converted = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(converted))
+                let converted = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(converted));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -195,15 +189,19 @@ impl Sink for VulkanConverter {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
-impl Drop for VulkanConverter {
+impl Drop for Converting {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -212,6 +210,7 @@ impl Drop for VulkanConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::Sink;
     use crate::{
         elements::{VulkanDownload, VulkanUpload},
         test_support::{capture, try_vulkan_device},

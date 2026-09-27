@@ -10,12 +10,11 @@ use crate::{
     buffer::MediaBuffer,
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// How many output frames [`SwChromaKey`] pre-allocates once it learns its
@@ -62,7 +61,13 @@ pub enum SwChromaKeyError {
 /// through unchanged; only alpha is written, and it is the key's coverage
 /// times the alpha each pixel arrived with, so an opaque picture is keyed as
 /// it always was and one another key already cut into keeps those cuts.
-pub struct SwChromaKey {
+pub struct SwChromaKey(TransformStage<Keying>);
+
+transform_filter!(SwChromaKey);
+
+/// What a [`SwChromaKey`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Keying {
     pp_log: PpLog,
     name: Arc<str>,
     /// What this element is keying by right now, refreshed from `control`
@@ -92,7 +97,6 @@ pub struct SwChromaKey {
     /// is what `PerFrameTransform`'s own docs mean by an element with a
     /// runtime setting comparing its own state.
     repeated: RepeatedOutput,
-    pad: SrcPad,
 }
 
 impl SwChromaKey {
@@ -108,16 +112,9 @@ impl SwChromaKey {
             options.threshold,
             options.smoothing
         );
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self {
+        let element = Self(TransformStage::new(Keying {
             name,
             pp_log,
             options,
@@ -126,11 +123,12 @@ impl SwChromaKey {
             dims: None,
             pool: None,
             repeated: RepeatedOutput::new(),
-            pad,
-        };
+        }));
         (element, handle)
     }
+}
 
+impl Keying {
     /// Picks up whatever the handle has been set to, and forgets the cached
     /// keyed frame if it was made with something else.
     ///
@@ -177,7 +175,7 @@ impl SwChromaKey {
     }
 }
 
-impl Element for SwChromaKey {
+impl Element for Keying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -195,13 +193,7 @@ impl Element for SwChromaKey {
     }
 }
 
-impl Source for SwChromaKey {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for SwChromaKey {
+impl Transform for Keying {
     /// Keys pixel by pixel on the CPU; the GPU counterpart is D3d11ChromaKey.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -210,7 +202,7 @@ impl Sink for SwChromaKey {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same picture as last time keys to the frame already in
             // hand — see [`PerFrameTransform`], which is where that is
@@ -219,12 +211,15 @@ impl Sink for SwChromaKey {
                 self.refresh_options();
                 if !self.enabled {
                     // Straight through: the same picture, not a copy of it.
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let keyed = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(keyed))
+                let keyed = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(keyed));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(SwChromaKeyError::UnsupportedBuffer("Packet").into())
@@ -236,17 +231,21 @@ impl Sink for SwChromaKey {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // A pure per-pixel transform, same as `SwScaler` — nothing local
         // buffered or ordered to flush beyond the cached keyed frame.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
-impl PerFrameTransform for SwChromaKey {
+impl PerFrameTransform for Keying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -352,6 +351,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{super::options::ChromaKeyMethod, *};
+    use crate::element::{Sink, Source};
 
     fn new_chroma_key(
         options: ChromaKeyOptions,

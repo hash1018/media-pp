@@ -17,16 +17,15 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
-    pad::SrcPad,
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
     platform::windows::d3d11_gpu::D3d11Gpu,
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/video_effect_bgra.hlsl");
@@ -171,7 +170,13 @@ impl EffectConstants {
 ///
 /// An effect that changes nothing, and an element that is turned off, hand
 /// each frame straight through — the same texture, not a copy of it.
-pub struct D3d11VideoEffect {
+pub struct D3d11VideoEffect(TransformStage<Applying>);
+
+transform_filter!(D3d11VideoEffect);
+
+/// What a [`D3d11VideoEffect`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Applying {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
@@ -184,7 +189,6 @@ pub struct D3d11VideoEffect {
     enabled: bool,
 
     pass: FullFramePass<EffectConstants>,
-    pad: SrcPad,
     /// Only the CPU-side `AVFrame` wrapper is reused; each output texture is
     /// new, since downstream may still hold the last one.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -197,7 +201,7 @@ pub struct D3d11VideoEffect {
 // device-level ones free-threaded, the context-level ones behind `context`'s
 // own `Mutex`) or plain data, and `&mut self` on every method that touches the
 // rest rules out concurrent access — the reasoning `D3d11ChromaKey` gives.
-unsafe impl Send for D3d11VideoEffect {}
+unsafe impl Send for Applying {}
 
 /// One validated input: the texture to sample, which slice of it, the
 /// visible size to draw, and the fraction of the texture that size covers.
@@ -234,18 +238,11 @@ impl D3d11VideoEffect {
             s!("ps_effect"),
         )?;
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "created: {} {effect:?}", effect.name());
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self {
+        let element = Self(TransformStage::new(Applying {
             name,
             pp_log,
             device: device.clone(),
@@ -255,13 +252,14 @@ impl D3d11VideoEffect {
             control,
             enabled: true,
             pass,
-            pad,
             pool,
             repeated: RepeatedOutput::new(),
-        };
+        }));
         Ok((element, handle))
     }
+}
 
+impl Applying {
     /// Picks up whatever the handle has been set to, once per frame.
     fn refresh(&mut self) {
         let effect = self.control.get();
@@ -424,7 +422,7 @@ impl D3d11VideoEffect {
     }
 }
 
-impl PerFrameTransform for D3d11VideoEffect {
+impl PerFrameTransform for Applying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -442,7 +440,7 @@ impl PerFrameTransform for D3d11VideoEffect {
     }
 }
 
-impl Element for D3d11VideoEffect {
+impl Element for Applying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -460,13 +458,7 @@ impl Element for D3d11VideoEffect {
     }
 }
 
-impl Source for D3d11VideoEffect {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d11VideoEffect {
+impl Transform for Applying {
     /// Drawn on the GPU; a system-memory frame belongs in SwVideoEffect.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -475,20 +467,23 @@ impl Sink for D3d11VideoEffect {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
                 self.refresh();
                 if !self.enabled || self.params.is_identity() {
                     // Straight through: the same picture, not a copy of it.
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let drawn = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(drawn))
+                let drawn = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(drawn));
+                Ok(())
             }
             // One `Draw` per frame, pushed before `consume` returns, so
             // there is nothing to drain.
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -497,11 +492,15 @@ impl Sink for D3d11VideoEffect {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
@@ -515,6 +514,7 @@ mod tests {
 
     use super::super::super::options::apply;
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::{ColorCorrection, D3d11Download, LumaKey};
     use crate::test_support::try_d3d11_gpu as try_device;
 

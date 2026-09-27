@@ -10,12 +10,10 @@ use super::super::options::{ChromaKeyOptions, feather_band};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver},
@@ -24,6 +22,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `CudaChromaKey`. Converts into the crate-wide `Error`
@@ -95,7 +94,13 @@ pub enum CudaChromaKeyError {
 /// the same normalized BGR distance and the same feather ramp
 /// [`SwChromaKey`](crate::elements::SwChromaKey) does, from the same
 /// resolved band the D3D11 shader reads.
-pub struct CudaChromaKey {
+pub struct CudaChromaKey(TransformStage<Keying>);
+
+transform_filter!(CudaChromaKey);
+
+/// What a [`CudaChromaKey`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Keying {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in
@@ -128,7 +133,6 @@ pub struct CudaChromaKey {
     /// `options`. A disabled one hands every frame straight through.
     enabled: bool,
 
-    pad: SrcPad,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the CUDA surface
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
     /// `CudaUpload`.
@@ -139,7 +143,7 @@ pub struct CudaChromaKey {
 // affinity of their own, `device_ctx` only ever has its address compared, and
 // `&mut self` on every method that touches them rules out concurrent access.
 // Same reasoning as `CudaConverter`.
-unsafe impl Send for CudaChromaKey {}
+unsafe impl Send for Keying {}
 
 impl CudaChromaKey {
     /// `device` must be the same [`CudaDevice`] every other CUDA element in
@@ -167,13 +171,6 @@ impl CudaChromaKey {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let key_color = options.method.key_color();
         pp_info!(
@@ -185,7 +182,7 @@ impl CudaChromaKey {
 
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self {
+        let element = Self(TransformStage::new(Keying {
             name,
             pp_log,
             hw_device_ctx,
@@ -195,13 +192,14 @@ impl CudaChromaKey {
             options,
             control,
             enabled: true,
-            pad,
             repeated: RepeatedOutput::new(),
             pool,
-        };
+        }));
         Ok((element, handle))
     }
+}
 
+impl Keying {
     /// Picks up whatever the handle has been set to, and forgets the cached
     /// keyed surface if it was made with something else.
     ///
@@ -329,7 +327,7 @@ impl CudaChromaKey {
     }
 }
 
-impl PerFrameTransform for CudaChromaKey {
+impl PerFrameTransform for Keying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -347,7 +345,7 @@ impl PerFrameTransform for CudaChromaKey {
     }
 }
 
-impl Element for CudaChromaKey {
+impl Element for Keying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -365,13 +363,7 @@ impl Element for CudaChromaKey {
     }
 }
 
-impl Source for CudaChromaKey {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for CudaChromaKey {
+impl Transform for Keying {
     /// Writes alpha into a device-resident frame; the surface layout it
     /// requires is a runtime value, not part of this.
     fn input_contract(&self) -> InputContract {
@@ -381,7 +373,7 @@ impl Sink for CudaChromaKey {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same surface as last time is the same pixels as last time,
             // and keying them again produces the frame already in hand —
@@ -390,27 +382,34 @@ impl Sink for CudaChromaKey {
                 self.refresh_options();
                 if !self.enabled {
                     // Straight through: the same picture, not a copy of it.
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let keyed = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(keyed))
+                let keyed = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(keyed));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => Err(CudaChromaKeyError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // Nothing local to react to beyond the cached keyed frame — a pure
-        // per-frame transform, same reasoning as `CudaConverter::control`.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        // per-frame transform, same reasoning as `CudaConverter`.
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
-impl Drop for CudaChromaKey {
+impl Drop for Keying {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -422,6 +421,7 @@ mod tests {
 
     use super::super::super::options::ChromaKeyMethod;
     use super::*;
+    use crate::element::Sink;
     use crate::{
         elements::{CudaDownload, CudaUpload},
         test_support::try_cuda_device,

@@ -10,12 +10,10 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
-    pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver},
@@ -24,6 +22,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to `CudaVideoEffect`. Converts into the crate-wide
@@ -76,7 +75,13 @@ pub enum CudaVideoEffectError {
 /// through the hardware's approximate `lg2`/`ex2`, which is why this agrees
 /// with the software element to within one step rather than exactly
 /// wherever a gamma is set.
-pub struct CudaVideoEffect {
+pub struct CudaVideoEffect(TransformStage<Applying>);
+
+transform_filter!(CudaVideoEffect);
+
+/// What a [`CudaVideoEffect`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Applying {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in
@@ -99,7 +104,6 @@ pub struct CudaVideoEffect {
     control: Arc<VideoEffectControl>,
     enabled: bool,
 
-    pad: SrcPad,
     /// Reuses only the CPU-side `AVFrame` wrapper; each surface comes from
     /// `hw_frames_ctx`'s own pool.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -109,7 +113,7 @@ pub struct CudaVideoEffect {
 // affinity, `device_ctx` only ever has its address compared, and `&mut self`
 // on every method that touches them rules out concurrent access — the
 // reasoning `CudaChromaKey` gives.
-unsafe impl Send for CudaVideoEffect {}
+unsafe impl Send for Applying {}
 
 impl CudaVideoEffect {
     /// `device` must be the same [`CudaDevice`] every other CUDA element in
@@ -134,19 +138,12 @@ impl CudaVideoEffect {
         // reused by another context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: BGRA, {} {effect:?}", effect.name());
 
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self {
+        let element = Self(TransformStage::new(Applying {
             name,
             pp_log,
             hw_device_ctx,
@@ -157,13 +154,14 @@ impl CudaVideoEffect {
             params: effect.params(),
             control,
             enabled: true,
-            pad,
             repeated: RepeatedOutput::new(),
             pool,
-        };
+        }));
         Ok((element, handle))
     }
+}
 
+impl Applying {
     /// Picks up whatever the handle has been set to, once per frame.
     fn refresh(&mut self) {
         let effect = self.control.get();
@@ -270,7 +268,7 @@ impl CudaVideoEffect {
     }
 }
 
-impl PerFrameTransform for CudaVideoEffect {
+impl PerFrameTransform for Applying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -288,7 +286,7 @@ impl PerFrameTransform for CudaVideoEffect {
     }
 }
 
-impl Element for CudaVideoEffect {
+impl Element for Applying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -306,13 +304,7 @@ impl Element for CudaVideoEffect {
     }
 }
 
-impl Source for CudaVideoEffect {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for CudaVideoEffect {
+impl Transform for Applying {
     /// Device-resident frames; the surface layout it needs is a runtime
     /// value, not part of this.
     fn input_contract(&self) -> InputContract {
@@ -322,18 +314,21 @@ impl Sink for CudaVideoEffect {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
                 self.refresh();
                 if !self.enabled || self.params.is_identity() {
                     // Straight through: the same picture, not a copy of it.
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let output = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(output))
+                let output = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(output));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -342,15 +337,19 @@ impl Sink for CudaVideoEffect {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
-impl Drop for CudaVideoEffect {
+impl Drop for Applying {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -362,6 +361,7 @@ mod tests {
 
     use super::super::super::options::apply;
     use super::*;
+    use crate::element::Sink;
     use crate::{
         elements::{ColorCorrection, CudaDownload, CudaUpload, LumaKey},
         test_support::try_cuda_device,

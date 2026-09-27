@@ -18,16 +18,15 @@ use crate::{
     buffer::MediaBuffer,
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
-    pad::SrcPad,
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
     platform::windows::d3d11_gpu::D3d11Gpu,
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/chroma_key_bgra.hlsl");
@@ -212,7 +211,13 @@ impl ChromaKeyConstants {
 /// the flush point for everything else queued on the shared context, which
 /// is the trade it makes: batching across elements in exchange for a bound
 /// on what the device holds. See `key`'s own comment for the measurements.
-pub struct D3d11ChromaKey {
+pub struct D3d11ChromaKey(TransformStage<Keying>);
+
+transform_filter!(D3d11ChromaKey);
+
+/// What a [`D3d11ChromaKey`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Keying {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
@@ -227,7 +232,6 @@ pub struct D3d11ChromaKey {
     enabled: bool,
 
     pass: FullFramePass<ChromaKeyConstants>,
-    pad: SrcPad,
     /// Reused across every keyed frame — see [`UnboundObjectPool`]'s docs.
     /// Only the small CPU-side `AVFrame` wrapper is actually reused; the
     /// output texture itself is a fresh allocation per frame, since
@@ -252,7 +256,7 @@ pub struct D3d11ChromaKey {
 // own `Mutex`) or plain data. `&mut self` on every method that touches
 // non-`Arc`/`Mutex` state already rules out concurrent access to those parts
 // from multiple threads — same reasoning as `D3d11Scaler`.
-unsafe impl Send for D3d11ChromaKey {}
+unsafe impl Send for Keying {}
 
 /// One validated input: the texture to sample, which slice of it, the
 /// visible size to draw, and the fraction of the texture that size covers.
@@ -291,13 +295,6 @@ impl D3d11ChromaKey {
         )?;
 
         let key_color = options.method.key_color();
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
             pp_log: &pp_log,
@@ -307,7 +304,7 @@ impl D3d11ChromaKey {
         );
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self {
+        let element = Self(TransformStage::new(Keying {
             name,
             pp_log,
             device: device.clone(),
@@ -316,13 +313,14 @@ impl D3d11ChromaKey {
             control,
             enabled: true,
             pass,
-            pad,
             pool,
             repeated: RepeatedOutput::new(),
-        };
+        }));
         Ok((element, handle))
     }
+}
 
+impl Keying {
     /// Picks up whatever the handle has been set to, and forgets the cached
     /// keyed texture if it was made with something else.
     ///
@@ -514,7 +512,7 @@ impl D3d11ChromaKey {
     }
 }
 
-impl PerFrameTransform for D3d11ChromaKey {
+impl PerFrameTransform for Keying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -532,7 +530,7 @@ impl PerFrameTransform for D3d11ChromaKey {
     }
 }
 
-impl Element for D3d11ChromaKey {
+impl Element for Keying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -550,13 +548,7 @@ impl Element for D3d11ChromaKey {
     }
 }
 
-impl Source for D3d11ChromaKey {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for D3d11ChromaKey {
+impl Transform for Keying {
     /// Keying happens on the GPU; a system-memory frame belongs in SwChromaKey.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -565,7 +557,7 @@ impl Sink for D3d11ChromaKey {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             // The same texture as last time is the same pixels as last time,
             // and keying them again produces the surface already in hand —
@@ -574,14 +566,17 @@ impl Sink for D3d11ChromaKey {
                 self.refresh_options();
                 if !self.enabled {
                     // Straight through: the same picture, not a copy of it.
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let keyed = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(keyed))
+                let keyed = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(keyed));
+                Ok(())
             }
             // Nothing is buffered here — one `Draw` per frame, pushed
             // before `consume` returns — so there is nothing to drain.
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -590,13 +585,17 @@ impl Sink for D3d11ChromaKey {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn reset(&mut self) {
         // A pure per-pixel transform, same as `D3d11Scaler` — nothing local
         // buffered or ordered to flush beyond the cached keyed frame.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
@@ -611,6 +610,7 @@ mod tests {
     };
 
     use super::{super::super::options::ChromaKeyMethod, *};
+    use crate::element::{Sink, Source};
     use crate::elements::D3d11Download;
     use crate::test_support::try_d3d11_gpu as try_device;
 

@@ -10,17 +10,16 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::VulkanDevice,
     error::Result,
-    pad::SrcPad,
     platform::vulkan::{
         bgra_pass::{BgraPass, BgraPassError, PassInput, immediates},
         gpu::VulkanError,
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
+    transform::{TransformStage, transform_filter},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/video_effect.wgsl");
@@ -66,7 +65,13 @@ impl From<BgraPassError> for VulkanVideoEffectError {
 /// PTS, duration and colour tags carried through. An effect that changes
 /// nothing, and an element that is turned off, hand each frame straight
 /// through — the same picture, not a copy of it.
-pub struct VulkanVideoEffect {
+pub struct VulkanVideoEffect(TransformStage<Applying>);
+
+transform_filter!(VulkanVideoEffect);
+
+/// What a [`VulkanVideoEffect`] does to each frame: all of its work, which the
+/// framework makes the filter.
+struct Applying {
     pp_log: PpLog,
     name: Arc<str>,
     pass: BgraPass,
@@ -79,7 +84,6 @@ pub struct VulkanVideoEffect {
     params: EffectParams,
     control: Arc<VideoEffectControl>,
     enabled: bool,
-    pad: SrcPad,
 }
 
 impl VulkanVideoEffect {
@@ -94,18 +98,11 @@ impl VulkanVideoEffect {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VulkanVideoEffect, &name, None);
         let pass = BgraPass::new(device, SHADER, c"main", 96, PassInput::Bgra)?;
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
         pp_info!(pp_log: &pp_log, "opened: BGRA, {} {effect:?}", effect.name());
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
         Ok((
-            Self {
+            Self(TransformStage::new(Applying {
                 name,
                 pp_log,
                 pass,
@@ -114,12 +111,13 @@ impl VulkanVideoEffect {
                 params: effect.params(),
                 control,
                 enabled: true,
-                pad,
-            },
+            })),
             handle,
         ))
     }
+}
 
+impl Applying {
     /// Picks up whatever the handle has been set to, once per frame.
     fn refresh(&mut self) {
         let effect = self.control.get();
@@ -171,7 +169,7 @@ impl VulkanVideoEffect {
     }
 }
 
-impl PerFrameTransform for VulkanVideoEffect {
+impl PerFrameTransform for Applying {
     fn repeated(&mut self) -> &mut RepeatedOutput {
         &mut self.repeated
     }
@@ -189,7 +187,7 @@ impl PerFrameTransform for VulkanVideoEffect {
     }
 }
 
-impl Element for VulkanVideoEffect {
+impl Element for Applying {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -207,13 +205,7 @@ impl Element for VulkanVideoEffect {
     }
 }
 
-impl Source for VulkanVideoEffect {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for VulkanVideoEffect {
+impl Transform for Applying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
@@ -221,18 +213,21 @@ impl Sink for VulkanVideoEffect {
         )
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
                 self.refresh();
                 if !self.enabled || self.params.is_identity() {
                     // Straight through: the same picture, not a copy of it.
-                    return self.pad.push(MediaBuffer::Video(frame));
+                    out.push(MediaBuffer::Video(frame));
+                    return Ok(());
                 }
-                let output = self.transform(&frame)?;
-                self.pad.push(MediaBuffer::Video(output))
+                let output = PerFrameTransform::transform(self, &frame)?;
+                out.push(MediaBuffer::Video(output));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -241,15 +236,19 @@ impl Sink for VulkanVideoEffect {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.repeated.clear();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.repeated.clear();
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 }
 
-impl Drop for VulkanVideoEffect {
+impl Drop for Applying {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
     }
@@ -259,6 +258,7 @@ impl Drop for VulkanVideoEffect {
 mod tests {
     use super::super::super::options::apply;
     use super::*;
+    use crate::element::Sink;
     use crate::{
         elements::{ColorCorrection, LumaKey, VulkanDownload, VulkanUpload},
         test_support::{capture, try_vulkan_device},

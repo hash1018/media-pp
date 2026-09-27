@@ -57,12 +57,13 @@ compile error with no explanation.
   any filter — it now takes `impl IntoFilter<M>`, which a `Filter` and a
   `Transform` both are, with the marker worked out by the compiler — and
   `into_filter()` makes one of it for a list, as a `Rack` takes. A filter
-  written as `Sink` and `Source` is unchanged. The scalers, the uploads and
-  the downloads of every backend are the first elements of this crate
-  written this way, with their names, constructors and behaviour as they
-  were, but for two edges the stage settles: a `D3d12Scaler` whose wait for
-  the GPU fails at the end still ends the stream, and a `CudaScaler` hands
-  on every frame its graph made even where downstream refuses one.
+  written as `Sink` and `Source` is unchanged. The scalers, uploads,
+  downloads, converters, chroma keys and video effects of every backend,
+  and `D3d11ToneMap`, are the first elements of this crate written this
+  way, with their names, constructors and behaviour as they were, but for
+  two edges the stage settles: a `D3d12Scaler` whose wait for the GPU fails
+  at the end still ends the stream, and a `CudaScaler` hands on every frame
+  its graph made even where downstream refuses one.
 
 - **`VulkanScaler` resizes NV12 and BGRA Vulkan frames on the GPU**, the
   Vulkan counterpart of `CudaScaler`: `VulkanDecoder -> VulkanScaler ->
