@@ -352,11 +352,12 @@ impl VulkanEncoder {
         loop {
             match self.encoder.receive_packet(&mut packet) {
                 Ok(()) => {
-                    packet.set_time_base(shared::TIME_BASE);
-                    if packet.duration() == 0 && self.packet_duration > 0 {
-                        packet.set_duration(self.packet_duration);
+                    let mut owned = owned(&packet)?;
+                    owned.set_time_base(shared::TIME_BASE);
+                    if owned.duration() == 0 && self.packet_duration > 0 {
+                        owned.set_duration(self.packet_duration);
                     }
-                    self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    self.pad.push(MediaBuffer::Packet(Arc::new(owned)))?;
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -365,6 +366,28 @@ impl VulkanEncoder {
         }
         Ok(())
     }
+}
+
+/// `packet`'s bytes and properties in a packet of its own.
+///
+/// What FFmpeg's Vulkan encoders hand out is a view of a buffer from the
+/// encoder's own pool (`libavcodec/vulkan_encode.c`), whose free callback
+/// reaches through the encoder's Vulkan context. A packet let go of after
+/// the encoder was — in a muxer's queue as a recording stops, or held by a
+/// caller — frees into a context that is gone, and faulted there. So none
+/// leaves this element: a copy of the compressed bytes costs little, and
+/// the pool's buffer goes back while the encoder still exists.
+fn owned(packet: &ffmpeg::Packet) -> Result<ffmpeg::Packet> {
+    use ffmpeg::packet::{Mut as _, Ref as _};
+
+    let mut owned = ffmpeg::Packet::copy(packet.data().unwrap_or(&[]));
+    // SAFETY: two live packets; the call copies timing, flags and side data,
+    // not the payload.
+    let code = unsafe { ffi::av_packet_copy_props(owned.as_mut_ptr(), packet.as_ptr()) };
+    if code < 0 {
+        return Err(VulkanEncoderError::from(ffmpeg::Error::from(code)).into());
+    }
+    Ok(owned)
 }
 
 /// The track this encoder's packets make: its [`VulkanEncoder::parameters`],
@@ -558,6 +581,14 @@ mod tests {
             if let MediaBuffer::Packet(packet) = packet {
                 assert_eq!(packet.time_base(), encoder.time_base());
                 assert!(packet.duration() > 0);
+                // Its bytes are its own, not a view of the encoder's pool:
+                // freed after the encoder, one of those faulted.
+                // SAFETY: a live packet; only its pointers are compared.
+                let own = unsafe {
+                    let raw = ffmpeg::packet::Ref::as_ptr(&**packet);
+                    !(*raw).buf.is_null() && std::ptr::eq((*raw).data, (*(*raw).buf).data)
+                };
+                assert!(own, "a packet that is a view of the encoder's buffer");
             }
         }
         let decoded = decode(encoder.parameters(), &packets);

@@ -148,6 +148,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A packet from `VulkanEncoder` can outlive the encoder.** FFmpeg's
+  Vulkan encoders hand out a view of a buffer from the encoder's own pool,
+  whose free callback reaches through the encoder's Vulkan context; one
+  let go of after the encoder was — in a muxer's queue as a recording
+  stops — faulted inside libavcodec. Each packet is now copied into a
+  buffer of its own before it leaves the element. Found as a crash in this
+  crate's own tests one run in two on an RTX 3050 with FFmpeg 8.1.
+
 - **A looping file turns round, and plays backwards, on any lap.** Where
   playback turns round is the picture shown, on the timeline looping carries
   past the file's end; `FileDemuxer` read it as a position in the file, so
