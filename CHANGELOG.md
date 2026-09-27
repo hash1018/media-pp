@@ -178,6 +178,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A seek to the last pictures of a file whose sound ends sooner no
+  longer times out.** The picture's branch took its sample and nothing
+  more, so `FileDemuxer` parked the packets it could not hand on; the
+  sound had nothing at or after the target and could only preroll on its
+  end of stream. At the end of the file the demuxer waited for every parked
+  packet to go before ending any pad, which was until the preroll ended,
+  so the sound's end never came and the seek failed after five seconds.
+  A pad that owes nothing parked now has its end at once; another's parked
+  packets and end follow as it takes them. Rare — once in a few hundred of
+  the conformance matrix's sequences, with one-deep queues — which is how
+  it was found, and traced.
+
 - **After a paused seek, `WasapiRenderer` plays from the seek's target.**
   The one sample a paused seek hands every terminal reached it while it
   was paused, and it dropped it, so once playback resumed the sound began

@@ -854,9 +854,18 @@ impl FileDemuxer {
     /// Packets were parked per pad for exactly this; the end was not. Found
     /// by the conformance matrix, with one-deep queues and sound.
     ///
-    /// A `Finish` that arrives meanwhile ends in order: the ends still owed
-    /// go out, waited for, since a finish plays on to them — and no pad is
-    /// handed a second.
+    /// What is still parked goes out from here too, each pad's in its order
+    /// and its end after the last of it — but a pad that owes nothing parked
+    /// has its end as soon as it can take it, whatever another still owes.
+    /// Waited for until every pad's parked packets had gone, the end was
+    /// kept from a branch that needed it to preroll, behind a sibling that
+    /// had its sample and took nothing more: a seek to the last picture,
+    /// past the last of the sound, timed out once in a few hundred of the
+    /// matrix's sequences.
+    ///
+    /// A `Finish` that arrives meanwhile ends in order: what is parked and
+    /// the ends still owed go out, waited for, since a finish plays on to
+    /// them — and no pad is handed a second end.
     fn end_every_pad(
         &mut self,
         control: &ControlReceiver,
@@ -865,8 +874,12 @@ impl FileDemuxer {
         self.sought = false;
         let mut owed = vec![true; self.pads.len()];
         loop {
+            self.drain_pending(bus)?;
             for (index, pad) in self.pads.iter_mut().enumerate() {
-                if owed[index] && (!pad.is_linked() || pad.ready_consume()) {
+                if owed[index]
+                    && self.parked_per_pad[index] == 0
+                    && (!pad.is_linked() || pad.ready_consume())
+                {
                     pad.push_eos(&self.pp_log)?;
                     owed[index] = false;
                 }
@@ -876,6 +889,10 @@ impl FileDemuxer {
             }
             while let Some((request, ack)) = control.try_recv() {
                 if matches!(request, RequestKind::Finish) {
+                    for (index, _, packet) in std::mem::take(&mut self.pending) {
+                        self.push_to_pad(index, packet, bus);
+                    }
+                    self.forget_parked();
                     for (index, pad) in self.pads.iter_mut().enumerate() {
                         if owed[index] {
                             pad.push_eos(&self.pp_log)?;
@@ -1136,16 +1153,15 @@ impl SourceElement for FileDemuxer {
                     .next()
                     .map(|(s, p)| (s.index(), s.time_base(), p));
                 let Some((index, time_base, mut packet)) = next else {
-                    if !self.pending.is_empty() {
-                        // Nothing left to read, but a blocked pad still owes
-                        // delivery.
-                        std::thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
                     // The end of the file, and the one place the loop flag is
                     // read: a change made mid-file lands here, at the end the
                     // source was already heading for.
                     if self.looping.load(Ordering::Relaxed) {
+                        if !self.pending.is_empty() {
+                            // The next lap waits for what this one parked.
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
                         match self.wrap() {
                             Ok(()) => {
                                 self.begin_lap(bus);
@@ -1166,6 +1182,8 @@ impl SourceElement for FileDemuxer {
                             ),
                         }
                     }
+                    // What is still parked goes out with the ends — see
+                    // `end_every_pad`.
                     break;
                 };
                 self.stamp_lap(index, time_base, &mut packet);
@@ -2676,6 +2694,148 @@ mod tests {
         assert!(demuxer.pending.is_empty());
         assert_eq!(seen.load(Ordering::SeqCst), 2);
         assert!(!demuxer.pending_blocked());
+    }
+
+    /// Records what reaches a pad — how many packets, and whether its end
+    /// did — and takes nothing while its gate is shut.
+    struct EndRecorder {
+        open: Arc<AtomicBool>,
+        packets: Arc<AtomicUsize>,
+        ended: Arc<AtomicBool>,
+        pp_log: PpLog,
+    }
+
+    /// What an [`EndRecorder`] linked to a pad shows: its gate, what it
+    /// counted, whether it ended.
+    type EndRecord = (Arc<AtomicBool>, Arc<AtomicUsize>, Arc<AtomicBool>);
+
+    impl EndRecorder {
+        fn link(pad: &mut SrcPad, name: &str, open: bool) -> EndRecord {
+            let (gate, packets, ended) = (
+                Arc::new(AtomicBool::new(open)),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            pad.link(Box::new(EndRecorder {
+                open: Arc::clone(&gate),
+                packets: Arc::clone(&packets),
+                ended: Arc::clone(&ended),
+                pp_log: element_pp_log(ElementType::Other, name, None),
+            }));
+            (gate, packets, ended)
+        }
+    }
+
+    impl Element for EndRecorder {
+        fn name(&self) -> Arc<str> {
+            "ends".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl crate::element::Sink for EndRecorder {
+        fn ready_consume(&mut self) -> bool {
+            self.open.load(Ordering::SeqCst)
+        }
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            if buf.is_eos() {
+                self.ended.store(true, Ordering::SeqCst);
+            } else {
+                self.packets.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    /// At the end of the file a pad that owes nothing parked has its end at
+    /// once, while another's parked packets still wait for room — and those
+    /// go out in order, then that pad's end, once it has some.
+    ///
+    /// What the conformance matrix found: a seek to the last picture, past
+    /// the last of the sound, has the picture's branch take its sample and
+    /// nothing more, so the rest of its packets are parked; the sound's
+    /// branch has nothing at or after the target and prerolls only on its
+    /// end. Reading waited at the end of the file until every parked packet
+    /// had gone, which was until the preroll ended, so the sound's end never
+    /// came and the seek timed out.
+    #[test]
+    fn a_pad_owing_nothing_is_ended_while_another_still_owes_packets() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
+        let [held, ended] = [ffmpeg::media::Type::Video, ffmpeg::media::Type::Audio].map(|kind| {
+            streams
+                .iter()
+                .find(|stream| stream.kind == kind)
+                .expect("the fixture has a picture and a sound")
+                .index
+        });
+        let (room, held_packets, held_ended) =
+            EndRecorder::link(&mut demuxer.pads[held], "held", false);
+        let (_, _, sound_ended) = EndRecorder::link(&mut demuxer.pads[ended], "ended", true);
+        // In a preroll, as a seek's: a pad that takes nothing more has its
+        // packets parked, and reading goes on for the other.
+        let context = Arc::new(crate::element::Context::for_test_with_clock(
+            Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::new(crate::clock::Clock::new()),
+        ));
+        demuxer.attach_context(&context);
+        context
+            .state
+            .observe(&crate::control::ControlMsg::Preroll(Arc::new(
+                crate::control::PrerollContext::new([]),
+            )));
+        let (requests, control) = crate::control::channel_in(&context.state);
+        let (bus, _bus_rx) = Bus::new();
+        // Answers rather than asserting: a demuxer left running would keep
+        // the scope below from ever ending, so it is stopped first.
+        let happens = |done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !done() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            true
+        };
+
+        let (sound_first, still_parked, picture_after, packets_first) =
+            std::thread::scope(|scope| {
+                let running = scope.spawn(|| demuxer.run(&control, &bus));
+                let sound_first = happens(&|| sound_ended.load(Ordering::SeqCst));
+                let still_parked =
+                    held_packets.load(Ordering::SeqCst) == 0 && !held_ended.load(Ordering::SeqCst);
+                room.store(true, Ordering::SeqCst);
+                let picture_after = happens(&|| held_ended.load(Ordering::SeqCst));
+                let packets_first = held_packets.load(Ordering::SeqCst) > 0;
+                requests.send(crate::control::ControlMsg::Stop);
+                running.join().expect("no panic").expect("no error");
+                (sound_first, still_parked, picture_after, packets_first)
+            });
+        assert!(
+            sound_first,
+            "the sound was not ended while the picture still owed packets"
+        );
+        assert!(
+            still_parked,
+            "the picture took nothing, nor its end, meanwhile"
+        );
+        assert!(
+            picture_after,
+            "the picture's packets and end did not follow"
+        );
+        assert!(packets_first, "its packets went ahead of its end");
     }
 
     /// A file whose picture is muxed ahead of its sound: the video pad's queue

@@ -311,6 +311,20 @@ to two cores it failed once in ten, then in none of twenty on the tree
 before the segment carried `show_from` and none of twenty after — so
 still rarer than a test can hold, and not tied to that change.
 
+Traced on the 77th replay, and fixed. The sound track ends before the
+last picture. The seek landed on a keyframe well before it; the picture's
+branch took its sample, the last frame, and nothing more, so the demuxer
+parked the picture packets it could no longer hand on; the sound had
+nothing at or after the target and could preroll only on its end of stream. At the end
+of the file the demuxer waited for every parked packet to go before it
+ended any pad — until the preroll ended, which waited on the sound's end.
+Not the read cursor after all: `end_every_pad` already handed each pad its
+end as soon as it could take one, but the read loop only reached it once
+nothing was parked. Now it goes there with packets parked, and a pad that
+owes nothing has its end at once
+(`a_pad_owing_nothing_is_ended_while_another_still_owes_packets`, which
+fails on the old loop).
+
 ---
 
 ## 4. The design
