@@ -6,9 +6,7 @@
 //! follows a flush, and where it begins both as a caller names a place in
 //! the media and on the timeline its buffers are stamped on — two places a
 //! looping file keeps a lap or more apart, which is what lets a decoder hold
-//! a seek's target against the pictures. Its buffers are on that timeline:
-//! every buffer after a segment, up to the next, carries the number
-//! [`crate::timeline`] gives it, and that number is the segment's `id`.
+//! a seek's target against the pictures.
 //!
 //! # How an event travels
 //!
@@ -23,12 +21,24 @@
 //! drains goes on ahead of an `Eos`.
 //!
 //! Events are never dropped for room and never waited for: a queue takes
-//! one past its capacity. An event from a timeline the pipeline has left is
-//! dropped where a buffer from it would be.
+//! one past its capacity.
 //!
 //! A branch joined to a stream already under way — one attached to a `Tee`,
 //! a line a bin or a rack fills anew — is handed the stream's last segment
 //! before anything else, so no element is handed a buffer outside one.
+//!
+//! # A seek's flush
+//!
+//! The `Flush` a seek begins with, the pipeline's own, puts every pad it
+//! passes and every queue's worker into flushing: from then until the
+//! flushed segment the source begins after the seek comes the same way,
+//! whatever arrives there is dropped, buffers and events alike. What a
+//! thread was still handing on from the position the seek left — a source
+//! reading on a moment too long, a buffer a queue took as the flush went
+//! past — goes no further than the first place the flush has reached, and
+//! nothing has to say which seek a buffer came from. A `Flush` from
+//! anywhere else — an element driven by hand, a bridge passing its feeding
+//! side's on — is only the elements' to react to, and flushes no pad.
 //!
 //! # Not public yet
 //!
@@ -58,8 +68,9 @@ pub(crate) enum StreamEvent {
 
 /// Where a run of buffers begins — see this module's docs.
 pub(crate) struct Segment {
-    /// The timeline it opens: the number [`crate::timeline`] gives every
-    /// buffer after it.
+    /// Which of the pipeline's timelines it opens — which seek's, and one
+    /// for the stream as it starts: the pipeline's own count, which each
+    /// seek moves on before it flushes.
     pub(crate) id: u64,
     /// Whether it follows a flush, so that what an element holds from
     /// before it belongs to a timeline the pipeline has left.
@@ -77,19 +88,6 @@ impl Segment {
     /// a buffer that shows it is stamped.
     pub(crate) fn on_timeline(&self, position: Duration) -> Duration {
         (position + self.start).saturating_sub(self.position)
-    }
-}
-
-impl StreamEvent {
-    /// A segment opening the timeline this thread makes buffers on, at
-    /// `position` in the media and `start` on that timeline.
-    pub(crate) fn segment(flushed: bool, position: Duration, start: Duration) -> Self {
-        Self::Segment(Arc::new(Segment {
-            id: crate::timeline::current(),
-            flushed,
-            position,
-            start,
-        }))
     }
 }
 
@@ -140,18 +138,11 @@ pub(crate) fn forward(pads: &mut [SrcPad], event: &StreamEvent) -> Result<()> {
     first
 }
 
-/// Begins a segment on every one of `pads`, on the timeline this thread is
-/// on — what a source's thread does as it starts, and again as it applies a
-/// seek. Traced pad by pad, as a source's `Eos` is: this is where the
+/// Begins `segment` on every one of `pads` — what a source's thread does as
+/// it starts, and again as it applies a seek. Traced pad by pad, as a source's `Eos` is: this is where the
 /// segment enters the graph.
-pub(crate) fn begin_segment(
-    pads: &mut [SrcPad],
-    flushed: bool,
-    position: Duration,
-    start: Duration,
-    pp_log: &PpLog,
-) -> Result<()> {
-    let event = StreamEvent::segment(flushed, position, start);
+pub(crate) fn begin_segment(pads: &mut [SrcPad], segment: Segment, pp_log: &PpLog) -> Result<()> {
+    let event = StreamEvent::Segment(Arc::new(segment));
     let mut first = Ok(());
     for pad in pads.iter_mut().filter(|pad| pad.is_linked()) {
         pp_trace!(

@@ -38,6 +38,10 @@ pub struct SrcPad {
     /// What has left through this pad — see [`crate::stats`]. Every pad has
     /// one, so an element's outputs are counted without it doing anything.
     counters: Arc<PadCounters>,
+    /// Whether a seek's flush has passed and its segment not yet: what is
+    /// pushed meanwhile is from the position the seek left, and is dropped
+    /// — see [`crate::stream`].
+    flushing: bool,
 }
 
 impl SrcPad {
@@ -55,6 +59,7 @@ impl SrcPad {
             name,
             contract: OutputContract::Unknown,
             peer: None,
+            flushing: false,
         }
     }
 
@@ -108,8 +113,13 @@ impl SrcPad {
 
     /// Pushes a buffer to whatever this pad is linked to. Pushing into an
     /// unlinked pad silently drops the buffer (e.g. a demuxer stream
-    /// nobody cared to link).
+    /// nobody cared to link), and so does pushing between a seek's `Flush`
+    /// and the start of the stream the seek begins: what is pushed then is
+    /// from the position the seek left.
     pub fn push(&mut self, buf: MediaBuffer) -> Result<()> {
+        if self.flushing {
+            return Ok(());
+        }
         let is_eos = buf.is_eos();
         let bytes = match &buf {
             MediaBuffer::Packet(packet) => packet.size() as u64,
@@ -172,6 +182,12 @@ impl SrcPad {
     /// order with what was pushed before it — see [`crate::stream`]. Not
     /// counted: it is not data. An unlinked pad drops it, as `push` does.
     pub(crate) fn push_event(&mut self, event: &StreamEvent) -> Result<()> {
+        match event {
+            StreamEvent::Segment(segment) if segment.flushed => self.flushing = false,
+            // From the position the seek left, as a buffer would be.
+            _ if self.flushing => return Ok(()),
+            StreamEvent::Segment(_) => {}
+        }
         match &mut self.peer {
             Some(sink) => sink.stream_event(Event(event)),
             None => Ok(()),
@@ -195,6 +211,10 @@ impl SrcPad {
     /// [`crate::element::Sink::control`] — and one that did would hand
     /// everything after it each message twice.
     pub(crate) fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        // A seek's own, and nobody else's — see `crate::stream`.
+        if matches!(msg, ControlMsg::Flush) && crate::control::reached_directly() {
+            self.flushing = true;
+        }
         match &mut self.peer {
             Some(sink) => sink.control(msg),
             None => Ok(()),

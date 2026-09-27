@@ -12,7 +12,7 @@ use crate::stream::{Event, StreamEvent};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seen {
     Segment { id: u64, flushed: bool },
-    Buffer { timeline: u64 },
+    Buffer,
 }
 
 type Record = Arc<Mutex<Vec<Seen>>>;
@@ -67,9 +67,7 @@ impl Source for Watcher {
 
 impl Sink for Watcher {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        self.seen.lock().unwrap().push(Seen::Buffer {
-            timeline: crate::timeline::current(),
-        });
+        self.seen.lock().unwrap().push(Seen::Buffer);
         self.pad.push(buf)
     }
 
@@ -84,7 +82,7 @@ impl Sink for Watcher {
 }
 
 /// The stream's segment as `seen` has it, having checked that it came
-/// first and that every buffer after it is on its timeline.
+/// first and that nothing but buffers came after it.
 fn segment_of(name: &str, seen: &Record) -> u64 {
     let seen = seen.lock().unwrap();
     let Some(Seen::Segment { id, flushed }) = seen.first().copied() else {
@@ -97,8 +95,8 @@ fn segment_of(name: &str, seen: &Record) -> u64 {
     for (at, entry) in seen.iter().enumerate().skip(1) {
         assert_eq!(
             *entry,
-            Seen::Buffer { timeline: id },
-            "{name}, entry {at}: every buffer after the segment is on its timeline"
+            Seen::Buffer,
+            "{name}, entry {at}: one segment, and then the stream"
         );
     }
     id
@@ -111,7 +109,7 @@ fn wait_for_a_buffer(name: &str, seen: &Record) {
         .lock()
         .unwrap()
         .iter()
-        .any(|entry| matches!(entry, Seen::Buffer { .. }))
+        .any(|entry| matches!(entry, Seen::Buffer))
     {
         assert!(Instant::now() < deadline, "{name} was handed no buffer");
         thread::sleep(Duration::from_millis(5));

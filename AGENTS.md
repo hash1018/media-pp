@@ -36,13 +36,13 @@ final source of truth when documentation and implementation differ.
 - A direct `Sink::consume` call is synchronous and may return `Err`. A `Queue`
   is the explicit thread and recovery boundary: it reports a downstream data
   error as `BusEvent::Error`, drops that buffer, and continues its worker.
-- A `Queue` is also where data from a timeline a seek has left is dropped
-  (`crate::timeline`). A buffer's number is implicit in the thread that made
-  it and crosses threads only through a `Queue`; an element that hands
-  buffers to a worker of its own makes them unnumbered, which is never
-  dropped. Do not add a number to `MediaBuffer` or thread it through
-  elements — carry it the way `Queue` does, and only where such an element
-  must take part in seeks.
+- What a seek leaves behind is dropped between its `Flush` and its
+  segment (`crate::stream`): the pipeline's own `Flush` puts every pad it
+  passes and every `Queue` worker into flushing, and whatever reaches one
+  before the flushed `Segment` the source begins after the seek is dropped
+  there. No buffer carries a number saying which seek it is from. An
+  element that hands buffers to a worker of its own drops what it holds on
+  `Flush` and hands on nothing between the `Flush` and the segment.
 - A `SourceElement::run` implementation should likewise report a recoverable
   per-buffer pad-push error to its `Bus` and continue. Return `Err` only when the
   source cannot meaningfully continue.

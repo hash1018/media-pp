@@ -74,7 +74,6 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::control::{ControlMsg, PrerollContext};
 use crate::graph::ElementId;
-use crate::timeline::UNNUMBERED;
 
 /// Where playback stands: whether data flows, and why.
 #[derive(Debug, Clone, Default)]
@@ -159,9 +158,9 @@ impl Bell {
 #[derive(Debug)]
 pub(crate) struct PlaybackState {
     phase: Mutex<Phase>,
-    /// The number of the timeline media is being read on — see
-    /// [`crate::timeline`]. Apart from the phase, and atomic, because a
-    /// queue reads it for every buffer it hands on.
+    /// The number of the timeline media is being read on: one for the stream
+    /// as it starts, and one more for each seek — what the segment a source
+    /// begins says it opens, see [`crate::stream`].
     timeline: AtomicU64,
     /// Interrupts raised so far, one before each request the pipeline
     /// sends — see [`Self::interrupt`].
@@ -208,7 +207,7 @@ impl PlaybackState {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             phase: Mutex::new(Phase::Playing),
-            timeline: AtomicU64::new(UNNUMBERED + 1),
+            timeline: AtomicU64::new(1),
             interrupts: AtomicU64::new(0),
             settled: AtomicU64::new(0),
             raised: Mutex::new(()),
@@ -422,16 +421,9 @@ impl PlaybackState {
         self.decodes_everything.load(Ordering::Relaxed)
     }
 
-    /// Starts a new timeline, and answers its number. Everything numbered
-    /// before this is behind from now on.
-    pub(crate) fn begin_timeline(&self) -> u64 {
-        self.timeline.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
-    /// Whether a buffer made on timeline `number` is from a position the
-    /// pipeline has since left.
-    pub(crate) fn is_behind(&self, number: u64) -> bool {
-        number != UNNUMBERED && number < self.timeline()
+    /// Starts a new timeline — the pipeline's to call, as a seek begins.
+    pub(crate) fn begin_timeline(&self) {
+        self.timeline.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Tells whatever is waiting — a paced wait, a queue — that a request
@@ -579,14 +571,5 @@ mod tests {
         drop(bell);
         state.interrupt();
         assert!(state.listeners.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn an_unnumbered_buffer_is_never_behind() {
-        let state = PlaybackState::new();
-        state.begin_timeline();
-        state.begin_timeline();
-        assert!(!state.is_behind(UNNUMBERED));
-        assert!(state.is_behind(UNNUMBERED + 1));
     }
 }

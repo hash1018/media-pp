@@ -114,23 +114,21 @@ impl Pipeline {
                     let mut source = source;
                     let control_rx = control_rx;
                     let _running = RunningSourceGuard::new(running);
-                    // What this source makes is on the pipeline's timeline,
-                    // and moves to each new one as it applies the `Seek`.
-                    crate::timeline::enter(&state);
-
                     let source_name = source.name();
                     let source_type = source.element_type();
                     // Every stream begins with a segment, before the source
                     // has so much as looked at its control — see
                     // `crate::stream`, on why that never waits.
                     let source_log = source.pp_log().clone();
-                    if let Err(error) = crate::stream::begin_segment(
-                        source.src_pads(),
-                        false,
-                        Duration::ZERO,
-                        Duration::ZERO,
-                        &source_log,
-                    ) {
+                    let segment = crate::stream::Segment {
+                        id: state.timeline(),
+                        flushed: false,
+                        position: Duration::ZERO,
+                        start: Duration::ZERO,
+                    };
+                    if let Err(error) =
+                        crate::stream::begin_segment(source.src_pads(), segment, &source_log)
+                    {
                         bus.post_downstream_error(
                             &source_log,
                             source_type,

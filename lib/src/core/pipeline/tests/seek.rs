@@ -1650,7 +1650,7 @@ impl SourceElement for UnpausingSource {
                     let _ = ack.send(());
                     return Ok(());
                 };
-                if crate::control::apply_one(self, bus, &msg, &ack, false)? {
+                if crate::control::apply_one(self, bus, &msg, &ack, control.state())? {
                     return Ok(());
                 }
             }
@@ -2000,7 +2000,7 @@ impl SourceElement for ReadingOnSource {
                     let _ = ack.send(());
                     return Ok(());
                 };
-                if crate::control::apply_one(self, bus, &msg, &ack, false)? {
+                if crate::control::apply_one(self, bus, &msg, &ack, control.state())? {
                     return Ok(());
                 }
             }

@@ -28,9 +28,9 @@
 //! - played to the end, the pipeline says [`BusEvent::Finished`], unless it
 //!   loops, when it goes on into the next lap instead;
 //! - finished, every terminal's last word is an `Eos`;
-//! - every buffer a terminal is handed belongs to the segment it was handed
-//!   last, and a segment on a new timeline follows a flush — see
-//!   [`crate::stream`];
+//! - no terminal is handed a buffer before a segment, and each segment
+//!   after the stream's first opens a later timeline and follows a flush —
+//!   see [`crate::stream`];
 //! - and nothing reports an error.
 //!
 //! # Every shape, not a chosen few
@@ -199,15 +199,12 @@ impl Element for Recorder {
 
 impl Sink for Recorder {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        // What it is handed is on the timeline of the thread handing it —
-        // which has to be the one the last segment opened.
-        let number = crate::timeline::current();
-        if number != crate::timeline::UNNUMBERED && self.segment != Some(number) {
-            self.log.lock().unwrap().push(Entry::Outside(format!(
-                "{} on timeline {number}, in the segment of {:?}",
-                buf.kind(),
-                self.segment
-            )));
+        // No buffer outside a segment — see `crate::stream`.
+        if self.segment.is_none() {
+            self.log
+                .lock()
+                .unwrap()
+                .push(Entry::Outside(format!("{} before any segment", buf.kind())));
         }
         thread::sleep(self.delay);
         let entry = match &buf {

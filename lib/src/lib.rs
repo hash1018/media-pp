@@ -294,7 +294,7 @@ pub(crate) use core::frame_size;
 pub(crate) use core::playback_state;
 pub(crate) use core::repeat;
 pub(crate) use core::stream;
-pub(crate) use core::timing::{schedule, time, timeline};
+pub(crate) use core::timing::{schedule, time};
 #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) use core::tone_map;
 

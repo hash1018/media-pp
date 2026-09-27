@@ -772,9 +772,9 @@ pub(crate) fn handle_request<S: SourceElement>(
     request: RequestKind,
     ack: Sender<()>,
 ) -> Result<ControlOutcome> {
-    let backwards = control.state().backwards();
+    let state = control.state();
     let RequestKind::Control(msg) = request else {
-        apply_finish(source, bus, &ack, backwards);
+        apply_finish(source, bus, &ack, state.backwards());
         return Ok(ControlOutcome {
             stopped: true,
             paused_for: Duration::ZERO,
@@ -782,7 +782,7 @@ pub(crate) fn handle_request<S: SourceElement>(
     };
     if msg != ControlMsg::Pause {
         return Ok(ControlOutcome {
-            stopped: apply_one(source, bus, &msg, &ack, backwards)?,
+            stopped: apply_one(source, bus, &msg, &ack, state)?,
             paused_for: Duration::ZERO,
         });
     }
@@ -792,7 +792,7 @@ pub(crate) fn handle_request<S: SourceElement>(
     // interval as much as the wait for `Resume` does.
     let pause_start = Instant::now();
     source.pausing()?;
-    apply_one(source, bus, &msg, &ack, backwards)?;
+    apply_one(source, bus, &msg, &ack, state)?;
     let stopped = wait_out_pause(control, source, bus)?;
     Ok(ControlOutcome {
         stopped,
@@ -861,9 +861,9 @@ pub(crate) fn apply_one<S: SourceElement>(
     bus: &Bus,
     msg: &ControlMsg,
     ack: &Sender<()>,
-    backwards: bool,
+    state: &PlaybackState,
 ) -> Result<bool> {
-    let is_stop = apply_one_unacked(source, bus, msg, backwards)?;
+    let is_stop = apply_one_unacked(source, bus, msg, state)?;
     let _ = ack.send(());
     Ok(is_stop)
 }
@@ -877,7 +877,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     source: &mut S,
     bus: &Bus,
     msg: &ControlMsg,
-    backwards: bool,
+    state: &PlaybackState,
 ) -> Result<bool> {
     pp_trace!(
         pp_log: source.pp_log(),
@@ -885,28 +885,26 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     );
     let result: Result<bool> = (|| {
         source.on_control(msg);
-        let sought = apply_seek(source, bus, msg, backwards);
-        if matches!(msg, ControlMsg::Seek(_)) {
-            // What this thread reads from now on is the new position's — see
-            // `crate::timeline`. Even where the seek failed: the pipeline has
-            // left the old timeline all the same, and whatever this source
-            // goes on to read is all it will get.
-            crate::timeline::follow();
-        }
-        sought?;
+        apply_seek(source, bus, msg, state.backwards())?;
         // A source is asked only by the pipeline, which asks every queue
         // worker too, directly: passed on from here it reaches this source's
         // own line and stops at them. A queue built by hand carries it on.
         let _direct = Direct::enter(true);
         let forwarded = forward(source.src_pads(), msg);
         // What it reads from here on begins a stream again, on the timeline
-        // it has just followed — see `crate::stream`.
+        // the pipeline began for the seek — see `crate::stream`.
         let begun = if let ControlMsg::Seek(target) = msg {
             let start = source.as_seekable().map_or(*target, |seekable| {
                 seekable.on_timeline(crate::stream::Position(*target))
             });
             let pp_log = source.pp_log().clone();
-            crate::stream::begin_segment(source.src_pads(), true, *target, start, &pp_log)
+            let segment = crate::stream::Segment {
+                id: state.timeline(),
+                flushed: true,
+                position: *target,
+                start,
+            };
+            crate::stream::begin_segment(source.src_pads(), segment, &pp_log)
         } else {
             Ok(())
         };
@@ -940,9 +938,9 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
         let Some((request, ack)) = control.recv() else {
             return Ok(true); // sender gone — treat like Stop
         };
-        let backwards = control.state().backwards();
+        let state = control.state();
         let RequestKind::Control(msg) = request else {
-            apply_finish(source, bus, &ack, backwards);
+            apply_finish(source, bus, &ack, state.backwards());
             return Ok(true);
         };
         if !control.state().holds() {
@@ -950,12 +948,12 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
             // this message came to say so; see `crate::playback_state`.
             // Downstream goes on first, then the source itself, and only
             // then is the request done — see `SourceElement::resuming`.
-            apply_one_unacked(source, bus, &msg, backwards)?;
+            apply_one_unacked(source, bus, &msg, state)?;
             source.resuming()?;
             let _ = ack.send(());
             return Ok(false);
         }
-        if apply_one(source, bus, &msg, &ack, backwards)? {
+        if apply_one(source, bus, &msg, &ack, state)? {
             return Ok(true);
         }
         // Another Pause while already paused: already forwarded above
@@ -1063,6 +1061,14 @@ mod tests {
         pad::SrcPad,
     };
 
+    /// A pipeline's state, playing the way `backwards` says — what a source
+    /// driven by hand here applies a request against.
+    fn heading(backwards: bool) -> Arc<PlaybackState> {
+        let state = PlaybackState::new();
+        state.set_backwards(backwards);
+        state
+    }
+
     /// A `SourceElement` with no real I/O — just enough surface for
     /// `drain_control`/`wait_out_pause` to drive, since this module's own
     /// logic doesn't care what the source actually produces.
@@ -1164,8 +1170,8 @@ mod tests {
 
         let mut source = DummySource::new();
         source.reversible = true;
-        apply_one_unacked(&mut source, &bus, &seek(3), true).expect("backwards");
-        apply_one_unacked(&mut source, &bus, &seek(1), false).expect("forwards");
+        apply_one_unacked(&mut source, &bus, &seek(3), &heading(true)).expect("backwards");
+        apply_one_unacked(&mut source, &bus, &seek(1), &heading(false)).expect("forwards");
         assert_eq!(
             source.sought,
             [
@@ -1175,7 +1181,7 @@ mod tests {
         );
 
         let mut source = DummySource::new();
-        let refused = apply_one_unacked(&mut source, &bus, &seek(3), true);
+        let refused = apply_one_unacked(&mut source, &bus, &seek(3), &heading(true));
         let Err(crate::Error::SeekError(error)) = refused else {
             panic!("refused with a seek error: {refused:?}");
         };
@@ -1200,7 +1206,7 @@ mod tests {
             &mut source,
             &bus,
             &ControlMsg::Seek(Duration::from_secs(1)),
-            false,
+            &heading(false),
         );
         let Err(crate::Error::SeekError(error)) = refused else {
             panic!("refused with a seek error: {refused:?}");
@@ -1226,11 +1232,12 @@ mod tests {
             ControlMsg::Resume,
             ControlMsg::Seek(Duration::from_secs(1)),
         ] {
-            apply_one_unacked(&mut source, &bus, &msg, false).expect("control applies");
+            apply_one_unacked(&mut source, &bus, &msg, &heading(false)).expect("control applies");
         }
         assert_eq!(source.flushes, 0, "only Flush may discard source-held data");
 
-        apply_one_unacked(&mut source, &bus, &ControlMsg::Flush, false).expect("flush applies");
+        apply_one_unacked(&mut source, &bus, &ControlMsg::Flush, &heading(false))
+            .expect("flush applies");
         assert_eq!(source.flushes, 1);
     }
 
@@ -1728,7 +1735,7 @@ mod tests {
         source.pads[1].link(Box::new(sound));
         let (bus, _bus_rx) = Bus::new();
 
-        let applied = apply_one_unacked(&mut source, &bus, &ControlMsg::Pause, false);
+        let applied = apply_one_unacked(&mut source, &bus, &ControlMsg::Pause, &heading(false));
 
         assert!(applied.is_err(), "the picture's refusal is the answer");
         assert_eq!(

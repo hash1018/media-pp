@@ -11,4 +11,3 @@ pub mod playback_clock;
 pub mod rate;
 pub mod schedule;
 pub mod time;
-pub(crate) mod timeline;

@@ -245,9 +245,10 @@ impl Pipeline {
     /// After it, every source is at `target` or wherever it landed near it
     /// (see [`crate::bus::BusEvent::Seeked`]), nothing any element held from
     /// the old position is left — the `Flush` — and whatever of the old
-    /// position reaches a queue later is dropped there, being on a timeline
-    /// that is no longer current — see [`crate::timeline`]. Nothing has
-    /// moved: every source is still paused.
+    /// position is still handed on afterwards is dropped at the first pad or
+    /// queue the `Flush` has reached, until the segment each source begins
+    /// after the seek passes it — see `crate::stream`. Nothing has moved:
+    /// every source is still paused.
     fn reposition(&self, target: Duration) {
         let msg = ControlMsg::Seek(target);
         pp_trace!(

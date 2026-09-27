@@ -946,8 +946,12 @@ mod tests {
                 sink.control(&ControlMsg::Pause).is_err(),
                 "not the default of doing nothing"
             );
-            let segment =
-                crate::stream::StreamEvent::segment(false, Duration::ZERO, Duration::ZERO);
+            let segment = crate::stream::StreamEvent::Segment(Arc::new(crate::stream::Segment {
+                id: 1,
+                flushed: false,
+                position: Duration::ZERO,
+                start: Duration::ZERO,
+            }));
             assert!(
                 sink.stream_event(crate::stream::Event(&segment)).is_err(),
                 "nor for an event in the stream"

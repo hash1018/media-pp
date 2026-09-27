@@ -327,13 +327,13 @@ pub(crate) struct QueueCounters {
     /// sees the sending side close while it runs. It never relied on that:
     /// the queue's own sender lives exactly as long as the `Queue`, whose
     /// drop stops the worker by its flag and joins it first.
-    channel: OnceLock<Sender<crate::timeline::Numbered>>,
+    channel: OnceLock<Sender<crate::stream::Item>>,
     dropped: AtomicU64,
     blocked_ns: AtomicU64,
 }
 
 impl QueueCounters {
-    pub(crate) fn watch(&self, channel: Sender<crate::timeline::Numbered>) {
+    pub(crate) fn watch(&self, channel: Sender<crate::stream::Item>) {
         let _ = self.channel.set(channel);
     }
 

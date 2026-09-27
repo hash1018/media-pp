@@ -39,7 +39,6 @@ use crate::{
     playback_state::{Bell, PlaybackState},
     stats::ElementCounters,
     stream::{Event, Item, StreamEvent},
-    timeline::{Numbered, UNNUMBERED},
 };
 
 /// Errors specific to `Queue`. Converts into the crate-wide `Error` via
@@ -193,7 +192,7 @@ impl Default for OverflowPolicy {
 pub struct Queue {
     pp_log: PpLog,
     name: Arc<str>,
-    tx: Sender<Numbered>,
+    tx: Sender<Item>,
     policy: OverflowPolicy,
     bus: Bus,
     handle: Option<JoinHandle<()>>,
@@ -222,8 +221,9 @@ pub struct Queue {
     /// How many `Eos` this queue has taken and not yet handed on or
     /// discarded — see [`Inbox::owes_an_end`].
     ends_owed: Arc<AtomicUsize>,
-    /// The pipeline's playback state, whose timeline a buffer is handed over
-    /// on — see [`crate::timeline`]. `None` for one spawned by hand.
+    /// The pipeline's playback state, whose interrupts the worker holds back
+    /// for and whose stop abandons what it carries. `None` for one spawned
+    /// by hand.
     state: Option<Arc<PlaybackState>>,
     /// This queue's worker's place among those the pipeline's requests
     /// reach directly — so a request passed on to this queue from upstream
@@ -339,7 +339,7 @@ impl Queue {
         // particular can fire once per buffer under sustained overflow.
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Queue, &name, pipeline_id);
-        let (tx, rx) = unbounded::<Numbered>();
+        let (tx, rx) = unbounded::<Item>();
         // The pipeline's state where there is a pipeline: it says when a
         // paused worker may go on. One spawned by hand keeps its own, moved
         // on by what `control` sends it.
@@ -371,6 +371,7 @@ impl Queue {
             bell: worker_bell.clone(),
             room: room.clone(),
             stopped_during_interrupt: Cell::new(None),
+            flushing: Cell::new(false),
         };
 
         // `Builder::name` panics on interior NULs. Queue names are caller
@@ -380,11 +381,6 @@ impl Queue {
         let handle = spawn(
             thread_name.clone(),
             Box::new(move || {
-                // What this worker hands on is on the timeline of what it
-                // carries — see `crate::timeline::carry_on`.
-                if let Some(state) = &worker_inbox.state {
-                    crate::timeline::enter(state);
-                }
                 worker_loop(
                     worker_inbox,
                     control_rx,
@@ -453,10 +449,7 @@ impl Queue {
             // one that was not yet counted in.
             self.ends_owed.fetch_add(1, Ordering::AcqRel);
             let result = self
-                .hand_over(
-                    Numbered::on(self.state.as_ref(), Item::Buffer(buf)),
-                    Duration::MAX,
-                )
+                .hand_over(Item::Buffer(buf), Duration::MAX)
                 .map_err(|_| QueueError::ChannelClosed.into());
             if result.is_err() {
                 self.ends_owed.fetch_sub(1, Ordering::AcqRel);
@@ -478,9 +471,7 @@ impl Queue {
         if let Some(counters) = counters {
             counters.arrived();
         }
-        // Numbered as the thread handing it over is, and carried so: see
-        // `crate::timeline`.
-        let buf = Numbered::on(self.state.as_ref(), Item::Buffer(buf));
+        let buf = Item::Buffer(buf);
         let result = match self.policy {
             OverflowPolicy::Block(timeout) => {
                 // Timed only when it had to wait: a send into room is not
@@ -607,7 +598,7 @@ impl Sink for Queue {
             pp_log: &self.pp_log,
             "event={carried} phase=received"
         );
-        let item = Numbered::on(self.state.as_ref(), Item::Event(carried.clone()));
+        let item = Item::Event(carried.clone());
         let result = if self.worker_gone() {
             Err(())
         } else {
@@ -687,11 +678,7 @@ impl Queue {
     ///
     /// Waits on [`Self::room`], which the worker rings as it takes a buffer
     /// and the pipeline's state rings as an interrupt is raised.
-    fn hand_over(
-        &self,
-        buf: Numbered,
-        timeout: Duration,
-    ) -> std::result::Result<(), HandOverError> {
+    fn hand_over(&self, buf: Item, timeout: Duration) -> std::result::Result<(), HandOverError> {
         let deadline = Instant::now().checked_add(timeout);
         let interrupted = || {
             self.state
@@ -732,7 +719,7 @@ impl Queue {
 /// Where a worker takes its buffers from — and not while an interrupt is
 /// out — and the bells it waits on and rings.
 struct Inbox {
-    data: Receiver<Numbered>,
+    data: Receiver<Item>,
     /// The pipeline's playback state, against whose timeline what is
     /// carried is judged before it goes on and whose interrupts the worker
     /// holds back for — `None` for a queue spawned by hand, which does
@@ -748,6 +735,10 @@ struct Inbox {
     /// When the worker first found its queue dropped while an interrupt was
     /// out — see [`Self::held_back`].
     stopped_during_interrupt: Cell<Option<Instant>>,
+    /// Whether a seek's flush has reached this worker and its segment not
+    /// yet: what it takes meanwhile is from the position the seek left, and
+    /// goes no further — see [`crate::stream`].
+    flushing: Cell<bool>,
 }
 
 impl Inbox {
@@ -810,6 +801,19 @@ impl Inbox {
     fn discarded(&self, ends: usize) {
         self.ends_owed.fetch_sub(ends, Ordering::AcqRel);
     }
+
+    /// Starts flushing on a seek's `Flush` — the pipeline's own, which
+    /// reached this worker directly — and on no other: one carried across
+    /// from an element driven by hand is only the elements' to react to.
+    fn flushes(&self, msg: &ControlMsg, direct: bool, pp_log: &PpLog) {
+        if direct && *msg == ControlMsg::Flush {
+            pp_debug!(
+                pp_log: pp_log,
+                "flushing: dropping what arrives until the seek's segment"
+            );
+            self.flushing.set(true);
+        }
+    }
 }
 
 /// Rings the thread handing buffers over as the worker ends, so one waiting
@@ -861,7 +865,6 @@ fn worker_loop(
         pp_log: &pp_log,
         counters: counters.as_deref(),
         errors: &error_reporter,
-        dropped_from: Cell::new(UNNUMBERED),
     };
     // However this ends, a thread waiting to hand a buffer over hears of it.
     let _ends = RingOnEnd(inbox.room.clone());
@@ -989,39 +992,30 @@ struct Worker<'a> {
     pp_log: &'a PpLog,
     counters: Option<&'a ElementCounters>,
     errors: &'a QueueErrorReporter<'a>,
-    /// The timeline this worker last dropped a buffer from, so a seek's
-    /// leftovers are logged once rather than once a buffer.
-    dropped_from: Cell<u64>,
 }
 
 /// Hands one buffer to `downstream`, counting it and reporting a failure on
 /// the bus — a failure drops that buffer and nothing else.
-fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_>) {
-    let Numbered { number, item } = carried;
-    if worker
-        .inbox
-        .state
-        .as_deref()
-        .is_some_and(|state| state.is_behind(number))
-    {
-        // From a position the pipeline has since left — what a `Flush`
-        // should have discarded and a thread's timing let past it.
-        if worker.dropped_from.replace(number) != number {
-            pp_debug!(
-                pp_log: worker.pp_log,
-                "dropping what arrives from timeline {number}, which a seek has left"
-            );
+fn forward(downstream: &mut Box<dyn Sink>, item: Item, worker: &Worker<'_>) {
+    if worker.inbox.flushing.get() {
+        match &item {
+            // The seek's own: the new position's stream begins here.
+            Item::Event(StreamEvent::Segment(segment)) if segment.flushed => {
+                worker.inbox.flushing.set(false);
+            }
+            // From the position the seek left — what the `Flush` discarded
+            // the rest of, and a thread still handing it over let past it.
+            _ => {
+                if matches!(item, Item::Buffer(MediaBuffer::Eos)) {
+                    worker.inbox.discarded(1);
+                }
+                return;
+            }
         }
-        if matches!(item, Item::Buffer(MediaBuffer::Eos)) {
-            worker.inbox.discarded(1);
-        }
-        return;
     }
-    // What the elements after this make of it is on the same timeline.
-    crate::timeline::carry_on(number);
     let buf = match item {
         Item::Buffer(buf) => buf,
-        Item::Event(event) => return forward_event(downstream, number, &event, worker),
+        Item::Event(event) => return forward_event(downstream, &event, worker),
     };
     let is_eos = buf.is_eos();
     let call = worker
@@ -1073,19 +1067,7 @@ fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_
 
 /// Hands one event to `downstream`, reporting a failure on the bus as a
 /// buffer's is.
-fn forward_event(
-    downstream: &mut Box<dyn Sink>,
-    number: u64,
-    event: &StreamEvent,
-    worker: &Worker<'_>,
-) {
-    // A segment is numbered as the timeline it opens: both are this
-    // thread's number as the source began it — see `crate::stream`.
-    let StreamEvent::Segment(segment) = event;
-    debug_assert!(
-        number == UNNUMBERED || number == segment.id,
-        "{event} carried as timeline {number}"
-    );
+fn forward_event(downstream: &mut Box<dyn Sink>, event: &StreamEvent, worker: &Worker<'_>) {
     pp_trace!(
         pp_log: worker.pp_log,
         "event={event} phase=forwarding"
@@ -1118,6 +1100,7 @@ fn apply_control(
         "event=control control={msg:?} phase=forwarding"
     );
     inbox.discarded(discard_stale_data(&inbox.data, &msg));
+    inbox.flushes(&msg, direct, error_reporter.pp_log);
     inbox.room.ring();
     forward_control(downstream, msg.clone(), direct, error_reporter);
     let is_stop = msg == ControlMsg::Stop;
@@ -1164,6 +1147,7 @@ fn apply_control(
             "event=control control={msg:?} phase=forwarding"
         );
         inbox.discarded(discard_stale_data(&inbox.data, &msg));
+        inbox.flushes(&msg, direct, error_reporter.pp_log);
         inbox.room.ring();
         forward_control(downstream, msg.clone(), direct, error_reporter);
         let is_stop = msg == ControlMsg::Stop;
@@ -1278,11 +1262,11 @@ fn deliver_pending(
 /// docs on why that's safe (nothing feeds a paused/stopped queue in the
 /// first place).
 /// Empties the channel on `Flush`, and says how many `Eos` went with it.
-fn discard_stale_data(data_rx: &Receiver<Numbered>, msg: &ControlMsg) -> usize {
+fn discard_stale_data(data_rx: &Receiver<Item>, msg: &ControlMsg) -> usize {
     let mut ends = 0;
     if *msg == ControlMsg::Flush {
         while let Ok(held) = data_rx.try_recv() {
-            ends += usize::from(matches!(held.item, Item::Buffer(MediaBuffer::Eos)));
+            ends += usize::from(matches!(held, Item::Buffer(MediaBuffer::Eos)));
         }
     }
     ends
@@ -1305,12 +1289,12 @@ mod tests {
     #[test]
     fn flush_discards_backlog_but_seek_does_not() {
         let (tx, rx) = crossbeam_channel::bounded(2);
-        tx.send(Numbered::on(None, Item::Buffer(packet()))).unwrap();
+        tx.send(Item::Buffer(packet())).unwrap();
 
         discard_stale_data(&rx, &ControlMsg::Seek(Duration::from_secs(1)));
         assert!(rx.try_recv().is_ok(), "Seek must not own Queue flushing");
 
-        tx.send(Numbered::on(None, Item::Buffer(packet()))).unwrap();
+        tx.send(Item::Buffer(packet())).unwrap();
         discard_stale_data(&rx, &ControlMsg::Flush);
         assert!(rx.try_recv().is_err(), "Flush must discard queued data");
     }
