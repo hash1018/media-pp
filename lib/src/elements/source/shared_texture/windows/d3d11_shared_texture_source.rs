@@ -24,18 +24,16 @@ use windows::{
 
 use crate::{
     buffer::MediaBuffer,
-    bus::Bus,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlReceiver,
-    element::{Element, ElementType, Source, SourceElement},
-    elements::{AppSource, AppSourceHandle},
-    error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
-    pad::SrcPad,
+    element::{Element, ElementType, ProducingSource},
+    elements::{AppSource, AppSourceHandle, source::app_source::Receiving},
+    error::{D3d11FrameWrapError, D3d11SharedDeviceError},
     platform::windows::{
         d3d11::protect_shared_device, d3d11_gpu::D3d11Gpu, d3d11va::wrap_d3d11_texture,
     },
     pool::UnboundObjectPool,
-    pp_log::{PpLog, pp_info},
+    pp_log::pp_info,
+    produce::produce_source,
 };
 
 /// The one texture format taken here: what a compositing producer — a
@@ -151,9 +149,9 @@ pub enum D3d11SharedTextureSourceError {
 /// engine composites its page with the alpha already multiplied into the
 /// colour, and a layer drawn from such a frame has to say so — see
 /// [`VideoLayer::premultiplied_alpha`](crate::elements::VideoLayer::premultiplied_alpha).
-pub struct D3d11SharedTextureSource {
-    inner: AppSource,
-}
+pub struct D3d11SharedTextureSource(ProducingSource<Receiving>);
+
+produce_source!(D3d11SharedTextureSource);
 
 /// Pushes another device's textures into a [`D3d11SharedTextureSource`].
 ///
@@ -219,7 +217,7 @@ impl D3d11SharedTextureSource {
         // so the device has to be usable from more than the thread that made
         // it before any command is issued.
         protect_shared_device(device)?;
-        let (inner, pusher) = AppSource::typed(
+        let (source, pusher) = AppSource::receiving(
             name,
             capacity,
             ElementType::D3d11SharedTextureSource,
@@ -227,10 +225,14 @@ impl D3d11SharedTextureSource {
                 MediaKind::VideoFrame,
                 MemoryDomain::D3d11,
             )),
+            // Unlike a plain `AppSource`, live: what it emits is whatever
+            // another device drew just now, and a paused pipeline cannot ask
+            // it for a first picture.
+            true,
         );
-        pp_info!(pp_log: inner.pp_log(), "opened: {width}x{height}");
+        pp_info!(pp_log: source.pp_log(), "opened: {width}x{height}");
         Ok((
-            Self { inner },
+            Self(source),
             D3d11SharedTextureHandle {
                 pusher,
                 import: Arc::new(Import {
@@ -427,43 +429,6 @@ impl Import {
                 .CreateTexture2D(&description, None, Some(&mut texture))?
         };
         Ok(texture.expect("CreateTexture2D succeeded without producing a texture"))
-    }
-}
-
-impl Element for D3d11SharedTextureSource {
-    fn name(&self) -> Arc<str> {
-        self.inner.name()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d11SharedTextureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        self.inner.pp_log()
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        self.inner.pp_log_mut()
-    }
-}
-
-impl Source for D3d11SharedTextureSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        self.inner.src_pads()
-    }
-}
-
-impl SourceElement for D3d11SharedTextureSource {
-    /// Unlike the [`AppSource`] underneath, this one is live: what it emits
-    /// is whatever another device drew just now, and a paused pipeline
-    /// cannot ask it for a first picture.
-    fn is_live(&self) -> bool {
-        true
-    }
-
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        self.inner.run(control, bus)
     }
 }
 
@@ -778,6 +743,23 @@ mod tests {
             ),
             "expected DimensionMismatch, got {error:?}"
         );
+    }
+
+    /// Unlike the plain `AppSource` it is built as, it is live: what it
+    /// emits is another device's latest picture, which a paused pipeline
+    /// cannot ask it for.
+    #[test]
+    fn it_is_live_where_a_plain_app_source_is_not() {
+        use crate::element::SourceElement;
+
+        let Some(gpu) = try_d3d11_gpu() else {
+            return;
+        };
+        let (source, _handle) =
+            D3d11SharedTextureSource::new("shared", &gpu, 8, 8, 4).expect("the source opens");
+        assert!(source.is_live());
+        let (plain, _handle) = AppSource::new("plain", 4);
+        assert!(!plain.is_live());
     }
 
     /// A producer can close a handle at any moment, so one that names

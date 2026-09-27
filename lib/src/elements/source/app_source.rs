@@ -45,8 +45,10 @@ pub struct AppSource(ProducingSource<Receiving>);
 produce_source!(AppSource);
 
 /// What an [`AppSource`] does when asked: waits for the application's next
-/// buffer. All of its work, which the framework makes the source.
-struct Receiving {
+/// buffer. All of its work, which the framework makes the source — and
+/// what an element that is an `AppSource` under another name is made of
+/// too (see [`AppSource::receiving`]).
+pub(crate) struct Receiving {
     pp_log: PpLog,
     name: Arc<str>,
     /// Almost always [`ElementType::AppSource`]. An element built on this
@@ -55,8 +57,11 @@ struct Receiving {
     /// instead, since what a reader of either wants is the element the
     /// caller actually constructed.
     element_type: ElementType,
-    /// What it declares its output to be — see [`AppSource::typed`].
+    /// What it declares its output to be — see [`AppSource::receiving`].
     contract: OutputContract,
+    /// Whether what it is handed is made at a rate of its own — see
+    /// [`AppSource::receiving`].
+    live: bool,
     data_rx: Receiver<MediaBuffer>,
 }
 
@@ -74,35 +79,41 @@ impl AppSource {
     /// [`AppSourceHandle::push`] blocks — same trade-off as
     /// [`crate::queue::Queue`]'s own `capacity`.
     pub fn new(name: impl Into<String>, capacity: usize) -> (Self, AppSourceHandle) {
-        Self::typed(
+        let (source, handle) = Self::receiving(
             name,
             capacity,
             ElementType::AppSource,
             OutputContract::Unknown,
-        )
+            false,
+        );
+        (Self(source), handle)
     }
 
-    /// [`Self::new`] for an element built on this one: it supplies its own
-    /// [`ElementType`] and, since it knows what it pushes, the output
-    /// contract a general-purpose `AppSource` cannot declare.
-    pub(crate) fn typed(
+    /// What [`Self::new`] makes, for an element that is an `AppSource`
+    /// under a name of its own: it supplies its own [`ElementType`], the
+    /// output contract a general-purpose `AppSource` cannot declare since it
+    /// knows what it pushes, and whether that is `live` — made at a rate of
+    /// its own, which an application's buffers in general are not.
+    pub(crate) fn receiving(
         name: impl Into<String>,
         capacity: usize,
         element_type: ElementType,
         contract: OutputContract,
-    ) -> (Self, AppSourceHandle) {
+        live: bool,
+    ) -> (ProducingSource<Receiving>, AppSourceHandle) {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(element_type, &name, None);
         pp_info!(pp_log: &pp_log, "created: capacity={capacity}");
         let (data_tx, data_rx) = bounded(capacity);
         (
-            Self(ProducingSource::new(Receiving {
+            ProducingSource::new(Receiving {
                 name: name.clone(),
                 pp_log,
                 element_type,
                 contract,
+                live,
                 data_rx,
-            })),
+            }),
             AppSourceHandle { name, data_tx },
         )
     }
@@ -156,7 +167,7 @@ impl Element for Receiving {
 
 impl Produce for Receiving {
     fn is_live(&self) -> bool {
-        false
+        self.live
     }
 
     fn output_contract(&self) -> OutputContract {

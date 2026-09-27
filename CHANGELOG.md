@@ -60,9 +60,9 @@ compile error with no explanation.
   the wiring closure is handed the source itself, as before, or the
   `ProducingSource` a `Produce` is made into. `TestVideoSource`,
   `TestAudioSource`, `AppSource`, `AudioMixer`, the four video
-  compositors and the Windows captures (`DxgiCaptureSource`,
-  `WgcCaptureSource`, `MfCaptureSource`, `WasapiCaptureSource`) are
-  written this way now; a pause no longer waits out `TestVideoSource`'s
+  compositors, the Windows captures (`DxgiCaptureSource`,
+  `WgcCaptureSource`, `MfCaptureSource`, `WasapiCaptureSource`) and
+  `D3d11SharedTextureSource` are written this way now; a pause no longer waits out `TestVideoSource`'s
   current frame interval, nor a request a live mixer's tick or a WASAPI
   capture's poll.
 
