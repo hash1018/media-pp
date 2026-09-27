@@ -1435,10 +1435,46 @@ mod tests {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 240;
 
-    fn gpu() -> Option<D3d12Gpu> {
-        D3d12Gpu::new()
+    /// The device a test draws on, held with this module's other tests
+    /// kept out until the test is done with it.
+    ///
+    /// One at a time because of WARP, the software adapter a CI runner
+    /// has. Two of these tests drawing at once on it — two windows, two
+    /// queues, one device — crash inside the driver now and then: an
+    /// access violation in `ExecuteCommandLists`, in
+    /// `CreateGraphicsPipelineState` while the other draws, or on one of
+    /// WARP's own threads as the other's window closes. Measured with WARP
+    /// forced as the default adapter: 5 crashes in 150 runs of the two
+    /// system-memory tests together, none in 150 of the whole module run
+    /// one test at a time, and none in 300 of the pair together on an RTX
+    /// 3050. The pipeline creation that crashed reads only this module's
+    /// own live shaders and root signature, so it is not a resource let
+    /// go early here — it is the driver, and it is the runner's.
+    struct Gpu {
+        gpu: D3d12Gpu,
+        _one_at_a_time: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl std::ops::Deref for Gpu {
+        type Target = D3d12Gpu;
+
+        fn deref(&self) -> &D3d12Gpu {
+            &self.gpu
+        }
+    }
+
+    fn gpu() -> Option<Gpu> {
+        static DRAWING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let one_at_a_time = DRAWING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let gpu = D3d12Gpu::new()
             .inspect_err(|error| eprintln!("skipping: no Direct3D 12 device here ({error})"))
-            .ok()
+            .ok()?;
+        Some(Gpu {
+            gpu,
+            _one_at_a_time: one_at_a_time,
+        })
     }
 
     /// What puts a test picture on the GPU — which only a device that does
