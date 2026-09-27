@@ -481,6 +481,37 @@ Clipping to `show_from` happens in one place: a framework stage after every
 decoder, which is today's `PrerollGate` reading the segment instead of the
 phase. It applies to audio and video alike, which 2ca1ecf wanted.
 
+**Found starting stage 5's terminals (2026-09-28).** Clipping reads the
+segment now. The counting is where this section wants it already: a
+terminal's wrapper counts what it takes — one sample for a seek, the
+frames asked for in a step, or its `Eos` — and from then answers not ready
+(`TerminalTracer` with `PrerollContext::mark_ready` and `is_ready`), so
+wherever backpressure reaches, the terminal holds everything upstream. What
+the four holds cover is where it does not reach, and none of them only
+stands in for it:
+
+- `Tee.owed` keeps up to 512 items for a branch whose terminal has its
+  sample, and `FileDemuxer` parks without bound while a preroll runs, both
+  while a sibling branch decodes on to its own target — up to a GOP of the
+  other stream, which the one read cursor interleaves with it. A `Queue` at
+  the head of each branch would have to take that much past its capacity
+  while its terminal holds: the same hold in another place. Blocking there
+  instead starves the sibling (366c248). These go only with a per-stream
+  buffer that reads each stream to its own need — the multiqueue of §5.
+- `PrerollGate.after` is the output stash for a decoder's burst (§4.5). It
+  moves into the framework when the decoders become transforms, which needs
+  `Transform` to hear segments.
+- The decoders' `holding` — not ready once their sample went on — is
+  backpressure written in the element, and moves with the stash.
+- `Pacer.pending` is the one buffer a paced wait was interrupted in, kept in
+  order across the pause; that is what AGENTS.md asks of anything holding
+  back during a phase.
+
+So what follows here is a choice rather than a removal: keep the fan-out
+holds where they are, bounded as now, and move only the decoders' stash and
+readiness into the framework; or do §5's multiqueue first and remove them
+there.
+
 ### 4.5 One default behaviour
 
 Elements implement their media work. The framework implements the protocol.
