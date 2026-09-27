@@ -13,10 +13,9 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -186,7 +185,13 @@ impl AudioVolumeHandle {
 /// Runtime changes made through [`AudioVolumeHandle`] are linearly ramped
 /// per audio sample. This changes parameters only and never changes graph
 /// topology.
-pub struct AudioVolume {
+pub struct AudioVolume(TransformStage<Adjusting>);
+
+transform_filter!(AudioVolume);
+
+/// What an [`AudioVolume`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Adjusting {
     pp_log: PpLog,
     name: Arc<str>,
     control: Arc<VolumeControl>,
@@ -196,7 +201,6 @@ pub struct AudioVolume {
     ramp_step: f32,
     ramp_remaining: usize,
     gain_envelope: Vec<f32>,
-    pad: SrcPad,
 }
 
 impl AudioVolume {
@@ -227,7 +231,7 @@ impl AudioVolume {
             options.ramp_duration
         );
         Ok((
-            Self {
+            Self(TransformStage::new(Adjusting {
                 name: name.clone(),
                 pp_log,
                 control,
@@ -237,18 +241,13 @@ impl AudioVolume {
                 ramp_step: 0.0,
                 ramp_remaining: 0,
                 gain_envelope: Vec::new(),
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(PortContract::frame(
-                        MediaKind::AudioFrame,
-                        MemoryDomain::System,
-                    )),
-                ),
-            },
+            })),
             handle,
         ))
     }
+}
 
+impl Adjusting {
     fn ramp_samples(&self, sample_rate: u32) -> usize {
         self.ramp_duration
             .as_nanos()
@@ -323,7 +322,7 @@ impl AudioVolume {
     }
 }
 
-impl Element for AudioVolume {
+impl Element for Adjusting {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -341,13 +340,14 @@ impl Element for AudioVolume {
     }
 }
 
-impl Source for AudioVolume {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Adjusting {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
-}
 
-impl Sink for AudioVolume {
     /// Scales samples in place; nothing else has samples to scale.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -356,23 +356,22 @@ impl Sink for AudioVolume {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
                 let frame = self.process_audio(frame)?;
-                self.pad.push(MediaBuffer::Audio(frame))
+                out.push(MediaBuffer::Audio(frame));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioVolumeError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioVolumeError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.snap_to_target();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.snap_to_target();
     }
 }
 
@@ -485,6 +484,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
+    use crate::element::{Sink, Source};
 
     fn new_volume(
         options: AudioVolumeOptions,

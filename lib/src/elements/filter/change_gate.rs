@@ -8,11 +8,10 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::{MediaBuffer, picture_id},
     contract::InputContract,
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
     pool::UnboundObjectPoolRef,
+    transform::{TransformStage, transform_filter},
 };
 
 /// Forwards a video frame only when its picture is not the one it last
@@ -66,12 +65,17 @@ use crate::{
 ///
 /// It reads no pixels, so it works the same on a GPU frame as on one in
 /// system memory, and costs a pointer comparison either way.
-pub struct ChangeGate {
+pub struct ChangeGate(TransformStage<Gating>);
+
+transform_filter!(ChangeGate);
+
+/// What a [`ChangeGate`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Gating {
     pp_log: PpLog,
     name: Arc<str>,
     min_interval: Duration,
     forwarded: Option<Forwarded>,
-    pad: SrcPad,
 }
 
 /// The last picture forwarded, and when.
@@ -92,18 +96,18 @@ impl ChangeGate {
     /// [`Duration::ZERO`] forwards every change as it arrives.
     pub fn new(name: impl Into<String>, min_interval: Duration) -> Self {
         let name: Arc<str> = name.into().into();
-        let pad = SrcPad::new(format!("{name}_src"));
         let pp_log = element_pp_log(ElementType::ChangeGate, &name, None);
         pp_info!(pp_log: &pp_log, "created: at most one frame per {min_interval:?}");
-        Self {
+        Self(TransformStage::new(Gating {
             pp_log,
             name,
             min_interval,
             forwarded: None,
-            pad,
-        }
+        }))
     }
+}
 
+impl Gating {
     /// Whether this frame is one the terminal downstream has not seen.
     fn is_new(&self, frame: &ffmpeg::frame::Video, now: Instant) -> bool {
         match &self.forwarded {
@@ -142,7 +146,7 @@ impl ChangeGate {
     }
 }
 
-impl Element for ChangeGate {
+impl Element for Gating {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -160,40 +164,33 @@ impl Element for ChangeGate {
     }
 }
 
-impl Source for ChangeGate {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for ChangeGate {
+impl Transform for Gating {
     /// Whatever arrives, wherever its pixels live: this compares pointers and
     /// reads nothing, so it passes the upstream contract straight through.
     fn input_contract(&self) -> InputContract {
         InputContract::Any
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         let MediaBuffer::Video(frame) = &buf else {
             // Everything that is not a picture — end of stream above all —
             // has nothing to be unchanged about.
-            return self.pad.push(buf);
+            out.push(buf);
+            return Ok(());
         };
         let now = Instant::now();
         if !self.is_new(frame, now) {
             return Ok(());
         }
         self.remember(frame, now);
-        self.pad.push(buf)
+        out.push(buf);
+        Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            // Whatever comes next is new by definition: downstream has been
-            // reset, or is about to stop.
-            self.forwarded = None;
-        }
-        Ok(())
+    fn reset(&mut self) {
+        // Whatever comes next is new by definition: downstream has been
+        // reset, or is about to stop.
+        self.forwarded = None;
     }
 }
 
@@ -203,6 +200,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::control::ControlMsg;
+    use crate::element::Sink;
     use crate::pool::UnboundObjectPool;
 
     /// One frame with its own picture. System memory, because what this gate

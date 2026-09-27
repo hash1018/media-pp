@@ -97,9 +97,14 @@ impl<T: Transform> TransformStage<T> {
 
     /// The transform itself — for the element of this crate that is a
     /// newtype over its stage, to reach what it is made of.
-    #[cfg(test)]
     pub(crate) fn inner(&self) -> &T {
         &self.inner
+    }
+
+    /// The same, to change it — for a test that drives the work directly.
+    #[cfg(test)]
+    pub(crate) fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
     }
 
     /// Hands on what `out` holds, every buffer even where one is refused,

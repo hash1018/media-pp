@@ -6,13 +6,13 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Context, Element, ElementType, Sink, Source, element_pp_log},
+    element::{Context, Element, ElementType, Output, Transform, element_pp_log},
     elements::AudioFormat,
     error::Result,
     playback_clock::PlaybackClock,
     playback_state::PlaybackState,
     pp_log::PpLog,
+    transform::{TransformStage, transform_filter},
 };
 
 use super::stretcher::{Piece, Stretcher};
@@ -59,10 +59,15 @@ pub enum AudioTempoError {
 /// it on before the `Eos`. While a preroll runs a frame goes on as it came:
 /// what a preroll asks of the terminal after this is one sample, and a
 /// stretch hands on nothing until it has been given more than that.
-pub struct AudioTempo {
+pub struct AudioTempo(TransformStage<Stretching>);
+
+transform_filter!(AudioTempo);
+
+/// What an [`AudioTempo`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Stretching {
     pp_log: PpLog,
     name: Arc<str>,
-    pad: crate::pad::SrcPad,
     /// The pipeline's; `None` for one no pipeline wired, which passes
     /// everything as it came.
     playback_clock: Option<Arc<PlaybackClock>>,
@@ -77,22 +82,17 @@ impl AudioTempo {
     /// passes everything as it came in none.
     pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
-        Self {
+        Self(TransformStage::new(Stretching {
             pp_log: element_pp_log(ElementType::AudioTempo, &name, None),
-            pad: crate::pad::SrcPad::with_contract(
-                format!("{name}_src"),
-                OutputContract::Fixed(PortContract::frame(
-                    MediaKind::AudioFrame,
-                    MemoryDomain::System,
-                )),
-            ),
             name,
             playback_clock: None,
             state: None,
             stretcher: None,
-        }
+        }))
     }
+}
 
+impl Stretching {
     /// How much sound is stretched now: the pipeline's rate, whichever way.
     fn rate(&self) -> f64 {
         self.playback_clock
@@ -100,13 +100,14 @@ impl AudioTempo {
             .map_or(1.0, |clock| clock.rate().abs())
     }
 
-    fn stretch(&mut self, frame: Arc<ffmpeg::frame::Audio>) -> Result<()> {
+    fn stretch(&mut self, frame: Arc<ffmpeg::frame::Audio>, out: &mut Output) -> Result<()> {
         if self
             .state
             .as_ref()
             .is_some_and(|state| state.is_prerolling())
         {
-            return self.pad.push(MediaBuffer::Audio(frame));
+            out.push(MediaBuffer::Audio(frame));
+            return Ok(());
         }
         let rate = self.rate();
         if self
@@ -115,7 +116,8 @@ impl AudioTempo {
             .is_none_or(|(_, _, stretcher)| stretcher.passes(rate))
             && rate == 1.0
         {
-            return self.pad.push(MediaBuffer::Audio(frame));
+            out.push(MediaBuffer::Audio(frame));
+            return Ok(());
         }
         let (sample_rate, channels) = (frame.rate(), frame.channels());
         if sample_rate == 0 || channels == 0 {
@@ -129,7 +131,7 @@ impl AudioTempo {
             .as_ref()
             .is_some_and(|(made, made_layout, _)| *made != format || *made_layout != layout)
         {
-            self.finish()?;
+            self.finish(out)?;
         }
         let (_, _, stretcher) = self.stretcher.get_or_insert_with(|| {
             (
@@ -146,7 +148,7 @@ impl AudioTempo {
         let pieces = stretcher
             .stretch(&frame, media_ns, rate)
             .map_err(AudioTempoError::from)?;
-        self.hand_on(pieces, Some(frame))
+        self.hand_on(pieces, Some(frame), out)
     }
 
     /// Hands on what the stretch put out, `frame` for a piece that is the
@@ -155,13 +157,14 @@ impl AudioTempo {
         &mut self,
         pieces: Vec<Piece>,
         frame: Option<Arc<ffmpeg::frame::Audio>>,
+        out: &mut Output,
     ) -> Result<()> {
         let mut frame = frame;
         for piece in pieces {
             match piece {
                 Piece::AsIs => {
                     if let Some(frame) = frame.take() {
-                        self.pad.push(MediaBuffer::Audio(frame))?;
+                        out.push(MediaBuffer::Audio(frame));
                     }
                 }
                 Piece::Stretched {
@@ -174,7 +177,7 @@ impl AudioTempo {
                         media_ns.rescale(ffmpeg::Rational::new(1, 1_000_000_000), base),
                     ));
                     crate::buffer::set_time_base(&mut frame, base);
-                    self.pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
+                    out.push(MediaBuffer::Audio(Arc::new(frame)));
                 }
             }
         }
@@ -182,16 +185,16 @@ impl AudioTempo {
     }
 
     /// Hands on everything a stretch holds, and forgets it.
-    fn finish(&mut self) -> Result<()> {
+    fn finish(&mut self, out: &mut Output) -> Result<()> {
         let Some((_, _, mut stretcher)) = self.stretcher.take() else {
             return Ok(());
         };
         let pieces = stretcher.finish().map_err(AudioTempoError::from)?;
-        self.hand_on(pieces, None)
+        self.hand_on(pieces, None, out)
     }
 }
 
-impl Element for AudioTempo {
+impl Element for Stretching {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -214,13 +217,14 @@ impl Element for AudioTempo {
     }
 }
 
-impl Source for AudioTempo {
-    fn src_pads(&mut self) -> &mut [crate::pad::SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Stretching {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
-}
 
-impl Sink for AudioTempo {
     /// Decoded sound, in any format; it goes on in the one it came in.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -229,25 +233,25 @@ impl Sink for AudioTempo {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Audio(frame) => self.stretch(frame),
-            MediaBuffer::Eos => {
-                self.finish()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            MediaBuffer::Audio(frame) => self.stretch(frame, out),
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioTempoError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioTempoError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop)
-            && let Some((_, _, stretcher)) = &mut self.stretcher
-        {
+    /// Hands on everything the stretch holds before the end.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        self.finish(out)
+    }
+
+    fn reset(&mut self) {
+        if let Some((_, _, stretcher)) = &mut self.stretcher {
             stretcher.reset();
         }
-        Ok(())
     }
 }
 
@@ -257,6 +261,8 @@ mod tests {
 
     use super::*;
     use crate::clock::Clock;
+    use crate::control::ControlMsg;
+    use crate::element::{Sink, Source};
     use crate::elements::AppSink;
 
     const RATE: u32 = 48_000;

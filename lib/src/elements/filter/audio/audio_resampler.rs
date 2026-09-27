@@ -7,12 +7,11 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     elements::AudioFormat,
     error::Result,
-    pad::SrcPad,
     time::{MediaTimestamp, TimeBase},
+    transform::{TransformStage, transform_filter},
 };
 
 /// The reusable `libswresample` state shared by [`AudioResampler`] and
@@ -158,13 +157,18 @@ pub enum AudioResamplerError {
 /// contiguous across resampler buffering. The first output is anchored to
 /// the first input frame's PTS, rescaled from the time base that frame
 /// carries — see [`crate::buffer::time_base`].
-pub struct AudioResampler {
+pub struct AudioResampler(TransformStage<Resampling>);
+
+transform_filter!(AudioResampler);
+
+/// What an [`AudioResampler`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Resampling {
     pp_log: PpLog,
     name: Arc<str>,
     target: AudioFormat,
     resampler: AudioFrameResampler,
     next_pts: Option<i64>,
-    pad: SrcPad,
 }
 
 impl AudioResampler {
@@ -174,13 +178,6 @@ impl AudioResampler {
         crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::AudioResampler, &name, None);
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::AudioFrame,
-                MemoryDomain::System,
-            )),
-        );
         pp_info!(
             pp_log: &pp_log,
             "created: {}Hz, {} channel(s), format={:?}",
@@ -188,23 +185,28 @@ impl AudioResampler {
             target.channels(),
             target.sample_format
         );
-        Self {
+        Self(TransformStage::new(Resampling {
             name,
             pp_log,
             target,
             resampler: AudioFrameResampler::new(target),
             next_pts: None,
-            pad,
-        }
+        }))
     }
 
     /// Returns the fixed output audio format.
     pub fn format(&self) -> AudioFormat {
-        self.target
+        self.0.inner().target
     }
 
     /// Returns the output PTS time base, `1 / sample_rate`.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Resampling {
+    fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.target.sample_rate as i32)
     }
 
@@ -232,7 +234,7 @@ impl AudioResampler {
         Ok(())
     }
 
-    fn push_frames(&mut self, frames: Vec<ffmpeg::frame::Audio>) -> Result<()> {
+    fn push_frames(&mut self, frames: Vec<ffmpeg::frame::Audio>, out: &mut Output) -> Result<()> {
         let time_base = self.time_base();
         for mut frame in frames {
             let pts = self.next_pts.get_or_insert(0);
@@ -240,18 +242,13 @@ impl AudioResampler {
             frame.set_pts(Some(*pts));
             crate::buffer::set_time_base(&mut frame, time_base);
             *pts += frame.samples() as i64;
-            self.pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
+            out.push(MediaBuffer::Audio(Arc::new(frame)));
         }
         Ok(())
     }
-
-    fn reset(&mut self) {
-        self.resampler.reset();
-        self.next_pts = None;
-    }
 }
 
-impl Element for AudioResampler {
+impl Element for Resampling {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -269,13 +266,14 @@ impl Element for AudioResampler {
     }
 }
 
-impl Source for AudioResampler {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Resampling {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
-}
 
-impl Sink for AudioResampler {
     /// Converts one audio layout to another; the rate and format it changes are runtime values, not part of this.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -284,7 +282,7 @@ impl Sink for AudioResampler {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
                 self.anchor_pts(&frame)?;
@@ -293,27 +291,28 @@ impl Sink for AudioResampler {
                     .run(&frame)
                     .inspect_err(|error| pp_error!(self, "resample failed: {error}"))
                     .map_err(AudioResamplerError::from)?;
-                self.push_frames(frames)
+                self.push_frames(frames, out)
             }
-            MediaBuffer::Eos => {
-                let frames = self
-                    .resampler
-                    .flush()
-                    .inspect_err(|error| pp_error!(self, "resampler flush failed: {error}"))
-                    .map_err(AudioResamplerError::from)?;
-                self.push_frames(frames)?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioResamplerError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioResamplerError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.reset();
-        }
-        Ok(())
+    /// What the resampler still holds goes on before the end.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        let frames = self
+            .resampler
+            .flush()
+            .inspect_err(|error| pp_error!(self, "resampler flush failed: {error}"))
+            .map_err(AudioResamplerError::from)?;
+        self.push_frames(frames, out)
+    }
+
+    fn reset(&mut self) {
+        self.resampler.reset();
+        self.next_pts = None;
     }
 }
 
@@ -325,6 +324,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
+    use crate::element::{Sink, Source};
 
     fn f32_packed_frame(rate: u32, channels: u16, samples: usize, pts: i64) -> MediaBuffer {
         let format = ffmpeg::format::Sample::F32(Type::Packed);
@@ -454,7 +454,10 @@ mod tests {
             crate::Error::AudioResamplerError(AudioResamplerError::NoTimeBase)
         ));
         assert!(received.lock().unwrap().is_empty());
-        assert!(resampler.next_pts.is_none(), "the output is not anchored");
+        assert!(
+            resampler.0.inner().next_pts.is_none(),
+            "the output is not anchored"
+        );
 
         resampler
             .consume(f32_packed_frame(48_000, 2, 960, 9_600))

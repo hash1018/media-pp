@@ -9,10 +9,9 @@ use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 /// How quickly the level the gate listens to falls once the sound stops.
@@ -245,7 +244,13 @@ impl Rates {
 /// front. `Flush` and `Stop` return it to closed, since whatever follows is
 /// a different stretch of sound; `Eos` passes straight through, as nothing
 /// is held back.
-pub struct AudioGate {
+pub struct AudioGate(TransformStage<Gating>);
+
+transform_filter!(AudioGate);
+
+/// What an [`AudioGate`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Gating {
     pp_log: PpLog,
     name: Arc<str>,
     control: Arc<Tuning<AudioGateOptions>>,
@@ -255,7 +260,6 @@ pub struct AudioGate {
     state: State,
     level: f32,
     gain: f32,
-    pad: SrcPad,
 }
 
 impl AudioGate {
@@ -276,7 +280,7 @@ impl AudioGate {
         let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
-            Self {
+            Self(TransformStage::new(Gating {
                 name: name.clone(),
                 pp_log,
                 control: control.clone(),
@@ -287,18 +291,13 @@ impl AudioGate {
                 state: State::Closed,
                 level: 0.0,
                 gain: 0.0,
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(PortContract::frame(
-                        MediaKind::AudioFrame,
-                        MemoryDomain::System,
-                    )),
-                ),
-            },
+            })),
             AudioGateHandle { control },
         ))
     }
+}
 
+impl Gating {
     /// Works the settings out again when they, or the frame's rate, have
     /// changed since the last frame.
     fn follow_settings(&mut self, sample_rate: u32) {
@@ -352,7 +351,7 @@ impl AudioGate {
     }
 }
 
-impl Element for AudioGate {
+impl Element for Gating {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -370,13 +369,14 @@ impl Element for AudioGate {
     }
 }
 
-impl Source for AudioGate {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Gating {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
-}
 
-impl Sink for AudioGate {
     /// Scales samples in place; nothing else has samples to scale.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -385,23 +385,22 @@ impl Sink for AudioGate {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
                 let frame = self.process(frame)?;
-                self.pad.push(MediaBuffer::Audio(frame))
+                out.push(MediaBuffer::Audio(frame));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioGateError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioGateError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.close();
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.close();
     }
 }
 
@@ -413,6 +412,8 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
+    use crate::control::ControlMsg;
+    use crate::element::{Sink, Source};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;
@@ -542,10 +543,10 @@ mod tests {
             release: Duration::from_millis(20),
             ..no_timing()
         });
-        gate.follow_settings(RATE);
+        gate.0.inner_mut().follow_settings(RATE);
 
         // 10 ms is 480 samples: halfway through, halfway open.
-        let opening: Vec<f32> = (0..960).map(|_| gate.gain(0.5)).collect();
+        let opening: Vec<f32> = (0..960).map(|_| gate.0.inner_mut().gain(0.5)).collect();
         assert!((opening[239] - 0.5).abs() < 0.01, "{}", opening[239]);
         assert_eq!(opening[490], 1.0, "fully open after it");
 
@@ -553,7 +554,9 @@ mod tests {
         // under -32 dBFS after 20 ms × ln(0.5 / 0.0251) ≈ 2871 samples.
         // With no hold the gate closes on the next, and 20 ms of release is
         // 960 samples from there to nothing.
-        let closing: Vec<f32> = (0..RATE / 5).map(|_| gate.gain(0.0)).collect();
+        let closing: Vec<f32> = (0..RATE / 5)
+            .map(|_| gate.0.inner_mut().gain(0.0))
+            .collect();
         let closes = closing.iter().position(|gain| *gain < 1.0).unwrap();
         let closed = closing.iter().position(|gain| *gain == 0.0).unwrap();
         assert!((2865..=2880).contains(&closes), "began closing at {closes}");

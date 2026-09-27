@@ -9,10 +9,9 @@ use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 /// Settings for [`AudioCompressor`], and what
@@ -204,7 +203,13 @@ impl Rates {
 /// next frame. A frame that is not `f32` is an error for that frame and
 /// changes nothing. `Flush` and `Stop` let go of whatever it was holding
 /// down; `Eos` passes straight through.
-pub struct AudioCompressor {
+pub struct AudioCompressor(TransformStage<Compressing>);
+
+transform_filter!(AudioCompressor);
+
+/// What an [`AudioCompressor`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Compressing {
     pp_log: PpLog,
     name: Arc<str>,
     control: Arc<Tuning<AudioCompressorOptions>>,
@@ -212,7 +217,6 @@ pub struct AudioCompressor {
     rates: Rates,
     /// The level follower, as an amplitude.
     level: f32,
-    pad: SrcPad,
 }
 
 impl AudioCompressor {
@@ -233,7 +237,7 @@ impl AudioCompressor {
         let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
-            Self {
+            Self(TransformStage::new(Compressing {
                 name: name.clone(),
                 pp_log,
                 control: control.clone(),
@@ -241,18 +245,13 @@ impl AudioCompressor {
                 // Replaced before the first sample is looked at.
                 rates: Rates::new(options, 48_000),
                 level: 0.0,
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(PortContract::frame(
-                        MediaKind::AudioFrame,
-                        MemoryDomain::System,
-                    )),
-                ),
-            },
+            })),
             AudioCompressorHandle { control },
         ))
     }
+}
 
+impl Compressing {
     fn follow_settings(&mut self, sample_rate: u32) {
         if let Some(options) = self.control.fresh(&mut self.applied, sample_rate) {
             self.rates = Rates::new(options, sample_rate);
@@ -281,7 +280,7 @@ impl AudioCompressor {
     }
 }
 
-impl Element for AudioCompressor {
+impl Element for Compressing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -299,13 +298,14 @@ impl Element for AudioCompressor {
     }
 }
 
-impl Source for AudioCompressor {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Compressing {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
-}
 
-impl Sink for AudioCompressor {
     /// Scales samples in place; nothing else has samples to scale.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -314,23 +314,22 @@ impl Sink for AudioCompressor {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
                 let frame = self.process(frame)?;
-                self.pad.push(MediaBuffer::Audio(frame))
+                out.push(MediaBuffer::Audio(frame));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioCompressorError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioCompressorError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.level = 0.0;
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.level = 0.0;
     }
 }
 
@@ -342,6 +341,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;
@@ -448,9 +448,11 @@ mod tests {
             release: Duration::from_millis(100),
             output_gain_db: 0.0,
         });
-        compressor.follow_settings(RATE);
+        compressor.0.inner_mut().follow_settings(RATE);
         let loud = 0.5;
-        let attacking: Vec<f32> = (0..RATE / 10).map(|_| compressor.gain(loud)).collect();
+        let attacking: Vec<f32> = (0..RATE / 10)
+            .map(|_| compressor.0.inner_mut().gain(loud))
+            .collect();
         assert!(attacking[0] > 0.9, "not all at once: {}", attacking[0]);
         // Five time constants in, the follower has all but reached the
         // level, so the gain has all but reached the static curve's.
@@ -461,7 +463,9 @@ mod tests {
             attacking[2_400]
         );
 
-        let releasing: Vec<f32> = (0..RATE / 2).map(|_| compressor.gain(0.0)).collect();
+        let releasing: Vec<f32> = (0..RATE / 2)
+            .map(|_| compressor.0.inner_mut().gain(0.0))
+            .collect();
         assert!(
             releasing[480] < 0.5,
             "still holding down 10 ms into the release"

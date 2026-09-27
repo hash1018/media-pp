@@ -9,10 +9,9 @@ use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 /// How close to the gain it is releasing toward counts as there: -120 dB.
@@ -142,7 +141,13 @@ impl AudioLimiterHandle {
 /// frame. A frame that is not `f32` is an error for that frame and changes
 /// nothing. `Flush` and `Stop` let go at once; `Eos` passes straight
 /// through.
-pub struct AudioLimiter {
+pub struct AudioLimiter(TransformStage<Limiting>);
+
+transform_filter!(AudioLimiter);
+
+/// What an [`AudioLimiter`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Limiting {
     pp_log: PpLog,
     name: Arc<str>,
     control: Arc<Tuning<AudioLimiterOptions>>,
@@ -153,7 +158,6 @@ pub struct AudioLimiter {
     release: f32,
     /// How far under one the gain is.
     reduction: f32,
-    pad: SrcPad,
 }
 
 impl AudioLimiter {
@@ -174,7 +178,7 @@ impl AudioLimiter {
         let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
-            Self {
+            Self(TransformStage::new(Limiting {
                 name: name.clone(),
                 pp_log,
                 control: control.clone(),
@@ -183,18 +187,13 @@ impl AudioLimiter {
                 ceiling: 1.0,
                 release: 0.0,
                 reduction: 0.0,
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(PortContract::frame(
-                        MediaKind::AudioFrame,
-                        MemoryDomain::System,
-                    )),
-                ),
-            },
+            })),
             AudioLimiterHandle { control },
         ))
     }
+}
 
+impl Limiting {
     fn follow_settings(&mut self, sample_rate: u32) {
         if let Some(options) = self.control.fresh(&mut self.applied, sample_rate) {
             self.ceiling = db_to_amplitude(options.threshold_db);
@@ -246,7 +245,7 @@ impl AudioLimiter {
     }
 }
 
-impl Element for AudioLimiter {
+impl Element for Limiting {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -264,13 +263,14 @@ impl Element for AudioLimiter {
     }
 }
 
-impl Source for AudioLimiter {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Limiting {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
-}
 
-impl Sink for AudioLimiter {
     /// Scales samples in place; nothing else has samples to scale.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -279,23 +279,22 @@ impl Sink for AudioLimiter {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
                 let frame = self.process(frame)?;
-                self.pad.push(MediaBuffer::Audio(frame))
+                out.push(MediaBuffer::Audio(frame));
+                Ok(())
             }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            // The stage's, never handed here.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioLimiterError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioLimiterError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.reduction = 0.0;
-        }
-        Ok(())
+    fn reset(&mut self) {
+        self.reduction = 0.0;
     }
 }
 
@@ -307,6 +306,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
+    use crate::element::{Sink, Source};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;

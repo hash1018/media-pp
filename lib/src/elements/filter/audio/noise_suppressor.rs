@@ -9,10 +9,9 @@ use super::audio_f32::{self, Unreadable};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 /// The one rate RNNoise was trained at, and so the one it takes.
@@ -123,7 +122,13 @@ impl Channel {
 ///
 /// The network's weights are compiled into the crate, so nothing is loaded
 /// from disk. Each channel keeps one RNNoise state, about 100 KB.
-pub struct NoiseSuppressor {
+pub struct NoiseSuppressor(TransformStage<Suppressing>);
+
+transform_filter!(NoiseSuppressor);
+
+/// What a [`NoiseSuppressor`] does to each buffer: all of its work, which the
+/// framework makes the filter.
+struct Suppressing {
     pp_log: PpLog,
     name: Arc<str>,
     channels: Vec<Channel>,
@@ -133,7 +138,6 @@ pub struct NoiseSuppressor {
     /// Denoised samples still to be thrown away: the block RNNoise returns
     /// before it has heard anything.
     lead_in: usize,
-    pad: SrcPad,
 }
 
 impl NoiseSuppressor {
@@ -142,22 +146,17 @@ impl NoiseSuppressor {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::NoiseSuppressor, &name, None);
         pp_info!(pp_log: &pp_log, "created");
-        Self {
+        Self(TransformStage::new(Suppressing {
             name: name.clone(),
             pp_log,
             channels: Vec::new(),
             waiting: VecDeque::new(),
             lead_in: BLOCK,
-            pad: SrcPad::with_contract(
-                format!("{name}_src"),
-                OutputContract::Fixed(PortContract::frame(
-                    MediaKind::AudioFrame,
-                    MemoryDomain::System,
-                )),
-            ),
-        }
+        }))
     }
+}
 
+impl Suppressing {
     /// Starts again with `channels` and nothing held.
     fn restart(&mut self, channels: usize) {
         self.channels = (0..channels).map(|_| Channel::new()).collect();
@@ -195,7 +194,7 @@ impl NoiseSuppressor {
     }
 
     /// Hands on every waiting frame whose denoised samples are all ready.
-    fn release_ready(&mut self) -> Result<()> {
+    fn release_ready(&mut self, out: &mut Output) -> Result<()> {
         while let Some(front) = self.waiting.front() {
             let samples = front.samples();
             if self
@@ -215,7 +214,7 @@ impl NoiseSuppressor {
             // `AudioVolume`.
             let mut frame = Arc::try_unwrap(frame).unwrap_or_else(|shared| shared.as_ref().clone());
             audio_f32::write(&mut frame, &denoised);
-            self.pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
+            out.push(MediaBuffer::Audio(Arc::new(frame)));
         }
         Ok(())
     }
@@ -223,14 +222,14 @@ impl NoiseSuppressor {
     /// Feeds silence behind what is held until every waiting frame has gone
     /// out — at most two blocks: the one completing the last partial block,
     /// and the one RNNoise needs to give that back.
-    fn drain(&mut self) -> Result<()> {
+    fn drain_held(&mut self, out: &mut Output) -> Result<()> {
         while !self.waiting.is_empty() {
             for channel in &mut self.channels {
                 let short = BLOCK - channel.pending.len() % BLOCK;
                 channel.pending.extend(std::iter::repeat_n(0.0, short));
             }
             self.denoise_blocks();
-            self.release_ready()?;
+            self.release_ready(out)?;
         }
         // The silence fed in was never anyone's input, and RNNoise now holds
         // some of it: whatever comes next starts from nothing, lead-in and
@@ -240,7 +239,7 @@ impl NoiseSuppressor {
         Ok(())
     }
 
-    fn process(&mut self, frame: Arc<ffmpeg::frame::Audio>) -> Result<()> {
+    fn process(&mut self, frame: Arc<ffmpeg::frame::Audio>, out: &mut Output) -> Result<()> {
         let rate = frame.rate();
         if rate != NOISE_SUPPRESSOR_SAMPLE_RATE {
             return Err(NoiseSuppressorError::UnsupportedSampleRate(rate).into());
@@ -250,7 +249,7 @@ impl NoiseSuppressor {
             // A different layout is a different signal: what the old one
             // held goes out first, and the new one starts from nothing.
             if !self.channels.is_empty() {
-                self.drain()?;
+                self.drain_held(out)?;
             }
             self.restart(samples.len());
         }
@@ -259,11 +258,11 @@ impl NoiseSuppressor {
         }
         self.waiting.push_back(frame);
         self.denoise_blocks();
-        self.release_ready()
+        self.release_ready(out)
     }
 }
 
-impl Element for NoiseSuppressor {
+impl Element for Suppressing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -281,13 +280,14 @@ impl Element for NoiseSuppressor {
     }
 }
 
-impl Source for NoiseSuppressor {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+impl Transform for Suppressing {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
-}
 
-impl Sink for NoiseSuppressor {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -295,24 +295,23 @@ impl Sink for NoiseSuppressor {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Audio(frame) => self.process(frame),
-            MediaBuffer::Eos => {
-                self.drain()?;
-                self.pad.push(MediaBuffer::Eos)
-            }
+            MediaBuffer::Audio(frame) => self.process(frame, out),
+            // The stage's, never handed here — see `drain`.
+            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(NoiseSuppressorError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(NoiseSuppressorError::UnsupportedBuffer("Video").into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            let channels = self.channels.len();
-            self.restart(channels);
-        }
-        Ok(())
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        self.drain_held(out)
+    }
+
+    fn reset(&mut self) {
+        let channels = self.channels.len();
+        self.restart(channels);
     }
 }
 
@@ -324,6 +323,8 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
+    use crate::control::ControlMsg;
+    use crate::element::{Sink, Source};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = NOISE_SUPPRESSOR_SAMPLE_RATE;
