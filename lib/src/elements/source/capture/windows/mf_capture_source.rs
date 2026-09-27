@@ -13,13 +13,10 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlReceiver,
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     elements::VideoFormat,
     error::Result,
-    pad::SrcPad,
     platform::windows::{
         com::ComApartment,
         mf::{
@@ -28,6 +25,7 @@ use crate::{
         },
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    produce::produce_source,
 };
 
 /// The unit every emitted `pts` counts in: Media Foundation's own 100ns
@@ -156,13 +154,20 @@ pub struct MfCaptureOptions {
 ///
 /// # Stop latency
 ///
-/// `IMFSourceReader::ReadSample` is synchronous and has no timeout, so
-/// control is looked at once per delivered frame — a bound of one frame
+/// `IMFSourceReader::ReadSample` is synchronous and has no timeout — the
+/// one wait here the framework's `Wait` cannot let go of — so control is
+/// looked at once per delivered frame — a bound of one frame
 /// interval at the negotiated rate, and the reason a mode's rate is worth
 /// picking deliberately. A camera that stops delivering without failing
 /// would leave that call parked; in practice a device that goes away fails
 /// the read rather than going quiet, which is what makes this bounded.
-pub struct MfCaptureSource {
+pub struct MfCaptureSource(ProducingSource<Capturing>);
+
+produce_source!(MfCaptureSource);
+
+/// What an [`MfCaptureSource`] does when asked: the camera's next picture.
+/// All of its work, which the framework makes the source.
+struct Capturing {
     pp_log: PpLog,
     name: Arc<str>,
     /// Held for this element's whole life: the reader and the source below
@@ -198,7 +203,9 @@ pub struct MfCaptureSource {
     /// docs. Each frame is written whole before it is pushed, so `release`
     /// has nothing to reset.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
-    pad: SrcPad,
+    /// The COM apartment the reads run in: joined on the source's own
+    /// thread in `starting`, and left there in `stopping`.
+    apartment: Option<ComApartment>,
 }
 
 // SAFETY: every handle here is a `windows-rs` COM interface wrapper.
@@ -206,10 +213,11 @@ pub struct MfCaptureSource {
 // free-threaded, so handing them to the source thread is sound, and `&mut
 // self` on every method that touches them already rules out concurrent
 // access — the same reasoning `DxgiCaptureSource` and `WasapiCaptureSource`
-// document for their own.
-unsafe impl Send for MfCaptureSource {}
+// document for their own. The apartment is joined and left on the source's
+// own thread, by the framework's `starting` and `stopping` there.
+unsafe impl Send for Capturing {}
 
-impl Drop for MfCaptureSource {
+impl Drop for Capturing {
     fn drop(&mut self) {
         // SAFETY: `source` is live and this is the last thing done with it;
         // `Shutdown` is idempotent and is what releases the camera.
@@ -356,16 +364,8 @@ impl MfCaptureSource {
             framerate
         );
 
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::NV12),
-            ),
-        );
-
         Ok((
-            Self {
+            Self(ProducingSource::new(Capturing {
                 pp_log,
                 name: name.clone(),
                 _runtime: runtime,
@@ -385,8 +385,8 @@ impl MfCaptureSource {
                     move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
                     |_| {},
                 ),
-                pad,
-            },
+                apartment: None,
+            })),
             VideoFormat {
                 width,
                 height,
@@ -444,7 +444,7 @@ impl MfCaptureSource {
     /// clock keeps every one of those intervals as it actually was, rather
     /// than rounding it onto a grid the camera never promised.
     pub fn time_base(&self) -> ffmpeg::Rational {
-        ffmpeg::Rational::new(1, TIME_BASE_DENOMINATOR)
+        self.0.inner().time_base()
     }
 
     /// The rate the camera's mode was negotiated at — what an encoder after
@@ -452,7 +452,13 @@ impl MfCaptureSource {
     /// `None` does not otherwise say. Nominal: frames are stamped as the
     /// camera delivers them, which [`MfCaptureSource::time_base`] explains.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        self.frame_rate
+        self.0.inner().frame_rate
+    }
+}
+
+impl Capturing {
+    fn time_base(&self) -> ffmpeg::Rational {
+        ffmpeg::Rational::new(1, TIME_BASE_DENOMINATOR)
     }
 
     fn classify_error(&self, error: windows::core::Error) -> MfCaptureSourceError {
@@ -604,25 +610,9 @@ impl MfCaptureSource {
         }
         Ok(frame)
     }
-
-    /// Pushes `frame` downstream, reporting — rather than dying on — a
-    /// failing `Sink`, the same "drop this one buffer, keep going" contract
-    /// every other capture source in this crate gives its own pushes.
-    fn push_frame(&mut self, frame: UnboundObjectPoolRef<ffmpeg::frame::Video>, bus: &Bus) {
-        if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
-            bus.post(
-                &self.pp_log,
-                BusEvent::Error {
-                    element_type: ElementType::MfCaptureSource,
-                    name: self.name.clone(),
-                    error,
-                },
-            );
-        }
-    }
 }
 
-impl Element for MfCaptureSource {
+impl Element for Capturing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -640,15 +630,16 @@ impl Element for MfCaptureSource {
     }
 }
 
-impl Source for MfCaptureSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for MfCaptureSource {
+impl Produce for Capturing {
     fn is_live(&self) -> bool {
         true
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12),
+        )
     }
 
     /// Discards what the camera queued while nothing was reading: those
@@ -664,30 +655,35 @@ impl SourceElement for MfCaptureSource {
         Ok(())
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        let _apartment = ComApartment::new().map_err(MfCaptureSourceError::from)?;
+    /// Joins COM on the source's thread, where every read is made.
+    fn starting(&mut self) -> Result<()> {
+        self.apartment = Some(ComApartment::new().map_err(MfCaptureSourceError::from)?);
+        Ok(())
+    }
 
-        loop {
-            if crate::control::drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
+    /// Leaves COM, on the thread that joined it.
+    fn stopping(&mut self) {
+        self.apartment = None;
+    }
 
-            let Some(sample) = self.read_sample()? else {
-                // A stream tick: the camera reported a gap rather than a
-                // picture. Nothing to push, and nothing wrong.
-                pp_debug!(self, "the camera reported a gap with no sample");
-                continue;
-            };
-            // SAFETY: `sample` is the live sample just read.
-            let sample_time =
-                unsafe { sample.GetSampleTime() }.map_err(|error| self.classify_error(error))?;
-            let mut frame = self.build_frame(&sample)?;
-            frame.set_pts(Some(self.stamp(sample_time)));
-            crate::buffer::set_time_base(&mut frame, self.time_base());
-            self.push_frame(frame, bus);
-        }
+    /// The camera's next picture, stamped on its own clock — waiting for it
+    /// in the synchronous reader, not through `Wait`, since that read has
+    /// no timeout and cannot be let go of (see the type's own docs on stop
+    /// latency).
+    fn produce(&mut self, _wait: &mut Wait<'_>) -> Result<Produced> {
+        let Some(sample) = self.read_sample()? else {
+            // A stream tick: the camera reported a gap rather than a
+            // picture. Nothing to hand on, and nothing wrong.
+            pp_debug!(self, "the camera reported a gap with no sample");
+            return Ok(Produced::Nothing);
+        };
+        // SAFETY: `sample` is the live sample just read.
+        let sample_time =
+            unsafe { sample.GetSampleTime() }.map_err(|error| self.classify_error(error))?;
+        let mut frame = self.build_frame(&sample)?;
+        frame.set_pts(Some(self.stamp(sample_time)));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
+        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame))))
     }
 }
 

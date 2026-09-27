@@ -2,7 +2,6 @@ use std::{
     ffi::c_void,
     ptr,
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -22,24 +21,21 @@ use windows::Win32::{
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlReceiver,
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     elements::AudioFormat,
     error::Result,
-    pad::SrcPad,
     platform::windows::wasapi::{
         ComApartment, WasapiDevice, WasapiDeviceKind, WasapiProcess, activate_process_loopback,
         list_devices as enumerate_wasapi_devices, list_processes as enumerate_wasapi_processes,
         open_device, resolve_mix_format,
     },
-    schedule::ActiveTimeline,
+    produce::produce_source,
 };
 
-/// How long [`WasapiCaptureSource::run`] sleeps between checks of
-/// `GetNextPacketSize` — also bounds `Stop` latency, same reasoning as
-/// `DxgiCaptureSource`'s own `POLL_GRANULARITY`. Plain
+/// How long a [`WasapiCaptureSource`] waits, once it has handed on
+/// everything the device had, before it looks at `GetNextPacketSize`
+/// again. Plain
 /// polling rather than `IAudioClient::SetEventHandle` + `WaitForSingleObject`:
 /// event-driven signaling is well documented as unreliable specifically
 /// for loopback capture (Microsoft's own WASAPILoopbackCapture sample
@@ -129,7 +125,7 @@ pub struct WasapiCaptureOptions {
 /// Emits continuously from the moment `run` starts, `pts` always in
 /// lockstep with wall-clock time — backed by real WASAPI data when it's
 /// available and synthesized silence otherwise (see
-/// `WasapiCaptureSource::fill_silence_gap`), since WASAPI itself
+/// its `silence_owed`), since WASAPI itself
 /// delivers literally nothing whenever the render engine has no active
 /// session at all (e.g. nothing currently playing, for
 /// [`WasapiDeviceKind::Render`]). Without this, a quiet period would be a
@@ -138,18 +134,18 @@ pub struct WasapiCaptureOptions {
 /// sync across it.
 ///
 /// Every WASAPI object here is created by [`WasapiCaptureSource::open`] on
-/// its caller's thread, then actually driven by [`SourceElement::run`] on
-/// whichever thread [`crate::pipeline::Pipeline`] spawns for this source
-/// — a different thread in the normal case. COM requires every thread
-/// that touches an interface to have joined an apartment itself (even
-/// though the interfaces here are free-threaded/agile and can be handed
-/// across threads freely), so `run` makes its own `CoInitializeEx` call
-/// before touching anything, paired with `CoUninitialize` when it returns
-/// — the same two-`CoInitializeEx`-calls-per-object-lifetime pattern
+/// its caller's thread, then actually driven on whichever thread
+/// [`crate::pipeline::Pipeline`] spawns for this source — a different
+/// thread in the normal case. COM requires every thread that touches an
+/// interface to have joined an apartment itself (even though the
+/// interfaces here are free-threaded/agile and can be handed across
+/// threads freely), so the source makes its own `CoInitializeEx` call as
+/// it starts, before touching anything, paired with `CoUninitialize` as it
+/// stops — the same two-`CoInitializeEx`-calls-per-object-lifetime pattern
 /// `cpal`'s own WASAPI backend uses. `open` also joins its caller's COM
 /// apartment while it creates the agile WASAPI interfaces, then balances
 /// that call before returning; the pipeline worker joins its own apartment
-/// independently in `run`.
+/// independently as the source starts.
 ///
 /// Deliberately does **not** retry internally on
 /// `AUDCLNT_E_DEVICE_INVALIDATED` (default device changed, unplugged,
@@ -160,7 +156,14 @@ pub struct WasapiCaptureOptions {
 ///
 /// Runs until `Stop` — never reaches `Eos` on its own, same as every other
 /// live source in this crate.
-pub struct WasapiCaptureSource {
+pub struct WasapiCaptureSource(ProducingSource<Capturing>);
+
+produce_source!(WasapiCaptureSource);
+
+/// What a [`WasapiCaptureSource`] does when asked: the device's next packet,
+/// or the silence that keeps up with the clock. All of its work, which the
+/// framework makes the source.
+struct Capturing {
     pp_log: PpLog,
     name: Arc<str>,
     audio_client: IAudioClient,
@@ -173,7 +176,15 @@ pub struct WasapiCaptureSource {
     /// "integer tick counter" convention every other source in this crate
     /// uses.
     samples_emitted: i64,
-    pad: SrcPad,
+    /// The COM apartment the capture runs in: joined on the source's own
+    /// thread in `starting`, and left there in `stopping`.
+    apartment: Option<ComApartment>,
+    /// When the capture began, on the clock a pause does not move — what
+    /// the silence topping it up counts from. Set as it is first asked.
+    started: Option<Instant>,
+    /// When the device is looked at next, once everything it had has been
+    /// handed on; `None` while there may be more.
+    next_look: Option<Instant>,
 }
 
 // SAFETY: every WASAPI/COM handle here is a `windows-rs` COM interface
@@ -181,8 +192,10 @@ pub struct WasapiCaptureSource {
 // these specific interfaces are documented free-threaded/agile).
 // `&mut self` on every method that touches them already rules out
 // concurrent access from multiple threads — same reasoning
-// `DxgiCaptureSource` documents for its own `unsafe impl Send`.
-unsafe impl Send for WasapiCaptureSource {}
+// `DxgiCaptureSource` documents for its own `unsafe impl Send`. The
+// apartment is joined and left on the source's own thread, by the
+// framework's `starting` and `stopping` there.
+unsafe impl Send for Capturing {}
 
 impl WasapiCaptureSource {
     /// Enumerates every currently-active audio endpoint — both `Render`
@@ -354,14 +367,7 @@ impl WasapiCaptureSource {
         capture_client: IAudioCaptureClient,
         audio_format: AudioFormat,
     ) -> Self {
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::AudioFrame,
-                MemoryDomain::System,
-            )),
-        );
-        Self {
+        Self(ProducingSource::new(Capturing {
             name,
             pp_log,
             audio_client,
@@ -370,12 +376,20 @@ impl WasapiCaptureSource {
             format: audio_format.sample_format,
             channel_layout: audio_format.channel_layout(),
             samples_emitted: 0,
-            pad,
-        }
+            apartment: None,
+            started: None,
+            next_look: None,
+        }))
     }
 
     /// The unit each emitted frame's `pts` is expressed in.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Capturing {
+    fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.sample_rate as i32)
     }
 
@@ -421,32 +435,12 @@ impl WasapiCaptureSource {
         frame
     }
 
-    /// Pushes `frame` downstream, reporting (rather than dying on) a
-    /// failing `Sink` — same "drop this one buffer, keep going" contract
-    /// `DxgiCaptureSource::run` and the framework's loop for a `Produce`
-    /// give their own pushes.
-    fn push_frame(&mut self, frame: ffmpeg::frame::Audio, bus: &Bus) {
-        if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
-            bus.post(
-                &self.pp_log,
-                BusEvent::Error {
-                    element_type: ElementType::WasapiCaptureSource,
-                    name: self.name.clone(),
-                    error,
-                },
-            );
-        }
-    }
-
-    /// Synthesizes and pushes one silence frame covering however many
-    /// samples real WASAPI delivery has fallen behind `elapsed` — active
-    /// wall-clock time since `run_captured` started, already excluding
-    /// time spent frozen inside `Pause` (see
-    /// [`crate::schedule::ActiveTimeline`]; a raw `Instant::elapsed()`
-    /// would count a pause as a deficit to fill, making `Resume`
-    /// synthesize one giant silence frame covering the whole pause) — a
-    /// no-op (`deficit <= 0`) whenever real packets have kept up. WASAPI
-    /// delivers **zero** packets
+    /// One silence frame covering however many samples real WASAPI
+    /// delivery has fallen behind `elapsed` — active time since the capture
+    /// began, on the clock a pause does not move (a raw `Instant::elapsed()`
+    /// would count a pause as a deficit to fill, making `Resume` synthesize
+    /// one giant silence frame covering the whole pause) — or `None`
+    /// whenever real packets have kept up. WASAPI delivers **zero** packets
     /// whenever the render engine has no active session at all (as
     /// opposed to an active-but-quiet session, which still delivers
     /// `AUDCLNT_BUFFERFLAGS_SILENT`-flagged packets `build_frame` already
@@ -457,11 +451,11 @@ impl WasapiCaptureSource {
     /// every gap with synthesized silence (rather than, say, stretching
     /// the next real frame's `pts`) keeps `pts` a plain, always-accurate
     /// sample count no matter which samples were real.
-    fn fill_silence_gap(&mut self, elapsed: Duration, bus: &Bus) {
+    fn silence_owed(&mut self, elapsed: Duration) -> Option<ffmpeg::frame::Audio> {
         let expected = (elapsed.as_secs_f64() * self.sample_rate as f64) as i64;
         let deficit = expected - self.samples_emitted;
         if deficit <= 0 {
-            return;
+            return None;
         }
         let mut frame =
             ffmpeg::frame::Audio::new(self.format, deficit as usize, self.channel_layout);
@@ -470,75 +464,47 @@ impl WasapiCaptureSource {
         frame.set_pts(Some(self.samples_emitted));
         crate::buffer::set_time_base(&mut frame, self.time_base());
         self.samples_emitted += deficit;
-        self.push_frame(frame, bus);
+        Some(frame)
     }
 
-    /// The main capture loop, run once COM has joined this thread's
-    /// apartment (see [`SourceElement::run`]) and the audio client has been
-    /// started. Drains every buffer WASAPI has ready on each
-    /// `POLL_INTERVAL` tick (`GetNextPacketSize` returning `0` means
-    /// caught up), pushing one `MediaBuffer::Audio` per packet, then tops
-    /// up with synthesized silence (see [`WasapiCaptureSource::fill_silence_gap`])
-    /// so `pts` keeps advancing with wall-clock time even across a tick
-    /// where WASAPI delivered nothing at all.
-    fn run_captured(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        let mut timeline = ActiveTimeline::new(Instant::now());
-        loop {
-            let outcome = crate::control::drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            timeline.account_pause(outcome.paused_for);
-
-            thread::sleep(POLL_INTERVAL);
-
-            loop {
-                // SAFETY: `capture_client` is live while its parent audio
-                // client is started; no packet is currently held here.
-                let packet_size = match unsafe { self.capture_client.GetNextPacketSize() } {
-                    Ok(size) => size,
-                    Err(error) => return Err(self.classify_error(error).into()),
-                };
-                if packet_size == 0 {
-                    break;
-                }
-
-                let mut data: *mut u8 = ptr::null_mut();
-                let mut frames_available = 0u32;
-                let mut flags = 0u32;
-                // SAFETY: all three outputs are live locals, optional position
-                // outputs are intentionally omitted, and no earlier packet is
-                // outstanding on this serialized capture client.
-                if let Err(error) = unsafe {
-                    self.capture_client.GetBuffer(
-                        &mut data,
-                        &mut frames_available,
-                        &mut flags,
-                        None,
-                        None,
-                    )
-                } {
-                    return Err(self.classify_error(error).into());
-                }
-
-                let frame = self.build_frame(data, frames_available, flags);
-                // SAFETY: balances the successful `GetBuffer` above with the
-                // exact frame count it returned; `build_frame` copied all data
-                // before the buffer becomes invalid.
-                if let Err(error) = unsafe { self.capture_client.ReleaseBuffer(frames_available) } {
-                    return Err(self.classify_error(error).into());
-                }
-
-                self.push_frame(frame, bus);
-            }
-
-            self.fill_silence_gap(timeline.elapsed(Instant::now()), bus);
+    /// The device's next packet as a frame, or `None` once it has handed
+    /// over everything it has (`GetNextPacketSize` returning `0`).
+    fn next_packet(&mut self) -> Result<Option<ffmpeg::frame::Audio>> {
+        // SAFETY: `capture_client` is live while its parent audio client is
+        // started; no packet is currently held here.
+        let packet_size = match unsafe { self.capture_client.GetNextPacketSize() } {
+            Ok(size) => size,
+            Err(error) => return Err(self.classify_error(error).into()),
+        };
+        if packet_size == 0 {
+            return Ok(None);
         }
+
+        let mut data: *mut u8 = ptr::null_mut();
+        let mut frames_available = 0u32;
+        let mut flags = 0u32;
+        // SAFETY: all three outputs are live locals, optional position
+        // outputs are intentionally omitted, and no earlier packet is
+        // outstanding on this serialized capture client.
+        if let Err(error) = unsafe {
+            self.capture_client
+                .GetBuffer(&mut data, &mut frames_available, &mut flags, None, None)
+        } {
+            return Err(self.classify_error(error).into());
+        }
+
+        let frame = self.build_frame(data, frames_available, flags);
+        // SAFETY: balances the successful `GetBuffer` above with the exact
+        // frame count it returned; `build_frame` copied all data before the
+        // buffer becomes invalid.
+        if let Err(error) = unsafe { self.capture_client.ReleaseBuffer(frames_available) } {
+            return Err(self.classify_error(error).into());
+        }
+        Ok(Some(frame))
     }
 }
 
-impl Element for WasapiCaptureSource {
+impl Element for Capturing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -556,15 +522,40 @@ impl Element for WasapiCaptureSource {
     }
 }
 
-impl Source for WasapiCaptureSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for WasapiCaptureSource {
+impl Produce for Capturing {
     fn is_live(&self) -> bool {
         true
+    }
+
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
+    }
+
+    /// What the device has, a packet at a time; once it has handed over
+    /// everything, the silence that keeps `pts` with the clock (see
+    /// `silence_owed`), and the next look [`POLL_INTERVAL`] later.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let started = *self.started.get_or_insert_with(|| wait.now());
+        if let Some(next_look) = self.next_look {
+            if !wait.until(next_look) {
+                return Ok(Produced::Nothing);
+            }
+            self.next_look = None;
+        }
+        if let Some(frame) = self.next_packet()? {
+            return Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(frame))));
+        }
+        let now = wait.now();
+        self.next_look = Some(now + POLL_INTERVAL);
+        Ok(
+            match self.silence_owed(now.saturating_duration_since(started)) {
+                Some(frame) => Produced::Buffer(MediaBuffer::Audio(Arc::new(frame))),
+                None => Produced::Nothing,
+            },
+        )
     }
 
     /// Stops the capture session for the pause: left running, nothing
@@ -595,31 +586,33 @@ impl SourceElement for WasapiCaptureSource {
         Ok(())
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-
-        let _apartment = ComApartment::new().map_err(WasapiCaptureSourceError::from)?;
-
+    /// Joins COM on the source's thread and starts the capture there.
+    fn starting(&mut self) -> Result<()> {
+        let apartment = ComApartment::new().map_err(WasapiCaptureSourceError::from)?;
         // SAFETY: this client was initialized in `open` and the source thread
         // exclusively owns its start/stop lifecycle.
         if let Err(error) = unsafe { self.audio_client.Start() } {
             return Err(self.classify_error(error).into());
         }
+        self.apartment = Some(apartment);
+        Ok(())
+    }
 
-        let result = self.run_captured(control, bus);
-
-        // SAFETY: balances the successful start for this run; calling Stop on
-        // the live client is also the required cleanup after a loop error.
+    /// Stops the capture and leaves COM, on the thread that started it.
+    fn stopping(&mut self) {
+        // SAFETY: balances the successful start; calling Stop on the live
+        // client is also the required cleanup after an error.
         if let Err(error) = unsafe { self.audio_client.Stop() } {
             pp_error!(self, "Stop failed: {error}");
         }
-        result
+        self.apartment = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     /// The format a process loopback asks for has to be one this crate can
     /// describe, since nothing else ever tells it what is arriving — a
@@ -646,8 +639,7 @@ mod tests {
     /// What a process loopback hands over on a machine that has one to open:
     /// frames in the format it asked for, and a timeline that keeps up with
     /// the clock whether or not the process is making a noise — silence is
-    /// filled, exactly as it is for a device (see
-    /// [`WasapiCaptureSource::fill_silence_gap`]).
+    /// filled, exactly as it is for a device (see `silence_owed`).
     ///
     /// Skips where there is nothing to capture, or where Windows refuses the
     /// activation — a build older than 10 2004 has no process loopback at
@@ -707,6 +699,82 @@ mod tests {
             samples > expected / 2,
             "a capture of {} delivered {samples} samples where {expected} were due",
             process.executable
+        );
+    }
+
+    /// A device capture keeps its timeline with the clock whether or not
+    /// anything plays — silence fills what the device does not hand over —
+    /// and a pause costs it nothing: playing on is not a burst of what the
+    /// pause would have owed.
+    ///
+    /// Captures the machine's playback device by loopback, which needs no
+    /// microphone; skips where there is none to open.
+    #[test]
+    fn a_device_capture_keeps_up_with_the_clock_and_a_pause_costs_nothing() {
+        use crate::elements::AppSink;
+        use std::sync::{Arc as StdArc, Mutex};
+
+        let device = WasapiCaptureSource::list_devices()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .into_iter()
+                    .find(|device| device.kind == WasapiDeviceKind::Render)
+            });
+        let Some(device) = device else {
+            eprintln!("skipped: no playback device on this machine to capture");
+            return;
+        };
+        let (source, format) =
+            match WasapiCaptureSource::open("test-device-audio", WasapiCaptureOptions { device }) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    eprintln!("skipped: the playback device would not open: {error}");
+                    return;
+                }
+            };
+
+        let samples = StdArc::new(Mutex::new(0i64));
+        let sink = AppSink::new("test-device-audio-sink", {
+            let samples = StdArc::clone(&samples);
+            move |buffer| {
+                if let MediaBuffer::Audio(frame) = &buffer {
+                    *samples.lock().expect("sample count poisoned") += frame.samples() as i64;
+                }
+                Ok(())
+            }
+        });
+        let (pipeline, ()) =
+            crate::pipeline::Pipeline::new("test-device-audio", source, |source, ctx| {
+                let branch = ctx.branch().to(sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("test pipeline wiring must succeed");
+
+        let playing = Duration::from_millis(400);
+        pipeline.run().expect("the capture must start");
+        thread::sleep(playing);
+        pipeline.pause();
+        thread::sleep(Duration::from_millis(1000));
+        pipeline.resume();
+        thread::sleep(playing);
+        pipeline.stop();
+
+        let errors: Vec<_> = pipeline
+            .bus()
+            .iter()
+            .filter(|event| matches!(event, crate::bus::BusEvent::Error { .. }))
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        let samples = *samples.lock().expect("sample count poisoned");
+        let played = ((playing * 2).as_secs_f64() * format.sample_rate as f64) as i64;
+        // Half, not all: starting the client and the last poll's worth still
+        // in flight when this stops come off the window. The pause's own
+        // second, owed at once, would put it well past the upper bound.
+        assert!(
+            samples > played / 2 && samples < played * 5 / 4,
+            "{samples} samples where {played} were played"
         );
     }
 

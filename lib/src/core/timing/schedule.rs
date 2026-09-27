@@ -1,22 +1,14 @@
-//! Wall-clock scheduling helpers shared by every
-//! [`crate::element::SourceElement`] that paces itself against real time
-//! instead of an upstream `pts`. Two distinct shapes of that problem live
-//! here:
+//! Wall-clock scheduling shared by the sources that pace themselves
+//! against real time instead of an upstream `pts`: [`PeriodicSchedule`],
+//! an absolute `next_due` deadline (`TestVideoSource`, `DxgiCaptureSource`,
+//! the video compositors, ...) that must not let one abnormally slow tick
+//! turn into a burst of back-to-back catch-up work.
 //!
-//! - [`PeriodicSchedule`] — an absolute `next_due` deadline
-//!   (`TestVideoSource`, `DxgiCaptureSource`, `SwVideoCompositor`,
-//!   `D3d11VideoCompositor`, ...) that must survive a
-//!   [`crate::control::ControlMsg::Pause`]/`Resume` cycle without losing
-//!   its phase, yet also must not let one abnormally slow tick turn into a
-//!   burst of back-to-back catch-up work.
-//! - [`ActiveTimeline`] — an elapsed-time budget (`WasapiCaptureSource`,
-//!   `TestAudioSource`, `AudioMixer`, ...) measuring how much *active*
-//!   (non-`Pause`d) wall-clock time has passed since this source started,
-//!   used to decide how many samples/ticks are owed so far.
-//!
-//! Both used to be duplicated (and, for a while, disagreed on) inline in
-//! each source's own `run()` loop — see each type's own docs for exactly
-//! what they replace.
+//! What a pause leaves out is not this module's: a
+//! [`crate::element::Produce`] keeps its schedule on
+//! [`crate::element::Wait::now`], a clock that stands still while the
+//! pipeline is paused. A capture source still written as its own loop
+//! folds a pause in with `PeriodicSchedule::resume_after_pause`.
 
 use std::time::{Duration, Instant};
 
@@ -43,18 +35,9 @@ impl PeriodicSchedule {
         }
     }
 
-    /// `true` once `next_due` has arrived.
-    #[cfg(all(
-        target_os = "windows",
-        any(feature = "dxgi-capture", feature = "wgc-capture")
-    ))]
-    pub fn is_due(&self, now: Instant) -> bool {
-        now >= self.next_due
-    }
-
     /// How long until `next_due`, or `Duration::ZERO` if it has already
     /// passed — safe to feed straight into [`std::thread::sleep`] or a
-    /// bounded poll timeout without a separate `is_due` guard.
+    /// bounded poll timeout without checking whether it is due first.
     pub fn remaining(&self, now: Instant) -> Duration {
         self.next_due.saturating_duration_since(now)
     }
@@ -71,17 +54,11 @@ impl PeriodicSchedule {
     /// uses, for the same reason: no caller of this type may ever emit a
     /// back-to-back burst, regardless of why it fell behind.
     ///
-    /// Built only for the capture sources whose own loops still take a
-    /// pause as a duration; a [`crate::element::Produce`] keeps its
+    /// Built only for the capture source whose own loop still takes a
+    /// pause as a duration, PipeWire's screen capture; a [`crate::element::Produce`] keeps its
     /// schedule on [`crate::element::Wait::now`], which a pause does not
     /// move.
-    #[cfg(any(
-        all(
-            target_os = "windows",
-            any(feature = "dxgi-capture", feature = "wgc-capture")
-        ),
-        all(target_os = "linux", feature = "pipewire-screen-capture")
-    ))]
+    #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
     pub fn resume_after_pause(&mut self, paused_for: Duration, now: Instant) {
         self.next_due += paused_for;
         self.resync_if_behind(now);
@@ -148,104 +125,6 @@ impl PeriodicSchedule {
     }
 }
 
-/// How much *active* (non-`Pause`d) wall-clock time has passed since this
-/// source started — the elapsed-time counterpart to [`PeriodicSchedule`]'s
-/// absolute deadline, for sources that decide how many samples/ticks are
-/// owed so far rather than waiting for one fixed-size tick at a time —
-/// `WasapiCaptureSource` filling a silence gap. A source written as a
-/// [`crate::element::Produce`] has this for free, on
-/// [`crate::element::Wait::now`]'s clock.
-///
-/// Tracks a single shifting `anchor` rather than a separate elapsed-time
-/// accumulator: `now.saturating_duration_since(anchor)` after shifting
-/// `anchor` forward by a pause's duration gives exactly the same value as
-/// `now.saturating_duration_since(start) - paused_total` would with a
-/// fixed `start` and a separately accumulated `paused_total` — one field
-/// instead of two, and it composes for free across any number of
-/// `Pause`/`Resume` cycles. Unlike [`crate::clock::Clock`] (which every
-/// [`crate::elements::Pacer`] in a pipeline shares, and which observes
-/// `pause()`/`resume()` as they happen in real time), each caller of this
-/// type owns its own private instance and only ever learns about a pause
-/// after the fact — one summed [`crate::control::ControlOutcome::paused_for`]
-/// per [`crate::control::drain_control`] call — so there is no in-progress
-/// "currently paused" state to represent here.
-#[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
-#[derive(Debug, Clone, Copy)]
-pub struct ActiveTimeline {
-    anchor: Instant,
-}
-
-#[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
-impl ActiveTimeline {
-    /// Starts an active timeline anchored at `now`.
-    pub fn new(now: Instant) -> Self {
-        Self { anchor: now }
-    }
-
-    /// Folds a measured [`crate::control::ControlOutcome::paused_for`]
-    /// back in, so [`ActiveTimeline::elapsed`] does not count time spent
-    /// frozen inside `Pause` as active — see the type's own docs for why
-    /// shifting the anchor is equivalent to subtracting an accumulated
-    /// total.
-    pub fn account_pause(&mut self, paused_for: Duration) {
-        self.anchor += paused_for;
-    }
-
-    /// Active time elapsed since `now`(construction) minus every
-    /// `paused_for` folded in since. Saturates to zero rather than
-    /// underflowing/panicking if `now` predates the (possibly
-    /// pause-shifted) anchor.
-    pub fn elapsed(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.anchor)
-    }
-}
-
-#[cfg(all(test, target_os = "windows", feature = "wasapi-capture"))]
-mod active_timeline_tests {
-    use super::*;
-
-    #[test]
-    fn elapsed_excludes_time_spent_paused() {
-        let t0 = Instant::now();
-        let mut timeline = ActiveTimeline::new(t0);
-
-        let before_pause = t0 + Duration::from_millis(200);
-        assert_eq!(timeline.elapsed(before_pause), Duration::from_millis(200));
-
-        // A 500ms Pause/Resume cycle measured 500ms after `before_pause`.
-        timeline.account_pause(Duration::from_millis(500));
-        let after_pause = before_pause + Duration::from_millis(500);
-        assert_eq!(
-            timeline.elapsed(after_pause),
-            Duration::from_millis(200),
-            "the 500ms spent paused must not count as active time"
-        );
-    }
-
-    #[test]
-    fn multiple_pauses_accumulate() {
-        let t0 = Instant::now();
-        let mut timeline = ActiveTimeline::new(t0);
-        timeline.account_pause(Duration::from_millis(100));
-        timeline.account_pause(Duration::from_millis(250));
-
-        assert_eq!(
-            timeline.elapsed(t0 + Duration::from_secs(1)),
-            Duration::from_millis(650),
-            "1s of real time minus 350ms total paused"
-        );
-    }
-
-    #[test]
-    fn elapsed_saturates_instead_of_underflowing() {
-        let t0 = Instant::now();
-        let mut timeline = ActiveTimeline::new(t0);
-        timeline.account_pause(Duration::from_secs(10));
-
-        assert_eq!(timeline.elapsed(t0), Duration::ZERO);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,13 +132,7 @@ mod tests {
     const INTERVAL: Duration = Duration::from_millis(100);
 
     #[test]
-    #[cfg(any(
-        all(
-            target_os = "windows",
-            any(feature = "dxgi-capture", feature = "wgc-capture")
-        ),
-        all(target_os = "linux", feature = "pipewire-screen-capture")
-    ))]
+    #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
     fn resume_after_pause_preserves_phase_when_the_shift_is_enough() {
         let t0 = Instant::now();
         let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
@@ -279,13 +152,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(
-        all(
-            target_os = "windows",
-            any(feature = "dxgi-capture", feature = "wgc-capture")
-        ),
-        all(target_os = "linux", feature = "pipewire-screen-capture")
-    ))]
+    #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
     fn resume_after_pause_resyncs_when_the_shift_still_lands_in_the_past() {
         let t0 = Instant::now();
         let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
@@ -362,18 +229,16 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(
-        target_os = "windows",
-        any(feature = "dxgi-capture", feature = "wgc-capture")
-    ))]
-    fn is_due_and_remaining_agree() {
+    fn remaining_counts_down_to_the_deadline() {
         let t0 = Instant::now();
         let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
-        assert!(schedule.is_due(t0), "the first tick is due immediately");
+        assert_eq!(
+            schedule.remaining(t0),
+            Duration::ZERO,
+            "the first tick is due immediately"
+        );
         schedule.advance_after_tick(t0); // steady state: next_due = t0 + 100ms
-        assert!(!schedule.is_due(t0 + INTERVAL / 2));
         assert_eq!(schedule.remaining(t0 + INTERVAL / 2), INTERVAL / 2);
-        assert!(schedule.is_due(t0 + INTERVAL));
         assert_eq!(schedule.remaining(t0 + INTERVAL), Duration::ZERO);
     }
 

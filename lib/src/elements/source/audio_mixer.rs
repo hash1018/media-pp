@@ -27,10 +27,9 @@ use crate::{
     produce::produce_source,
 };
 
-/// How often a live [`AudioMixer`] mixes and emits a combined frame — same
-/// role as [`crate::elements::DxgiCaptureSource`]'s own `POLL_GRANULARITY`/
-/// `crate::elements::WasapiCaptureSource`'s `POLL_INTERVAL`: bounds `Stop`
-/// latency and sets the mixer's own output granularity.
+/// How often a live [`AudioMixer`] mixes and emits a combined frame — the
+/// mixer's own output granularity, as `WasapiCaptureSource`'s
+/// `POLL_INTERVAL` is a capture's.
 const TICK_INTERVAL: Duration = Duration::from_millis(20);
 
 /// How much an offline mix makes at a time: twenty milliseconds, as a
@@ -795,7 +794,7 @@ impl Mixing {
     /// Sums however many samples are needed to keep `samples_emitted` in
     /// lockstep with `elapsed` (a no-op if nothing's owed yet — same
     /// wall-clock-deficit shape as
-    /// [`crate::elements::WasapiCaptureSource::fill_silence_gap`], just
+    /// `WasapiCaptureSource`'s `silence_owed`, just
     /// summing real contributions from every input instead of emitting
     /// pure silence). `elapsed` already excludes time spent frozen inside
     /// `Pause` (it is read on [`Wait::now`]'s clock) so a `Pause`/

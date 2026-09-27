@@ -49,7 +49,7 @@ impl Default for TestAudioOptions {
 /// fabricates however many samples wall-clock time now owes on a
 /// drift-free absolute schedule (`expected = elapsed * sample_rate`,
 /// `needed = expected - samples_emitted` — the same shape
-/// `WasapiCaptureSource::fill_silence_gap`/`AudioMixer::mix_tick` both
+/// `WasapiCaptureSource`'s `silence_owed` and `AudioMixer`'s `mix_tick` both
 /// use, not a fixed
 /// per-tick sample count, which would drift the same way a fixed-duration
 /// `thread::sleep`-only schedule would), stamps it with an increasing

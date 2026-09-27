@@ -244,7 +244,10 @@
 //! makes it, waiting where it has to only through the
 //! [`Wait`](element::Wait) it is handed. The framework runs the loop: what
 //! the pipeline asks in between, a pause kept out of the clock the source
-//! schedules on, and the end of its stream. [`Pipeline::new`](pipeline::Pipeline::new)
+//! schedules on, and the end of its stream. What a device has to set up on
+//! the source's own thread — an apartment joined, a capture started — goes
+//! in its `starting`, and is let go of in its `stopping`, which the
+//! framework calls there. [`Pipeline::new`](pipeline::Pipeline::new)
 //! takes one as it takes any [`SourceElement`](element::SourceElement). A
 //! source with several outputs, or one that can be sought, implements
 //! `SourceElement` itself.
@@ -313,7 +316,7 @@ pub use core::{
 // Same flat-namespace reasoning as above, but crate-private: `schedule`/
 // `time` are pacing/rescale internals `crate::elements` builds on, not
 // exposed in any public element's own field/method signature — nothing
-// downstream of this crate needs `PeriodicSchedule`/`ActiveTimeline`/
+// downstream of this crate needs `PeriodicSchedule`/
 // `MediaTimestamp`/`TimeBase` itself. `pub(crate) use` keeps the same
 // `crate::schedule`/`crate::time` paths working for every internal caller
 // without also making them part of this crate's external API surface.

@@ -4,10 +4,10 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, bounded};
+use crossbeam_channel::{Receiver, bounded};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::{
@@ -63,12 +63,9 @@ use windows::{
 use crate::rate::{FrameRate, FrameRateHandle};
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
-    pad::SrcPad,
     platform::windows::{
         d3d11::protect_shared_device,
         d3d11_gpu::{D3d11Gpu, D3d11GpuError},
@@ -76,6 +73,7 @@ use crate::{
     },
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_error, pp_info, pp_warn},
+    produce::{Received, produce_source},
     schedule::PeriodicSchedule,
 };
 
@@ -205,18 +203,26 @@ impl Default for WgcCaptureOptions {
 ///
 /// Runs until `Stop` — a live capture has no natural end, so this never
 /// reaches [`MediaBuffer::Eos`] on its own. The captured window going away
-/// ends `run` with [`WgcCaptureSourceError::TargetGone`] instead, which
-/// reaches the caller as a [`BusEvent::Error`]; whether that means reopening,
+/// ends the source with [`WgcCaptureSourceError::TargetGone`] instead, which
+/// reaches the caller as a
+/// [`BusEvent::Error`](crate::bus::BusEvent::Error); whether that means
+/// reopening,
 /// [`Pipeline::stop`](crate::pipeline::Pipeline::stop), or
 /// [`Pipeline::finish`](crate::pipeline::Pipeline::finish) is the caller's
 /// decision, the same "fail fast, caller rebuilds" contract
 /// `DxgiCaptureSource` and `PipeWireScreenCaptureSource` follow.
 /// `Pipeline::finish` still forwards
 /// ordered EOS through the normal source-control path. The source is live and
-/// not seekable. A downstream push error is posted to the source [`Bus`] and
+/// not seekable. A downstream push error is posted to the pipeline's bus and
 /// only that frame is dropped; WGC/session/device failures are fatal because
 /// capture cannot meaningfully continue.
-pub struct WgcCaptureSource {
+pub struct WgcCaptureSource(ProducingSource<Capturing>);
+
+produce_source!(WgcCaptureSource);
+
+/// What a [`WgcCaptureSource`] does when asked: the window's picture at the
+/// next tick. All of its work, which the framework makes the source.
+struct Capturing {
     pp_log: PpLog,
     name: Arc<str>,
     /// Raw HWND value. Stored as an integer because windows-rs deliberately
@@ -238,15 +244,46 @@ pub struct WgcCaptureSource {
     /// can hand out a handle that changes it while this is running.
     frame_rate: Arc<FrameRate>,
     frame_index: i64,
-    pad: SrcPad,
     frame_pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The capture session and the apartment it lives in: made on the
+    /// source's own thread as it starts, and let go of there as it stops.
+    session: Option<Session>,
+    /// The window's latest picture, copied out of WGC's frame pool, and its
+    /// visible size — what each tick emits, the same one again until WGC
+    /// hands over a newer.
+    latest: Option<Captured>,
+    /// When each tick is due, on the clock a pause does not move — made as
+    /// the first is asked for.
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a tick's work was done since the schedule last moved: it
+    /// moves on once that work — its frame handed on, where it had one — is
+    /// done, as the next is asked for.
+    ticked: bool,
 }
+
+/// A picture copied out of WGC's frame pool, and its visible size.
+type Captured = (ID3D11Texture2D, (u32, u32));
+
+/// A capture session running, and the apartment it runs in. Dropped in
+/// declaration order: the session before the apartment, as the source's run
+/// used to let go of them.
+struct Session {
+    runtime: WgcRuntime,
+    _apartment: WinRtApartment,
+}
+
+// SAFETY: the parts that are not `Send` — the session's raw owner handle and
+// its apartment — exist only between `starting` and `stopping`, which the
+// framework calls on the source's own thread, and the source does not move
+// between them. Everything else is either plain data or a COM/WinRT
+// interface wrapper this thread alone touches.
+unsafe impl Send for Capturing {}
 
 impl WgcCaptureSource {
     /// Validates `hwnd`, starts its lifetime watcher, creates the capture's D3D11
     /// device, and returns both the source and that device as the [`D3d11Gpu`]
     /// every other D3D11 element in the pipeline is to share. The frame pool and session are activated in
-    /// [`SourceElement::run`] on their owning source thread.
+    /// as the source starts, on its own thread, which owns them.
     pub fn open(
         name: impl Into<String>,
         hwnd: HWND,
@@ -260,7 +297,8 @@ impl WgcCaptureSource {
         // SAFETY: null adapter/software pointers select the default hardware
         // adapter, optional feature levels use D3D defaults, and both output
         // slots are correctly typed and live. BGRA support is required by the
-        // WinRT Direct3D interop device built from this D3D11 device in `run`.
+        // WinRT Direct3D interop device built from this D3D11 device as it
+        // starts.
         unsafe {
             D3D11CreateDevice(
                 None,
@@ -325,7 +363,6 @@ impl WgcCaptureSource {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WgcCaptureSource, &name, None);
-        let pad = SrcPad::with_contract(format!("{name}_src"), output_contract());
         if let Some(error) = target.owner_process_error {
             pp_warn!(
                 pp_log: &pp_log,
@@ -335,7 +372,7 @@ impl WgcCaptureSource {
             );
         }
 
-        Self {
+        Self(ProducingSource::new(Capturing {
             pp_log,
             name,
             hwnd: target.hwnd,
@@ -348,15 +385,18 @@ impl WgcCaptureSource {
             include_cursor: options.include_cursor,
             frame_rate: FrameRate::new(options.frame_rate),
             frame_index: 0,
-            pad,
             frame_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-        }
+            session: None,
+            latest: None,
+            schedule: None,
+            ticked: false,
+        }))
     }
 
     /// PTS unit of frames emitted by this source — the reciprocal of the
     /// capture rate, and so a value that moves with [`Self::frame_rate`].
     pub fn time_base(&self) -> ffmpeg::Rational {
-        self.frame_rate.get().invert()
+        self.0.inner().time_base()
     }
 
     /// Runtime control for the rate this captures at.
@@ -365,7 +405,21 @@ impl WgcCaptureSource {
     /// to. Changing the rate re-means [`Self::time_base`] and every timestamp
     /// after the change — see [`crate::rate`].
     pub fn frame_rate(&self) -> FrameRateHandle {
-        self.frame_rate.handle()
+        self.0.inner().frame_rate.handle()
+    }
+}
+
+#[cfg(test)]
+impl WgcCaptureSource {
+    /// What it is made of, for the tests that capture by hand.
+    fn capturing(&mut self) -> &mut Capturing {
+        self.0.inner_mut()
+    }
+}
+
+impl Capturing {
+    fn time_base(&self) -> ffmpeg::Rational {
+        self.frame_rate.get().invert()
     }
 
     fn create_texture(
@@ -399,19 +453,19 @@ impl WgcCaptureSource {
         Ok(texture.expect("CreateTexture2D succeeded without producing a texture"))
     }
 
+    /// The picture WGC just handed over, copied out of its frame pool with
+    /// its visible size — or `None` where there is none to keep.
     fn receive_latest(
         &self,
         runtime: &WgcRuntime,
-        latest: &mut Option<ID3D11Texture2D>,
-        visible_size: &mut Option<(u32, u32)>,
-    ) -> std::result::Result<(), WgcCaptureSourceError> {
+    ) -> std::result::Result<Option<Captured>, WgcCaptureSourceError> {
         let frame = CaptureFrameGuard(runtime.frame_pool.TryGetNextFrame()?);
         let size = frame.0.ContentSize()?;
         if size.Width <= 0 || size.Height <= 0 {
             // A minimized window can transiently report an empty client
             // area. Keep the last valid image and let the next change-driven
             // notification recover capture instead of terminating the source.
-            return Ok(());
+            return Ok(None);
         }
         let width = size.Width as u32;
         let height = size.Height as u32;
@@ -470,8 +524,6 @@ impl WgcCaptureSource {
             )
         };
         drop(frame);
-        *latest = Some(captured);
-        *visible_size = Some((width, height));
 
         if runtime.size()
             != (SizeInt32 {
@@ -484,7 +536,7 @@ impl WgcCaptureSource {
                 Height: height as i32,
             })?;
         }
-        Ok(())
+        Ok(Some((captured, (width, height))))
     }
 
     fn emit_frame(
@@ -507,7 +559,7 @@ impl WgcCaptureSource {
     }
 }
 
-impl Element for WgcCaptureSource {
+impl Element for Capturing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -525,19 +577,19 @@ impl Element for WgcCaptureSource {
     }
 }
 
-impl Source for WgcCaptureSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for WgcCaptureSource {
+impl Produce for Capturing {
     fn is_live(&self) -> bool {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        let _apartment = WinRtApartment::initialize()?;
+    fn output_contract(&self) -> OutputContract {
+        output_contract()
+    }
+
+    /// Starts the capture session, on the source's own thread, which owns
+    /// it from here.
+    fn starting(&mut self) -> Result<()> {
+        let apartment = WinRtApartment::initialize()?;
         let hwnd = HWND(self.hwnd as *mut _);
         let target = TargetIdentity {
             hwnd,
@@ -554,85 +606,91 @@ impl SourceElement for WgcCaptureSource {
         .inspect_err(|error| pp_error!(self, "capture start failed: {error}"))?;
         pp_info!(
             self,
-            "started: window={:?}, frame_rate={}, include_cursor={}",
+            "capturing: window={:?}, frame_rate={}, include_cursor={}",
             hwnd,
             self.frame_rate.get(),
             self.include_cursor
         );
+        self.session = Some(Session {
+            runtime,
+            _apartment: apartment,
+        });
+        Ok(())
+    }
 
-        let mut latest = None;
-        let mut visible_size = None;
-        let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            if outcome.paused_for > Duration::ZERO {
-                schedule.resume_after_pause(outcome.paused_for, Instant::now());
-            }
+    /// Lets go of the session, on the thread that started it.
+    fn stopping(&mut self) {
+        self.session = None;
+    }
 
-            // Followed here rather than at construction, so a rate set through
-            // `frame_rate()` while this is running is kept from the next tick.
-            let interval = self.frame_rate.interval();
-            if schedule.interval() != interval {
-                pp_info!(self, "frame rate is now {}", self.frame_rate.get());
-                schedule.set_interval(interval, Instant::now());
-            }
-            if runtime.target_gone() {
-                return Err(WgcCaptureSourceError::TargetGone.into());
-            }
-
-            let timeout = schedule.remaining(Instant::now()).min(POLL_GRANULARITY);
-            match runtime.frame_rx.recv_timeout(timeout) {
-                Ok(()) => {
-                    // `Closed` shares this bounded wake-up channel with
-                    // `FrameArrived`. Do not touch the frame pool after the
-                    // close notification won the race.
-                    if runtime.target_gone() {
-                        return Err(WgcCaptureSourceError::TargetGone.into());
-                    }
-                    self.receive_latest(&runtime, &mut latest, &mut visible_size)
-                        .inspect_err(|error| pp_error!(self, "capture frame failed: {error}"))?;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(WgcCaptureSourceError::FrameNotificationsStopped.into());
-                }
-            }
-
-            if runtime.target_gone() {
-                return Err(WgcCaptureSourceError::TargetGone.into());
-            }
-            if !schedule.is_due(Instant::now()) {
-                continue;
-            }
-            let Some((width, height)) = visible_size else {
-                schedule.advance_after_tick(Instant::now());
-                continue;
-            };
-            let frame = self
-                .emit_frame(
-                    latest
-                        .as_ref()
-                        .expect("visible size is set only with a latest texture"),
-                    width,
-                    height,
-                )
-                .inspect_err(|error| pp_error!(self, "emit frame failed: {error}"))?;
-            if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::Error {
-                        element_type: ElementType::WgcCaptureSource,
-                        name: self.name.clone(),
-                        error,
-                    },
-                );
-            }
-            schedule.advance_after_tick(Instant::now());
+    /// The window's latest picture, once the tick is due — taking each one
+    /// WGC hands over as it arrives, so the one a tick emits is never
+    /// older than the pool had to keep. Kept on the clock a pause does not
+    /// move, so playing on after one is not a burst of the ticks it would
+    /// have owed.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let now = wait.now();
+        // Followed here rather than at construction, so a rate set through
+        // `frame_rate()` while this is running is kept from the next tick.
+        let interval = self.frame_rate.interval();
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
+        if std::mem::take(&mut self.ticked) {
+            schedule.advance_after_tick(now);
         }
+        let rate_changed = schedule.interval() != interval;
+        if rate_changed {
+            schedule.set_interval(interval, now);
+        }
+        let due = now + schedule.remaining(now);
+        if rate_changed {
+            pp_info!(self, "frame rate is now {}", self.frame_rate.get());
+        }
+
+        let Some(session) = &self.session else {
+            return Err(WgcCaptureSourceError::FrameNotificationsStopped.into());
+        };
+        let runtime = &session.runtime;
+        if runtime.target_gone() {
+            return Err(WgcCaptureSourceError::TargetGone.into());
+        }
+        // A slice at a time, so a rate set while it waits is kept from then.
+        match wait.recv_until(&runtime.frame_rx, due.min(now + POLL_GRANULARITY)) {
+            Some(Received::Got(())) => {
+                // `Closed` shares this bounded wake-up channel with
+                // `FrameArrived`. Do not touch the frame pool after the
+                // close notification won the race.
+                if runtime.target_gone() {
+                    return Err(WgcCaptureSourceError::TargetGone.into());
+                }
+                let received = self
+                    .receive_latest(runtime)
+                    .inspect_err(|error| pp_error!(self, "capture frame failed: {error}"))?;
+                if received.is_some() {
+                    self.latest = received;
+                }
+            }
+            Some(Received::LetGo) => return Ok(Produced::Nothing),
+            Some(Received::Gone) => {
+                return Err(WgcCaptureSourceError::FrameNotificationsStopped.into());
+            }
+            None => {}
+        }
+        if runtime.target_gone() {
+            return Err(WgcCaptureSourceError::TargetGone.into());
+        }
+        if wait.now() < due {
+            return Ok(Produced::Nothing);
+        }
+        self.ticked = true;
+        let Some((latest, (width, height))) = self.latest.clone() else {
+            return Ok(Produced::Nothing);
+        };
+        let frame = self
+            .emit_frame(&latest, width, height)
+            .inspect_err(|error| pp_error!(self, "emit frame failed: {error}"))?;
+        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame))))
     }
 }
 
@@ -1272,7 +1330,7 @@ mod tests {
     use std::{
         sync::{Arc, mpsc},
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use windows::{
@@ -1607,10 +1665,17 @@ mod tests {
         .expect("the device created by WGC open must be reusable");
 
         let latest = source
+            .capturing()
             .create_texture(2, 2, D3D11_BIND_SHADER_RESOURCE)
             .expect("create immutable latest-image texture");
-        let first = source.emit_frame(&latest, 2, 2).expect("wrap first tick");
-        let second = source.emit_frame(&latest, 2, 2).expect("wrap repeat tick");
+        let first = source
+            .capturing()
+            .emit_frame(&latest, 2, 2)
+            .expect("wrap first tick");
+        let second = source
+            .capturing()
+            .emit_frame(&latest, 2, 2)
+            .expect("wrap repeat tick");
         assert_eq!(first.pts(), Some(0));
         assert_eq!(second.pts(), Some(1));
         assert_eq!(

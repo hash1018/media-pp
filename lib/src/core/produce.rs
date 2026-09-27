@@ -74,6 +74,20 @@ pub trait Produce: Element {
     fn resuming(&mut self) -> Result<()> {
         Ok(())
     }
+
+    /// Sets up what has to live on the source's own thread — an apartment
+    /// joined, a device started — there, before it is asked for anything.
+    /// An `Err` ends the source before it began, and [`Self::stopping`] is
+    /// not called for it. Nothing by default.
+    fn starting(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Lets go, on the same thread, of what [`Self::starting`] set up, once
+    /// the source will be asked for nothing more — stopped, at its end, or
+    /// failed. What fails here is the source's own to log. Nothing by
+    /// default.
+    fn stopping(&mut self) {}
 }
 
 /// What a [`Produce`] made when asked.
@@ -140,25 +154,63 @@ impl Wait<'_> {
     /// The pipeline's request is only looked at, never taken: taking it is
     /// the framework's, once this has let go.
     pub(crate) fn recv<T>(&mut self, rx: &crossbeam_channel::Receiver<T>) -> Received<T> {
+        match self.receive(rx, None) {
+            Some(received) => received,
+            None => unreachable!("a receive with no deadline ends only with an answer"),
+        }
+    }
+
+    /// The same, giving up at `at` on [`Self::now`]'s clock: `None` once
+    /// it is there with nothing received. A message already waiting when
+    /// it comes is still received.
+    #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
+    pub(crate) fn recv_until<T>(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<T>,
+        at: Instant,
+    ) -> Option<Received<T>> {
+        self.receive(rx, Some(at))
+    }
+
+    fn receive<T>(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<T>,
+        at: Option<Instant>,
+    ) -> Option<Received<T>> {
+        use crossbeam_channel::{RecvTimeoutError, TryRecvError};
+
         let Some(requests) = self.control else {
-            return match rx.recv() {
-                Ok(got) => Received::Got(got),
-                Err(_) => Received::Gone,
+            let got = match at {
+                None => rx.recv().ok(),
+                Some(at) => match rx.recv_timeout(at.saturating_duration_since(self.now())) {
+                    Ok(got) => Some(got),
+                    Err(RecvTimeoutError::Timeout) => return None,
+                    Err(RecvTimeoutError::Disconnected) => None,
+                },
             };
+            return Some(got.map_or(Received::Gone, Received::Got));
         };
         let mut ready = crossbeam_channel::Select::new();
         let control = ready.recv(&requests.rx);
         ready.recv(rx);
         loop {
-            if ready.ready() == control {
-                return Received::LetGo;
+            let index = match at {
+                None => ready.ready(),
+                Some(at) => match ready.ready_timeout(at.saturating_duration_since(self.now())) {
+                    Ok(index) => index,
+                    Err(_) if self.now() >= at => return None,
+                    Err(_) => continue,
+                },
+            };
+            if index == control {
+                return Some(Received::LetGo);
             }
             match rx.try_recv() {
-                Ok(got) => return Received::Got(got),
-                Err(crossbeam_channel::TryRecvError::Disconnected) => return Received::Gone,
+                Ok(got) => return Some(Received::Got(got)),
+                Err(TryRecvError::Disconnected) => return Some(Received::Gone),
                 // Taken by another receiver in between, or woken for
                 // nothing: look again.
-                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(TryRecvError::Empty) => {}
             }
         }
     }
@@ -257,9 +309,30 @@ impl<P: Produce> SourceElement for ProducingSource<P> {
     /// ends or the pipeline stops it — taking what the pipeline asks
     /// between one and the next, the one way every source does
     /// (`handle_request`). A buffer the pad refuses is reported, and the
-    /// source goes on; a failure to make one ends it.
+    /// source goes on; a failure to make one ends it. What it sets up on
+    /// this thread first it lets go of here last, however the loop ended
+    /// ([`Produce::starting`], [`Produce::stopping`]).
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(pp_log: self.inner.pp_log(), "started");
+        self.inner.starting()?;
+        let ended = self.ask(control, bus);
+        self.inner.stopping();
+        ended
+    }
+
+    fn pausing(&mut self) -> Result<()> {
+        self.inner.pausing()
+    }
+
+    fn resuming(&mut self) -> Result<()> {
+        self.inner.resuming()
+    }
+}
+
+impl<P: Produce> ProducingSource<P> {
+    /// The loop itself: [`SourceElement::run`] between the source's own
+    /// setting up and letting go.
+    fn ask(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
             // What the pipeline asks first, each request the one way every
             // source takes it (`handle_request`) — and whether anything is
@@ -306,14 +379,6 @@ impl<P: Produce> SourceElement for ProducingSource<P> {
                 }
             }
         }
-    }
-
-    fn pausing(&mut self) -> Result<()> {
-        self.inner.pausing()
-    }
-
-    fn resuming(&mut self) -> Result<()> {
-        self.inner.resuming()
     }
 }
 
@@ -608,5 +673,173 @@ mod tests {
             gap >= paused + every / 2,
             "the next came {gap:?} after the last: owed at once once playback went on"
         );
+    }
+
+    /// What a `Hooked` does once it has started.
+    #[derive(Clone, Copy, Debug)]
+    enum Then {
+        End,
+        Fail,
+        WaitForStop,
+    }
+
+    /// Notes, with the thread it was on, each hook and each asking.
+    struct Hooked {
+        pp_log: PpLog,
+        cannot_start: bool,
+        then: Then,
+        seen: Arc<Mutex<Vec<(&'static str, thread::ThreadId)>>>,
+    }
+
+    impl Hooked {
+        fn note(&self, what: &'static str) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((what, thread::current().id()));
+        }
+    }
+
+    impl Element for Hooked {
+        fn name(&self) -> Arc<str> {
+            "hooked".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Produce for Hooked {
+        fn is_live(&self) -> bool {
+            true
+        }
+
+        fn starting(&mut self) -> Result<()> {
+            self.note("starting");
+            if self.cannot_start {
+                return Err(crate::error::Error::Other("no device".into()));
+            }
+            Ok(())
+        }
+
+        fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+            self.note("produce");
+            match self.then {
+                Then::End => Ok(Produced::End),
+                Then::Fail => Err(crate::error::Error::Other("device lost".into())),
+                Then::WaitForStop => {
+                    let later = wait.now() + Duration::from_secs(60);
+                    wait.until(later);
+                    Ok(Produced::Nothing)
+                }
+            }
+        }
+
+        fn stopping(&mut self) {
+            self.note("stopping");
+        }
+    }
+
+    /// Runs a `Hooked` until it has let go of what it set up, or — where it
+    /// could not start — until its failure is reported, and answers what it
+    /// saw.
+    fn hooked(cannot_start: bool, then: Then) -> Vec<(&'static str, thread::ThreadId)> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let source = Hooked {
+            pp_log: element_pp_log(ElementType::Other, "hooked", None),
+            cannot_start,
+            then,
+            seen: Arc::clone(&seen),
+        };
+        let sink = Arriving(
+            element_pp_log(ElementType::Other, "arriving", None),
+            Arc::new(Arrivals::default()),
+        );
+        let (pipeline, ()) = Pipeline::new("hooks", source, |source, ctx| {
+            let branch = ctx.branch().to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wiring succeeds");
+        pipeline.run().expect("run");
+        let noted = |what| seen.lock().unwrap().iter().any(|(seen, _)| *seen == what);
+        if cannot_start {
+            wait_for("a failed start was not reported", || {
+                pipeline
+                    .bus()
+                    .try_recv()
+                    .is_some_and(|event| matches!(event, BusEvent::Error { .. }))
+            });
+        } else {
+            wait_for("it was never asked", || noted("produce"));
+        }
+        pipeline.stop();
+        seen.lock().unwrap().clone()
+    }
+
+    /// What a source sets up on its own thread it lets go of there, once,
+    /// after everything it was asked — however the asking ended; and one
+    /// that could not start is neither asked nor let go of.
+    #[test]
+    fn a_source_starts_and_stops_on_its_own_thread_around_everything_it_is_asked() {
+        for then in [Then::End, Then::Fail, Then::WaitForStop] {
+            let seen = hooked(false, then);
+            let what: Vec<_> = seen.iter().map(|(what, _)| *what).collect();
+            assert_eq!(what.first(), Some(&"starting"), "{then:?}: {what:?}");
+            assert_eq!(what.last(), Some(&"stopping"), "{then:?}: {what:?}");
+            assert_eq!(
+                what.iter().filter(|what| **what == "stopping").count(),
+                1,
+                "{then:?}: {what:?}"
+            );
+            let (_, thread) = seen[0];
+            assert_ne!(thread, thread::current().id(), "{then:?}");
+            assert!(
+                seen.iter().all(|(_, on)| *on == thread),
+                "{then:?}: not all on the source's thread"
+            );
+        }
+        let what: Vec<_> = hooked(true, Then::End)
+            .into_iter()
+            .map(|(what, _)| what)
+            .collect();
+        assert_eq!(what, ["starting"]);
+    }
+
+    /// A receive with a deadline gives up there, takes a message already
+    /// waiting even once the deadline has come, and lets go for a request
+    /// the pipeline sends before either.
+    #[test]
+    #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
+    fn a_receive_gives_up_at_its_deadline_and_lets_go_for_a_request() {
+        let (control_tx, control) = crate::control::channel();
+        let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+        let mut wait = Wait {
+            control: Some(&control),
+            paused: Duration::ZERO,
+        };
+
+        let asked = Instant::now();
+        assert!(
+            wait.recv_until(&rx, wait.now() + Duration::from_millis(30))
+                .is_none()
+        );
+        assert!(asked.elapsed() >= Duration::from_millis(25));
+
+        tx.send(7).unwrap();
+        let past = wait.now();
+        assert!(matches!(wait.recv_until(&rx, past), Some(Received::Got(7))));
+
+        let _acknowledged = control_tx.enqueue(crate::control::ControlMsg::Pause);
+        assert!(matches!(
+            wait.recv_until(&rx, wait.now() + Duration::from_secs(60)),
+            Some(Received::LetGo)
+        ));
     }
 }

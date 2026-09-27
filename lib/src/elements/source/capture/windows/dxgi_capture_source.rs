@@ -1,9 +1,4 @@
-use std::{
-    ffi::c_void,
-    sync::Arc,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{ffi::c_void, sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::rate::{FrameRate, FrameRateHandle};
@@ -36,28 +31,24 @@ use windows::{
 
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     elements::VideoFormat,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
-    pad::SrcPad,
     platform::windows::{
         d3d11::protect_shared_device,
         d3d11_gpu::{D3d11Gpu, D3d11GpuError},
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    produce::produce_source,
     schedule::PeriodicSchedule,
 };
 
-/// How often [`DxgiCaptureSource::run`]'s poll loop re-checks
-/// `drain_control`/whether it's time to emit, even mid-wait for the next
-/// real desktop change — bounds `Stop` latency at very low configured
-/// [`DxgiCaptureOptions::frame_rate`] values, where "wait until the next tick" on
-/// its own could otherwise be a long, unresponsive block. Same idea as
-/// [`crate::queue::Queue`]'s own `STOP_POLL_INTERVAL`.
+/// How long a capture waits for its next tick at a time before it looks at
+/// its rate again: a rate set while it waits is kept from then, rather than
+/// a tick of the old one later — which at a low configured
+/// [`DxgiCaptureOptions::frame_rate`] could otherwise be a long one.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 
 /// How long `AcquireNextFrame` is allowed to wait for the desktop to change:
@@ -76,7 +67,7 @@ const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 ///
 /// Nothing is lost by not waiting. Desktop Duplication queues a change until
 /// it is acquired, so a poll that finds none simply finds it at the next
-/// tick, and [`DxgiCaptureSource::run`] polls at the last moment before each
+/// tick, and each tick polls at the last moment before its
 /// emission — which bounds that to the one tick a fixed-rate emitter
 /// quantizes to anyway.
 const ACQUIRE_TIMEOUT_MS: u32 = 0;
@@ -328,7 +319,7 @@ struct CursorShape {
 }
 
 /// The cursor as one comparable value: everything
-/// [`DxgiCaptureSource::copy_picture`] would draw of it.
+/// [`Capturing::copy_picture`] would draw of it.
 ///
 /// The mouse moves independently of the desktop image, so a tick that
 /// captured nothing can still owe a new picture. The shape is compared by a
@@ -354,7 +345,7 @@ struct CaptureUnit {
     /// (`D3D11_USAGE_STAGING`) under [`CaptureMode::Cpu`], GPU-only
     /// (`D3D11_USAGE_DEFAULT`, no bind flags) under [`CaptureMode::Gpu`]
     /// — only the fresh composite texture
-    /// [`DxgiCaptureSource::emit_frame_gpu`] builds needs to be
+    /// [`Capturing::emit_frame_gpu`] builds needs to be
     /// shader-bindable, not this one. Sized to this output's own
     /// resolution, not the final composite's — see `source_box` for the
     /// (possibly smaller) piece of it actually used.
@@ -375,7 +366,7 @@ struct CaptureUnit {
     dest_y: u32,
     /// Whether this unit has captured at least one real image yet — the
     /// element as a whole is ready to emit only once every unit's own
-    /// flag is `true` (see [`DxgiCaptureSource::all_captured`]), so a
+    /// flag is `true` (see [`Capturing::all_captured`]), so a
     /// freshly opened multi-output region never emits with part of the
     /// composite still blank.
     has_captured: bool,
@@ -404,11 +395,10 @@ struct CaptureUnit {
 /// judder even though the *average* rate was exactly right.
 ///
 /// So instead: this element always keeps the most recently captured
-/// desktop image on hand, and [`SourceElement::run`]'s own loop emits it
-/// — the same one again if nothing changed since the last tick — at a
-/// steady one-frame cadence, entirely on the one thread `run()` already
-/// has (no extra threads spawned; see this crate's own "elements never
-/// spawn their own threads" rule). Same shape as
+/// desktop image on hand, and each tick emits it — the same one again if
+/// nothing changed since the last tick — at a steady one-frame cadence,
+/// entirely on the source's one thread (no extra threads spawned; see this
+/// crate's own "elements never spawn their own threads" rule). Same shape as
 /// [`crate::elements::TestVideoSource`]: [`DxgiCaptureSource::time_base`]
 /// is the reciprocal of the frame rate and `pts` is a plain incrementing tick counter, one per
 /// *emitted* frame, not per real capture.
@@ -440,10 +430,16 @@ struct CaptureUnit {
 /// [`CaptureArea::Region`] — in which case every field below that used
 /// to describe "the" duplication instead describes one `CaptureUnit`
 /// per contributing output.
-pub struct DxgiCaptureSource {
+pub struct DxgiCaptureSource(ProducingSource<Capturing>);
+
+produce_source!(DxgiCaptureSource);
+
+/// What a [`DxgiCaptureSource`] does when asked: the next tick's picture of
+/// the desktop. All of its work, which the framework makes the source.
+struct Capturing {
     pp_log: PpLog,
     name: Arc<str>,
-    /// Only used by [`CaptureMode::Gpu`]'s [`DxgiCaptureSource::emit_frame`]
+    /// Only used by [`CaptureMode::Gpu`]'s [`Capturing::emit_frame`]
     /// path, to build each tick's fresh per-emission composite texture —
     /// unused after construction in [`CaptureMode::Cpu`], but harmless to
     /// hold either way (one extra COM reference, same device already
@@ -481,7 +477,7 @@ pub struct DxgiCaptureSource {
     /// constant rate rather than only on real changes. Only under
     /// [`CaptureMode::Cpu`] — `None` under [`CaptureMode::Gpu`], which
     /// composites straight from each unit's own `staging_texture` at
-    /// emit time instead (see [`DxgiCaptureSource::emit_frame_gpu`]).
+    /// emit time instead (see [`Capturing::emit_frame_gpu`]).
     staging: Option<ffmpeg::frame::Video>,
     /// See [`DxgiCaptureOptions::frame_rate`]. Shared rather than a plain field so
     /// [`DxgiCaptureSource::frame_rate`] can hand out a handle that changes
@@ -490,7 +486,9 @@ pub struct DxgiCaptureSource {
     /// This element's `pts` tick counter — one per *emitted* frame (see
     /// [`DxgiCaptureSource::time_base`]'s own docs), not per real capture.
     frame_index: i64,
-    pad: SrcPad,
+    /// Whether it emits in D3D11 textures or in system memory — see
+    /// [`CaptureMode`]; what its output contract says.
+    gpu_mode_domain: MemoryDomain,
     /// Reused across every emitted frame — see [`UnboundObjectPool`]'s
     /// docs. Pre-sized to `width`/`height` up front, same reasoning as
     /// `SwScaler`'s own pool.
@@ -507,12 +505,12 @@ pub struct DxgiCaptureSource {
     /// a tick that captured nothing hands out another one, and the buffer's
     /// reference count is what says whether the texture may be drawn into
     /// again. `None` before the first emission and under [`CaptureMode::Cpu`].
-    /// See [`DxgiCaptureSource::emit_frame_gpu`].
+    /// See [`Capturing::emit_frame_gpu`].
     composite: Option<ffmpeg::frame::Video>,
     /// Composites drawn earlier, kept rather than freed. A screen-sized
     /// texture is 8 MiB at 1080p, and a screen with real motion changes on
     /// every tick, so allocating one per changed frame is what this avoids —
-    /// see [`DxgiCaptureSource::build_composite`], which takes one back only
+    /// see [`Capturing::build_composite`], which takes one back only
     /// once nothing refers to it. Grows to however many emitted frames are in
     /// flight at once, and no further.
     spare_composites: Vec<ffmpeg::frame::Video>,
@@ -520,7 +518,7 @@ pub struct DxgiCaptureSource {
     /// frame the desktop image was last copied into, kept so a tick that
     /// captured nothing can point a wrapper at it instead of copying
     /// identical pixels again. `None` before the first emission and under
-    /// [`CaptureMode::Gpu`]. See [`DxgiCaptureSource::emit_frame_cpu`].
+    /// [`CaptureMode::Gpu`]. See [`Capturing::emit_frame_cpu`].
     last_picture: Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
     /// Pictures a wrapper already pushed downstream may still be pointing
     /// at. A wrapper shares the picture's *buffer*, not its pool slot, so a
@@ -535,7 +533,7 @@ pub struct DxgiCaptureSource {
     /// Bumped every time `cursor_shape` is replaced — see [`CursorState`].
     cursor_shape_version: u64,
     /// Scratch for the per-frame change metadata DXGI writes — see
-    /// [`DxgiCaptureSource::changed_regions`]. One buffer, grown to the
+    /// [`Capturing::changed_regions`]. One buffer, grown to the
     /// largest frame seen and reused, rather than an allocation per frame on
     /// the path whose whole point is to stop copying per frame.
     metadata: Vec<u8>,
@@ -550,6 +548,13 @@ pub struct DxgiCaptureSource {
     /// [`CaptureMode::Cpu`]. That is, whether producing it again would give
     /// different pixels.
     captured_since_picture: bool,
+    /// When each tick is due, on the clock a pause does not move — made as
+    /// the first is asked for.
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a tick's work was done since the schedule last moved: it
+    /// moves on once that work — its frame handed on, where it had one — is
+    /// done, as the next is asked for.
+    ticked: bool,
 }
 
 // SAFETY: every D3D11/DXGI handle here is a `windows-rs` COM interface
@@ -557,7 +562,7 @@ pub struct DxgiCaptureSource {
 // `&mut self` on every method that touches them (mirrors `D3d12Decoder`/
 // `SwScaler`'s own reasoning) already rules out concurrent access from
 // multiple threads.
-unsafe impl Send for DxgiCaptureSource {}
+unsafe impl Send for Capturing {}
 
 impl DxgiCaptureSource {
     /// Every output [`CaptureArea::Output`] can name, in the order its index
@@ -713,7 +718,7 @@ impl DxgiCaptureSource {
 
         // One output under [`CaptureMode::Gpu`] is the case where an acquired
         // frame can go straight into a composite, with no surface of this
-        // element's own in between — see [`DxgiCaptureSource::poll_capture`].
+        // element's own in between — see [`Capturing::poll_capture`].
         // Several outputs cannot: a composite is only complete once every one
         // of them has contributed, so each keeps its own latest image to be
         // assembled from.
@@ -806,20 +811,11 @@ impl DxgiCaptureSource {
         // Which domain this emits in is settled by `capture_mode` right
         // here, so downstream can be checked against it even though the
         // captured size and format are runtime values.
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::frame(
-                    MediaKind::VideoFrame,
-                    if gpu_mode {
-                        MemoryDomain::D3d11
-                    } else {
-                        MemoryDomain::System
-                    },
-                )
-                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
-            ),
-        );
+        let gpu_mode_domain = if gpu_mode {
+            MemoryDomain::D3d11
+        } else {
+            MemoryDomain::System
+        };
         // Gpu: only the small CPU-side `AVFrame` wrapper is ever pooled
         // (`ffmpeg::frame::Video::empty` — same as `D3d11Upload`'s own
         // pool); the GPU texture itself is a fresh allocation every
@@ -855,7 +851,7 @@ impl DxgiCaptureSource {
         );
 
         Ok((
-            Self {
+            Self(ProducingSource::new(Capturing {
                 name,
                 pp_log,
                 device,
@@ -871,7 +867,7 @@ impl DxgiCaptureSource {
                 staging,
                 frame_rate: FrameRate::new(frame_rate),
                 frame_index: 0,
-                pad,
+                gpu_mode_domain,
                 pool,
                 wrapper_pool: UnboundObjectPool::new(
                     0,
@@ -887,7 +883,9 @@ impl DxgiCaptureSource {
                 metadata: Vec::new(),
                 direct,
                 captured_since_picture: false,
-            },
+                schedule: None,
+                ticked: false,
+            })),
             VideoFormat {
                 width,
                 height,
@@ -903,7 +901,7 @@ impl DxgiCaptureSource {
     /// [`crate::elements::TestVideoSource::time_base`], and so a value that
     /// moves with [`Self::frame_rate`].
     pub fn time_base(&self) -> ffmpeg::Rational {
-        self.frame_rate.get().invert()
+        self.0.inner().frame_rate.get().invert()
     }
 
     /// Runtime control for the rate this captures at.
@@ -918,7 +916,23 @@ impl DxgiCaptureSource {
     /// feeding a compositor it usually does not arise: the compositor stamps
     /// its own output and this element's timestamps go no further.
     pub fn frame_rate(&self) -> FrameRateHandle {
-        self.frame_rate.handle()
+        self.0.inner().frame_rate.handle()
+    }
+}
+
+#[cfg(test)]
+impl DxgiCaptureSource {
+    /// What it is made of, for the tests that capture by hand.
+    fn capturing(&mut self) -> &mut Capturing {
+        self.0.inner_mut()
+    }
+}
+
+impl Capturing {
+    /// The unit each emitted frame's `pts` is expressed in — see
+    /// [`DxgiCaptureSource::time_base`].
+    fn time_base(&self) -> ffmpeg::Rational {
+        self.frame_rate.get().invert()
     }
 
     /// Whether every contributing output has captured at least one real
@@ -1371,8 +1385,8 @@ impl DxgiCaptureSource {
     /// Builds the next frame to push — the unit of work `run` does once
     /// per emission tick, real change or repeat — and stamps the next
     /// `pts` and this source's fixed color description. Dispatches to
-    /// [`DxgiCaptureSource::emit_frame_cpu`] or
-    /// [`DxgiCaptureSource::emit_frame_gpu`] depending on `self.gpu_mode`.
+    /// [`Capturing::emit_frame_cpu`] or
+    /// [`Capturing::emit_frame_gpu`] depending on `self.gpu_mode`.
     ///
     /// Both modes produce BGRA, so both get the same description, and it
     /// matches what [`crate::elements::D3d11VideoCompositor`] already stamps
@@ -1416,7 +1430,7 @@ impl DxgiCaptureSource {
     ///
     /// # Why a tick with nothing new copies nothing
     ///
-    /// The same reason [`DxgiCaptureSource::emit_frame_gpu`] builds nothing:
+    /// The same reason [`Capturing::emit_frame_gpu`] builds nothing:
     /// this element emits at a constant rate rather than only when the
     /// desktop changes, so most ticks on a mostly-still screen would copy
     /// the full picture — 8 MiB per tick at 1080p, around 480 MB/s at 60 fps
@@ -1524,7 +1538,7 @@ impl DxgiCaptureSource {
         self.captured_since_picture = false;
     }
 
-    /// `CaptureMode::Gpu`'s equivalent of [`DxgiCaptureSource::emit_frame_cpu`]:
+    /// `CaptureMode::Gpu`'s equivalent of [`Capturing::emit_frame_cpu`]:
     /// builds a composite `ID3D11Texture2D` (`self.width` x `self.height`) and
     /// `CopySubresourceRegion`s every unit's own `source_box` crop into it at
     /// that unit's `dest_x`/`dest_y` — one GPU-side copy per contributing
@@ -1722,7 +1736,7 @@ impl DxgiCaptureSource {
     }
 }
 
-impl Element for DxgiCaptureSource {
+impl Element for Capturing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -1740,86 +1754,68 @@ impl Element for DxgiCaptureSource {
     }
 }
 
-impl Source for DxgiCaptureSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for DxgiCaptureSource {
+impl Produce for Capturing {
     fn is_live(&self) -> bool {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            if outcome.paused_for > Duration::ZERO {
-                schedule.resume_after_pause(outcome.paused_for, Instant::now());
-            }
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, self.gpu_mode_domain)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
+    }
 
-            // Followed here rather than at construction, so a rate set through
-            // `frame_rate()` while this is running is kept from the next tick.
-            let interval = self.frame_rate.interval();
-            if schedule.interval() != interval {
-                pp_info!(self, "frame rate is now {}", self.frame_rate.get());
-                schedule.set_interval(interval, Instant::now());
+    /// This tick's picture of the desktop, once the tick is due — polled at
+    /// the last moment before it (see [`ACQUIRE_TIMEOUT_MS`]), and nothing
+    /// until every output has captured once. Kept on the clock a pause does
+    /// not move, so playing on after one is not a burst of the ticks it
+    /// would have owed.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let now = wait.now();
+        // Followed here rather than at construction, so a rate set through
+        // `frame_rate()` while this is running is kept from the next tick.
+        let interval = self.frame_rate.interval();
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
+        // Moved on only once the last tick's own work (emit and push, which
+        // a slow downstream or GPU readback can stretch arbitrarily) is done
+        // — see `TestVideoSource`'s identical correction for why the
+        // placement matters.
+        if std::mem::take(&mut self.ticked) {
+            schedule.advance_after_tick(now);
+        }
+        let rate_changed = schedule.interval() != interval;
+        if rate_changed {
+            schedule.set_interval(interval, now);
+        }
+        let due = now + schedule.remaining(now);
+        if rate_changed {
+            pp_info!(self, "frame rate is now {}", self.frame_rate.get());
+        }
+        // The wait for the next tick happens here, holding nothing, rather
+        // than inside `AcquireNextFrame` — see `ACQUIRE_TIMEOUT_MS` on why
+        // that call is never given time to wait in.
+        if !wait.until(due.min(now + POLL_GRANULARITY)) || wait.now() < due {
+            return Ok(Produced::Nothing);
+        }
+        if let Err(error) = self.poll_capture(ACQUIRE_TIMEOUT_MS) {
+            pp_error!(self, "capture failed: {error}");
+            return Err(error.into());
+        }
+        self.ticked = true;
+        if !self.all_captured() {
+            // Nothing real captured yet — nothing to emit; the schedule
+            // still moves on, or the next tick would be due at once.
+            return Ok(Produced::Nothing);
+        }
+        match self.emit_frame() {
+            Ok(frame) => Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame)))),
+            Err(error) => {
+                pp_error!(self, "emit_frame failed: {error}");
+                Err(error.into())
             }
-            // The wait for the next tick happens here, in a sleep that holds
-            // nothing, rather than inside `AcquireNextFrame` — see
-            // `ACQUIRE_TIMEOUT_MS` on why that call is never given time to
-            // wait in. Bounded by `POLL_GRANULARITY` so `Stop` stays
-            // responsive at a low configured `frame_rate`.
-            let remaining = schedule.remaining(Instant::now());
-            if !remaining.is_zero() {
-                thread::sleep(remaining.min(POLL_GRANULARITY));
-                continue;
-            }
-            if let Err(error) = self.poll_capture(ACQUIRE_TIMEOUT_MS) {
-                pp_error!(self, "capture failed: {error}");
-                return Err(error.into());
-            }
-
-            if !schedule.is_due(Instant::now()) {
-                continue;
-            }
-
-            if !self.all_captured() {
-                // Still advance even though there's nothing to emit this
-                // tick — otherwise `next_due` sits in the past and the
-                // next iteration's `poll_timeout` above is zero, busy-looping
-                // instead of waiting for the next tick.
-                schedule.advance_after_tick(Instant::now());
-                continue; // nothing real captured yet — nothing to emit
-            }
-            let frame = match self.emit_frame() {
-                Ok(frame) => frame,
-                Err(error) => {
-                    pp_error!(self, "emit_frame failed: {error}");
-                    return Err(error.into());
-                }
-            };
-            if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::Error {
-                        element_type: ElementType::DxgiCaptureSource,
-                        name: self.name.clone(),
-                        error,
-                    },
-                );
-            }
-            // Advance only now that this tick's own work (emit + push,
-            // which a slow downstream/GPU readback can stretch
-            // arbitrarily) is done — see `TestVideoSource::run`'s
-            // identical correction for why the placement matters.
-            schedule.advance_after_tick(Instant::now());
         }
     }
 }
@@ -2148,6 +2144,7 @@ fn composite_cursor(
 mod tests {
     use super::*;
     use crate::{buffer::picture_id, platform::windows::d3d11va::d3d11va_texture};
+    use std::time::Instant;
 
     /// Refused before any device or duplication is created, so this needs
     /// neither a GPU nor a display. It used to be taken as 1 fps instead.
@@ -2246,20 +2243,29 @@ mod tests {
         // unit has copied something there is nothing to emit, which is what
         // `all_captured` gates on.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !source.all_captured() && Instant::now() < deadline {
-            source.poll_capture(16).expect("poll the duplication");
+        while !source.capturing().all_captured() && Instant::now() < deadline {
+            source
+                .capturing()
+                .poll_capture(16)
+                .expect("poll the duplication");
         }
-        if !source.all_captured() {
+        if !source.capturing().all_captured() {
             eprintln!("skipping: the desktop never produced a frame to capture");
             return;
         }
 
-        let first = source.emit_frame_cpu().expect("copy the first picture");
+        let first = source
+            .capturing()
+            .emit_frame_cpu()
+            .expect("copy the first picture");
         let picture = picture_id(&first);
 
         // No `poll_capture` in between and the cursor is not drawn, so
         // nothing this tick would show has changed.
-        let second = source.emit_frame_cpu().expect("emit an unchanged tick");
+        let second = source
+            .capturing()
+            .emit_frame_cpu()
+            .expect("emit an unchanged tick");
         assert_eq!(
             picture_id(&second),
             picture,
@@ -2268,8 +2274,11 @@ mod tests {
 
         // A tick that did capture must not copy over the picture the frames
         // above are still showing.
-        source.captured_since_picture = true;
-        let third = source.emit_frame_cpu().expect("emit a changed tick");
+        source.capturing().captured_since_picture = true;
+        let third = source
+            .capturing()
+            .emit_frame_cpu()
+            .expect("emit a changed tick");
         assert_ne!(
             picture_id(&third),
             picture,
@@ -2308,20 +2317,29 @@ mod tests {
         // `emit_frame_gpu` has nothing to composite until a unit has copied
         // something, which is what `all_captured` gates on.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !source.all_captured() && Instant::now() < deadline {
-            source.poll_capture(16).expect("poll the duplication");
+        while !source.capturing().all_captured() && Instant::now() < deadline {
+            source
+                .capturing()
+                .poll_capture(16)
+                .expect("poll the duplication");
         }
-        if !source.all_captured() {
+        if !source.capturing().all_captured() {
             eprintln!("skipping: the desktop never produced a frame to capture");
             return;
         }
 
-        let first = source.emit_frame_gpu().expect("build the first composite");
+        let first = source
+            .capturing()
+            .emit_frame_gpu()
+            .expect("build the first composite");
         let first_texture = d3d11va_texture(&first).expect("a D3D11 frame").0;
 
         // No `poll_capture` in between, so nothing was captured and the
         // composite cannot have changed.
-        let second = source.emit_frame_gpu().expect("emit an unchanged tick");
+        let second = source
+            .capturing()
+            .emit_frame_gpu()
+            .expect("emit an unchanged tick");
         assert_eq!(
             d3d11va_texture(&second).expect("a D3D11 frame").0,
             first_texture,
@@ -2333,6 +2351,7 @@ mod tests {
         // nothing of the frames before this one — so it takes the whole
         // picture rather than what changed since.
         let (target, up_to_date) = source
+            .capturing()
             .composite_to_draw_into()
             .expect("a composite to draw into");
         let target_texture = d3d11va_texture(&target).expect("a D3D11 frame").0;
@@ -2345,7 +2364,7 @@ mod tests {
             "a composite this element has not drawn into cannot be treated as current"
         );
         // What `poll_capture` does once its copy has succeeded.
-        source.composite = Some(target);
+        source.capturing().composite = Some(target);
 
         // With nothing reading it any more, the composite drawn last is the
         // one to draw into again — that is what lets a tick copy only the
@@ -2353,6 +2372,7 @@ mod tests {
         drop(first);
         drop(second);
         let (again, up_to_date) = source
+            .capturing()
             .composite_to_draw_into()
             .expect("a composite to draw into");
         assert_eq!(
@@ -2591,10 +2611,10 @@ mod tests {
         };
         drop(source);
 
-        let (source, _format) =
+        let (mut source, _format) =
             DxgiCaptureSource::open_with_device("device-consumer", options, &gpu)
                 .expect("the device created for this output must pass adapter validation");
-        assert_eq!(source.device.as_raw(), gpu.device().as_raw());
+        assert_eq!(source.capturing().device.as_raw(), gpu.device().as_raw());
     }
 
     /// The rate a capture was opened at can be changed afterwards, and
