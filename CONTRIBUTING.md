@@ -17,12 +17,19 @@ skip, saying why, on a machine without the hardware.
 ## Control sequences
 
 `core::pipeline::tests::conformance` runs random orders of pause, resume,
-seek, frame step, finish and stop against the shapes of pipeline this crate is used in,
-and checks what every terminal was handed: nothing new while paused, nothing
-from before a seek after it, an `Eos` after a finish, and no call that fails
-to return. An ordinary test run plays a few fixed sequences. The races these
-are for show when threads are short of cores, so CI also runs them pinned to
-two, seeded from the clock:
+seek, frame step, rate, looping, finish and stop — and stop while another
+call is under way — against the shapes of pipeline this crate is used in,
+and checks what every terminal was handed: nothing new once a pause has
+returned, nothing from before a seek after it, an `Eos` after a finish, and
+no call that fails to return. The file shapes are a matrix of six axes —
+how the picture fans out, what decodes it, what filters it, what paces it,
+what the sound goes through, how deep the queues are — covering every pair
+of choices; `MEDIA_PP_CONTROL_FULL=1` runs every combination. A pair a known
+bug breaks is listed in `KNOWN_BROKEN`, beside the ignored test that
+reproduces it, and comes back into the matrix when the bug is fixed. An
+ordinary test run plays a few fixed sequences. The races these are for show
+when threads are short of cores, so CI also runs them pinned to two, seeded
+from the clock:
 
 ```sh
 MEDIA_PP_CONTROL_ITERS=10 MEDIA_PP_CONTROL_RANDOM=1 taskset -c 0,1 cargo test -p media-pp --lib -- conformance
@@ -30,8 +37,10 @@ MEDIA_PP_CONTROL_ITERS=10 MEDIA_PP_CONTROL_RANDOM=1 taskset -c 0,1 cargo test -p
 
 On Windows, set the shell's own affinity first —
 `[System.Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity = 3` —
-and cargo and the tests inherit it. A failure prints its seed and the steps
-it took; `MEDIA_PP_CONTROL_SEED=<seed>` replays exactly that sequence, and
+and cargo and the tests inherit it. A failure prints its shape, its seed and
+the steps it took, and the line that replays it:
+`MEDIA_PP_CONTROL_SHAPE=<shape> MEDIA_PP_CONTROL_SEED=<seed>` runs exactly
+that sequence, and
 `MEDIA_PP_CONTROL_TRACE=<directory>` writes the crate's log there at `Trace`,
 every control message at every element, for reading what it did. A change to
 how control travels — a new message, a new element that waits, a new source

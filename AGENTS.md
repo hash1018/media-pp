@@ -297,8 +297,11 @@ final source of truth when documentation and implementation differ.
   element that waits on the clock, a `Queue` or `Tee` path — runs the control
   conformance sequences pinned to two cores, a few hundred of them, before it
   lands (see `CONTRIBUTING.md`). A new element that waits, holds buffers, or
-  has a source loop of its own gets a shape there too. These races do not
-  show on a free machine.
+  has a source loop of its own joins the matrix there as a choice on one of
+  its axes, and the matrix pairs it with every other choice. These races do
+  not show on a free machine. A bug the matrix finds that is not fixed at
+  once goes into its `KNOWN_BROKEN` list with an ignored test that
+  reproduces it — never into a looser promise.
 - For stress tests, leak investigations, fitted-slope interpretation, or new
   per-cycle resource coverage, apply the repository skill
   `media-pp-soak-analysis`. Its hardware, fixture, and portal prerequisites must

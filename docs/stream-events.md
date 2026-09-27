@@ -237,6 +237,34 @@ About a third of the history (F) is local, and the demuxer's single-read-cursor
 bugs (8e23512, 3e3e82b, 8d3ca52) are an interleaving problem. The design does
 not claim those.
 
+### 3.1 What the matrix found
+
+Stage 0's conformance matrix (§6) found three bugs the hand-picked shapes
+never had, in its first hours. Each is reproduced by an ignored test in
+`core/pipeline/tests/conformance.rs` and listed in its `KNOWN_BROKEN`:
+
+- **An accurate seek on a later lap of a looping file shows the keyframe
+  before its target**
+  (`an_accurate_seek_on_a_later_lap_shows_its_target`). A caller's seek is a
+  position in the file; the source stays on the lap playback is on, so the
+  pictures come stamped a lap further on; the decoders' preroll gate holds
+  the target as the file position and lets the first picture through. The
+  target and the data are in two different coordinates, and nothing next to
+  the data says how they relate. A `Segment` that carries both — see §4.2 —
+  is the fix.
+- **Packets fanned out and played backwards: the faster branch never
+  steps** (`packets_fanned_out_backwards_step_on_in_every_branch`). A
+  stretch's end is inferred from the next stretch's first packet; with the
+  slower branch full and the source waiting on it, the faster branch never
+  gets that packet and holds its pictures for good. `StreamEvent::Stretch`
+  from the source is the fix.
+- **A paused seek to the end, with one-deep queues and sound, never
+  prerolls the sound**
+  (`a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues`).
+  The demuxer parks packets per pad but pushes each pad's `Eos` with a wait
+  for room, the picture's first; the sound's parked packets and `Eos` wait
+  behind it. The single read cursor — §5 — not fixed by this design.
+
 ---
 
 ## 4. The design
@@ -276,12 +304,21 @@ pub enum StreamEvent {
 pub struct Segment {
     pub id: SegmentId,              // unique within the pipeline
     pub flushed: bool,              // follows a flush: drop what is held from before
-    pub start: Duration,            // media time the segment starts at
-    pub show_from: Option<Duration>, // accurate seek: decode from start, show from here
+    pub start: Duration,            // where the segment starts, on the stream's timeline
+    pub show_from: Option<Duration>, // accurate seek: decode from start, show from here — on the timeline
+    pub position: Duration,         // `start` as a position in the media, for a caller
     pub rate: f64,                  // negative: backwards
     pub step: Option<usize>,        // a frame step's count, where this segment is one
 }
 ```
+
+Every time in a segment that an element compares a buffer against is on the
+stream's timeline — the one the buffers are stamped on — and the source that
+emits the segment is what converts a caller's position into it. A looping
+file's timeline runs on across laps while a caller seeks within the file;
+today the seek target and the pictures are in those two different
+coordinates, and the matrix found what that costs (§3.1). `position` is the
+same point as the caller meant it, for what reports progress.
 
 Sources emit a `Segment`:
 - when they start — every source, live ones included, so every stream begins
@@ -514,7 +551,7 @@ cross-channel rules to take apart again.
 
 | Stage | What | Breaks |
 |---|---|---|
-| **0. A generated conformance matrix** | Every element shape × every control sequence: seek playing and paused, seek at and past the end, turn around, step both ways, loop across the end both ways, stop and finish during each, pinned to two cores. Today's shapes are hand-written. This is what finds a side effect before a user does, and what proves each later stage changes nothing. | nothing |
+| **0. A generated conformance matrix** — done | Six axes of file shape — fan-out, decoder, filter, pacing, sound, queue depth — in 16 shapes covering every pair of choices, beside the live and offline shapes; random sequences of pause, resume, seek (at and past the end too), step, rate both ways, looping, finish, stop, and stop while a call is under way, judged by what each call promised rather than by the messages that carried it, so the judge stands through every later stage. Found three bugs in its first hours (§3.1). | nothing |
 | **1. The flow plane** | The pipeline delivers flow requests directly to every source and queue worker. Resume opens gates in reverse topological order. Threads live until `Stop`, and "linger at the end" is the framework's. One `Wait` primitive. This addresses the C and G clusters, which in-band events cannot. | nothing public |
 | **2. The stream plane, empty** | `Item`, `StreamEvent`, delivery through pads, `Queue`, `Tee` and bins. `Eos` is mirrored as `StreamEvent::Eos` while `MediaBuffer::Eos` still exists. No `Segment` is emitted yet. | nothing public |
 | **3. Sources emit `Segment`, pads flush** | Emitted at start, seek, loop and turn; `Stretch` from `ReversibleSource`. Pads refuse data while flushing. The timeline number is kept alongside and asserted equal in tests, then removed. | nothing public |
