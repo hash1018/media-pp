@@ -8,8 +8,8 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, IntoFilter, ReversibleDecoder, Sink, Source,
-        element_pp_log,
+        Context, Element, ElementType, Filter, IntoFilter, IntoTerminal, ReversibleDecoder, Sink,
+        Source, element_pp_log,
     },
     error::Result,
     graph::{
@@ -713,8 +713,8 @@ impl ChainBuilder {
     ///
     /// Any sink, as it is — `.to(counter)` — or already boxed, the way a
     /// muxer hands its sinks over: a boxed sink is a sink.
-    pub fn to(self, terminal: impl Sink + 'static) -> Result<DetachedBranch> {
-        let mut terminal: Box<dyn Sink> = Box::new(terminal);
+    pub fn to<M>(self, terminal: impl IntoTerminal<M>) -> Result<DetachedBranch> {
+        let mut terminal: Box<dyn Sink> = terminal.into_terminal();
         if let Some(error) = self.error {
             return Err(error.into());
         }
@@ -905,7 +905,7 @@ impl ChainBuilder {
 
     /// Alias of [`Self::to`] retained for callers that prefer builder-style
     /// terminology when supplying the terminal sink.
-    pub fn build(self, terminal: impl Sink + 'static) -> Result<DetachedBranch> {
+    pub fn build<M>(self, terminal: impl IntoTerminal<M>) -> Result<DetachedBranch> {
         self.to(terminal)
     }
 }

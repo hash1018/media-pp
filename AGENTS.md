@@ -114,6 +114,16 @@ final source of truth when documentation and implementation differ.
   compositor or mixer input — or reads the stream plane. An element of
   this crate moved onto one keeps its public name, constructors and
   `Filter` as a newtype over `TransformStage` (`transform_filter!`).
+- A terminal that does something with each buffer — plays, shows, counts,
+  hands it out — is a `Render`: `render` for each buffer, `drain` before
+  its end is taken, `reset` for a `Flush` or `Stop`, and `pausing` and
+  `resuming` for a device it stops for a pause. The framework turns the
+  control messages into those and never shows it one; what the terminal
+  wrapper does — the preroll's counting, holding while paused — is
+  unchanged by it. A muxer of several tracks, a compositor's or a mixer's
+  input and an `AppSink` handing control to the application stay `Sink`s.
+  An element of this crate moved onto one keeps its public name as a
+  newtype over `RenderStage` (`render_sink!`).
 - Declare a new element's link contract through `Sink::input_contract` and
   `SrcPad::with_contract` — a `Transform`'s own `input_contract` and
   `output_contract` — limited to what construction already settles:

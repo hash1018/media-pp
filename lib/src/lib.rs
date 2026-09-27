@@ -252,6 +252,16 @@
 //! source with several outputs, or one that can be sought, implements
 //! `SourceElement` itself.
 //!
+//! # Writing a terminal
+//!
+//! A terminal that does something with each buffer — plays it, shows it,
+//! hands it out of the pipeline — implements [`Render`](element::Render):
+//! `render` for each buffer, `drain` before its end is taken, `reset` for a
+//! seek or a stop, and `pausing` and `resuming` for a device of its own.
+//! The framework does the rest, and [`ChainBuilder::to`](pipeline::ChainBuilder::to)
+//! takes one as it takes any [`Sink`](element::Sink). A terminal that routes
+//! the stream itself — a muxer of several tracks — implements `Sink`.
+//!
 //! # Watching it run
 //!
 //! [`Pipeline::stats`](pipeline::Pipeline::stats) reads what every element is
@@ -323,6 +333,7 @@ pub use core::{
 pub(crate) use core::frame_size;
 pub(crate) use core::playback_state;
 pub(crate) use core::produce;
+pub(crate) use core::render;
 pub(crate) use core::repeat;
 pub(crate) use core::stash;
 pub(crate) use core::stream;

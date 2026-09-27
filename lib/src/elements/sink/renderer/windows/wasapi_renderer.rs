@@ -14,8 +14,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, Render, element_pp_log},
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
     elements::{AudioFormat, WasapiDevice, WasapiDeviceKind},
@@ -24,6 +23,7 @@ use crate::{
         ComApartment, list_devices as enumerate_wasapi_devices, open_device, resolve_mix_format,
     },
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
+    render::{RenderStage, render_sink},
     time::{MediaTimestamp, TimeBase},
 };
 
@@ -136,7 +136,13 @@ pub enum WasapiRendererError {
 /// enough WASAPI ring-buffer space to submit the whole input frame. Put a
 /// [`crate::queue::Queue`] immediately before this sink when its blocking
 /// must not hold up another branch.
-pub struct WasapiRenderer {
+pub struct WasapiRenderer(RenderStage<Rendering>);
+
+render_sink!(WasapiRenderer);
+
+/// What a [`WasapiRenderer`] does with each frame: plays it on the device.
+/// All of its work, which the framework makes the terminal.
+struct Rendering {
     pp_log: PpLog,
     name: Arc<str>,
     audio_client: IAudioClient,
@@ -146,6 +152,9 @@ pub struct WasapiRenderer {
     format: AudioFormat,
     buffer_frames: u32,
     running: bool,
+    /// Whether the device is stopped for a pause — set and cleared by the
+    /// framework's `pausing` and `resuming`, and nothing else: a seek's
+    /// reset leaves it, so a paused seek's one sample waits in the buffer.
     paused: bool,
     clock_binding: PlaybackClockBinding,
     timeline: Option<DeviceTimeline>,
@@ -201,7 +210,7 @@ struct DeviceTimeline {
 // SAFETY: WASAPI client interfaces are free-threaded. Every method that
 // touches them requires `&mut self`, and each calling thread joins a COM
 // apartment for the duration of the call via `ComApartment`.
-unsafe impl Send for WasapiRenderer {}
+unsafe impl Send for Rendering {}
 
 impl WasapiRenderer {
     /// Lists active WASAPI render endpoints and their mix formats.
@@ -276,7 +285,7 @@ impl WasapiRenderer {
         );
 
         Ok((
-            Self {
+            Self(RenderStage::new(Rendering {
                 name,
                 pp_log,
                 audio_client,
@@ -290,16 +299,18 @@ impl WasapiRenderer {
                 clock_binding: PlaybackClockBinding::Unbound,
                 timeline: None,
                 stretcher: Stretcher::new(format),
-            },
+            })),
             format,
         ))
     }
 
     /// Returns the endpoint mix format required by [`Sink::consume`](crate::element::Sink::consume).
     pub fn format(&self) -> AudioFormat {
-        self.format
+        self.0.inner.format
     }
+}
 
+impl Rendering {
     fn ensure_playback_master(&mut self) -> Result<()> {
         self.clock_binding
             .ensure_registered()
@@ -391,7 +402,7 @@ impl WasapiRenderer {
     /// it waits in the device's buffer, silent, until `Resume` starts the
     /// device, as the PipeWire renderer's does. Dropped instead, as it was,
     /// the sound after a paused seek began a frame after the picture.
-    fn render(&mut self, frame: &ffmpeg::frame::Audio) -> Result<()> {
+    fn play(&mut self, frame: &ffmpeg::frame::Audio) -> Result<()> {
         validate_frame(self.format, frame)?;
         if frame.samples() == 0 {
             return Ok(());
@@ -555,7 +566,7 @@ impl WasapiRenderer {
         Ok(())
     }
 
-    fn drain(&mut self) -> Result<()> {
+    fn play_out(&mut self) -> Result<()> {
         // What the stretcher still holds is the end of the sound too.
         let pieces = self
             .stretcher
@@ -645,7 +656,7 @@ fn priming_trim_samples(frame_pts_ns: i64, target_ns: i64, sample_rate: u32) -> 
         .max(0) as usize
 }
 
-impl Element for WasapiRenderer {
+impl Element for Rendering {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -680,7 +691,7 @@ impl Element for WasapiRenderer {
     }
 }
 
-impl Sink for WasapiRenderer {
+impl Render for Rendering {
     /// Writes samples to the shared-mode endpoint buffer.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -689,79 +700,67 @@ impl Sink for WasapiRenderer {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn render(&mut self, buf: MediaBuffer) -> Result<()> {
         let _apartment = ComApartment::new().map_err(WasapiRendererError::from)?;
         match buf {
             MediaBuffer::Audio(frame) => self
-                .render(&frame)
+                .play(&frame)
                 .inspect_err(|error| pp_error!(self, "render failed: {error}")),
-            MediaBuffer::Eos => self
-                .drain()
-                .inspect_err(|error| pp_error!(self, "drain failed: {error}")),
             MediaBuffer::Packet(_) => Err(WasapiRendererError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(WasapiRendererError::UnsupportedBuffer("Video").into()),
+            MediaBuffer::Eos => Ok(()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn drain(&mut self) -> Result<()> {
         let _apartment = ComApartment::new().map_err(WasapiRendererError::from)?;
-        match msg {
-            ControlMsg::Pause => {
-                if self.running {
-                    // SAFETY: the initialized client is running and this
-                    // renderer exclusively sequences the stop transition.
-                    unsafe { self.audio_client.Stop() }
-                        .map_err(|error| self.classify_error(error))?;
-                    self.running = false;
-                }
-                self.publish_device_position(false)?;
-                self.paused = true;
-            }
-            ControlMsg::Resume => {
-                self.paused = false;
-                // SAFETY: the initialized client returns queued padding by
-                // value before deciding whether it needs to restart.
-                let padding = unsafe { self.audio_client.GetCurrentPadding() }
-                    .map_err(|error| self.classify_error(error))?;
-                if padding > 0 {
-                    self.start()?;
-                    self.publish_device_position(true)?;
-                }
-            }
-            ControlMsg::Stop => {
-                self.paused = false;
-                self.stop_and_reset()?;
-            }
-            ControlMsg::Flush => {
-                if self.running {
-                    // SAFETY: this renderer exclusively stops the live client
-                    // before resetting its queue for the seek.
-                    unsafe { self.audio_client.Stop() }
-                        .map_err(|error| self.classify_error(error))?;
-                }
-                self.running = false;
-                // `paused` is deliberately left alone. Flush discards the old
-                // timeline; whether this renderer is playing is a lifecycle
-                // question owned by Pause/Resume. Clearing it here let the one
-                // preroll sample of a *paused* seek reach the device, which is
-                // audible as a blip and a click as the client starts and stops
-                // around it.
-                //
-                // SAFETY: the initialized client is now stopped, which is the
-                // required state for `Reset`.
-                unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
-                self.timeline = None;
-                self.stretcher.reset();
-                // The playback clock it masters the pipeline resets for the
-                // seek, once every thread has taken this — see `Pipeline::seek`.
-            }
-            ControlMsg::Seek(_) | ControlMsg::Preroll(_) => {}
+        self.play_out()
+            .inspect_err(|error| pp_error!(self, "drain failed: {error}"))
+    }
+
+    /// Stops the device for the pause; what it holds stays in its buffer.
+    fn pausing(&mut self) -> Result<()> {
+        let _apartment = ComApartment::new().map_err(WasapiRendererError::from)?;
+        if self.running {
+            // SAFETY: the initialized client is running and this renderer
+            // exclusively sequences the stop transition.
+            unsafe { self.audio_client.Stop() }.map_err(|error| self.classify_error(error))?;
+            self.running = false;
+        }
+        self.publish_device_position(false)?;
+        self.paused = true;
+        Ok(())
+    }
+
+    /// Starts the device again where it holds anything to play.
+    fn resuming(&mut self) -> Result<()> {
+        let _apartment = ComApartment::new().map_err(WasapiRendererError::from)?;
+        self.paused = false;
+        // SAFETY: the initialized client returns queued padding by value
+        // before deciding whether it needs to restart.
+        let padding = unsafe { self.audio_client.GetCurrentPadding() }
+            .map_err(|error| self.classify_error(error))?;
+        if padding > 0 {
+            self.start()?;
+            self.publish_device_position(true)?;
         }
         Ok(())
     }
+
+    /// Discards what the device holds, for a seek or a stop alike. Whether
+    /// it is paused is left alone: that is `pausing` and `resuming`'s, and a
+    /// reset that cleared it let the one preroll sample of a *paused* seek
+    /// reach the device — a blip and a click as the client started and
+    /// stopped around it. The playback clock it masters resets for a seek
+    /// once every thread has flushed — see `Pipeline::seek` — so what this
+    /// publishes of where it stopped is only ever read at a stop.
+    fn reset(&mut self) -> Result<()> {
+        let _apartment = ComApartment::new().map_err(WasapiRendererError::from)?;
+        self.stop_and_reset()
+    }
 }
 
-impl Drop for WasapiRenderer {
+impl Drop for Rendering {
     fn drop(&mut self) {
         let Ok(_apartment) = ComApartment::new() else {
             return;
@@ -789,7 +788,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::{clock::Clock, playback_clock::PlaybackMaster};
+    use crate::{clock::Clock, control::ControlMsg, element::Sink, playback_clock::PlaybackMaster};
 
     fn frame(format: AudioFormat, samples: usize) -> ffmpeg::frame::Audio {
         let mut frame =
@@ -886,12 +885,15 @@ mod tests {
         renderer
             .control(&ControlMsg::Flush)
             .expect("flush must reset the endpoint");
-        assert!(renderer.paused, "a flush must not resume a paused renderer");
+        assert!(
+            renderer.0.inner.paused,
+            "a flush must not resume a paused renderer"
+        );
 
         renderer
             .control(&ControlMsg::Resume)
             .expect("resume the renderer");
-        assert!(!renderer.paused, "only Resume lifts the pause");
+        assert!(!renderer.0.inner.paused, "only Resume lifts the pause");
     }
 
     /// A paused seek's one sample waits in the device's buffer, and the
@@ -922,17 +924,18 @@ mod tests {
 
         renderer.control(&ControlMsg::Pause).expect("pause");
         renderer.control(&ControlMsg::Flush).expect("flush");
-        let sample = frame(renderer.format, 480);
+        let sample = frame(renderer.0.inner.format, 480);
         renderer
             .consume(MediaBuffer::Audio(Arc::new(sample)))
             .expect("taken while paused");
         let _apartment = ComApartment::new().expect("COM for the query");
         // SAFETY: the initialized client returns its padding by value.
-        let padding = unsafe { renderer.audio_client.GetCurrentPadding() }.expect("padding");
+        let padding =
+            unsafe { renderer.0.inner.audio_client.GetCurrentPadding() }.expect("padding");
         assert!(padding > 0, "held in the device's buffer");
-        assert!(!renderer.running, "and not played while paused");
+        assert!(!renderer.0.inner.running, "and not played while paused");
 
         renderer.control(&ControlMsg::Resume).expect("resume");
-        assert!(renderer.running, "played once resumed");
+        assert!(renderer.0.inner.running, "played once resumed");
     }
 }

@@ -47,6 +47,15 @@ compile error with no explanation.
 
 ### Added
 
+- **`Render` writes a terminal as what it does with each buffer.**
+  `render` for each one, `drain` before its end is taken, `reset` for a
+  seek or a stop, and `pausing` and `resuming` for a device it stops while
+  paused; the framework turns the control messages into those, and the
+  element never sees one. `ChainBuilder::to` and `build` now take
+  `impl IntoTerminal<M>`, which a `Sink` and a `Render` both are.
+  `WasapiRenderer`, `WhisperTranscriber`, `FrameCounter` and
+  `PacketCounter` are written this way now.
+
 - **`Produce` writes a source as what it makes alone.** Asked for the next
   thing, it makes it — a buffer, nothing yet, or the end of its stream —
   waiting where it has to only through the `Wait` it is handed, which lets

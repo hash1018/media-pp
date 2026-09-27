@@ -12,9 +12,9 @@ use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, Render, element_pp_log},
     error::Result,
+    render::{RenderStage, render_sink},
 };
 
 /// The rate Whisper's own front end works at. Nothing else is accepted, and
@@ -441,7 +441,7 @@ impl Chunker {
         })
     }
 
-    /// Forgets everything, for a [`ControlMsg::Flush`] or a seek.
+    /// Forgets everything, for a seek or a stop.
     ///
     /// The timeline is not reset: positions stay where they were, because
     /// what the caller does with a seek is its own business and inventing a
@@ -574,9 +574,17 @@ fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTra
 /// [`MediaBuffer::Eos`] transcribes whatever is left, including the stretch
 /// normally held back at the live edge — nothing more is coming, so nothing
 /// can change what the model hears. A caller that stops the pipeline with
-/// [`ControlMsg::Stop`] instead abandons that audio, which is what `Stop`
+/// [`ControlMsg::Stop`](crate::control::ControlMsg::Stop) instead abandons
+/// that audio, which is what `Stop`
 /// means everywhere else in this crate.
-pub struct WhisperTranscriber<F> {
+pub struct WhisperTranscriber<F>(RenderStage<Transcribing<F>>);
+
+render_sink!(WhisperTranscriber<F> where F: FnMut(&Segment) -> Result<()> + Send + 'static);
+
+/// What a [`WhisperTranscriber`] does with the audio it is handed:
+/// transcribes it a chunk at a time. All of its work, which the framework
+/// makes the terminal.
+struct Transcribing<F> {
     pp_log: PpLog,
     name: Arc<str>,
     /// Made once and reused for every chunk.
@@ -682,7 +690,7 @@ where
             .map_err(WhisperTranscriberError::State)?;
         let end_of_text = context.token_eot();
 
-        Ok(Self {
+        Ok(Self(RenderStage::new(Transcribing {
             pp_log,
             name,
             state,
@@ -692,7 +700,7 @@ where
             end_of_text,
             on_segment,
             reported_zero_length: false,
-        })
+        })))
     }
 
     /// Says which language the speech is in, as whisper.cpp names it — a
@@ -712,11 +720,21 @@ where
         mut self,
         language: &str,
     ) -> std::result::Result<Self, WhisperTranscriberError> {
-        self.language = Some(language_code(language)?);
-        pp_info!(self, "language: {}", self.language.unwrap_or("auto"));
+        let transcribing = &mut self.0.inner;
+        transcribing.language = Some(language_code(language)?);
+        pp_info!(
+            transcribing,
+            "language: {}",
+            transcribing.language.unwrap_or("auto")
+        );
         Ok(self)
     }
+}
 
+impl<F> Transcribing<F>
+where
+    F: FnMut(&Segment) -> Result<()> + Send + 'static,
+{
     /// Reads one audio frame's samples, refusing anything not in the one
     /// shape the model's front end reads.
     fn samples_of(
@@ -814,7 +832,7 @@ where
     }
 }
 
-impl<F> Element for WhisperTranscriber<F>
+impl<F> Element for Transcribing<F>
 where
     F: FnMut(&Segment) -> Result<()> + Send + 'static,
 {
@@ -835,7 +853,7 @@ where
     }
 }
 
-impl<F> Sink for WhisperTranscriber<F>
+impl<F> Render for Transcribing<F>
 where
     F: FnMut(&Segment) -> Result<()> + Send + 'static,
 {
@@ -846,7 +864,7 @@ where
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn render(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
                 let samples = Self::samples_of(&frame)?;
@@ -859,38 +877,29 @@ where
                 }
                 Ok(())
             }
-            MediaBuffer::Eos => {
-                pp_trace!(self, "event=eos phase=received");
-                if let Some(inference) = self.chunker.flush() {
-                    self.transcribe(inference)?;
-                }
-                pp_trace!(self, "event=eos phase=completed outcome=ok");
-                Ok(())
-            }
             other => Err(WhisperTranscriberError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        pp_trace!(self, "event=control control={msg:?} phase=received");
-        match msg {
-            // All three abandon the audio being held: a flush because what
-            // follows is from elsewhere on the timeline, a seek for the
-            // same reason, and a stop because `Stop` means abandon rather
-            // than finish — that is what separates it from `Eos`, which
-            // transcribes the tail.
-            ControlMsg::Flush | ControlMsg::Seek(_) | ControlMsg::Stop => self.chunker.reset(),
-            // Nothing is scheduled here. Audio arrives or it does not, and
-            // a gap in it is silence the model is welcome to hear.
-            ControlMsg::Pause | ControlMsg::Resume => {}
-            // Repositioning costs this nothing — the buffered audio is
-            // dropped and the next chunk fills from wherever the source
-            // lands — so there is no reason to refuse one.
-            // A decoder's business: preroll waits for terminals to report a
-            // first sample of the new timeline, and the gate that does the
-            // reporting lives upstream of every terminal.
-            ControlMsg::Preroll(_) => {}
+    /// Transcribes the tail held back at the live edge: nothing more is
+    /// coming, so nothing can change what the model hears.
+    fn drain(&mut self) -> Result<()> {
+        pp_trace!(self, "event=eos phase=received");
+        if let Some(inference) = self.chunker.flush() {
+            self.transcribe(inference)?;
         }
+        pp_trace!(self, "event=eos phase=completed outcome=ok");
+        Ok(())
+    }
+
+    /// Abandons the audio being held: for a seek because what follows is
+    /// from elsewhere on the timeline, and for a stop because `Stop` means
+    /// abandon rather than finish — which is what separates it from the end
+    /// of the stream, whose tail `drain` transcribes. A pause needs
+    /// nothing: audio arrives or it does not, and a gap in it is silence
+    /// the model is welcome to hear.
+    fn reset(&mut self) -> Result<()> {
+        self.chunker.reset();
         Ok(())
     }
 }

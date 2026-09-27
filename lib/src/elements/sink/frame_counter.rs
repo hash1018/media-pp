@@ -5,15 +5,22 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, MemoryDomainSet, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, Render, element_pp_log},
     elements::CounterHandle,
     error::Result,
+    render::{RenderStage, render_sink},
 };
 
 /// Terminal sink that counts decoded frames, video or audio. The
 /// [`CounterHandle`] it comes with reads the count from outside the
 /// pipeline, even while this sink runs on a `Queue` worker thread.
-pub struct FrameCounter {
+pub struct FrameCounter(RenderStage<Counting>);
+
+render_sink!(FrameCounter);
+
+/// What a [`FrameCounter`] does with each buffer: counts it, where it is one of
+/// the decoded frames it counts.
+struct Counting {
     pp_log: PpLog,
     name: Arc<str>,
     count: CounterHandle,
@@ -28,17 +35,17 @@ impl FrameCounter {
         let pp_log = element_pp_log(ElementType::FrameCounter, &name, None);
         pp_info!(pp_log: &pp_log, "created");
         (
-            Self {
+            Self(RenderStage::new(Counting {
                 name,
                 pp_log,
                 count: count.clone(),
-            },
+            })),
             count,
         )
     }
 }
 
-impl Element for FrameCounter {
+impl Element for Counting {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -56,7 +63,7 @@ impl Element for FrameCounter {
     }
 }
 
-impl Sink for FrameCounter {
+impl Render for Counting {
     /// Counts decoded buffers of either medium — it only tallies them,
     /// so it neither reads the samples nor cares which memory they live
     /// in. PacketCounter is the encoded-side counterpart.
@@ -68,7 +75,7 @@ impl Sink for FrameCounter {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn render(&mut self, buf: MediaBuffer) -> Result<()> {
         if let MediaBuffer::Video(_) | MediaBuffer::Audio(_) = buf {
             self.count.increment();
         }
