@@ -240,8 +240,9 @@ not claim those.
 ### 3.1 What the matrix found
 
 Stage 0's conformance matrix (§6) found three bugs the hand-picked shapes
-never had, in its first hours. Each is reproduced by an ignored test in
-`core/pipeline/tests/conformance.rs` and listed in its `KNOWN_BROKEN`:
+never had, in its first hours. Each is reproduced by a test in
+`core/pipeline/tests/conformance.rs`, ignored and listed in its
+`KNOWN_BROKEN` for as long as the bug is not fixed:
 
 - **An accurate seek on a later lap of a looping file shows the keyframe
   before its target**
@@ -253,13 +254,18 @@ never had, in its first hours. Each is reproduced by an ignored test in
   the data says how they relate. A `Segment` that carries both — see §4.2 —
   is the fix.
 - **Packets fanned out and played backwards: the faster branch never
-  steps** (`packets_fanned_out_backwards_step_on_in_every_branch`). A
-  stretch's end is inferred from the next stretch's first packet; with the
-  slower branch full and the source waiting on it, the faster branch never
-  gets that packet and holds its pictures for good — with one-deep queues
-  every time, with ordinary ones now and then. `StreamEvent::Stretch` from
-  the source is the fix; until then the matrix plays no packet fan-out
-  backwards.
+  steps** (`packets_fanned_out_backwards_step_on_in_every_branch`). The
+  faster branch's decoder needs the rest of the stretch the source is
+  reading; the slower branch, which has its sample, takes nothing more, and
+  the source waited inside its push to that branch, where a `Tee` that
+  keeps what comes for a prerolled branch could not let it go. A
+  `StreamEvent::Stretch` from the source, as this document proposed, was
+  tried first; the step still hung, since what the faster branch lacked
+  was not the word that its stretch had ended but the stretch. Fixed on
+  its own: a source reading backwards holds a packet until its pad can
+  take it, as forwards it parks one, and the `Tee` answers ready once the
+  branch has its sample. With that, the marker made no difference either
+  way, so it is not in the design any more.
 - **A paused seek to the end, with one-deep queues and sound, never
   prerolls the sound**
   (`a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues`).
@@ -277,7 +283,7 @@ never had, in its first hours. Each is reproduced by an ignored test in
 
 | Plane | Direction | Ordered with data | Carries | Delivered by |
 |---|---|---|---|---|
-| **Stream** | downstream | yes — it *is* the data | buffers, and stream events: `Segment`, `Stretch`, `Eos` | the pads, in order, through every element and thread boundary |
+| **Stream** | downstream | yes — it *is* the data | buffers, and stream events: `Segment`, `Eos` | the pads, in order, through every element and thread boundary |
 | **Flow** | pipeline → threads | no | `Pause`, `Resume`, `Stop`, flush start, and the interrupt that unblocks any wait | the pipeline, **directly to every thread-owning element** (each source, each `Queue` worker) and to every element with a device hook — never cascaded |
 | **Feedback** | upstream | no | readiness (backpressure), picture lateness (QoS), "prerolled" | readiness through `ready_consume` as now; QoS and preroll completion through the pipeline |
 
@@ -298,9 +304,6 @@ pub enum StreamEvent {
     /// A run of buffers on one timeline begins; everything after it, up to
     /// the next Segment, belongs to it.
     Segment(Arc<Segment>),
-    /// Playing backwards: a stretch, handed on last picture first, begins
-    /// here. Sent by the source that cut it.
-    Stretch,
     /// The segment's stream ends. Nothing about threads or lifetimes.
     Eos,
 }
@@ -336,8 +339,9 @@ Sources emit a `Segment`:
 
 Compositors and mixers are sources, and emit their output's segments.
 
-`ReversibleSource` emits `Stretch` itself. `mark_stretch`'s inference and the
-`begin_stretch` / `end_stretch` calls go away.
+A stretch played backwards is still told to its decoder where a decode time
+goes back, by the stage in front of it (`mark_stretch`). A `Stretch` event
+from the source was tried and taken out again: §3.1.
 
 What moves out of `PlaybackState` and the control messages:
 
@@ -346,7 +350,6 @@ What moves out of `PlaybackState` and the control messages:
 | timeline number, thread-local, checked at `Queue` | `Segment.id`, plus pads that refuse data while flushing (§4.3). This is a simplification, not a fix: the number has never been measured catching anything. |
 | `PlaybackState::backwards` | `Segment.rate < 0` |
 | `PrerollContext` target and step count | `Segment.show_from`, `Segment.step` |
-| stretch boundaries guessed from DTS | `StreamEvent::Stretch` |
 | `Flush` resetting per-element state | the flushed `Segment`, arriving exactly where the old data ends |
 | "first sample of the new timeline" | first buffer a terminal takes after the flushed `Segment` — exact, per terminal |
 | `Completion`: `Eos` "not flushed since" | `Eos` of the current segment id |
@@ -559,7 +562,7 @@ cross-channel rules to take apart again.
 | **0. A generated conformance matrix** — done | Six axes of file shape — fan-out, decoder, filter, pacing, sound, queue depth — in 16 shapes covering every pair of choices, beside the live and offline shapes; random sequences of pause, resume, seek (at and past the end too), step, rate both ways, looping, finish, stop, and stop while a call is under way, judged by what each call promised rather than by the messages that carried it, so the judge stands through every later stage. Found three bugs in its first hours (§3.1). | nothing |
 | **1. The flow plane** — done | The pipeline delivers every request directly to every source and every `Queue` worker, and each thread passes it on only to the elements on its own thread (`control::Direct`); a queue carries across only what was not sent to every thread, such as a source's own `Stop` after an error. A worker that ends delivers what is still waiting for it first. `stop` returns once the threads have ended. Resume needs no order (§4.3). This addresses the C and G clusters, which in-band events cannot. Threads living until `Stop` with the framework's own "linger at the end", and the one `Wait` primitive, move to stage 5, where the framework owns the source loop. | nothing public; `stop` waits for the threads |
 | **2. The stream plane** — done | `crate::stream`: `Item`, `StreamEvent`, and a hook on `Sink` that only this crate can override, since its argument is a type nothing outside can name. An event goes as control does on one thread — the element's reaction, which pushes what it answers the event with ahead of it, then the framework on through its pads — but in order with the data: a `Queue` carries it in its channel, a `Tee` hands it to each branch and keeps it with what a preroll holds back, a bin or a rack sends it down its line. It is never dropped for room and never waited for, since a source begins its stream before it looks at its control. What joins a stream under way — a branch attached to a `Tee`, a line filled anew — is handed its last segment first. The one event is a `Segment` saying which timeline it opens and whether a flush came before it, emitted by the framework as each source's thread starts and after each seek it applies — a turn included; the conformance matrix checks that every buffer a terminal is handed is on the timeline of the segment before it. `Eos` stays `MediaBuffer::Eos` until stage 6, which moves it in one step rather than mirroring it. | nothing public |
-| **3. Sources emit the rest** | A `Segment` at each lap of a loop, and from a live source where its timestamps break, unflushed; `Stretch` from `ReversibleSource`; a `PipelineBridge` passing its feeding side's flush on as a flushed `Segment`. The segment's times — start, `show_from`, position, rate, step. Pads refuse data while flushing. The timeline number, already asserted equal to the segment's in tests, is then removed. | nothing public |
+| **3. Sources emit the rest** | A `Segment` at each lap of a loop, and from a live source where its timestamps break, unflushed; a `PipelineBridge` passing its feeding side's flush on as a flushed `Segment`. The segment's times — start, `show_from`, position, rate, step. Pads refuse data while flushing. The timeline number, already asserted equal to the segment's in tests, is then removed. | nothing public |
 | **4. Readers move to the segment** | `backwards`, the seek target, the step count, clipping, completion, the clock anchor. `PlaybackState` shrinks to the flow phase, the interrupt and the preroll bookkeeping. | `crate`-internal only |
 | **5. `Transform` / `Render` / `Produce` / `Device`** | Every in-tree element migrated, one family at a time, each family deleting its `control()` and its holds. Sink-side preroll (§4.4) lands with the renderers. With the source loop the framework's, threads live until `Stop` and "linger at the end" is the framework's; every blocking wait goes through one `Wait` (§4.3). | custom elements: they keep compiling against raw `Sink`/`Source` |
 | **6. Remove the old surface** | `MediaBuffer::Eos` becomes `StreamEvent::Eos`, and the stream plane is made public. `ControlMsg` in `Sink`, `drain_control`, `handle_request` and the `pub` preroll types go. | **breaking**: custom elements, obs-rs |

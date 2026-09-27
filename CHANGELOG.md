@@ -169,6 +169,16 @@ compile error with no explanation.
   workers behind it have ended, as `finish` does, rather than leaving that
   to be read from the bus.
 
+- **A file whose packets are fanned out to several branches steps
+  backwards in every branch.** Played backwards, `FileDemuxer` handed each
+  packet over without asking whether its pad could take it, and a branch
+  that had its step's picture took nothing more: the demuxer waited inside
+  that push, which a `Tee` keeping what comes for such a branch could not
+  let go, and its sibling, a stretch short of its next picture, showed
+  nothing until the step timed out. A packet read backwards is now held
+  until its pad can take it, as one read forwards is. Found by the
+  conformance matrix, which now plays that shape backwards too.
+
 - **A paused seek to the end of a file prerolls every branch, however
   shallow its queues.** At the end of a file `FileDemuxer` handed each pad
   its `Eos` in turn, waiting for room — the picture's first. In a preroll a

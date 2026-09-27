@@ -367,6 +367,9 @@ struct Backwards {
     end: i64,
     /// Whether this stretch has still to be sought to.
     unread: bool,
+    /// A packet read and ready to go, waiting for its pad to take it — see
+    /// [`FileDemuxer::hand_on_backwards`].
+    held: Option<ffmpeg::Packet>,
 }
 
 /// How much a decoder may hold of a stretch read backwards — see
@@ -1075,7 +1078,7 @@ impl SourceElement for FileDemuxer {
                     return Ok(());
                 }
                 if self.backwards.is_some() {
-                    if self.read_backwards(bus)? {
+                    if self.read_backwards(bus, true)? {
                         continue;
                     }
                     // The start of the file: the end of the stream, backwards.
@@ -1216,6 +1219,7 @@ impl ReversibleSource for FileDemuxer {
             start: end,
             end,
             unread: true,
+            held: None,
         });
         self.start_stretch()?;
         Ok(target)
@@ -1228,7 +1232,7 @@ impl ReversibleSource for FileDemuxer {
             .as_ref()
             .is_some_and(|backwards| !backwards.unread)
         {
-            if !self.read_backwards(bus)? {
+            if !self.read_backwards(bus, false)? {
                 break;
             }
         }
@@ -1311,14 +1315,23 @@ impl FileDemuxer {
 
     /// Reads one packet backwards — see [`Backwards`] — and answers
     /// whether there is more to read: `false` once the stretch that begins
-    /// the file has been read.
-    fn read_backwards(&mut self, bus: &Bus) -> crate::error::Result<bool> {
+    /// the file has been read. `may_hold`: whether a packet its pad cannot
+    /// take yet may be held for the next call — see
+    /// [`Self::hand_on_backwards`].
+    fn read_backwards(&mut self, bus: &Bus, may_hold: bool) -> crate::error::Result<bool> {
         if self
             .backwards
             .as_ref()
             .is_some_and(|backwards| backwards.unread)
         {
             self.start_stretch()?;
+            return Ok(true);
+        }
+        if let Some(backwards) = self.backwards.as_mut()
+            && let Some(packet) = backwards.held.take()
+        {
+            let index = backwards.stream;
+            self.hand_on_backwards(index, packet, bus, may_hold);
             return Ok(true);
         }
         let next = self.take_parked().or_else(|| {
@@ -1356,8 +1369,44 @@ impl FileDemuxer {
         }
         self.shift_to_lap(time_base, &mut packet);
         packet.set_time_base(time_base);
-        self.push_to_pad(index, packet, bus);
+        self.hand_on_backwards(index, packet, bus, may_hold);
         Ok(true)
+    }
+
+    /// Pushes a packet read backwards once its pad can take it, and until
+    /// then holds it, reading nothing more — as forwards a packet is parked
+    /// for a pad that cannot take it yet.
+    ///
+    /// Not waited on inside the push: there, nothing a preroll does can let
+    /// it go. A `Tee` keeps what comes for a branch that has its sample,
+    /// rather than handing it on, but a push it is already waiting in stays
+    /// waiting — for a branch whose terminal has its sample and takes
+    /// nothing more. Its sibling, still decoding the stretch this is
+    /// reading, never had the rest of it, and a step waited on it for good.
+    /// Asked first, the `Tee` answers ready as soon as the branch has its
+    /// sample, and this goes on.
+    ///
+    /// Only between requests, though — `may_hold` — where the loop that
+    /// asks again looks at its control in between. Inside one, reading a
+    /// stretch to its end for a `Finish`, the pipeline's interrupt is out
+    /// and no queue takes anything until the request is answered: the pad
+    /// would never be ready, so the packet is pushed, which an interrupt
+    /// lets past a full queue.
+    fn hand_on_backwards(
+        &mut self,
+        index: usize,
+        packet: ffmpeg::Packet,
+        bus: &Bus,
+        may_hold: bool,
+    ) {
+        if !may_hold || self.pads[index].ready_consume() {
+            self.push_to_pad(index, packet, bus);
+            return;
+        }
+        if let Some(backwards) = self.backwards.as_mut() {
+            backwards.held = Some(packet);
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 
     /// The stretch just read is done: on to the one before — the end of the
@@ -2020,7 +2069,7 @@ mod tests {
             "a quarter into the file"
         );
         let (bus, _bus_rx) = Bus::new();
-        while demuxer.read_backwards(&bus).expect("read backwards") {}
+        while demuxer.read_backwards(&bus, true).expect("read backwards") {}
 
         let micros = |ts: i64| ts.rescale(time_base, microseconds());
         let seen: Vec<i64> = seen.lock().unwrap().iter().map(|&ts| micros(ts)).collect();

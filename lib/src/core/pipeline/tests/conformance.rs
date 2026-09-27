@@ -446,6 +446,9 @@ fn every_shape() -> Vec<FileShape> {
 }
 
 /// One choice on one axis, as [`KNOWN_BROKEN`] names it.
+// No known bug names a choice right now; the next one the matrix finds
+// does, and until then nothing makes one.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 enum Choice {
     Branches(Branches),
@@ -470,10 +473,7 @@ struct KnownBroken {
 
 /// What known bugs break, left out of the sequences until each is fixed.
 /// Remove an entry with the `#[ignore]` on its test, once the test passes.
-const KNOWN_BROKEN: [KnownBroken; 1] = [KnownBroken {
-    backwards: Choice::Branches(Branches::PacketTee),
-    test: "packets_fanned_out_backwards_step_on_in_every_branch",
-}];
+const KNOWN_BROKEN: [KnownBroken; 0] = [];
 
 /// Whether `shape` may be played backwards: no known bug breaks it there.
 fn turns_round(shape: FileShape) -> bool {
@@ -1250,6 +1250,9 @@ fn run_sequence_turning(
     steps: usize,
     turns: bool,
 ) -> std::result::Result<(), String> {
+    // Here rather than only in `conform`, so a test replaying one sequence
+    // is traced as well.
+    trace_if_asked();
     let Some(rig) = Rig::build(shape) else {
         return Ok(());
     };
@@ -2187,20 +2190,17 @@ fn a_paused_seek_to_the_end_prerolls_the_sound_through_one_deep_queues() {
 /// backwards, step on together — the faster branch's as much as the slower
 /// one's.
 ///
-/// It does not: found by the matrix. Backwards a decoder hands a stretch's
-/// pictures on once the stretch has ended, and nothing says where one
-/// ends: the graph works it out from the next stretch's first packet going
-/// back in time (`mark_stretch`). The slower branch, which has its step's
-/// picture and takes nothing more, fills its queues; the source, handing
-/// the next stretch through the `Tee`, waits on it; the faster branch has
-/// every packet of the stretch it is on and never learns that the stretch
-/// is over, so it shows nothing and the step times out. Fixed where the
-/// source says where each stretch ends, which is what
-/// `docs/stream-events.md` builds — ignored until then. Normal-depth queues
-/// show it too, less often; until then no shape of packets fanned out is
-/// played backwards in the matrix — see [`KNOWN_BROKEN`].
+/// Found by the matrix. Backwards a decoder hands a stretch's pictures on
+/// once the stretch is whole, which takes the rest of it read. The slower
+/// branch, which had its step's picture and took nothing more, filled its
+/// queues, and the source waited inside its push to that branch through the
+/// `Tee` — where nothing let it go: the `Tee` keeps what comes for a branch
+/// that has its sample, but only what comes after it has. The faster
+/// branch, a stretch short, showed nothing, and the step timed out. The
+/// source now holds a packet read backwards until its pad can take it, as
+/// forwards it parks one, and the `Tee` answers ready once the branch has
+/// its sample.
 #[test]
-#[ignore = "known bug: fixed by the source marking each stretch (docs/stream-events.md, stages 3-4)"]
 fn packets_fanned_out_backwards_step_on_in_every_branch() {
     // The sequence the matrix found it with: backwards, played to the start,
     // and a step on from a keyframe seek.
@@ -2216,6 +2216,21 @@ fn packets_fanned_out_backwards_step_on_in_every_branch() {
     if let Err(failure) =
         run_sequence_turning(Shape::File(shape), 1_790_491_301_682_327_112, 12, true)
     {
+        panic!("{failure}");
+    }
+}
+
+/// A file played backwards finishes. `Finish` reads the stretch under way
+/// to its end, and a packet read backwards that its pad cannot take yet is
+/// held until it can — but not there: the pipeline's interrupt is out for
+/// as long as the request is, no queue takes anything meanwhile, and the
+/// source waited for good on a queue that would never have room.
+#[test]
+fn a_file_played_backwards_finishes() {
+    // The sequence the matrix found it with: backwards, twice as fast, a
+    // keyframe seek, a step, and the finish.
+    let shape = FileShape::new(Branches::One, Pacing::Pacer, Sound::None, Depth::Tight);
+    if let Err(failure) = run_sequence(Shape::File(shape), 1_790_501_120_723_546_607, 12) {
         panic!("{failure}");
     }
 }
