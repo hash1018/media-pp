@@ -890,14 +890,29 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
         // worker too, directly: passed on from here it reaches this source's
         // own line and stops at them. A queue built by hand carries it on.
         let _direct = Direct::enter(true);
-        let forwarded = forward(source.src_pads(), msg);
+        // What an element after this refuses is that element's failure, not
+        // this source's: reported, as a queue reports one from behind it,
+        // and the source goes on. Returned, it ended this thread — a sink
+        // refusing a `Pause` on the source's own thread stopped the source,
+        // where the same sink behind a queue was a bus event. Every pad is
+        // told, and every refusal reported, whatever the one before did.
+        let (pp_log, element_type, name) = (
+            source.pp_log().clone(),
+            source.element_type(),
+            source.name(),
+        );
+        let report = |error| bus.post_downstream_error(&pp_log, element_type, name.clone(), error);
+        for pad in source.src_pads() {
+            if let Err(error) = pad.control(msg) {
+                report(error);
+            }
+        }
         // What it reads from here on begins a stream again, on the timeline
         // the pipeline began for the seek — see `crate::stream`.
-        let begun = if let ControlMsg::Seek(target) = msg {
+        if let ControlMsg::Seek(target) = msg {
             let start = source.as_seekable().map_or(*target, |seekable| {
                 seekable.on_timeline(crate::stream::Position(*target))
             });
-            let pp_log = source.pp_log().clone();
             let segment = crate::stream::Segment {
                 id: state.timeline(),
                 flushed: true,
@@ -905,11 +920,10 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
                 start,
                 backwards: state.backwards(),
             };
-            crate::stream::begin_segment(source.src_pads(), segment, &pp_log)
-        } else {
-            Ok(())
-        };
-        forwarded.and(begun)?;
+            if let Err(error) = crate::stream::begin_segment(source.src_pads(), segment, &pp_log) {
+                report(error);
+            }
+        }
         Ok(*msg == ControlMsg::Stop)
     })();
     match &result {
@@ -1724,6 +1738,11 @@ mod tests {
     /// A source tells every one of its pads, whatever the first answers. It
     /// told them in turn and stopped at the first failure, so a picture
     /// branch refusing a `Pause` left the sound branch beside it playing.
+    ///
+    /// And the refusal is the refusing element's, reported on the bus as a
+    /// queue reports one from behind it: the source goes on. Returned, it
+    /// ended the source's thread, where the same sink behind a queue was a
+    /// bus event and nothing more.
     #[test]
     fn a_source_tells_every_pad_even_where_one_fails() {
         let mut source = TwoPads {
@@ -1734,11 +1753,19 @@ mod tests {
         let (sound, sound_noted) = noting(false);
         source.pads[0].link(Box::new(picture));
         source.pads[1].link(Box::new(sound));
-        let (bus, _bus_rx) = Bus::new();
+        let (bus, bus_rx) = Bus::new();
 
         let applied = apply_one_unacked(&mut source, &bus, &ControlMsg::Pause, &heading(false));
 
-        assert!(applied.is_err(), "the picture's refusal is the answer");
+        assert!(
+            matches!(applied, Ok(false)),
+            "the source goes on: {applied:?}"
+        );
+        assert!(
+            matches!(bus_rx.try_recv(), Some(BusEvent::Error { .. })),
+            "the picture's refusal is reported"
+        );
+        assert!(bus_rx.try_recv().is_none(), "once");
         assert_eq!(
             *sound_noted.lock().unwrap(),
             [ControlMsg::Pause],

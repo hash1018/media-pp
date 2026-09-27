@@ -152,6 +152,8 @@ holds frames.
   resets it nowhere.
 - A control error on the source's own thread ends that thread. Behind a
   `Queue` the same error becomes a bus event. A `Tee` never returns one.
+  (Since fixed: on the source's own thread it is a bus event too, and the
+  source goes on.)
 - `Rack` and `VideoEncodeBin` do not pass their contents' `ready_consume` on,
   and `Rack` does not pass `as_reversible` on. (Since fixed for
   `ready_consume`; no rack holds a decoder, so `as_reversible` waits for one

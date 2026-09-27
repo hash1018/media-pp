@@ -159,6 +159,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **An element refusing a pipeline's control no longer ends its source.**
+  A sink on a source's own thread — no `Queue` between them — that
+  failed a `Pause`, say, ended that source's thread, while the same sink
+  behind a queue was a bus event and nothing more. It is a bus event
+  wherever the element is now, under the element's own name, and the
+  source goes on; every pad is still told, whatever the one before
+  answered.
+
 - **A pipeline with a `ReplayBuffer` refuses a seek again.** Its tracks
   refused one while the question was asked of the running graph, and
   answered yes once 0.3 took the answer from the wiring, so a seek went

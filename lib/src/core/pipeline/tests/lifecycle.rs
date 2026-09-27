@@ -742,3 +742,58 @@ fn hear_each_request_once() {
         );
     }
 }
+
+/// A sink that refuses a `Pause` on the source's own thread is reported on
+/// the bus, as one behind a `Queue` is, and the source goes on. The refusal
+/// was returned to the source, which ended its thread over it.
+#[test]
+fn a_sink_refusing_control_on_the_source_thread_does_not_end_the_source() {
+    use crate::elements::AppSink;
+
+    let taken = Arc::new(AtomicUsize::new(0));
+    let sink = AppSink::with_control(
+        "refusing",
+        {
+            let taken = Arc::clone(&taken);
+            move |_buffer| {
+                taken.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        },
+        |msg| match msg {
+            ControlMsg::Pause => Err(crate::error::Error::Other("refused".into())),
+            _ => Ok(()),
+        },
+    );
+    let (pipeline, ()) = Pipeline::new(
+        "refused",
+        TestVideoSource::new("gen", TestVideoOptions::default()),
+        |source, ctx| {
+            let branch = ctx.branch().to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        },
+    )
+    .expect("wiring succeeds");
+    pipeline.run().expect("run");
+    let flowing = |after: usize| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while taken.load(Ordering::Relaxed) <= after {
+            assert!(Instant::now() < deadline, "nothing more was taken");
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    flowing(0);
+    pipeline.pause();
+    pipeline.resume();
+    flowing(taken.load(Ordering::Relaxed));
+    assert!(pipeline.is_running(), "the source goes on");
+    pipeline.stop();
+    let mut errors = Vec::new();
+    while let Some(event) = pipeline.bus().try_recv() {
+        if matches!(event, BusEvent::Error { .. }) {
+            errors.push(event);
+        }
+    }
+    assert_eq!(errors.len(), 1, "the refusal, reported: {errors:?}");
+}

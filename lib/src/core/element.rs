@@ -551,7 +551,9 @@ pub trait Sink: Element {
     ///
     /// An error goes back to whoever sent the message. The message has
     /// still gone on downstream: one element failing to pause must not
-    /// leave the rest of the graph running.
+    /// leave the rest of the graph running. Sent by the pipeline, it goes
+    /// on the bus as this element's, wherever the element is: the source
+    /// or the queue passing the message on reports it and goes on.
     fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
         Ok(())
     }
