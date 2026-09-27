@@ -779,7 +779,7 @@ pub struct CudaVideoCompositor {
     output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
     pad: SrcPad,
     /// Where each tick is recorded, once the pipeline has handed it over
-    /// ??see [`crate::stats::TickStats`].
+    /// — see [`crate::stats::TickStats`].
     ticks: Option<Arc<TickCounters>>,
     /// What this composes in — see [`CudaVideoCompositor::with_format`].
     format: CudaFrameFormat,

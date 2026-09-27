@@ -1,4 +1,4 @@
-//! [`CudaVideoLayerHandle`] ??thread-safe runtime placement control for
+//! [`CudaVideoLayerHandle`] — thread-safe runtime placement control for
 //! one [`super::CudaVideoCompositor`] input.
 
 use std::sync::{Arc, Weak};

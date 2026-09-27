@@ -1,4 +1,4 @@
-//! [`CudaTextLayerHandle`] ??text drawn into a [`super::CudaVideoCompositor`]
+//! [`CudaTextLayerHandle`] — text drawn into a [`super::CudaVideoCompositor`]
 //! scene, rasterized on the CPU and uploaded as a coverage mask on every
 //! [`CudaTextLayerHandle::set_text`].
 

@@ -1,5 +1,5 @@
 //! The kernels [`super::CudaDriver`] loads, as PTX source the driver
-//! JIT-compiles ??kept apart from the Rust that calls them, which reads as
+//! JIT-compiles — kept apart from the Rust that calls them, which reads as
 //! Rust rather than as eight hundred lines of assembly.
 
 /// The BGRA-to-NV12 conversion nothing else on this crate's CUDA path can do.

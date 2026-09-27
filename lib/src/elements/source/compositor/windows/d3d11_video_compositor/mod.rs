@@ -899,7 +899,7 @@ pub struct D3d11VideoCompositor {
     output_views: HashMap<usize, ID3D11RenderTargetView>,
     pad: SrcPad,
     /// Where each tick is recorded, once the pipeline has handed it over
-    /// ??see [`crate::stats::TickStats`].
+    /// — see [`crate::stats::TickStats`].
     ticks: Option<Arc<TickCounters>>,
 }
 
