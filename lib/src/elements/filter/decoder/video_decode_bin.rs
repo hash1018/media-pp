@@ -47,6 +47,7 @@ use crate::{
     error::{Error, Result},
     pad::SrcPad,
     pp_log::{PpLog, pp_info, pp_warn},
+    stash::OutputStash,
     stream::Event,
 };
 
@@ -294,6 +295,11 @@ pub struct VideoDecodeBin {
     pending: Option<Vec<Box<dyn Filter>>>,
     context: Option<Arc<Context>>,
     pad: SrcPad,
+    /// What the line made that `pad` could not take while a preroll held the
+    /// graph — see [`OutputStash`]. The decoder inside keeps its own too,
+    /// but hands into the line, which takes everything: this is where what
+    /// follows the bin says whether it can take more.
+    stash: OutputStash,
     output_format: Option<ffmpeg::format::Pixel>,
     path: Arc<Mutex<DecodePath>>,
     /// Present while the hardware is decoding: what a replacement is built
@@ -448,6 +454,7 @@ impl VideoDecodeBin {
             pending: Some(elements),
             context: None,
             pad,
+            stash: OutputStash::default(),
             output_format,
             path: Arc::new(Mutex::new(path)),
             fallback,
@@ -504,14 +511,24 @@ impl VideoDecodeBin {
                 self.add_tail(frame.width(), frame.height())?;
             }
             if self.tail.is_empty() {
-                self.pad.push(buf)?;
+                self.hand_on(buf)?;
             } else {
                 for converted in self.tail.consume(buf)? {
-                    self.pad.push(converted)?;
+                    self.hand_on(converted)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Hands `buf` on through the stash — or, the end of the stream, after
+    /// everything kept, whatever the pad says: nothing would take it after.
+    fn hand_on(&mut self, buf: MediaBuffer) -> Result<()> {
+        if buf.is_eos() {
+            let kept = self.stash.release_all(&mut self.pad);
+            return kept.and(self.pad.push(buf));
+        }
+        self.stash.push(&mut self.pad, buf)
     }
 
     /// Puts the target's converter to NV12 after the decoder — at the size
@@ -603,6 +620,7 @@ impl Element for VideoDecodeBin {
     /// and paces as part of that pipeline.
     fn attach_context(&mut self, context: &Arc<Context>) {
         self.context = Some(context.clone());
+        self.stash.attach(&context.state);
         self.install();
     }
 
@@ -630,10 +648,10 @@ impl Source for VideoDecodeBin {
 }
 
 impl Sink for VideoDecodeBin {
-    /// What the decoder inside says — see `PrerollGate::holding` on when it
-    /// is not ready.
+    /// Not while it keeps what its pad cannot take yet, nor while the decoder
+    /// inside keeps its own — the crate's output stash.
     fn ready_consume(&mut self) -> bool {
-        self.line.ready_consume()
+        self.stash.ready(&mut self.pad) && self.line.ready_consume()
     }
 
     /// Encoded video, which is what every decoder it may hold takes.
@@ -684,6 +702,9 @@ impl Sink for VideoDecodeBin {
         }
         // Both, whatever the first answers — as a filter's pads all get a
         // message; the first failure is the answer.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.stash.clear();
+        }
         let line = self.line.control(msg);
         let tail = self.tail.control(msg);
         line.and(tail)
@@ -694,6 +715,9 @@ impl Sink for VideoDecodeBin {
     /// this bin's pad once this returns. Both, whatever the first answers.
     fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
         self.install();
+        // What is kept came before the event, and goes before what the line
+        // answers it with.
+        let kept = self.stash.release_all(&mut self.pad);
         let line = self
             .line
             .stream_event(event.0)
@@ -709,7 +733,7 @@ impl Sink for VideoDecodeBin {
             }
             Err(error) => tail = Err(error),
         }
-        line.and(tail)
+        kept.and(line).and(tail)
     }
 }
 
@@ -1397,6 +1421,96 @@ mod tests {
             90,
         )
         .expect("OpenH264 is always present")
+    }
+
+    /// Takes a picture while open, and shuts after each — what follows a
+    /// bin that has its preroll sample.
+    struct Shuts {
+        pp_log: crate::pp_log::PpLog,
+        open: Arc<std::sync::atomic::AtomicBool>,
+        taken: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl Element for Shuts {
+        fn name(&self) -> Arc<str> {
+            "shuts".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &crate::pp_log::PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut crate::pp_log::PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Shuts {
+        fn ready_consume(&mut self) -> bool {
+            self.open.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Video(frame) = &buf {
+                self.taken.lock().unwrap().push(frame.pts().unwrap_or(-1));
+            }
+            self.open.store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A preroll's terminal right after the bin is handed one picture. The
+    /// decoder inside hands everything it decodes into the bin's line,
+    /// which takes it all; what the bin's own pad cannot take is kept, and
+    /// the bin is not fed meanwhile. Once playback goes on it goes, in
+    /// order. Handed on as it came out of the line, a terminal that had
+    /// its sample was given the rest of the decoder's output with it.
+    #[test]
+    fn a_preroll_hands_the_terminal_after_the_bin_one_picture() {
+        let (params, packets) = h264();
+        let mut bin = VideoDecodeBin::open("bin", params, DecodeTarget::System, None)
+            .expect("software decode opens");
+        let context = Arc::new(crate::element::Context::for_test_with_clock(
+            crate::bus::Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::new(crate::clock::Clock::new()),
+        ));
+        bin.attach_context(&context);
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let taken = Arc::new(Mutex::new(Vec::new()));
+        bin.src_pads()[0].link(Box::new(Shuts {
+            pp_log: element_pp_log(ElementType::Other, "shuts", None),
+            open: Arc::clone(&open),
+            taken: Arc::clone(&taken),
+        }));
+        context.state.observe(&ControlMsg::Preroll(Arc::new(
+            crate::control::PrerollContext::new([]),
+        )));
+
+        let sent = packets.len();
+        let mut fed = 0;
+        for packet in packets {
+            if !bin.ready_consume() {
+                break;
+            }
+            bin.consume(MediaBuffer::Packet(Arc::new(packet)))
+                .expect("decodes");
+            fed += 1;
+        }
+        assert_eq!(taken.lock().unwrap().len(), 1, "one picture, the sample");
+        assert!(fed < sent, "and the bin was not fed on to the end");
+
+        context.state.observe(&ControlMsg::Pause);
+        context.state.observe(&ControlMsg::Resume);
+        bin.consume(MediaBuffer::Eos).expect("the end");
+        let taken = taken.lock().unwrap();
+        assert!(taken.len() > 1, "what was kept went on");
+        assert!(
+            taken.windows(2).all(|pair| pair[0] < pair[1]),
+            "in order: {taken:?}"
+        );
     }
 
     #[test]

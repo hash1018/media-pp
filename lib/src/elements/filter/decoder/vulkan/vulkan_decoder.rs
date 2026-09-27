@@ -199,8 +199,7 @@ impl VulkanDecoder {
     /// Hands on what was held of the stretch just over, last first.
     fn release(&mut self) -> crate::error::Result<()> {
         for buffer in self.stretch.end() {
-            self.preroll_gate
-                .push_admitted(buffer, |frame| self.pad.push(frame))?;
+            self.preroll_gate.push_admitted(buffer, &mut self.pad)?;
         }
         Ok(())
     }
@@ -218,8 +217,7 @@ impl VulkanDecoder {
                     if self.stretch.holding() {
                         self.stretch.hold(buffer);
                     } else {
-                        self.preroll_gate
-                            .push_admitted(buffer, |frame| self.pad.push(frame))?;
+                        self.preroll_gate.push_admitted(buffer, &mut self.pad)?;
                     }
                     frame = self.pool.get();
                 }
@@ -266,7 +264,7 @@ impl Sink for VulkanDecoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {
-        !self.preroll_gate.holding()
+        self.preroll_gate.ready(&mut self.pad)
     }
 
     fn input_contract(&self) -> InputContract {
@@ -291,8 +289,7 @@ impl Sink for VulkanDecoder {
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                     .map_err(|error| self.decode_error(error))?;
                 self.drain()?;
-                self.preroll_gate
-                    .push_eos_candidate(|candidate| self.pad.push(candidate))?;
+                self.preroll_gate.push_eos_candidate(&mut self.pad)?;
                 self.pad.push(MediaBuffer::Eos)
             }
             _ => Ok(()),
@@ -303,8 +300,7 @@ impl Sink for VulkanDecoder {
     /// target on the samples' timeline by.
     fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
         let crate::stream::StreamEvent::Segment(segment) = event.0;
-        self.preroll_gate.begin_segment(segment);
-        Ok(())
+        self.preroll_gate.begin_segment(segment, &mut self.pad)
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {

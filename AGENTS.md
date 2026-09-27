@@ -106,10 +106,12 @@ final source of truth when documentation and implementation differ.
 - A filter that makes each buffer into none, one or several is a
   `Transform`: its media work, with `drain` for what it still holds at the
   end and `reset` for what a `Flush` or `Stop` lets go of. The framework's
-  stage owns its pad, hands `Eos` on after the drain, and never shows it a
-  control message. Write `Sink` and `Source` directly only for an element
-  that routes the stream itself — `Queue`, `Tee`, a bin or a rack, a muxer,
-  a compositor or mixer input — or reads the stream plane. An element of
+  stage owns its pad, hands `Eos` on after the drain, keeps what the pad
+  cannot take while a preroll holds the graph (`OutputStash`, which the
+  decoders' gate, a bin and a rack keep too), and never shows it a control
+  message. Write `Sink` and `Source` directly only for an element that
+  routes the stream itself — `Queue`, `Tee`, a bin or a rack, a muxer, a
+  compositor or mixer input — or reads the stream plane. An element of
   this crate moved onto one keeps its public name, constructors and
   `Filter` as a newtype over `TransformStage` (`transform_filter!`).
 - Declare a new element's link contract through `Sink::input_contract` and

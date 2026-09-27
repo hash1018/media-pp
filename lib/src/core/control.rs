@@ -157,9 +157,6 @@ pub struct PrerollContext {
     target: Option<Duration>,
     /// How many samples each expected terminal takes before it is ready.
     samples: usize,
-    /// A frame step's, which lets the decoders decode on as they were
-    /// rather than select a sample — see [`Self::for_step`].
-    step: bool,
     /// The terminals that drop what reaches them until the preroll ends —
     /// see [`Self::silencing`].
     silenced: HashSet<ElementId>,
@@ -176,7 +173,6 @@ impl PrerollContext {
             labels: HashMap::new(),
             target: None,
             samples: 1,
-            step: false,
             silenced: HashSet::new(),
             state: Mutex::new(PrerollState::default()),
             changed: Condvar::new(),
@@ -192,7 +188,6 @@ impl PrerollContext {
             labels: HashMap::new(),
             target: Some(target),
             samples: 1,
-            step: false,
             silenced: HashSet::new(),
             state: Mutex::new(PrerollState::default()),
             changed: Condvar::new(),
@@ -202,13 +197,13 @@ impl PrerollContext {
     /// A frame step's preroll: each of `terminals` takes `frames` more
     /// pictures, from wherever its decoder is, and holds.
     ///
-    /// The decoders are left to decode on as they were: no sample is being
-    /// selected, and a picture decoded past the last one asked for waits in
-    /// its queue to be the next step's first rather than being dropped.
+    /// No sample is selected — a step begins no segment, so nothing is cut
+    /// — and a picture decoded past the last one asked for waits, in a queue
+    /// or a stage's stash, to be the next step's first rather than being
+    /// dropped.
     pub(crate) fn for_step(terminals: impl IntoIterator<Item = ElementId>, frames: usize) -> Self {
         Self {
             samples: frames.max(1),
-            step: true,
             ..Self::new(terminals)
         }
     }
@@ -231,11 +226,6 @@ impl PrerollContext {
     /// one for a seek's preroll, the frames asked for in a step's.
     pub fn samples(&self) -> usize {
         self.samples
-    }
-
-    /// Whether this is a frame step's preroll — see [`Self::for_step`].
-    pub(crate) fn is_step(&self) -> bool {
-        self.step
     }
 
     /// Whether `terminal` drops what reaches it while this preroll lasts

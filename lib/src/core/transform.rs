@@ -19,6 +19,7 @@ use crate::{
     graph::ElementId,
     pad::SrcPad,
     pp_log::PpLog,
+    stash::OutputStash,
 };
 
 /// A filter written as its media work alone: each buffer in, what it makes
@@ -87,12 +88,19 @@ impl Output {
 pub(crate) struct TransformStage<T> {
     inner: T,
     pad: SrcPad,
+    /// What it made that its pad could not take while a preroll held the
+    /// graph — see [`OutputStash`].
+    stash: OutputStash,
 }
 
 impl<T: Transform> TransformStage<T> {
     pub(crate) fn new(inner: T) -> Self {
         let pad = SrcPad::with_contract(format!("{}_src", inner.name()), inner.output_contract());
-        Self { inner, pad }
+        Self {
+            inner,
+            pad,
+            stash: OutputStash::default(),
+        }
     }
 
     /// The transform itself — for the element of this crate that is a
@@ -107,12 +115,12 @@ impl<T: Transform> TransformStage<T> {
         &mut self.inner
     }
 
-    /// Hands on what `out` holds, every buffer even where one is refused,
-    /// and answers the first refusal.
+    /// Hands on what `out` holds, through the stash, every buffer even
+    /// where one is refused, and answers the first refusal.
     fn hand_on(&mut self, out: Output) -> Result<()> {
         let mut first = Ok(());
         for buf in out.made {
-            let pushed = self.pad.push(buf);
+            let pushed = self.stash.push(&mut self.pad, buf);
             if first.is_ok() {
                 first = pushed;
             }
@@ -143,6 +151,7 @@ impl<T: Transform> Element for TransformStage<T> {
     }
 
     fn attach_context(&mut self, context: &Arc<Context>) {
+        self.stash.attach(&context.state);
         self.inner.attach_context(context);
     }
 }
@@ -155,7 +164,7 @@ impl<T: Transform> Source for TransformStage<T> {
 
 impl<T: Transform> Sink for TransformStage<T> {
     fn ready_consume(&mut self) -> bool {
-        self.pad.ready_consume()
+        self.stash.ready(&mut self.pad) && self.pad.ready_consume()
     }
 
     fn input_contract(&self) -> InputContract {
@@ -169,12 +178,20 @@ impl<T: Transform> Sink for TransformStage<T> {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let mut out = Output::default();
         if buf.is_eos() {
-            // What it holds goes first, and the end after it whether or not
-            // draining failed: a stream that is over is over.
+            // What is kept goes first, then what it holds, and the end after
+            // it whether or not draining failed: a stream that is over is
+            // over, and after its end nothing would take what was kept.
+            let kept = self.stash.release_all(&mut self.pad);
             let drained = self.inner.drain(&mut out);
-            let handed = self.hand_on(out);
+            let mut handed = Ok(());
+            for buf in out.made {
+                let pushed = self.pad.push(buf);
+                if handed.is_ok() {
+                    handed = pushed;
+                }
+            }
             let ended = self.pad.push(MediaBuffer::Eos);
-            return drained.and(handed).and(ended);
+            return kept.and(drained).and(handed).and(ended);
         }
         self.inner.transform(buf, &mut out)?;
         self.hand_on(out)
@@ -183,8 +200,18 @@ impl<T: Transform> Sink for TransformStage<T> {
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.inner.reset();
+            self.stash.clear();
         }
         Ok(())
+    }
+
+    /// What is kept goes ahead of the event the graph passes on after this:
+    /// it came before it. A seek's segment finds nothing kept, its `Flush`
+    /// having let it go; only one that begins a lap or a bridge's new input
+    /// can, and then a preroll's terminal is handed what it would otherwise
+    /// have waited for.
+    fn stream_event(&mut self, _event: crate::stream::Event<'_>) -> Result<()> {
+        self.stash.release_all(&mut self.pad)
     }
 }
 
@@ -570,5 +597,85 @@ mod tests {
         let unsaid = Twice(element_pp_log(ElementType::Other, "twice", None)).into_filter();
         assert_eq!(unsaid.input_contract(), InputContract::Unknown);
         assert!(unsaid.accepts_seek(), "a seek is followed unless said");
+    }
+
+    /// Takes one buffer and is then not ready until reopened — a terminal
+    /// that has its preroll sample.
+    struct TakesOne {
+        pp_log: PpLog,
+        open: Arc<std::sync::atomic::AtomicBool>,
+        received: Arc<Mutex<Vec<MediaBuffer>>>,
+    }
+
+    impl Element for TakesOne {
+        fn name(&self) -> Arc<str> {
+            "takes-one".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for TakesOne {
+        fn ready_consume(&mut self) -> bool {
+            self.open.load(Ordering::SeqCst)
+        }
+
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.open.store(false, Ordering::SeqCst);
+            self.received.lock().unwrap().push(buf);
+            Ok(())
+        }
+    }
+
+    /// In a preroll a terminal that has its sample takes nothing more: what
+    /// a transform makes after it — the second of a pair here — is kept
+    /// rather than pushed into it, and the stage answers not ready. Once
+    /// playback goes on what was kept goes first, then what follows.
+    #[test]
+    fn in_a_preroll_what_the_terminal_will_not_take_is_kept() {
+        let context = Arc::new(Context::for_test_with_clock(
+            crate::bus::Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::new(crate::clock::Clock::new()),
+        ));
+        let mut stage =
+            TransformStage::new(Twice(element_pp_log(ElementType::Other, "twice", None)));
+        stage.attach_context(&context);
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        stage.src_pads()[0].link(Box::new(TakesOne {
+            pp_log: element_pp_log(ElementType::Other, "takes-one", None),
+            open: Arc::clone(&open),
+            received: Arc::clone(&received),
+        }));
+        context.state.observe(&ControlMsg::Preroll(Arc::new(
+            crate::control::PrerollContext::new([]),
+        )));
+
+        stage.consume(packet(1)).expect("the sample, and one kept");
+        assert_eq!(tags(&received.lock().unwrap()), [Some(1)]);
+        assert!(!stage.ready_consume(), "held while it keeps one");
+
+        context.state.observe(&ControlMsg::Pause);
+        context.state.observe(&ControlMsg::Resume);
+        open.store(true, Ordering::SeqCst);
+        assert!(stage.ready_consume(), "nothing holds it back now");
+        stage.consume(packet(2)).expect("what was kept, then this");
+        assert_eq!(
+            tags(&received.lock().unwrap()),
+            [Some(1), Some(101), Some(2), Some(102)]
+        );
     }
 }

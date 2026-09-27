@@ -11,6 +11,7 @@ use crate::{
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
+    stash::OutputStash,
     stream::Event,
 };
 
@@ -117,6 +118,11 @@ pub struct Rack {
     /// things that need a pipeline to be meaningful.
     context: Option<Arc<Context>>,
     pad: SrcPad,
+    /// What the line made that `pad` could not take while a preroll held the
+    /// graph — see [`OutputStash`]. The line hands everything it makes to
+    /// the rack; this is where what follows the rack says whether it can
+    /// take more.
+    stash: OutputStash,
 }
 
 /// What a [`RackHandle`] leaves for its [`Rack`] to pick up.
@@ -199,6 +205,7 @@ impl Rack {
         pp_info!(pp_log: &pp_log, "created: empty");
         let rack = Self {
             pad: SrcPad::with_contract(format!("{name}_src"), output),
+            stash: OutputStash::default(),
             line: Line::new(ElementType::Rack, &name),
             pp_log,
             name,
@@ -207,6 +214,16 @@ impl Rack {
             context: None,
         };
         (rack, RackHandle { control })
+    }
+
+    /// Hands `buf` on through the stash — or, the end of the stream, after
+    /// everything kept, whatever the pad says: nothing would take it after.
+    fn hand_on(&mut self, buf: MediaBuffer) -> Result<()> {
+        if buf.is_eos() {
+            let kept = self.stash.release_all(&mut self.pad);
+            return kept.and(self.pad.push(buf));
+        }
+        self.stash.push(&mut self.pad, buf)
     }
 
     /// Replaces what is in the rack with `elements`.
@@ -229,6 +246,7 @@ impl Element for Rack {
     /// docs on what is in a rack still being in the pipeline.
     fn attach_context(&mut self, context: &Arc<Context>) {
         self.context = Some(context.clone());
+        self.stash.attach(&context.state);
     }
 
     fn name(&self) -> Arc<str> {
@@ -264,7 +282,7 @@ impl Sink for Rack {
         if let Some(elements) = self.control.take() {
             self.fill(elements);
         }
-        self.line.ready_consume()
+        self.stash.ready(&mut self.pad) && self.line.ready_consume()
     }
 
     /// What the caller declared, which is what the elements on either side
@@ -284,10 +302,10 @@ impl Sink for Rack {
             // An empty rack is a wire. Not a copy of the buffer: the same
             // one, which for a pooled picture is what keeps a rack from
             // costing a slot to hold nothing.
-            return self.pad.push(buf);
+            return self.hand_on(buf);
         }
         for buf in self.line.consume(buf)? {
-            self.pad.push(buf)?;
+            self.hand_on(buf)?;
         }
         Ok(())
     }
@@ -298,13 +316,18 @@ impl Sink for Rack {
         // Into the rack here, and past it once this returns, so an element
         // inside sees a Flush before the element after the rack does, exactly
         // as it would if the two were linked directly.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.stash.clear();
+        }
         self.line.control(msg)
     }
 
     /// Into the rack here, what it answers pushed ahead of it, and past it
     /// once this returns — as control goes.
     fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
-        let mut first = Ok(());
+        // What is kept came before the event, and goes before what the line
+        // answers it with.
+        let mut first = self.stash.release_all(&mut self.pad);
         for buf in self.line.stream_event(event.0)? {
             if let Err(error) = self.pad.push(buf) {
                 first = first.and(Err(error));
@@ -486,6 +509,110 @@ mod tests {
         assert!(!rack.ready_consume(), "what it holds cannot take one yet");
         ready.store(true, Ordering::Relaxed);
         assert!(rack.ready_consume());
+    }
+
+    /// Makes two frames of each: its own, and one a millisecond on.
+    struct Doubles(PpLog);
+
+    impl Element for Doubles {
+        fn name(&self) -> Arc<str> {
+            "doubles".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.0
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.0
+        }
+    }
+
+    impl crate::element::Transform for Doubles {
+        fn transform(&mut self, buf: MediaBuffer, out: &mut crate::element::Output) -> Result<()> {
+            let pts = pts_of(&buf);
+            out.push(buf);
+            out.push(frame(pts + 1));
+            Ok(())
+        }
+    }
+
+    /// Takes a frame while open, and shuts after each — a terminal that has
+    /// its preroll sample.
+    struct Shuts {
+        pp_log: PpLog,
+        open: Arc<std::sync::atomic::AtomicBool>,
+        taken: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl Element for Shuts {
+        fn name(&self) -> Arc<str> {
+            "shuts".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Shuts {
+        fn ready_consume(&mut self) -> bool {
+            self.open.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.taken.lock().unwrap().push(pts_of(&buf));
+            self.open.store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A preroll's terminal after the rack is handed one frame: what the
+    /// line makes goes into the rack, which takes it all, and what the
+    /// rack's own pad cannot take is kept, the rack not ready meanwhile.
+    /// Once playback goes on it goes first, in order.
+    #[test]
+    fn a_preroll_hands_the_terminal_after_the_rack_one_frame() {
+        use crate::element::IntoFilter;
+
+        let context = Arc::new(Context::for_test_with_clock(
+            crate::bus::Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::new(crate::clock::Clock::new()),
+        ));
+        let (mut rack, handle) = Rack::new("rack", InputContract::Unknown, OutputContract::Unknown);
+        rack.attach_context(&context);
+        handle
+            .replace(vec![
+                Doubles(element_pp_log(ElementType::Other, "doubles", None)).into_filter(),
+            ])
+            .expect("one pad");
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let taken = Arc::new(Mutex::new(Vec::new()));
+        rack.src_pads()[0].link(Box::new(Shuts {
+            pp_log: element_pp_log(ElementType::Other, "shuts", None),
+            open: Arc::clone(&open),
+            taken: Arc::clone(&taken),
+        }));
+        context.state.observe(&ControlMsg::Preroll(Arc::new(
+            crate::control::PrerollContext::new([]),
+        )));
+
+        rack.consume(frame(10)).expect("the sample, and one kept");
+        assert_eq!(*taken.lock().unwrap(), [10]);
+        assert!(!rack.ready_consume(), "held while it keeps one");
+
+        context.state.observe(&ControlMsg::Pause);
+        context.state.observe(&ControlMsg::Resume);
+        rack.consume(frame(20)).expect("what was kept, then these");
+        assert_eq!(*taken.lock().unwrap(), [10, 11, 20, 21]);
     }
 
     fn frame(pts: i64) -> MediaBuffer {

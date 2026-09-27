@@ -178,6 +178,19 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A preroll's terminal is handed only what it asks for.** A transform
+  that makes several buffers of one — a tempo stretch, `CudaScaler`, a
+  transform of your own — pushed them all into a terminal that already had
+  its sample, where nothing asked the pad between them. What its pad
+  cannot take while a preroll, or the pause after one, holds the graph is
+  now kept in order and handed on first once it can, the stage answering
+  not ready meanwhile; outside a preroll nothing changes. The decoders,
+  which held theirs back by hand after one sample, keep them the same way
+  now, and so do `VideoDecodeBin` and `Rack` for what their line hands
+  them: the decoders only drop what comes before an accurate seek's
+  target, whatever the phase, and the terminal's own readiness holds the
+  rest.
+
 - **A seek to the last pictures of a file whose sound ends sooner no
   longer times out.** The picture's branch took its sample and nothing
   more, so `FileDemuxer` parked the packets it could not hand on; the

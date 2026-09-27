@@ -269,7 +269,7 @@ impl Sink for SwDecoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {
-        !self.preroll_gate.holding()
+        self.preroll_gate.ready(&mut self.pad)
     }
 
     /// The medium, not just "a packet": an audio stream wired into a
@@ -345,8 +345,7 @@ impl Sink for SwDecoder {
                         drain_audio(decoder, &mut self.pad, &mut self.preroll_gate)?;
                     }
                 }
-                self.preroll_gate
-                    .push_eos_candidate(|candidate| self.pad.push(candidate))?;
+                self.preroll_gate.push_eos_candidate(&mut self.pad)?;
                 self.pad.push(MediaBuffer::Eos)
             }
             other => {
@@ -360,8 +359,7 @@ impl Sink for SwDecoder {
     /// target on the samples' timeline by.
     fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
         let crate::stream::StreamEvent::Segment(segment) = event.0;
-        self.preroll_gate.begin_segment(segment);
-        Ok(())
+        self.preroll_gate.begin_segment(segment, &mut self.pad)
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
@@ -435,7 +433,7 @@ fn drain_video(
                     // Reassigning `frame` releases the suppressed one right
                     // here. On a fixed hardware pool that returns its surface
                     // a whole branch earlier than dropping it downstream would.
-                    gate.push_admitted(buffer, |frame| pad.push(frame))?;
+                    gate.push_admitted(buffer, pad)?;
                 }
                 frame = pool.get();
             }
@@ -453,7 +451,7 @@ fn release(
     gate: &mut PrerollGate,
 ) -> crate::error::Result<()> {
     for buffer in stretch.end() {
-        gate.push_admitted(buffer, |frame| pad.push(frame))?;
+        gate.push_admitted(buffer, pad)?;
     }
     Ok(())
 }
@@ -467,7 +465,7 @@ fn drain_audio(
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                gate.push_admitted(MediaBuffer::Audio(Arc::new(frame)), |frame| pad.push(frame))?;
+                gate.push_admitted(MediaBuffer::Audio(Arc::new(frame)), pad)?;
                 frame = ffmpeg::frame::Audio::empty();
             }
             Err(error) if is_codec_drain_boundary(&error) => break,

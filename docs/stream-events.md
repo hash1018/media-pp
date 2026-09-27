@@ -513,19 +513,32 @@ stands in for it:
   another place. Blocking there instead starves the sibling (366c248).
   These go only with a per-stream buffer that reads each stream to its own
   need — the multiqueue of §5.
-- `PrerollGate.after` is the output stash for a decoder's burst (§4.5). It
-  moves into the framework when the decoders become transforms, which needs
-  `Transform` to hear segments.
+- `PrerollGate.after` is the output stash for a decoder's burst (§4.5).
 - The decoders' `holding` — not ready once their sample went on — is
-  backpressure written in the element, and moves with the stash.
+  backpressure written in the element.
 - `Pacer.pending` is the one buffer a paced wait was interrupted in, kept in
   order across the pause; that is what AGENTS.md asks of anything holding
   back during a phase.
 
-So what follows here is a choice rather than a removal: keep the fan-out
+So what followed here was a choice rather than a removal: keep the fan-out
 holds where they are, bounded as now, and move only the decoders' stash and
 readiness into the framework; or do §5's multiqueue first and remove them
-there.
+there. **The first was chosen (2026-09-28), and is done.** The stash is
+the framework's `OutputStash`: what a stage made that its pad cannot take
+while a preroll — or the pause that followed one — holds the graph, kept
+in order and handed on first once it can, the stage answering not ready
+meanwhile. Outside a preroll nothing is kept, and a pad is waited on inside
+the push as ever. `TransformStage` keeps one, so a transform answering one
+input with several no longer pushes the rest into a terminal that has its
+sample. The decoders keep one in their gate, which no longer stops after
+one sample: it only cuts what comes before the segment's `show_from`,
+whatever the phase — keeping the frame before it until the next shows it
+covers the instant — and a preroll's terminal, taking its sample and then
+answering not ready, holds the rest as backpressure does anywhere else.
+A bin and a rack keep one as well: the line inside hands everything to
+its collector, which takes it all, so it is at the bin's own pad that what
+follows says whether it can take more. The decoders stay filters of their
+own: moving the stash did not need them to be transforms.
 
 ### 4.5 One default behaviour
 
@@ -570,11 +583,11 @@ rack takes, takes `into_filter()`. An in-tree element moved onto one keeps
 its public name, constructors and `Filter` as a newtype over the crate's own
 stage, so nothing that builds one changes. The stage hands on everything the
 element made even where downstream refuses one, and ends the stream after a
-drain that fails. The output stash waits for the renderers' sink-side
-preroll, which is what makes a stage wait on readiness; until then an
-element that keeps a repeat cache clears it in its own `reset`. `reset` runs on
-a `Flush` or a `Stop`, which reach a filter driven by hand as well; the
-flushed `Segment` takes over when stage 6 moves the end into the stream.
+drain that fails. It keeps what its pad cannot take while a preroll holds
+the graph (`OutputStash`, §4.4). An element that keeps a repeat cache
+clears it in its own `reset`. `reset` runs on a `Flush` or a `Stop`, which
+reach a filter driven by hand as well; the flushed `Segment` takes over
+when stage 6 moves the end into the stream.
 
 ```rust
 /// A terminal. The framework delivers events and runs the preroll counting.
@@ -665,7 +678,7 @@ cross-channel rules to take apart again.
 | **2. The stream plane** — done | `crate::stream`: `Item`, `StreamEvent`, and a hook on `Sink` that only this crate can override, since its argument is a type nothing outside can name. An event goes as control does on one thread — the element's reaction, which pushes what it answers the event with ahead of it, then the framework on through its pads — but in order with the data: a `Queue` carries it in its channel, a `Tee` hands it to each branch and keeps it with what a preroll holds back, a bin or a rack sends it down its line. It is never dropped for room and never waited for, since a source begins its stream before it looks at its control. What joins a stream under way — a branch attached to a `Tee`, a line filled anew — is handed its last segment first. The one event is a `Segment` saying which timeline it opens and whether a flush came before it, emitted by the framework as each source's thread starts and after each seek it applies — a turn included; the conformance matrix checks that every buffer a terminal is handed is on the timeline of the segment before it. `Eos` stays `MediaBuffer::Eos` until stage 6, which moves it in one step rather than mirroring it. | nothing public |
 | **3. Sources emit the rest** | A `Segment` at each lap of a loop, and from a live source where its timestamps break, unflushed; a `PipelineBridge` passing its feeding side's flush on as a flushed `Segment`. The segment's `start` and `position` are in, which the decoders' preroll gate already reads to hold a seek's target against the pictures (§3.1); `show_from`, rate and step to come. A caller's seek on a looping file stays on the lap the source has read to, which near a lap's end is already the next one rather than the one shown; the segment is where the lap shown can come from. Done: pads and queue workers refuse what arrives between a seek's `Flush` and its segment, and the thread-local timeline number is gone; only the pipeline's own `Flush` flushes pads, so an element driven by hand behaves as before. `show_from` is in, read by the decoders' preroll gate in place of the preroll's target. Laps and bridges are in: a looping `FileDemuxer` begins each lap as a segment not flushed, on the timeline it comes in and starting a lap on; a `PipelineBridge` begins a flushed one behind the flush its feeding side sends across and one not flushed where another input's stream begins, at no time it could know. Nothing reads either yet but the conformance judge, which now takes a segment not flushed on the same timeline. Left: a live source's own timestamp breaks — none reconnects by itself; a reconnection comes through a bridge or a new pipeline — and the step count, which goes with the terminals counting their own preroll; a rate change without a turn stays the playback clock's. | nothing public |
 | **4. Readers move to the segment** | `backwards`, the seek target, the step count, clipping, completion, the clock anchor. `PlaybackState` shrinks to the flow phase, the interrupt and the preroll bookkeeping. | `crate`-internal only |
-| **5. `Transform` / `Render` / `Produce` / `Device`** | Every in-tree element migrated, one family at a time, each family deleting its `control()` and its holds. Sink-side preroll (§4.4) lands with the renderers. With the source loop the framework's, threads live until `Stop` and "linger at the end" is the framework's; every blocking wait goes through one `Wait` (§4.3). Begun: `Transform`, its stage and `pipe` taking either kind are in, and the first families are moved: the scalers, uploads, downloads, converters, chroma keys, video effects and encoders of every backend, `D3d11ToneMap`, the audio filters, `AudioWaveform` and `ChangeGate`. What stays a filter of its own routes the stream (`Tee`, `Rack`, the bins), waits on the clock or reads the phase (`Pacer`, `VideoSynchronizer`, `PauseGate`), reads the stream plane (the decoders, until the preroll moves), or makes an output timeline. `TimestampOrigin` and `FrameRateLimiter` stay filters of their own for now: each makes an output timeline that a `Stop` starts again and a `Flush` does not, which one `reset` cannot tell apart. | custom elements: they keep compiling against raw `Sink`/`Source` |
+| **5. `Transform` / `Render` / `Produce` / `Device`** | Every in-tree element migrated, one family at a time, each family deleting its `control()` and its holds. Sink-side preroll (§4.4) lands with the renderers. With the source loop the framework's, threads live until `Stop` and "linger at the end" is the framework's; every blocking wait goes through one `Wait` (§4.3). Begun: `Transform`, its stage and `pipe` taking either kind are in, and the first families are moved: the scalers, uploads, downloads, converters, chroma keys, video effects and encoders of every backend, `D3d11ToneMap`, the audio filters, `AudioWaveform` and `ChangeGate`. What stays a filter of its own routes the stream (`Tee`, `Rack`, the bins), waits on the clock or reads the phase (`Pacer`, `VideoSynchronizer`, `PauseGate`), reads the stream plane (the decoders, until the preroll moves), or makes an output timeline. `TimestampOrigin` and `FrameRateLimiter` stay filters of their own for now: each makes an output timeline that a `Stop` starts again and a `Flush` does not, which one `reset` cannot tell apart. The output stash is in (§4.4): `OutputStash`, kept by `TransformStage` and by the decoders' gate, which now only cuts to `show_from`; the fan-out holds stay, bounded, until §5's multiqueue. | custom elements: they keep compiling against raw `Sink`/`Source` |
 | **6. Remove the old surface** | `MediaBuffer::Eos` becomes `StreamEvent::Eos`, and the stream plane is made public. `ControlMsg` in `Sink`, `drain_control`, `handle_request` and the `pub` preroll types go. | **breaking**: custom elements, obs-rs |
 
 obs-rs impact: it implements no element of its own — no `Sink`, no
