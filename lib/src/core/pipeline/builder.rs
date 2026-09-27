@@ -54,6 +54,9 @@ pub struct PipelineBuilder {
     /// so the pipeline is what keeps them — see [`crate::stats`].
     source_counters: Vec<Arc<ElementCounters>>,
     completion: Arc<Completion>,
+    /// The queue workers every request reaches directly — see
+    /// [`crate::control::Direct`].
+    queue_workers: Arc<crate::control::Workers>,
 }
 
 impl PipelineBuilder {
@@ -80,6 +83,7 @@ impl PipelineBuilder {
             control_pairs: Vec::new(),
             operation: Arc::new(Mutex::new(())),
             source_counters: Vec::new(),
+            queue_workers: Arc::default(),
         }
     }
 
@@ -145,6 +149,7 @@ impl PipelineBuilder {
             source_id,
             source_counters: Arc::clone(&counters),
             completion: Arc::clone(&self.completion),
+            queue_workers: Arc::clone(&self.queue_workers),
         });
         source.attach_context(&context);
         let wired = wire(&mut source, &context)?;
@@ -187,6 +192,7 @@ impl PipelineBuilder {
             operation: self.operation,
             preroll_slot: PrerollSlot::default().into(),
             workers: Mutex::new(Vec::new()),
+            queue_workers: self.queue_workers,
             graph: self.graph,
             _source_counters: self.source_counters,
         })

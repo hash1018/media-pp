@@ -176,10 +176,13 @@ final source of truth when documentation and implementation differ.
   (`control::deliver` for a filter driven by hand), to every pad even where
   one fails; an element never forwards control itself, and `SrcPad::control`
   is crate-private so that it cannot hand everything after it a message
-  twice. Only an element that routes control its own way — `Queue` across a
-  thread, `Tee` to its branches, a bin to the line inside it — sends it on
-  from its hook. A Queue control failure is reported without leaving the
-  control cascade permanently blocked.
+  twice. Only an element that routes control its own way — `Tee` to its
+  branches, a bin to the line inside it — sends it on from its hook. A
+  pipeline's requests reach every source and every `Queue` worker directly
+  (`control::Direct`), so one passed on stops at the next queue; a queue
+  carries across only what is sent without the pipeline — a `Stop` after a
+  source failed, a `Flush` a bridge injects. A Queue control failure is
+  reported without leaving the control cascade permanently blocked.
 - Where playback stands — paused, prerolling and for which seek, which
   timeline is current — is the pipeline's `PlaybackState`, given to every
   element in `attach_context` and written only by the pipeline, before the

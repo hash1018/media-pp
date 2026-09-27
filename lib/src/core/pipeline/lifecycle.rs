@@ -85,9 +85,12 @@ impl Pipeline {
             );
             self.state.pause();
             self.clock.pause();
+            // The queue workers too, which already run: see `broadcast`.
+            let workers = self.queue_workers.senders();
             pause_acks = self
                 .control_txs
                 .iter()
+                .chain(&workers)
                 .filter_map(|control_tx| control_tx.enqueue(ControlMsg::Pause))
                 .collect();
         }
@@ -172,7 +175,12 @@ impl Pipeline {
                     // `Stop` below.
                     drop(std::mem::take(&mut pause_acks));
                     self.state.interrupt();
-                    for control_tx in self.control_txs.iter().take(index) {
+                    for control_tx in self
+                        .control_txs
+                        .iter()
+                        .take(index)
+                        .chain(&self.queue_workers.senders())
+                    {
                         control_tx.send(ControlMsg::Stop);
                     }
                     self.join_workers();
@@ -249,11 +257,40 @@ impl Pipeline {
     /// one, and none depends on the graph already being in the state the
     /// request assumes. It costs a request sent while all is paused nothing:
     /// there is nothing waiting for it to wake.
+    ///
+    /// And to every queue worker, not only to the sources: each thread the
+    /// graph has is asked directly, and passes the request on only to the
+    /// elements on its own thread — see [`crate::control::Direct`]. Carried
+    /// across each thread boundary in turn, as a request once was, it could
+    /// not reach a queue whose upstream thread was blocked handing it data,
+    /// or had ended: a stop as a file ended waited on a queue that nothing
+    /// could reach (d817bac).
     pub(super) fn broadcast(
         &self,
         enqueue: impl Fn(&ControlSender) -> Option<crossbeam_channel::Receiver<()>>,
     ) {
-        let acks: Vec<_> = self.control_txs.iter().filter_map(enqueue).collect();
+        self.send_to_threads(enqueue, true);
+    }
+
+    /// [`Self::broadcast`], to the sources alone where `queue_workers` is
+    /// false — for a `Finish`, whose `Eos` reaches the queues in order
+    /// behind the data, as data.
+    pub(super) fn send_to_threads(
+        &self,
+        enqueue: impl Fn(&ControlSender) -> Option<crossbeam_channel::Receiver<()>>,
+        queue_workers: bool,
+    ) {
+        let workers = if queue_workers {
+            self.queue_workers.senders()
+        } else {
+            Vec::new()
+        };
+        let acks: Vec<_> = self
+            .control_txs
+            .iter()
+            .chain(&workers)
+            .filter_map(enqueue)
+            .collect();
         self.state.interrupt();
         for ack in acks {
             let _ = ack.recv();
@@ -322,9 +359,11 @@ impl Pipeline {
     /// one's own cascade has finished. It therefore cannot preempt an arbitrary
     /// source read or `Sink::consume` call already blocked inside user or
     /// external-library code; the call returns only after that work gives
-    /// the control cascade a turn. After it returns, watch [`Pipeline::bus`]
-    /// for every source's background thread to finish. Not reusable
-    /// afterward — build a new `Pipeline` for the next play-through.
+    /// the control cascade a turn. It returns once every source's background
+    /// thread — and with it every Queue worker it owns — has ended, so
+    /// [`Pipeline::is_running`] is false by then, as it is after
+    /// [`Pipeline::finish`]. Not reusable afterward — build a new `Pipeline`
+    /// for the next play-through.
     pub fn stop(&self) {
         // Before the operation lock, not after: a seek holds that lock for as
         // long as its preroll wait, and an abandoning caller must not be made
@@ -332,14 +371,20 @@ impl Pipeline {
         // immediate return, so this only waits for the seek's own control
         // cascade to unwind.
         self.abandon_preroll();
-        let _operation = self
-            .operation
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.running.load(Ordering::Acquire) == 0 {
-            return;
+        {
+            let _operation = self
+                .operation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.running.load(Ordering::Acquire) > 0 {
+                self.stop_runtime();
+            }
         }
-        self.stop_runtime();
+        // Every thread has taken the `Stop`; what is left is each source
+        // returning and taking its line down. Waited for here rather than
+        // left to the bus: a source acknowledges before it returns, and
+        // before its Queue workers are joined.
+        self.join_workers();
     }
 
     fn stop_runtime(&self) {
@@ -389,7 +434,7 @@ impl Pipeline {
             self.paused.store(false, Ordering::Release);
             self.resume_runtime();
         }
-        self.broadcast(ControlSender::enqueue_finish);
+        self.send_to_threads(ControlSender::enqueue_finish, false);
         self.join_workers();
         pp_trace!(
             pp_log: &self.pp_log,

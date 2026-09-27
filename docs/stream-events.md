@@ -373,11 +373,12 @@ that have a device: capture sources and audio renderers.
   asking for its next item, a `Queue` worker taking from its channel. Closing
   needs no order, because nothing is released by closing. Device hooks run
   alongside.
-- **Resume**: open the gates in **reverse topological order**, terminals'
-  side first and sources last. No element can be handed data before the
-  element after it is open. The pipeline computes this order once per graph
-  change. It replaces "a release travels as a message, passed on before any
-  data" and "a preroll always ends in a pause".
+- **Resume**: open every gate. Each thread opens the elements on its own
+  thread before it pulls again, and a `Queue` whose worker has not opened yet
+  holds what it is handed, so no element is handed data before it is open,
+  in whatever order the threads take the request. Stage 1 found that this is
+  enough; an order computed from the graph — terminals' side first, sources
+  last, as this section first proposed — is not needed.
 - **Flush start**: raise the interrupt, empty every queue, and put every pad
   into **flushing**, which refuses data. Flushing ends when the flushed
   `Segment` passes the pad. A buffer mid-flight during the flush is refused
@@ -556,11 +557,11 @@ cross-channel rules to take apart again.
 | Stage | What | Breaks |
 |---|---|---|
 | **0. A generated conformance matrix** — done | Six axes of file shape — fan-out, decoder, filter, pacing, sound, queue depth — in 16 shapes covering every pair of choices, beside the live and offline shapes; random sequences of pause, resume, seek (at and past the end too), step, rate both ways, looping, finish, stop, and stop while a call is under way, judged by what each call promised rather than by the messages that carried it, so the judge stands through every later stage. Found three bugs in its first hours (§3.1). | nothing |
-| **1. The flow plane** | The pipeline delivers flow requests directly to every source and queue worker. Resume opens gates in reverse topological order. Threads live until `Stop`, and "linger at the end" is the framework's. One `Wait` primitive. This addresses the C and G clusters, which in-band events cannot. | nothing public |
+| **1. The flow plane** — done | The pipeline delivers every request directly to every source and every `Queue` worker, and each thread passes it on only to the elements on its own thread (`control::Direct`); a queue carries across only what was not sent to every thread, such as a source's own `Stop` after an error. A worker that ends delivers what is still waiting for it first. `stop` returns once the threads have ended. Resume needs no order (§4.3). This addresses the C and G clusters, which in-band events cannot. Threads living until `Stop` with the framework's own "linger at the end", and the one `Wait` primitive, move to stage 5, where the framework owns the source loop. | nothing public; `stop` waits for the threads |
 | **2. The stream plane, empty** | `Item`, `StreamEvent`, delivery through pads, `Queue`, `Tee` and bins. `Eos` is mirrored as `StreamEvent::Eos` while `MediaBuffer::Eos` still exists. No `Segment` is emitted yet. | nothing public |
 | **3. Sources emit `Segment`, pads flush** | Emitted at start, seek, loop and turn; `Stretch` from `ReversibleSource`. Pads refuse data while flushing. The timeline number is kept alongside and asserted equal in tests, then removed. | nothing public |
 | **4. Readers move to the segment** | `backwards`, the seek target, the step count, clipping, completion, the clock anchor. `PlaybackState` shrinks to the flow phase, the interrupt and the preroll bookkeeping. | `crate`-internal only |
-| **5. `Transform` / `Render` / `Produce` / `Device`** | Every in-tree element migrated, one family at a time, each family deleting its `control()` and its holds. Sink-side preroll (§4.4) lands with the renderers. | custom elements: they keep compiling against raw `Sink`/`Source` |
+| **5. `Transform` / `Render` / `Produce` / `Device`** | Every in-tree element migrated, one family at a time, each family deleting its `control()` and its holds. Sink-side preroll (§4.4) lands with the renderers. With the source loop the framework's, threads live until `Stop` and "linger at the end" is the framework's; every blocking wait goes through one `Wait` (§4.3). | custom elements: they keep compiling against raw `Sink`/`Source` |
 | **6. Remove the old surface** | `MediaBuffer::Eos`, `ControlMsg` in `Sink`, `drain_control`, `handle_request` and the `pub` preroll types go. | **breaking**: custom elements, obs-rs |
 
 obs-rs impact: it implements no element of its own — no `Sink`, no

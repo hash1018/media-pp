@@ -30,7 +30,10 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::InputContract,
-    control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
+    control::{
+        self, ControlMsg, ControlReceiver, ControlSender, Direct, Registration, RequestKind,
+        Workers,
+    },
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
     playback_state::{Bell, PlaybackState},
@@ -221,6 +224,11 @@ pub struct Queue {
     /// The pipeline's playback state, whose timeline a buffer is handed over
     /// on — see [`crate::timeline`]. `None` for one spawned by hand.
     state: Option<Arc<PlaybackState>>,
+    /// This queue's worker's place among those the pipeline's requests
+    /// reach directly — so a request passed on to this queue from upstream
+    /// is not carried across again; see [`crate::control::Direct`]. `None`
+    /// for one spawned by hand, which carries every request across itself.
+    direct: Option<Registration>,
 }
 
 impl Queue {
@@ -275,6 +283,7 @@ impl Queue {
             pipeline_id,
             None,
             None,
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
@@ -300,6 +309,7 @@ impl Queue {
             Some(&context.pipeline_id),
             Some(counters),
             Some(Arc::clone(&context.state)),
+            Some(&context.queue_workers),
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
@@ -316,6 +326,7 @@ impl Queue {
         pipeline_id: Option<&str>,
         counters: Option<Arc<ElementCounters>>,
         state: Option<Arc<PlaybackState>>,
+        workers: Option<&Arc<Workers>>,
         spawn: impl FnOnce(
             String,
             Box<dyn FnOnce() + Send + 'static>,
@@ -335,6 +346,7 @@ impl Queue {
             Some(state) => control::channel_in(state),
             None => control::channel(),
         };
+        let direct = workers.map(|workers| workers.register(control_tx.clone()));
         let worker_name = name.clone();
         let worker_bus = bus.clone();
         let worker_pp_log = pp_log.clone();
@@ -402,6 +414,7 @@ impl Queue {
             room,
             ends_owed,
             state,
+            direct,
         })
     }
 }
@@ -424,28 +437,10 @@ impl Element for Queue {
     }
 }
 
-impl Sink for Queue {
-    fn ready_consume(&mut self) -> bool {
-        match self.policy {
-            // Dropping the incoming buffer is this policy's defined way to
-            // make progress. Reporting "not ready" here would make an
-            // upstream Queue stop before `consume` can perform that drop,
-            // silently turning DropNewest into blocking backpressure.
-            OverflowPolicy::DropNewest => true,
-            OverflowPolicy::Block(_) => self.has_room(),
-        }
-    }
-
-    /// A Queue neither inspects nor transforms what it carries, so it
-    /// accepts every kind and — see `ChainBuilder::queue_with_policy` —
-    /// passes the upstream contract straight through to whatever it
-    /// feeds. Without that, a check would go dark at the first thread
-    /// boundary in the pipeline.
-    fn input_contract(&self) -> InputContract {
-        InputContract::Any
-    }
-
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+impl Queue {
+    /// Hands `buf` over, as [`Sink::consume`] does — which answers what
+    /// this says, but for a handover a stop cut short.
+    fn take(&mut self, buf: MediaBuffer) -> Result<()> {
         // EOS must never be dropped, regardless of policy: unlike an
         // explicit Stop or Queue::drop's private stop flag, this is the
         // natural-completion signal, and it reaches downstream only after
@@ -529,17 +524,62 @@ impl Sink for Queue {
         }
         result
     }
+}
+
+impl Sink for Queue {
+    fn ready_consume(&mut self) -> bool {
+        match self.policy {
+            // Dropping the incoming buffer is this policy's defined way to
+            // make progress. Reporting "not ready" here would make an
+            // upstream Queue stop before `consume` can perform that drop,
+            // silently turning DropNewest into blocking backpressure.
+            OverflowPolicy::DropNewest => true,
+            OverflowPolicy::Block(_) => self.has_room(),
+        }
+    }
+
+    /// A Queue neither inspects nor transforms what it carries, so it
+    /// accepts every kind and — see `ChainBuilder::queue_with_policy` —
+    /// passes the upstream contract straight through to whatever it
+    /// feeds. Without that, a check would go dark at the first thread
+    /// boundary in the pipeline.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Any
+    }
+
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        match self.take(buf) {
+            // Stopped, and the worker gone before this could be handed over:
+            // a stop reaches this queue's worker directly — see
+            // `crate::control::Direct` — so it can end before the thread
+            // handing it this has heard, and what it hands over now is
+            // abandoned, as a stop means.
+            Err(crate::error::Error::QueueError(QueueError::ChannelClosed))
+                if self.state.as_deref().is_some_and(PlaybackState::is_stopped) =>
+            {
+                Ok(())
+            }
+            taken => taken,
+        }
+    }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        // Blocks until the worker — and everything downstream of it — has
-        // finished handling this. Never stuck behind a data backlog: the
-        // worker checks this channel before every data buffer it pulls
-        // (see `worker_loop`), and while paused it's blocked *only* on
-        // this channel, so a `consume()` blocked sending data upstream of
-        // a paused queue just sits in ordinary backpressure — nothing
-        // feeds this queue while it's paused, since `Pause` blocks
-        // whatever's upstream the same way, all the way back to the
-        // source (see [`crate::control::drain_control`]).
+        // Carried across, this blocks until the worker — and everything on
+        // its thread after it — has handled the message. Never stuck behind
+        // a data backlog: the worker checks its channel before every buffer
+        // it pulls (see `worker_loop`), and while paused it waits *only* on
+        // that channel.
+        //
+        // One of the pipeline's requests to all its threads: this queue's
+        // worker has its own, straight from the pipeline, so what reached it
+        // from upstream stops here — see `crate::control::Direct`.
+        if self.direct.is_some() && control::reached_directly() {
+            pp_trace!(
+                pp_log: &self.pp_log,
+                "event=control control={msg:?} phase=received outcome=reached_directly"
+            );
+            return Ok(());
+        }
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=received"
@@ -555,6 +595,9 @@ impl Sink for Queue {
 
 impl Drop for Queue {
     fn drop(&mut self) {
+        // Out of the pipeline's reach first: a request from here on is for
+        // what is still there.
+        self.direct = None;
         if let Some(handle) = self.handle.take() {
             // Wakes the worker wherever it waits — idle, paused, or on a
             // downstream that is not ready — which is what ends one nothing
@@ -782,24 +825,25 @@ fn worker_loop(
     };
     // However this ends, a thread waiting to hand a buffer over hears of it.
     let _ends = RingOnEnd(inbox.room.clone());
-    let apply = |msg, ack: &Sender<()>, downstream: &mut Box<dyn Sink>| {
+    let apply = |msg, ack: &Sender<()>, direct: bool, downstream: &mut Box<dyn Sink>| {
         apply_control(
             &inbox,
             downstream,
             msg,
             ack,
+            direct,
             &control_rx,
             &error_reporter,
             &stop,
         )
     };
     loop {
-        if let Some((request, ack)) = control_rx.try_recv() {
-            let RequestKind::Control(msg) = request else {
-                let _ = ack.send(());
+        if let Ok(request) = control_rx.rx.try_recv() {
+            let RequestKind::Control(msg) = request.kind else {
+                let _ = request.ack.send(());
                 continue;
             };
-            if apply(msg, &ack, &mut downstream) {
+            if apply(msg, &request.ack, request.direct, &mut downstream) {
                 pp_info!(pp_log: &pp_log, "worker: stopped");
                 return;
             }
@@ -809,6 +853,7 @@ fn worker_loop(
         // Dropped: what is waiting still goes, and once nothing is, this ends.
         let stopping = stop.load(Ordering::Relaxed);
         if stopping && inbox.data.is_empty() {
+            deliver_pending(&mut downstream, &control_rx, &error_reporter);
             pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
             return;
         }
@@ -835,7 +880,7 @@ fn worker_loop(
                             let _ = request.ack.send(());
                             continue;
                         };
-                        if apply(msg, &request.ack, &mut downstream) {
+                        if apply(msg, &request.ack, request.direct, &mut downstream) {
                             pp_info!(pp_log: &pp_log, "worker: stopped");
                             return;
                         }
@@ -853,6 +898,7 @@ fn worker_loop(
             // its queue is dropped, and the worker found its downstream
             // busy.
             if !held_back && stop.load(Ordering::Relaxed) && !inbox.owes_an_end() {
+                deliver_pending(&mut downstream, &control_rx, &error_reporter);
                 pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
                 return;
             }
@@ -866,7 +912,7 @@ fn worker_loop(
                         let _ = request.ack.send(());
                         continue;
                     };
-                    if apply(msg, &request.ack, &mut downstream) {
+                    if apply(msg, &request.ack, request.direct, &mut downstream) {
                         pp_info!(pp_log: &pp_log, "worker: stopped");
                         return;
                     }
@@ -985,11 +1031,16 @@ fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_
 /// for `Pause` — blocking this thread on `control_rx` alone (never
 /// touching `data_rx`) until `Resume`/`Preroll`/`Stop`. Returns `true` once `Stop`
 /// has been handled, meaning the caller (`worker_loop`) should exit.
+// One over clippy's count: the request itself — its message, its
+// acknowledgement, whether the pipeline sent it to every thread — beside
+// what the worker is made of, which `worker_loop` already carries this way.
+#[allow(clippy::too_many_arguments)]
 fn apply_control(
     inbox: &Inbox,
     downstream: &mut Box<dyn Sink>,
     msg: ControlMsg,
     ack: &Sender<()>,
+    direct: bool,
     control_rx: &ControlReceiver,
     error_reporter: &QueueErrorReporter<'_>,
     stop: &AtomicBool,
@@ -1000,7 +1051,7 @@ fn apply_control(
     );
     inbox.discarded(discard_stale_data(&inbox.data, &msg));
     inbox.room.ring();
-    forward_control(downstream, msg.clone(), error_reporter);
+    forward_control(downstream, msg.clone(), direct, error_reporter);
     let is_stop = msg == ControlMsg::Stop;
     let _ = ack.send(());
     if is_stop {
@@ -1020,19 +1071,20 @@ fn apply_control(
             recv(control_rx.rx) -> request => request,
             recv(inbox.bell.rings()) -> _ => {
                 if stop.load(Ordering::Relaxed) {
+                    deliver_pending(downstream, control_rx, error_reporter);
                     pp_info!(pp_log: error_reporter.pp_log, "worker: stop flag set while paused, ending");
                     return true;
                 }
                 continue;
             }
         };
-        let (msg, ack) = match request {
+        let (msg, ack, direct) = match request {
             Ok(req) => {
                 let RequestKind::Control(msg) = req.kind else {
                     let _ = req.ack.send(());
                     continue;
                 };
-                (msg, req.ack)
+                (msg, req.ack, req.direct)
             }
             Err(_) => {
                 pp_info!(pp_log: error_reporter.pp_log, "worker: control channel gone while paused, ending");
@@ -1045,7 +1097,7 @@ fn apply_control(
         );
         inbox.discarded(discard_stale_data(&inbox.data, &msg));
         inbox.room.ring();
-        forward_control(downstream, msg.clone(), error_reporter);
+        forward_control(downstream, msg.clone(), direct, error_reporter);
         let is_stop = msg == ControlMsg::Stop;
         let _ = ack.send(());
         if is_stop {
@@ -1118,10 +1170,35 @@ impl QueueErrorReporter<'_> {
 fn forward_control(
     downstream: &mut Box<dyn Sink>,
     msg: ControlMsg,
+    direct: bool,
     error_reporter: &QueueErrorReporter<'_>,
 ) {
+    // Passed on as it came: one of the pipeline's requests to all its
+    // threads stops at the next queue it reaches directly.
+    let _direct = Direct::enter(direct);
     if let Err(error) = downstream.control(&msg) {
         error_reporter.post(error);
+    }
+}
+
+/// Hands on whatever control is still waiting, before a worker ends because
+/// its queue was dropped.
+///
+/// A request the pipeline sends this worker directly — a `Stop` above all —
+/// can be waiting here when the thread upstream, told the same at the same
+/// moment, has already dropped the queue; a worker that ended on the drop
+/// without taking it left everything after it unstopped, and a muxer there
+/// unfinished. Passed on without pausing for any of it: nothing comes after.
+fn deliver_pending(
+    downstream: &mut Box<dyn Sink>,
+    control_rx: &ControlReceiver,
+    error_reporter: &QueueErrorReporter<'_>,
+) {
+    while let Ok(request) = control_rx.rx.try_recv() {
+        if let RequestKind::Control(msg) = request.kind {
+            forward_control(downstream, msg, request.direct, error_reporter);
+        }
+        let _ = request.ack.send(());
     }
 }
 
@@ -1258,6 +1335,7 @@ mod tests {
             }),
             bus,
             OverflowPolicy::default(),
+            None,
             None,
             None,
             None,
@@ -1482,6 +1560,7 @@ mod tests {
             None,
             None,
             Some(Arc::clone(&state)),
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
         .unwrap();
@@ -2219,6 +2298,7 @@ mod tests {
             None,
             None,
             Some(Arc::clone(state)),
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
         .expect("spawn");
@@ -2318,6 +2398,7 @@ mod tests {
             None,
             None,
             Some(Arc::clone(&state)),
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
         .expect("spawn");

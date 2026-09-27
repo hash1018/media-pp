@@ -159,6 +159,9 @@ pub struct Pipeline {
     /// Which terminals have taken the end of their stream — what a step has
     /// no more pictures to ask for.
     pub(super) completion: Arc<super::completion::Completion>,
+    /// Every queue worker in the graph, which each request reaches directly
+    /// beside the sources — see [`crate::control::Direct`].
+    pub(super) queue_workers: Arc<crate::control::Workers>,
     /// Serializes public lifecycle/timeline operations. `paused` remains the
     /// caller-requested state while seek temporarily pauses the runtime.
     pub(super) operation: Arc<Mutex<()>>,
@@ -352,9 +355,8 @@ impl Drop for Pipeline {
     fn drop(&mut self) {
         // Send Stop while every sender is still alive. Merely dropping the
         // senders would not wake a source polling an empty control channel.
+        // `stop` joins the workers as well.
         self.stop();
-
-        self.join_workers();
     }
 }
 

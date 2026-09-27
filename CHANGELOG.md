@@ -159,6 +159,16 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A pause, seek or stop reaches every queue, whatever the thread before
+  it is doing.** A request went from each source down its line, one thread
+  handing it to the next, so a queue whose upstream thread was blocked
+  handing it data, or had ended, heard nothing and held the whole request
+  up. The pipeline now asks every source and every queue worker itself,
+  and each passes the request on only to the elements on its own thread.
+  `Pipeline::stop` now also returns once every source thread and the queue
+  workers behind it have ended, as `finish` does, rather than leaving that
+  to be read from the bus.
+
 - **A paused seek to the end of a file prerolls every branch, however
   shallow its queues.** At the end of a file `FileDemuxer` handed each pad
   its `Eos` in turn, waiting for room — the picture's first. In a preroll a

@@ -392,6 +392,10 @@ pub struct Context {
     /// Which of the pipeline's terminals have ended, shared by every
     /// source's context — see [`crate::bus::BusEvent::Finished`].
     pub(crate) completion: Arc<crate::pipeline::completion::Completion>,
+    /// Where a queue built into the pipeline registers its worker, which
+    /// the pipeline's requests reach directly — see
+    /// [`crate::control::Direct`].
+    pub(crate) queue_workers: Arc<crate::control::Workers>,
 }
 
 impl Context {
@@ -445,6 +449,7 @@ impl Context {
             operation: Arc::new(Mutex::new(())),
             source_id,
             source_counters: ElementCounters::new(),
+            queue_workers: Arc::default(),
         }
     }
 }

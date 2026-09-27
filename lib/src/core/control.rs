@@ -1,10 +1,12 @@
 //! Pause, Resume, Stop, Flush, Seek, and Finish — and the channel they travel
 //! through.
 //!
-//! Control follows the same pad-to-pad path as data but on a dedicated
-//! channel, because unlike [`Eos`](crate::buffer::MediaBuffer::Eos) it has to
-//! reach elements mid-stream and, at a [`Queue`](crate::queue::Queue), jump
-//! ahead of whatever is already backed up instead of queueing behind it.
+//! Control reaches every thread of a pipeline directly — each source and
+//! each [`Queue`](crate::queue::Queue)'s worker, on a channel of its own —
+//! and each thread passes it on pad to pad to the elements on that thread,
+//! stopping at the next queue, which has its own: see `Direct`. Not with
+//! the data, because unlike [`Eos`](crate::buffer::MediaBuffer::Eos) it has
+//! to reach elements mid-stream, ahead of whatever is already backed up.
 //!
 //! A [`SourceElement`](crate::element::SourceElement) loop stays responsive by
 //! calling [`drain_control`] every iteration. The returned [`ControlOutcome`]
@@ -436,6 +438,100 @@ pub(crate) enum RequestKind {
 pub(crate) struct Request {
     pub(crate) kind: RequestKind,
     pub(crate) ack: Sender<()>,
+    /// Whether this is one of a pipeline's requests to all its threads,
+    /// which reaches every one of them directly — see [`Direct`].
+    pub(crate) direct: bool,
+}
+
+thread_local! {
+    /// Whether this thread is passing on a request the pipeline sent every
+    /// one of its threads — see [`Direct`].
+    static DIRECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks this thread, until the mark is dropped, as passing on one of a
+/// pipeline's requests to all its threads — or, entered with `false`, as
+/// not.
+///
+/// A pipeline sends each request to every thread it has — each source and
+/// each [`Queue`](crate::queue::Queue)'s worker — not down through them: a
+/// request that had to be carried across each thread boundary in turn could
+/// not reach a queue whose upstream thread was blocked, or gone. So what a
+/// thread passes on reaches the elements on that thread, and at a queue the
+/// pipeline reaches directly it stops: that queue's worker has its own. A
+/// request passed on without this — a `Stop` sent after a source failed, a
+/// `Flush` a bridge injects — is carried across as it always was.
+pub(crate) struct Direct {
+    previous: bool,
+}
+
+impl Direct {
+    pub(crate) fn enter(direct: bool) -> Self {
+        Self {
+            previous: DIRECT.with(|flag| flag.replace(direct)),
+        }
+    }
+}
+
+impl Drop for Direct {
+    fn drop(&mut self) {
+        DIRECT.with(|flag| flag.set(self.previous));
+    }
+}
+
+/// Whether this thread is passing on a request that reaches every thread
+/// directly — see [`Direct`].
+pub(crate) fn reached_directly() -> bool {
+    DIRECT.with(std::cell::Cell::get)
+}
+
+/// The control channels of a pipeline's queue workers, which its requests
+/// reach directly — see [`Direct`]. A queue registers its own as it is
+/// built into the pipeline and takes it out as it is dropped, so a branch
+/// detached is asked nothing more.
+#[derive(Default)]
+pub(crate) struct Workers {
+    next: std::sync::atomic::AtomicU64,
+    senders: Mutex<Vec<(u64, ControlSender)>>,
+}
+
+impl Workers {
+    /// Adds `sender`, and answers what removes it again.
+    pub(crate) fn register(self: &Arc<Self>, sender: ControlSender) -> Registration {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.lock().push((id, sender));
+        Registration {
+            workers: Arc::clone(self),
+            id,
+        }
+    }
+
+    /// Every registered channel as it stands — taken under the lock and
+    /// used after it, so nothing waits on a worker while holding it.
+    pub(crate) fn senders(&self) -> Vec<ControlSender> {
+        self.lock()
+            .iter()
+            .map(|(_, sender)| sender.clone())
+            .collect()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(u64, ControlSender)>> {
+        self.senders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// One queue worker's place in [`Workers`], given up as it is dropped.
+pub(crate) struct Registration {
+    workers: Arc<Workers>,
+    id: u64,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.workers.lock().retain(|(id, _)| *id != self.id);
+    }
 }
 
 /// The sending half of a control channel — cloneable, cheap, `Send +
@@ -524,11 +620,16 @@ impl ControlSender {
     /// thread exists: [`crate::pipeline::Pipeline::run`] starting paused.
     pub(crate) fn enqueue(&self, msg: ControlMsg) -> Option<Receiver<()>> {
         self.moves_state(&msg);
-        let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
+        // Room for the acknowledgement, so whoever gives it never waits for it
+        // to be taken: the pipeline takes each in turn, and a queue worker
+        // that waited to hand its own over while the pipeline was still
+        // waiting on a source that was waiting on that worker never would.
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
         self.tx
             .send(Request {
                 kind: RequestKind::Control(msg),
                 ack: ack_tx,
+                direct: true,
             })
             .ok()?;
         Some(ack_rx)
@@ -538,11 +639,12 @@ impl ControlSender {
     /// as a downstream [`ControlMsg`]. Used only by
     /// [`crate::pipeline::Pipeline::finish`].
     pub(crate) fn enqueue_finish(&self) -> Option<Receiver<()>> {
-        let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
         self.tx
             .send(Request {
                 kind: RequestKind::Finish,
                 ack: ack_tx,
+                direct: true,
             })
             .ok()?;
         Some(ack_rx)
@@ -550,7 +652,14 @@ impl ControlSender {
 
     fn send_request(&self, kind: RequestKind) {
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
-        if self.tx.send(Request { kind, ack: ack_tx }).is_ok() {
+        let request = Request {
+            kind,
+            ack: ack_tx,
+            // Passed on from a request to all threads — a queue built by
+            // hand forwarding one to its worker — it still is one.
+            direct: reached_directly(),
+        };
+        if self.tx.send(request).is_ok() {
             let _ = ack_rx.recv();
         }
     }
@@ -785,6 +894,10 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
             crate::timeline::follow();
         }
         sought?;
+        // A source is asked only by the pipeline, which asks every queue
+        // worker too, directly: passed on from here it reaches this source's
+        // own line and stops at them. A queue built by hand carries it on.
+        let _direct = Direct::enter(true);
         forward(source.src_pads(), msg)?;
         Ok(*msg == ControlMsg::Stop)
     })();

@@ -676,3 +676,59 @@ fn pausing_leaves_a_queue_backlog_in_the_queue() {
     );
     pipeline.stop();
 }
+
+/// Each request reaches every element once, however many threads the graph
+/// has. The pipeline asks every queue worker directly, not only the
+/// sources, and what a thread passes on stops at a queue asked that way —
+/// see `crate::control::Direct`. Carried across as well, it arrived twice
+/// behind every queue: once from the pipeline, once from upstream.
+#[test]
+fn every_element_hears_each_request_once() {
+    use crate::elements::AppSink;
+
+    const NAMES: [&str; 3] = ["behind-two", "behind-three", "no-queue"];
+    let heard: [Arc<Mutex<Vec<String>>>; 3] = Default::default();
+    let sink = |at: usize| {
+        let heard = Arc::clone(&heard[at]);
+        AppSink::with_control(
+            NAMES[at],
+            |_buffer| Ok(()),
+            move |msg| {
+                heard.lock().unwrap().push(format!("{msg:?}"));
+                Ok(())
+            },
+        )
+    };
+    let (pipeline, ()) = Pipeline::new(
+        "heard-once",
+        TestVideoSource::new("gen", TestVideoOptions::default()),
+        |source, ctx| {
+            let tee = ctx
+                .tee("tee")
+                .branch(ctx.branch().queue("c", 2).to(sink(0))?)
+                .branch(ctx.branch().queue("d", 2).queue("e", 2).to(sink(1))?)
+                .branch(ctx.branch().to(sink(2))?)
+                .build()?;
+            let branch = ctx.branch().queue("a", 2).queue("b", 2).to_branch(tee)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        },
+    )
+    .expect("wiring succeeds");
+    pipeline.run().expect("run");
+    pipeline.pause();
+    pipeline.resume();
+    pipeline.pause();
+    pipeline.stop();
+    assert!(
+        !pipeline.is_running(),
+        "stop returns once every thread has ended"
+    );
+    for (name, heard) in NAMES.iter().zip(&heard) {
+        assert_eq!(
+            *heard.lock().unwrap(),
+            ["Pause", "Resume", "Pause", "Stop"],
+            "{name}"
+        );
+    }
+}
