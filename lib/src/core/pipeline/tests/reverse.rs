@@ -607,6 +607,10 @@ impl Sink for Watched {
         self.told.lock().unwrap().extend(told);
         self.inner.consume(buf)
     }
+    /// The segment is where the decoder learns what an accurate seek shows
+    /// from. Left with the default, which takes it and does nothing, the
+    /// decoder showed the first picture it made — the keyframe the seek
+    /// landed on — and a turn began there rather than at the picture sought.
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         if let StreamEvent::Eos = event {
             self.told.lock().unwrap().push(Told::Eos);
@@ -632,8 +636,12 @@ impl ReversibleDecoder for Watched {
     }
 }
 
-/// A file's picture through a [`Watched`] decoder to a paced end.
-fn watched(path: &std::path::Path, reversible: bool) -> (Arc<Pipeline>, Arc<Mutex<Vec<Told>>>) {
+/// A file's picture through a [`Watched`] decoder to a paced end — with
+/// what the decoder was told and handed, and what the end took.
+fn watched(
+    path: &std::path::Path,
+    reversible: bool,
+) -> (Arc<Pipeline>, Arc<Mutex<Vec<Told>>>, Taken) {
     let (source, streams) = FileDemuxer::open("demux", path).expect("open the fixture");
     let video = streams
         .iter()
@@ -646,7 +654,7 @@ fn watched(path: &std::path::Path, reversible: bool) -> (Arc<Pipeline>, Arc<Mute
         reversible,
         told: Arc::clone(&told),
     };
-    let (screen, _) = Taker::new("screen");
+    let (screen, pictures) = Taker::new("screen");
     let (pipeline, ()) = Pipeline::new("reverse-watched", source, |source, ctx| {
         let picture = ctx
             .branch()
@@ -659,7 +667,7 @@ fn watched(path: &std::path::Path, reversible: bool) -> (Arc<Pipeline>, Arc<Mute
         Ok(())
     })
     .expect("wire");
-    (pipeline, told)
+    (pipeline, told, pictures)
 }
 
 /// Backwards, the pipeline tells a decoder where each stretch begins and
@@ -673,7 +681,7 @@ fn a_decoder_is_told_where_each_stretch_begins_and_ends() {
     };
     let path = std::path::PathBuf::from(path);
     let every = pictures_of(&path);
-    let (pipeline, told) = watched(&path, true);
+    let (pipeline, told, _) = watched(&path, true);
     pipeline.pause();
     pipeline.run().expect("run");
     pipeline
@@ -739,7 +747,7 @@ fn a_decoder_that_cannot_hand_a_stretch_on_backwards_refuses() {
         return;
     };
     let path = std::path::PathBuf::from(path);
-    let (pipeline, _) = watched(&path, false);
+    let (pipeline, _, _) = watched(&path, false);
     let refused = pipeline.check_reverse().expect_err("refused");
     assert_eq!(refused.rejections().len(), 1, "{refused:?}");
     assert_eq!(
@@ -749,7 +757,7 @@ fn a_decoder_that_cannot_hand_a_stretch_on_backwards_refuses() {
     assert_eq!(&*refused.rejections()[0].name, "video-decoder");
     assert!(pipeline.check_seek().is_ok(), "seeking is another matter");
 
-    let (pipeline, _) = watched(&path, true);
+    let (pipeline, _, _) = watched(&path, true);
     assert!(pipeline.check_reverse().is_ok());
 }
 
@@ -763,8 +771,8 @@ fn backwards_hands_the_decoder_each_packet_once() {
     };
     let path = std::path::PathBuf::from(path);
     // Every packet of the picture: its decode time, in its own unit and in
-    // nanoseconds, and whether it is a keyframe.
-    let packets: Vec<(i64, Duration, bool)> = {
+    // nanoseconds, and where it is shown if it is a keyframe.
+    let packets: Vec<(i64, Duration, Option<Duration>)> = {
         let mut input = ffmpeg::format::input(&path).expect("open");
         let (index, base) = {
             let stream = input
@@ -773,36 +781,50 @@ fn backwards_hands_the_decoder_each_packet_once() {
                 .expect("a picture");
             (stream.index(), stream.time_base())
         };
+        let at = |ts: i64| {
+            let ns = ts.rescale(base, ffmpeg::Rational::new(1, 1_000_000_000));
+            Duration::from_nanos(ns.max(0) as u64)
+        };
         input
             .packets()
             .filter(|(stream, _)| stream.index() == index)
             .filter_map(|(_, packet)| {
                 let dts = packet.dts()?;
-                let ns = dts.rescale(base, ffmpeg::Rational::new(1, 1_000_000_000));
-                Some((dts, Duration::from_nanos(ns.max(0) as u64), packet.is_key()))
+                let keyframe = packet.pts().filter(|_| packet.is_key()).map(at);
+                Some((dts, at(dts), keyframe))
             })
             .collect()
     };
-    let keyframes: Vec<Duration> = packets
-        .iter()
-        .filter(|(_, _, key)| *key)
-        .map(|&(_, at, _)| at)
-        .collect();
+    let keyframes: Vec<Duration> = packets.iter().filter_map(|&(_, _, key)| key).collect();
     if keyframes
         .windows(2)
-        .any(|pair| pair[1] - pair[0] > Duration::from_secs(20))
+        .any(|pair| pair[1].saturating_sub(pair[0]) > Duration::from_secs(20))
     {
         eprintln!("skipping: the fixture's groups are longer than a stretch may be");
         return;
     }
     let every = pictures_of(&path);
-    let from = every[every.len() / 2];
-    let (pipeline, told) = watched(&path, true);
+    // Inside a group, not at its keyframe: a decoder that is not told where
+    // a seek shows from shows the keyframe the seek landed on, which at a
+    // keyframe is the picture sought all the same. The fixture is recorded
+    // in real time, so the middle picture is a keyframe in one run and not
+    // in the next.
+    let from = every[every.len() / 2..]
+        .iter()
+        .copied()
+        .find(|at| !keyframes.contains(at))
+        .expect("a picture after the middle that is not a keyframe");
+    let (pipeline, told, pictures) = watched(&path, true);
     pipeline.pause();
     pipeline.run().expect("run");
     pipeline
         .seek(from, SeekMode::Accurate)
         .expect("into the file");
+    assert_eq!(
+        pictures.lock().unwrap().last(),
+        Some(&from),
+        "the seek shows the picture to turn at"
+    );
     let before = told.lock().unwrap().len();
     pipeline.set_rate(-1.0).expect("backwards");
     pipeline.resume();
