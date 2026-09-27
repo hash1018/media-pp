@@ -159,6 +159,16 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`Player` turns round to play backwards at once on Linux.** Turning
+  round pauses and flushes the sound, and as the picture is read back to
+  the start of its file the sound's branch gets its `Eos` — which
+  `PipeWireAudioRenderer` drained, asking PipeWire to report when a stream
+  it had just paused had played out. PipeWire reports that only of a
+  stream the graph is running, so it waited out its five-second limit, and
+  the pipeline's next control reached nothing behind it until it had. With
+  nothing handed to the stream since it was last emptied, an `Eos` now has
+  nothing to wait for.
+
 - **A packet from `VulkanEncoder` can outlive the encoder.** FFmpeg's
   Vulkan encoders hand out a view of a buffer from the encoder's own pool,
   whose free callback reaches through the encoder's Vulkan context; one

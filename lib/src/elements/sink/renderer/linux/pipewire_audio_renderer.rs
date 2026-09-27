@@ -395,6 +395,10 @@ pub struct PipeWireAudioRenderer {
     /// Whether the stream has been started yet. It stays inactive until
     /// `PRIME_FRAMES` are queued — see that constant's own docs.
     primed: bool,
+    /// Whether any sound has been handed to the stream since it was last
+    /// emptied — opened, flushed, stopped or drained. Without any, an `Eos`
+    /// has nothing to wait for — see [`Self::drain`].
+    handed: bool,
     /// Media timestamp the first submitted frame carried, and how far the
     /// submitted range now extends. `None` until the first frame with a `pts`.
     timeline: Option<Timeline>,
@@ -535,6 +539,7 @@ impl PipeWireAudioRenderer {
                 playback,
                 clock_binding: PlaybackClockBinding::Unbound,
                 primed: false,
+                handed: false,
                 timeline: None,
                 stretcher: Stretcher::new(format),
                 commands: Some(command_tx),
@@ -693,6 +698,7 @@ impl PipeWireAudioRenderer {
         self.playback
             .queued_frames
             .fetch_add(frame.samples() as u64, Ordering::AcqRel);
+        self.handed = true;
 
         // Blocking here is the pacing: once the queue is full, upstream waits
         // for the device to drain rather than running ahead.
@@ -763,6 +769,15 @@ impl PipeWireAudioRenderer {
 
     /// Waits for everything already queued to reach the device, then reports
     /// the final position to the playback clock.
+    ///
+    /// Where nothing has been handed to the stream since it was last emptied
+    /// there is nothing to wait for, and it does not wait. That is the `Eos`
+    /// of a picture played backwards, which reaches the sound as the
+    /// source reads back to the start of the file, just after a turn round
+    /// has paused and flushed this: PipeWire reports a drain only from a
+    /// stream the graph is running, and asked of a paused one it never did —
+    /// this waited out `DEVICE_DRAIN_TIMEOUT`, five seconds in which the
+    /// pipeline's next control reached nothing behind it.
     fn drain(&mut self) -> Result<()> {
         // What the stretcher still holds is the end of the sound too.
         let pieces = self
@@ -770,39 +785,42 @@ impl PipeWireAudioRenderer {
             .finish()
             .map_err(PipeWireAudioRendererError::Stretch)?;
         self.queue_pieces(pieces, None, None)?;
-        // A stream shorter than `PRIME_FRAMES` never reached the threshold;
-        // start it now or its audio would never play at all.
-        if !self.primed {
-            self.set_active(true)?;
-            self.primed = true;
-        }
-        // Waiting on the channel alone ends the drain too early: the callback
-        // takes a frame out of it before copying, so the channel reads empty
-        // while that frame is still being copied. `queued_frames` covers that
-        // application-owned part; PipeWire's native drain below covers its
-        // own buffers, graph processing, and device latency.
-        let outstanding = self.playback.queued_frames.load(Ordering::Acquire);
-        let deadline = Instant::now() + self.frames_duration(outstanding) + DRAIN_SLACK;
-        let mut published = Ok(());
-        let drained = wait_for_queue(&self.playback, deadline, || {
-            if published.is_ok() {
-                published = self.publish_position(true);
+        if self.handed {
+            // A stream shorter than `PRIME_FRAMES` never reached the threshold;
+            // start it now or its audio would never play at all.
+            if !self.primed {
+                self.set_active(true)?;
+                self.primed = true;
             }
-        });
-        published?;
-        if !drained && !self.playback.ended.load(Ordering::Acquire) {
-            pp_warn!(
-                self,
-                "the device stopped taking audio during drain: {} frame(s) never played",
-                self.playback.queued_frames.load(Ordering::Acquire)
-            );
-            // Nothing more can be handed over, so abandon the application and
-            // PipeWire queues instead of asking the latter to drain forever.
-            self.flush()?;
-        }
+            // Waiting on the channel alone ends the drain too early: the callback
+            // takes a frame out of it before copying, so the channel reads empty
+            // while that frame is still being copied. `queued_frames` covers that
+            // application-owned part; PipeWire's native drain below covers its
+            // own buffers, graph processing, and device latency.
+            let outstanding = self.playback.queued_frames.load(Ordering::Acquire);
+            let deadline = Instant::now() + self.frames_duration(outstanding) + DRAIN_SLACK;
+            let mut published = Ok(());
+            let drained = wait_for_queue(&self.playback, deadline, || {
+                if published.is_ok() {
+                    published = self.publish_position(true);
+                }
+            });
+            published?;
+            if !drained && !self.playback.ended.load(Ordering::Acquire) {
+                pp_warn!(
+                    self,
+                    "the device stopped taking audio during drain: {} frame(s) never played",
+                    self.playback.queued_frames.load(Ordering::Acquire)
+                );
+                // Nothing more can be handed over, so abandon the application and
+                // PipeWire queues instead of asking the latter to drain forever.
+                self.flush()?;
+            }
 
-        if drained && !self.playback.ended.load(Ordering::Acquire) {
-            self.drain_device()?;
+            if drained && !self.playback.ended.load(Ordering::Acquire) {
+                self.drain_device()?;
+            }
+            self.handed = false;
         }
         self.publish_position(false)?;
         let final_position = self
@@ -978,11 +996,13 @@ impl Sink for PipeWireAudioRenderer {
                 self.timeline = None;
                 self.stretcher.reset();
                 self.primed = false;
+                self.handed = false;
                 position_result?;
             }
             ControlMsg::Flush => {
                 // Discard everything queued from the old timeline.
                 self.flush()?;
+                self.handed = false;
                 self.timeline = None;
                 self.stretcher.reset();
             }
@@ -1566,6 +1586,54 @@ mod tests {
             matches!(error, PipeWireAudioRendererError::NotAPlaybackDevice(name) if name == "some-mic"),
             "the mistake must surface as a typed construction error, \
              not as a stream that silently never plays"
+        );
+    }
+
+    /// An `Eos` with nothing handed to the stream since it was paused and
+    /// flushed — the sound's end, as a picture turned round to play
+    /// backwards reads back to the start of its file — returns at once.
+    ///
+    /// It waited five seconds: PipeWire reports a drain only from a stream
+    /// the graph is running, and this one was paused. The Player turned
+    /// round five seconds late.
+    #[test]
+    fn an_eos_with_nothing_handed_since_a_flush_returns_at_once() {
+        let Some(device) = PipeWireAudioRenderer::list_devices()
+            .ok()
+            .and_then(|devices| devices.into_iter().find(|device| device.is_default))
+        else {
+            eprintln!("skipping: no default PipeWire output");
+            return;
+        };
+        let (mut renderer, format) =
+            match PipeWireAudioRenderer::open("out", PipeWireAudioRendererOptions { device }) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    eprintln!("skipping: {error}");
+                    return;
+                }
+            };
+        // Silence first, enough to start the stream, as anything played is.
+        for _ in 0..=PRIME_FRAMES {
+            let mut frame =
+                ffmpeg::frame::Audio::new(format.sample_format, 480, format.channel_layout());
+            frame.set_rate(format.sample_rate);
+            frame.data_mut(0).fill(0);
+            renderer
+                .consume(MediaBuffer::Audio(Arc::new(frame)))
+                .expect("silence plays");
+        }
+        renderer.control(&ControlMsg::Pause).unwrap();
+        renderer.control(&ControlMsg::Flush).unwrap();
+
+        let started = Instant::now();
+        renderer
+            .consume(MediaBuffer::Eos)
+            .expect("the end is taken");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an end with nothing to play waited {:?}",
+            started.elapsed()
         );
     }
 
