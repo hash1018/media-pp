@@ -617,6 +617,14 @@ impl Sink for ReplayTrackSink {
         }
     }
 
+    /// A window of the stream as it ran: one measured across a jump in the
+    /// timeline would hold the wrong stretch and let go of it at the wrong
+    /// time. It refused seeks when they were asked at run time, and lost
+    /// that when the answer moved to the wiring (b9b9ea9).
+    fn accepts_seek(&self) -> bool {
+        false
+    }
+
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Terminal, so nothing is forwarded.
         match msg {
@@ -1036,6 +1044,20 @@ mod tests {
             Err(Error::ReplayBufferError(ReplayBufferError::Stopped))
         ));
         assert_eq!(handle.buffered(), Duration::ZERO);
+    }
+
+    /// Every track refuses a seek, as it is wired: a window of the stream as
+    /// it ran cannot follow one. It did, silently, once whether a seek
+    /// would be refused was asked of the wiring rather than the running
+    /// graph (b9b9ea9).
+    #[test]
+    fn every_track_refuses_a_seek() {
+        let Some(recorded) = fixture() else { return };
+        let (sinks, _handle) = buffer_over(&recorded, Duration::from_secs(3));
+        assert!(!sinks.is_empty());
+        for sink in &sinks {
+            assert!(!sink.accepts_seek(), "{} would follow a seek", sink.name());
+        }
     }
 
     /// A flush discards the timeline what is held belongs to, and a stream

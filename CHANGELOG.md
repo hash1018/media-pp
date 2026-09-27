@@ -159,6 +159,20 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A pipeline with a `ReplayBuffer` refuses a seek again.** Its tracks
+  refused one while the question was asked of the running graph, and
+  answered yes once 0.3 took the answer from the wiring, so a seek went
+  ahead and the window measured its length across the jump.
+
+- **A `Rack` or a `VideoEncodeBin` says it cannot take a buffer when what
+  is in it cannot**, as that element would in its place, instead of taking
+  it and leaving the thread in front waiting inside the push.
+
+- **A stream ends once.** An `Eos` pushed after one that went, with
+  nothing in between, goes no further than the pad: a source asked to
+  finish while it waited, paused, at the end it had already handed on sent
+  a second one, which a muxer would finish its file on twice.
+
 - **Every video compositor does the same with an input that ends, or is
   sought.** A live input's `Eos` removed it from `SwVideoCompositor` and
   `D3d11VideoCompositor`, so a file played to its end and then sought

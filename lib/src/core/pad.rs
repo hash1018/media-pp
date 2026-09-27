@@ -42,6 +42,8 @@ pub struct SrcPad {
     /// pushed meanwhile is from the position the seek left, and is dropped
     /// — see [`crate::stream`].
     flushing: bool,
+    /// Whether an `Eos` has gone and nothing since: a stream ends once.
+    ended: bool,
 }
 
 impl SrcPad {
@@ -60,6 +62,7 @@ impl SrcPad {
             contract: OutputContract::Unknown,
             peer: None,
             flushing: false,
+            ended: false,
         }
     }
 
@@ -116,11 +119,16 @@ impl SrcPad {
     /// nobody cared to link), and so does pushing between a seek's `Flush`
     /// and the start of the stream the seek begins: what is pushed then is
     /// from the position the seek left.
+    ///
+    /// A stream ends once: an `Eos` pushed after one that went, with nothing
+    /// in between, is dropped too. Whatever pushed it twice — a source asked
+    /// to finish while it waited, paused, at the end it had already handed
+    /// on — would have a muxer finish its file twice.
     pub fn push(&mut self, buf: MediaBuffer) -> Result<()> {
-        if self.flushing {
+        let is_eos = buf.is_eos();
+        if self.flushing || (is_eos && self.ended) {
             return Ok(());
         }
-        let is_eos = buf.is_eos();
         let bytes = match &buf {
             MediaBuffer::Packet(packet) => packet.size() as u64,
             _ => 0,
@@ -129,6 +137,8 @@ impl SrcPad {
             Some(sink) => sink.consume(buf),
             None => Ok(()),
         };
+        // Ended only once it has gone: one refused can be pushed again.
+        self.ended = if is_eos { result.is_ok() } else { false };
         if !is_eos {
             self.counters.pushed(result.is_ok(), bytes);
         }
@@ -183,10 +193,14 @@ impl SrcPad {
     /// counted: it is not data. An unlinked pad drops it, as `push` does.
     pub(crate) fn push_event(&mut self, event: &StreamEvent) -> Result<()> {
         match event {
-            StreamEvent::Segment(segment) if segment.flushed => self.flushing = false,
+            StreamEvent::Segment(segment) if segment.flushed => {
+                self.flushing = false;
+                self.ended = false;
+            }
             // From the position the seek left, as a buffer would be.
             _ if self.flushing => return Ok(()),
-            StreamEvent::Segment(_) => {}
+            // A new stream, which can end in its turn.
+            StreamEvent::Segment(_) => self.ended = false,
         }
         match &mut self.peer {
             Some(sink) => sink.stream_event(Event(event)),
@@ -219,5 +233,86 @@ impl SrcPad {
             Some(sink) => sink.control(msg),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::element::{Element, element_pp_log};
+    use crate::stream::Segment;
+
+    /// Writes down what reaches it, a word apiece.
+    struct Heard {
+        pp_log: PpLog,
+        heard: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Element for Heard {
+        fn name(&self) -> Arc<str> {
+            "heard".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Heard {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            let word = if buf.is_eos() { "eos" } else { "data" };
+            self.heard.lock().unwrap().push(word);
+            Ok(())
+        }
+        fn stream_event(&mut self, _event: Event<'_>) -> Result<()> {
+            self.heard.lock().unwrap().push("segment");
+            Ok(())
+        }
+    }
+
+    fn segment() -> StreamEvent {
+        StreamEvent::Segment(Arc::new(Segment {
+            id: 1,
+            flushed: false,
+            position: Duration::ZERO,
+            start: Duration::ZERO,
+            backwards: false,
+        }))
+    }
+
+    fn packet() -> MediaBuffer {
+        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
+    }
+
+    /// A stream ends once: an `Eos` after one that went, with nothing in
+    /// between, goes no further — and once a buffer or a new segment has
+    /// followed, the next one does.
+    #[test]
+    fn a_stream_ends_once() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mut pad = SrcPad::new("src");
+        pad.link(Box::new(Heard {
+            pp_log: element_pp_log(ElementType::Other, "heard", None),
+            heard: Arc::clone(&heard),
+        }));
+        pad.push(MediaBuffer::Eos).unwrap();
+        pad.push(MediaBuffer::Eos).unwrap();
+        pad.push(packet()).unwrap();
+        pad.push(MediaBuffer::Eos).unwrap();
+        pad.push_event(&segment()).unwrap();
+        pad.push(MediaBuffer::Eos).unwrap();
+        pad.push(MediaBuffer::Eos).unwrap();
+        assert_eq!(
+            *heard.lock().unwrap(),
+            ["eos", "data", "eos", "segment", "eos"]
+        );
     }
 }

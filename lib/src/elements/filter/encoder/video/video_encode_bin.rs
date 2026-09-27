@@ -752,6 +752,13 @@ impl Source for VideoEncodeBin {
 }
 
 impl Sink for VideoEncodeBin {
+    /// What the first element in it says, as that element would in the
+    /// bin's place — see `Rack::ready_consume`.
+    fn ready_consume(&mut self) -> bool {
+        self.install();
+        self.line.ready_consume()
+    }
+
     /// Frames from where [`EncodeInput`] said, in the layout it said.
     fn input_contract(&self) -> InputContract {
         self.input

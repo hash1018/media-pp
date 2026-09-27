@@ -153,11 +153,16 @@ holds frames.
 - A control error on the source's own thread ends that thread. Behind a
   `Queue` the same error becomes a bus event. A `Tee` never returns one.
 - `Rack` and `VideoEncodeBin` do not pass their contents' `ready_consume` on,
-  and `Rack` does not pass `as_reversible` on.
+  and `Rack` does not pass `as_reversible` on. (Since fixed for
+  `ready_consume`; no rack holds a decoder, so `as_reversible` waits for one
+  that does.)
 - `ReplayTrackSink::accepts_seek` answers true, against the trait's own
-  documentation.
+  documentation. (Since fixed: it refused seeks until b9b9ea9 moved the
+  question to the wiring and lost its answer.)
 - A `Finish` reaching `FileDemuxer` while it lingers at the end, paused, would
   push `Eos` twice. Only `Pipeline::finish` resuming first prevents it.
+  (Since fixed where every source's would be: a pad hands on one `Eos` per
+  stream.)
 
 **The rules an element has to know**, collected from `AGENTS.md` and the
 module docs. Each is enforced by hand.

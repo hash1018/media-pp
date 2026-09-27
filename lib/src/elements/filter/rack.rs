@@ -255,6 +255,18 @@ impl Source for Rack {
 }
 
 impl Sink for Rack {
+    /// What the first element in it says, as that element would in the
+    /// rack's place: a rack that answered yes for an element that cannot take
+    /// a buffer yet had the thread in front of it wait inside the push
+    /// instead. A line handed to the handle since goes in first — this is
+    /// asked between buffers, as `consume` is.
+    fn ready_consume(&mut self) -> bool {
+        if let Some(elements) = self.control.take() {
+            self.fill(elements);
+        }
+        self.line.ready_consume()
+    }
+
     /// What the caller declared, which is what the elements on either side
     /// are checked against — see this type's own docs.
     fn input_contract(&self) -> InputContract {
@@ -415,6 +427,65 @@ mod tests {
             self.controls.lock().unwrap().push(msg.clone());
             Ok(())
         }
+    }
+
+    /// Takes a buffer only when the test says it can.
+    struct Waiting {
+        pp_log: PpLog,
+        pad: SrcPad,
+        ready: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Element for Waiting {
+        fn name(&self) -> Arc<str> {
+            "waiting".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Source for Waiting {
+        fn src_pads(&mut self) -> &mut [SrcPad] {
+            std::slice::from_mut(&mut self.pad)
+        }
+    }
+
+    impl Sink for Waiting {
+        fn ready_consume(&mut self) -> bool {
+            self.ready.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.pad.push(buf)
+        }
+    }
+
+    /// A rack can take a buffer when what is in it can, as that element
+    /// would say in the rack's place — including one put in since the last
+    /// buffer, which goes in as the rack is asked.
+    #[test]
+    fn a_rack_is_ready_when_what_it_holds_is() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (mut rack, handle) = Rack::new("rack", InputContract::Unknown, OutputContract::Unknown);
+        assert!(rack.ready_consume(), "empty, it is a wire");
+        let ready = Arc::new(AtomicBool::new(false));
+        handle
+            .replace(vec![Box::new(Waiting {
+                pp_log: element_pp_log(ElementType::Other, "waiting", None),
+                pad: SrcPad::new("waiting_src"),
+                ready: Arc::clone(&ready),
+            })])
+            .expect("one pad");
+        assert!(!rack.ready_consume(), "what it holds cannot take one yet");
+        ready.store(true, Ordering::Relaxed);
+        assert!(rack.ready_consume());
     }
 
     fn frame(pts: i64) -> MediaBuffer {
