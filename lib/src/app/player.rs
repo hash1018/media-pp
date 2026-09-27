@@ -481,20 +481,11 @@ impl Player {
     }
 
     /// `position` on the pipeline's timeline, which looping carries on past
-    /// the end of the file, as a position in the file. The demuxer moves
-    /// on to the next lap a queue's depth before playback reaches it, so a
-    /// position short of the latest lap's start is still in the lap before.
+    /// the end of the file, as a position in the file — on whichever lap
+    /// it is, which is not the one the demuxer is reading: that is a
+    /// queue's depth ahead forwards and a decoder's stretch ahead backwards.
     fn in_lap(&self, position: Duration) -> Duration {
-        let lap = self.laps.lap_offset();
-        match position.checked_sub(lap) {
-            Some(in_lap) => in_lap,
-            None => {
-                let previous = self
-                    .duration
-                    .map_or(Duration::ZERO, |length| lap.saturating_sub(length));
-                position.saturating_sub(previous)
-            }
-        }
+        self.laps.in_lap(position)
     }
 
     /// Where the picture is decoded: on the window's GPU, by its hardware

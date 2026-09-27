@@ -151,7 +151,7 @@ impl std::fmt::Debug for StreamInfo {
 /// [`FileDemuxer::looping_handle`] before the demuxer is moved into its
 /// pipeline.
 ///
-/// Cheap to clone and safe to share: it holds one atomic flag and nothing
+/// Cheap to clone and safe to share: it holds a few atomics and nothing
 /// else, so it keeps neither the demuxer, its file, nor its pipeline alive.
 /// No call blocks or does any work beyond that store. A call after the
 /// source has finished is simply never read.
@@ -159,6 +159,7 @@ impl std::fmt::Debug for StreamInfo {
 pub struct FileDemuxerHandle {
     looping: Arc<AtomicBool>,
     published_offset: Arc<AtomicI64>,
+    published_lap: Arc<AtomicI64>,
 }
 
 impl FileDemuxerHandle {
@@ -191,13 +192,29 @@ impl FileDemuxerHandle {
     /// file, which is what a progress bar means by one. See
     /// [`FileDemuxer`]'s own docs on why the two are not the same number.
     ///
-    /// It moves once per lap, so a reader that samples it beside a timestamp
-    /// from the same moment can be one lap out for the instant either side of
-    /// a wrap. Nothing here can close that window, and a progress bar that is
-    /// wrong for one frame at the moment it jumps back to zero is not wrong
-    /// in a way anyone can see.
+    /// It is the lap the demuxer is *reading*, which is ahead of what is
+    /// shown by as much as the queues and a decoder hold: the next lap for
+    /// the last of one played forwards, the lap before for the first of one
+    /// played backwards, where a decoder holds whole stretches. Played fast
+    /// that is seconds of the file, so a timestamp is turned into a position
+    /// with [`Self::in_lap`], which reads the lap off the timestamp itself.
     pub fn lap_offset(&self) -> Duration {
         Duration::from_micros(self.published_offset.load(Ordering::Relaxed).max(0) as u64)
+    }
+
+    /// `timeline` — a frame's timestamp, or the pipeline's position — as a
+    /// position in the file, on whichever lap it is.
+    ///
+    /// The timeline unchanged until the file has looped; after that, how far
+    /// into its lap it is. A lap is as long as the one the timeline was last
+    /// carried over, so the start of the next lap is the start of the file.
+    pub fn in_lap(&self, timeline: Duration) -> Duration {
+        let lap = self.published_lap.load(Ordering::Relaxed);
+        if lap <= 0 {
+            return timeline;
+        }
+        let lap = u128::from(lap.unsigned_abs()) * 1_000;
+        Duration::from_nanos((timeline.as_nanos() % lap) as u64)
     }
 }
 
@@ -277,6 +294,9 @@ pub struct FileDemuxer {
     /// reader that looks a few times a second is the wrong way round. This
     /// is stored only where the offset moves, which is once per lap.
     published_offset: Arc<AtomicI64>,
+    /// `lap_length`, published for [`FileDemuxerHandle::in_lap`], as the
+    /// offset is and for the same reason.
+    published_lap: Arc<AtomicI64>,
     /// How far this source's output timeline has been carried past the
     /// file's own, in microseconds: the sum of every lap already played.
     /// Zero until the first wrap, so a source that never loops emits the
@@ -296,6 +316,13 @@ pub struct FileDemuxer {
     /// instead would drop the next lap on top of timestamps a muxer has
     /// already written.
     lap_end: i64,
+    /// How far one lap carries the timeline, in the same units: the
+    /// `lap_end` the last wrap stepped over. Zero until the first wrap.
+    ///
+    /// What puts a position on the timeline back into its lap — see
+    /// [`FileDemuxer::locate_in_lap`] — and what reading backwards steps the
+    /// offset down by, back over the start of a lap into the one before.
+    lap_length: i64,
     /// The pipeline's playback clock, whose rate says which way to read —
     /// see [`Backwards`].
     /// Where reading backwards has got to, while it is.
@@ -446,8 +473,10 @@ impl FileDemuxer {
                 looping: Arc::new(AtomicBool::new(false)),
                 backwards: None,
                 published_offset: Arc::new(AtomicI64::new(0)),
+                published_lap: Arc::new(AtomicI64::new(0)),
                 loop_offset: 0,
                 lap_end: 0,
+                lap_length: 0,
             },
             streams,
         ))
@@ -461,6 +490,7 @@ impl FileDemuxer {
         FileDemuxerHandle {
             looping: self.looping.clone(),
             published_offset: self.published_offset.clone(),
+            published_lap: self.published_lap.clone(),
         }
     }
 
@@ -527,12 +557,54 @@ impl FileDemuxer {
             let end = start.saturating_add(packet.duration().max(1));
             self.lap_end = self.lap_end.max(end.rescale(time_base, microseconds()));
         }
+        self.shift_to_lap(time_base, packet);
+    }
+
+    /// Carries `packet` from the file's own timeline onto the lap this is
+    /// reading, forwards or backwards.
+    fn shift_to_lap(&self, time_base: ffmpeg::Rational, packet: &mut ffmpeg::Packet) {
         if self.loop_offset == 0 {
             return;
         }
         let shift = self.loop_offset.rescale(microseconds(), time_base);
         packet.set_pts(packet.pts().map(|pts| pts.saturating_add(shift)));
         packet.set_dts(packet.dts().map(|dts| dts.saturating_add(shift)));
+    }
+
+    /// Puts the timeline on the lap that starts `offset` past the file's
+    /// own, as a whole one: the next wrap steps over exactly one lap from
+    /// there.
+    fn move_to_lap(&mut self, offset: i64) {
+        self.loop_offset = offset.max(0);
+        self.lap_end = self.lap_length;
+        self.published_offset
+            .store(self.loop_offset, Ordering::Relaxed);
+    }
+
+    /// `target` on the output timeline, as a position in the file — the
+    /// timeline moved to the lap it falls in.
+    ///
+    /// A caller's seek is a position in the file, never past its end; but
+    /// where playback turns round is the picture shown, which is on the
+    /// timeline looping carries past the end, a lap further on for every
+    /// lap played. Read as a position in the file it is past the end, and
+    /// what was read from there was stamped a lap or more short of it, so
+    /// the picture stopped until the clock came down to it. Only such a
+    /// position is past the end of a lap, which is what tells the two apart.
+    fn locate_in_lap(&mut self, target: Duration) -> Duration {
+        let (lap, at) = (self.lap_length.saturating_mul(1000), duration_ns(target));
+        if lap <= 0 || at <= lap {
+            return target;
+        }
+        let laps = (at - 1) / lap;
+        self.move_to_lap(laps * self.lap_length);
+        pp_debug!(
+            self,
+            "{target:?} is on lap {}, {}us past the file's own",
+            laps + 1,
+            self.loop_offset
+        );
+        Duration::from_nanos((at - laps * lap) as u64)
     }
 
     /// Starts the file again: carries the output timeline past the lap that
@@ -542,6 +614,8 @@ impl FileDemuxer {
     /// packet `seek` parks — the new lap's first — is stamped onto the new
     /// timeline like every packet after it.
     fn wrap(&mut self) -> crate::error::Result<()> {
+        self.lap_length = self.lap_end;
+        self.published_lap.store(self.lap_length, Ordering::Relaxed);
         self.loop_offset = self.loop_offset.saturating_add(self.lap_end);
         self.published_offset
             .store(self.loop_offset, Ordering::Relaxed);
@@ -807,7 +881,13 @@ impl FileDemuxer {
             let seeking_by = by.is_none_or(|(by, _)| by == index);
             let landing = at(packet.pts().or_else(|| packet.dts()))
                 .zip(at(packet.dts().or_else(|| packet.pts())));
-            self.stamp_lap(index, time_base, &mut packet);
+            // Backwards, what is parked is read back as it is read from the
+            // file, and carried onto the lap only as it is handed on — see
+            // `read_backwards`, which compares it with the stretch in the
+            // file's own time first.
+            if self.backwards.is_none() {
+                self.stamp_lap(index, time_base, &mut packet);
+            }
             self.park((index, time_base, packet));
             if seeking_by {
                 return (first, landing);
@@ -1042,6 +1122,7 @@ impl SourceElement for FileDemuxer {
 impl SeekableSource for FileDemuxer {
     fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
         self.backwards = None;
+        let target = self.locate_in_lap(target);
         self.reposition(target)
     }
 }
@@ -1054,6 +1135,7 @@ impl ReversibleSource for FileDemuxer {
         let stream = self
             .picture_stream()
             .ok_or(FileDemuxerError::NoStream(ffmpeg::media::Type::Video))?;
+        let target = self.locate_in_lap(target);
         // The picture at `target` is the last of the first stretch.
         let end = duration_ns(target).saturating_add(1);
         let longest = duration_ns(self.stretch_limit(stream));
@@ -1201,19 +1283,38 @@ impl FileDemuxer {
                 (*packet.as_mut_ptr()).flags |= ffmpeg::ffi::AV_PKT_FLAG_DISCARD;
             }
         }
+        self.shift_to_lap(time_base, &mut packet);
         packet.set_time_base(time_base);
         self.push_to_pad(index, packet, bus);
         Ok(true)
     }
 
-    /// The stretch just read is done: on to the one before, unless it began
-    /// the file.
+    /// The stretch just read is done: on to the one before — the end of the
+    /// lap before, where this one began the file and looping put a lap
+    /// before it — unless it began the timeline.
+    ///
+    /// Back into a lap that was played, whether or not the file still
+    /// loops: that lap is on the timeline either way. Only the first lap's
+    /// start ends the stream, as the start of a file that never looped does.
     fn stretch_read(&mut self) -> bool {
+        let (offset, lap) = (self.loop_offset, self.lap_length);
         let Some(backwards) = self.backwards.as_mut() else {
             return false;
         };
         if backwards.start <= 0 {
-            return false;
+            if offset <= 0 || lap <= 0 {
+                return false;
+            }
+            backwards.start = lap.saturating_mul(1000);
+            backwards.end = backwards.start;
+            backwards.unread = true;
+            self.move_to_lap(offset - lap);
+            pp_debug!(
+                self,
+                "back over the start of a lap: timeline now {}us past the file's own",
+                self.loop_offset
+            );
+            return true;
         }
         backwards.end = backwards.start;
         backwards.unread = true;
@@ -1768,6 +1869,178 @@ mod tests {
             demuxer.lap_end, reached,
             "going back must not shorten the lap the next wrap steps over"
         );
+    }
+
+    /// Where a pipeline turns round is the picture shown, on the timeline
+    /// looping carries past the end of the file; a caller's seek is in the
+    /// file. A position past the end of a lap can only be the first, and is
+    /// put back into its lap, with the timeline moved to that lap.
+    #[test]
+    fn a_position_past_the_end_of_a_lap_is_put_back_into_its_lap() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+        let lap = 8_000_000;
+        demuxer.lap_length = lap;
+        // Reading the fourth lap, as a demuxer ahead of what is shown is.
+        demuxer.move_to_lap(3 * lap);
+
+        let seconds = |s: u64| Duration::from_secs(s);
+        assert_eq!(
+            demuxer.locate_in_lap(seconds(3)),
+            seconds(3),
+            "a seek in the file"
+        );
+        assert_eq!(demuxer.loop_offset, 3 * lap, "and the lap left alone");
+
+        assert_eq!(
+            demuxer.locate_in_lap(seconds(10)),
+            seconds(2),
+            "two seconds into the second lap"
+        );
+        assert_eq!(demuxer.loop_offset, lap);
+        assert_eq!(
+            demuxer.lap_end, lap,
+            "a whole lap for the next wrap to step over"
+        );
+        assert_eq!(
+            demuxer.looping_handle().lap_offset(),
+            Duration::from_micros(lap as u64)
+        );
+
+        assert_eq!(
+            demuxer.locate_in_lap(seconds(16)),
+            seconds(8),
+            "the end of the second lap is the end of the file, not the start of the third"
+        );
+        assert_eq!(demuxer.loop_offset, lap);
+    }
+
+    /// Read backwards on a lap after the first, what comes out is stamped on
+    /// that lap; at its start it goes on from the end of the lap before, and
+    /// only the start of the first lap ends it.
+    ///
+    /// It read the file's own time as a position on the timeline: turned
+    /// round a lap in, it went back from the end of the file, stamped a lap
+    /// short, and the picture stopped until the clock came down to it.
+    #[test]
+    fn reading_backwards_goes_back_over_the_start_of_a_lap_that_was_played() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+        let (index, time_base) = video_stream(&demuxer);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        demuxer.src_pads()[index].link(Box::new(StampSink {
+            seen: seen.clone(),
+            pp_log: element_pp_log(ElementType::Other, "stamp-sink", None),
+        }));
+        // As one wrap leaves it.
+        let lap = demuxer.input.duration().max(0);
+        assert!(lap > 0, "the fixture says how long it is");
+        demuxer.lap_length = lap;
+        demuxer.published_lap.store(lap, Ordering::Relaxed);
+        demuxer.move_to_lap(lap);
+
+        let quarter = lap / 4;
+        let landed = demuxer
+            .seek_backwards(Duration::from_micros((lap + quarter) as u64))
+            .expect("turn round in the second lap");
+        assert_eq!(
+            landed,
+            Duration::from_micros(quarter as u64),
+            "a quarter into the file"
+        );
+        let (bus, _bus_rx) = Bus::new();
+        while demuxer.read_backwards(&bus).expect("read backwards") {}
+
+        let micros = |ts: i64| ts.rescale(time_base, microseconds());
+        let seen: Vec<i64> = seen.lock().unwrap().iter().map(|&ts| micros(ts)).collect();
+        assert!(
+            seen.iter().any(|&at| (lap..=lap + quarter).contains(&at)),
+            "the second lap, where it turned: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|&at| (lap - quarter..lap).contains(&at)),
+            "the end of the first lap, after the start of the second: {seen:?}"
+        );
+        assert!(
+            seen.iter().all(|&at| (0..=lap + quarter).contains(&at)),
+            "{seen:?}"
+        );
+        assert_eq!(
+            demuxer.loop_offset, 0,
+            "down to the first lap, where it ended"
+        );
+        let handle = demuxer.looping_handle();
+        assert_eq!(handle.lap_offset(), Duration::ZERO);
+        // Each read back on its own lap.
+        assert_eq!(
+            handle.in_lap(Duration::from_micros((lap + quarter) as u64)),
+            Duration::from_micros(quarter as u64)
+        );
+    }
+
+    /// A timestamp is read back on its own lap, not the one the demuxer is
+    /// reading — which is ahead of what is shown by whatever the queues and
+    /// the decoder hold.
+    #[test]
+    fn a_timestamp_is_read_back_on_its_own_lap() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+        let handle = demuxer.looping_handle();
+        let seconds = |s: f64| Duration::from_secs_f64(s);
+        assert_eq!(
+            handle.in_lap(seconds(12.5)),
+            seconds(12.5),
+            "before any wrap, the file's own"
+        );
+
+        let lap = 8_000_000;
+        demuxer.lap_length = lap;
+        demuxer.published_lap.store(lap, Ordering::Relaxed);
+        // Already reading the third lap.
+        demuxer.move_to_lap(2 * lap);
+        assert_eq!(
+            handle.in_lap(seconds(15.5)),
+            seconds(7.5),
+            "the end of the second, still shown"
+        );
+        assert_eq!(handle.in_lap(seconds(17.0)), seconds(1.0), "the third");
+        assert_eq!(
+            handle.in_lap(seconds(16.0)),
+            Duration::ZERO,
+            "the start of a lap is the start of the file"
+        );
+    }
+
+    /// Records the timestamp of every packet it is handed.
+    struct StampSink {
+        seen: Arc<Mutex<Vec<i64>>>,
+        pp_log: PpLog,
+    }
+
+    impl Element for StampSink {
+        fn name(&self) -> Arc<str> {
+            Arc::from("stamp-sink")
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl crate::element::Sink for StampSink {
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            if let MediaBuffer::Packet(packet) = buf
+                && let Some(ts) = packet.pts().or_else(|| packet.dts())
+            {
+                self.seen.lock().unwrap().push(ts);
+            }
+            Ok(())
+        }
     }
 
     /// Drives `FileDemuxer::run` directly (no `Pipeline`) to prove the

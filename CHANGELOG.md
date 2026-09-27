@@ -138,7 +138,32 @@ compile error with no explanation.
   format is fixed:
   `set_mix_format` answers `FixedMixFormat`.
 
+- **`FileDemuxerHandle::in_lap` reads a timestamp back as a position in the
+  file, on its own lap.** `lap_offset` is the lap the demuxer is reading,
+  which is ahead of the picture by what the queues and a decoder hold — the
+  next lap at the end of one played forwards, the one before at the start
+  of one played backwards; at four times the speed that was two seconds of
+  a progress bar gone blank at the end of every lap. `Player::position`
+  reads its lap this way now.
+
 ### Fixed
+
+- **A looping file turns round, and plays backwards, on any lap.** Where
+  playback turns round is the picture shown, on the timeline looping carries
+  past the file's end; `FileDemuxer` read it as a position in the file, so
+  turned round a lap or more in it went back from the file's end, stamped a
+  lap short, and the picture stood still until the clock came down to it.
+  A position past the end of a lap is now put back into its lap, what is
+  read backwards is stamped on that lap, and at the start of a lap it goes
+  on from the end of the one before — down to the start of the first, where
+  the stream ends as it always has.
+
+- **Theora, not ProRes, is what `VulkanDecoder::supports` is tested to
+  refuse**: FFmpeg 8.1 decodes ProRes on Vulkan's compute queues, and the
+  test failed there.
+
+- **The `vulkan` feature says what to install where Linux has no Vulkan
+  headers**, instead of ending in a bindgen panic.
 
 - **A program built with `cuda` starts without NVIDIA's driver.** The CUDA
   driver calls this crate makes itself linked `libcuda.so.1` — `nvcuda.dll`
