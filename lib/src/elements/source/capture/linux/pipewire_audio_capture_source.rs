@@ -40,7 +40,7 @@ use crate::{
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How many captured packets may be queued between the PipeWire thread and
-/// [`SourceElement::run`] before the oldest are dropped.
+/// the source's own before the oldest are dropped.
 ///
 /// PipeWire delivers on its own realtime thread and must never be blocked by a
 /// slow downstream, so the hand-off is a bounded queue rather than a lock the
@@ -143,7 +143,7 @@ type CommandReply = SyncSender<CommandResult>;
 enum Command {
     /// Starts or stops the capture stream itself. Stopping is what makes a
     /// paused source stop asking the daemon for audio nobody will read — see
-    /// [`PipeWireAudioCaptureSource::handle_control`].
+    /// [`Capturing::set_active`].
     SetActive {
         active: bool,
         reply: CommandReply,
@@ -215,7 +215,7 @@ fn wait_set_active(
 ///
 /// PipeWire delivers on its own realtime thread, which must never block on a
 /// slow downstream. Captured packets therefore cross into
-/// [`SourceElement::run`] through a bounded queue; when a stalled consumer
+/// the source's own thread through a bounded queue; when a stalled consumer
 /// fills it, the packet that would not fit is dropped and reported as
 /// [`crate::bus::BusEvent::Dropped`] rather than stalling the daemon or
 /// growing without bound. The gap that leaves stays where it happened: every

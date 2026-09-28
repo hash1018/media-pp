@@ -216,7 +216,7 @@ impl Default for PipeWireScreenCaptureOptions {
 }
 
 /// The latest captured image, written by the PipeWire thread and read by
-/// [`SourceElement::run`] on the pipeline's source thread.
+/// the source on the pipeline's source thread.
 ///
 /// Holds tightly packed `width * 4` BGRA rows rather than an
 /// `ffmpeg::frame::Video`: the PipeWire buffer's own stride is whatever the
@@ -252,12 +252,12 @@ struct Latest {
     /// Bumped every time the PipeWire thread writes a new image into
     /// `pixels`.
     ///
-    /// The compositor produces frames on damage while `run` emits at a fixed
+    /// The compositor produces frames on damage while the source emits at a fixed
     /// rate, so most ticks of a still desktop find `pixels` holding exactly
     /// what the last one copied out of it. Comparing this against the count
     /// behind the picture already being offered is what lets such a tick hand
     /// that picture out again instead of copying the whole screen a second
-    /// time — see [`PipeWireScreenCaptureSource::emit_frame`].
+    /// time — see [`Capturing::emit_frame`].
     ///
     /// A counter rather than a flag the reader clears, because the two
     /// threads write here under the same lock but at unrelated moments: the
