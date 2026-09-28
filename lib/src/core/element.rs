@@ -36,7 +36,7 @@ use crate::{
 };
 
 pub use crate::produce::{
-    AsProduce, AsSourceElement, IntoSource, Produce, Produced, ProducingSource, Wait,
+    AsProduce, AsSourceElement, IntoSource, Produce, ProduceError, Produced, ProducingSource, Wait,
 };
 pub use crate::render::{AsRender, AsSink, IntoTerminal, Render};
 pub use crate::transform::{AsFilter, AsTransform, IntoFilter, Output, Transform};

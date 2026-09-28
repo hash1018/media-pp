@@ -243,9 +243,10 @@
 //!
 //! # Writing a source
 //!
-//! A source that makes one thing at a time on one output — a generator, a
-//! device read a frame at a time, buffers an application hands in —
-//! implements [`Produce`](element::Produce): asked for the next thing, it
+//! A source that makes one thing at a time — a generator, a device read a
+//! frame at a time, buffers an application hands in, a live stream's
+//! packets on an output each — implements
+//! [`Produce`](element::Produce): asked for the next thing, it
 //! makes it, waiting where it has to only through the
 //! [`Wait`](element::Wait) it is handed. The framework runs the loop: what
 //! the pipeline asks in between, a pause kept out of the clock the source
@@ -253,10 +254,11 @@
 //! the source's own thread — an apartment joined, a capture started — goes
 //! in its `starting`, and is let go of in its `stopping`, which the
 //! framework calls there. [`Pipeline::new`](pipeline::Pipeline::new)
-//! takes one as it takes any [`SourceElement`](element::SourceElement). A
-//! source with several outputs, or one that can be sought, is one of this
-//! crate's own for now — `FileDemuxer` is both — since answering a seek
-//! is still each such source's own loop, which only this crate writes.
+//! takes one as it takes any [`SourceElement`](element::SourceElement), and
+//! one with several outputs says what they are in its `outputs` and which
+//! each buffer is for. A source that can be sought is one of this crate's
+//! own for now — `FileDemuxer` — since answering a seek is still such a
+//! source's own loop, which only this crate writes.
 //!
 //! # Writing a terminal
 //!

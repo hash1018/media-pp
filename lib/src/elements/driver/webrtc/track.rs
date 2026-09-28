@@ -9,7 +9,7 @@ use std::{
 use ffmpeg_next as ffmpeg;
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, select};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 use str0m::{
     change::{SdpAnswer, SdpOffer},
     format::Codec,
@@ -18,12 +18,12 @@ use str0m::{
 
 use crate::{
     buffer::MediaBuffer,
-    bus::Bus,
     contract::{InputContract, OutputContract, PortContract},
-    control::{ControlReceiver, RequestKind, drain_control, handle_request},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    element::{
+        Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait, element_pp_log,
+    },
     error::Result,
-    pad::SrcPad,
+    produce::{Received, produce_source},
 };
 
 use super::{
@@ -787,22 +787,34 @@ impl WebRtcTrackSink {
     }
 }
 
-/// One inbound track — the mirror image of [`WebRtcTrackSink`]. A plain
-/// [`SourceElement`], same shape as [`crate::elements::AppSource`]: it
-/// links into its own [`crate::pipeline::Pipeline`] via `src_pads()` like
-/// any other source. The difference from `AppSource` is only *who* feeds
-/// it — instead of an [`crate::elements::AppSourceHandle`] the app calls
-/// itself, [`crate::driver::Driver::run`] pushes into the sending half of this same
+/// One inbound track — the mirror image of [`WebRtcTrackSink`]. A source of
+/// the same shape as [`crate::elements::AppSource`]: it links into its own
+/// [`crate::pipeline::Pipeline`] via `src_pads()` like any other source.
+/// The difference from `AppSource` is only *who* feeds it — instead of an
+/// [`crate::elements::AppSourceHandle`] the app calls itself,
+/// [`crate::driver::Driver::run`] pushes into the sending half of this same
 /// channel internally, from its own thread, for every `Event::MediaData`
 /// on this track's `Mid`. Nothing here ever calls back into caller-supplied
 /// code from `WebRtcPeer::run`'s own thread — that thread only ever touches
 /// this crate's own types (see the module docs for why `WebRtcPeer` hands
 /// tracks out through [`WebRtcHandle::next_track`] instead of a callback).
-pub struct WebRtcTrackSource {
+///
+/// The peer going away — whether from `Stop` or the connection dying on
+/// its own — ends the stream the way every `AppSourceHandle` dropped ends
+/// an `AppSource`'s: its end handed on, no error.
+pub struct WebRtcTrackSource(ProducingSource<Receiving>);
+
+produce_source!(WebRtcTrackSource);
+
+/// What a [`WebRtcTrackSource`] hands on, a packet at a time as the peer
+/// receives it: all of its work, which the framework makes the source.
+struct Receiving {
     id: TrackId,
     pp_log: PpLog,
     name: Arc<str>,
-    pad: SrcPad,
+    /// Its one output's: encoded media of the track's kind, whichever
+    /// codec is negotiated with the peer at runtime.
+    contract: OutputContract,
     data_rx: Receiver<MediaBuffer>,
     codec: Arc<Mutex<Option<Codec>>>,
     negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
@@ -826,17 +838,11 @@ impl WebRtcTrackSource {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WebRtcPeer, &name, None);
-        // An inbound track always delivers encoded media; which codec is
-        // negotiated with the peer at runtime, but the kind never varies.
-        let pad = SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::packet(packet_kind(kind))),
-        );
-        Self {
+        Self(ProducingSource::new(Receiving {
             id,
             name,
             pp_log,
-            pad,
+            contract: OutputContract::Fixed(PortContract::packet(packet_kind(kind))),
             data_rx,
             codec,
             negotiated_codecs,
@@ -844,7 +850,7 @@ impl WebRtcTrackSource {
                 rx: stream_info_rx,
                 cached: None,
             }),
-        }
+        }))
     }
 
     /// Blocks for at most `timeout` until actual RTP media confirms enough
@@ -858,9 +864,10 @@ impl WebRtcTrackSource {
     /// value is cached and every later call returns it immediately. If the
     /// peer closes before the required media information arrives, this returns
     /// [`WebRtcError::Closed`]. This method does not consume media packets:
-    /// they remain buffered for [`SourceElement::run`].
+    /// they remain buffered for the source to hand on once its pipeline runs.
     pub fn wait_stream_info(&self, timeout: Duration) -> Result<WebRtcStreamInfo> {
-        let mut state = self.stream_info.lock().unwrap();
+        let track = self.0.inner();
+        let mut state = track.stream_info.lock().unwrap();
         if let Some(info) = &state.cached {
             return Ok(info.clone());
         }
@@ -871,7 +878,7 @@ impl WebRtcTrackSource {
                 Ok(info)
             }
             Err(RecvTimeoutError::Timeout) => Err(WebRtcError::StreamInfoTimeout {
-                track_id: self.id,
+                track_id: track.id,
                 timeout,
             }
             .into()),
@@ -888,7 +895,7 @@ impl WebRtcTrackSource {
     /// [`WebRtcTrackSource::codec`] remains separate: it reports which codec
     /// the remote sender actually chose once media starts arriving.
     pub fn negotiated_codecs(&self) -> Vec<Codec> {
-        self.negotiated_codecs.lock().unwrap().clone()
+        self.0.inner().negotiated_codecs.lock().unwrap().clone()
     }
 
     /// The codec this track is actually carrying, as seen on the most
@@ -904,11 +911,11 @@ impl WebRtcTrackSource {
     /// extra constraint in practice. Use [`Self::wait_stream_info`] when the
     /// downstream graph must be configured before this source starts running.
     pub fn codec(&self) -> Option<Codec> {
-        *self.codec.lock().unwrap()
+        *self.0.inner().codec.lock().unwrap()
     }
 }
 
-impl Element for WebRtcTrackSource {
+impl Element for Receiving {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -926,81 +933,25 @@ impl Element for WebRtcTrackSource {
     }
 }
 
-impl Source for WebRtcTrackSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for WebRtcTrackSource {
+impl Produce for Receiving {
     fn is_live(&self) -> bool {
         true
     }
 
-    /// Identical shape to [`crate::elements::AppSource::run`]: selects on
-    /// `control` and its own data channel together, so `Stop`/`Pause`
-    /// never wait behind a remote peer that's gone quiet. The data channel
-    /// disconnecting — `WebRtcPeer` gone, whether from `Stop` or the
-    /// connection dying on its own — ends this the same way `AppSource`
-    /// ends when every `AppSourceHandle` is dropped: one final `Eos`, no
-    /// error.
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        loop {
-            if drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
+    fn output_contract(&self) -> OutputContract {
+        self.contract
+    }
 
-            select! {
-                recv(control.rx) -> req => {
-                    match req {
-                        Ok(req) => {
-                            let finishing = matches!(req.kind, RequestKind::Finish);
-                            if handle_request(control, self, bus, req.kind, req.ack)?.stopped {
-                                pp_info!(self, "{}", if finishing { "finished" } else { "stopped" });
-                                return Ok(());
-                            }
-                        }
-                        // The Pipeline itself is gone — nothing left to drive this.
-                        Err(_) => {
-                            pp_info!(self, "run: control channel gone, ending");
-                            return Ok(());
-                        }
-                    }
-                }
-                recv(self.data_rx) -> buf => {
-                    match buf {
-                        Ok(buf) => {
-                            if let Err(error) = self.pad.push(buf) {
-                                bus.post_downstream_error(
-                                    &self.pp_log,
-                                    ElementType::WebRtcPeer,
-                                    self.name.clone(),
-                                    error,
-                                );
-                            }
-                        }
-                        // `WebRtcPeer` gone — this track (or the whole peer) is done.
-                        Err(_) => {
-                            pp_info!(self, "run: WebRtcPeer gone, ending");
-                            break;
-                        }
-                    }
-                }
+    /// The next packet the peer received — or, once the peer is gone, the
+    /// end of the stream.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        Ok(match wait.recv(&self.data_rx) {
+            Received::Got(buf) => Produced::Buffer(buf),
+            Received::LetGo => Produced::Nothing,
+            Received::Gone => {
+                pp_info!(self, "WebRtcPeer gone, ending");
+                Produced::End
             }
-        }
-        // The data channel ending (above) can race a `Stop` sent at the
-        // same moment — e.g. stopping the *upstream* `WebRtcPeer` (via its
-        // `DriverRunner`) disconnects this exact channel, and a caller
-        // stopping this `Pipeline` too, right after, can land its `Stop` in
-        // `control`'s queue after `select!` already picked the data arm.
-        // Ack it (a no-op otherwise) so `ControlSender::send`'s rendezvous
-        // never blocks forever waiting for an ack this thread would
-        // otherwise never get around to sending.
-        while let Some((_msg, ack)) = control.try_recv() {
-            let _ = ack.send(());
-        }
-        self.pad.push_eos(&self.pp_log)
+        })
     }
 }

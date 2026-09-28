@@ -6,13 +6,12 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
-    bus::Bus,
     contract::{MediaKind, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     elements::{RtspOptions, rtsp::redact},
     error::Result,
     pad::SrcPad,
+    produce::produce_source,
 };
 
 use super::file_demuxer::StreamInfo;
@@ -37,24 +36,31 @@ pub enum RtspSourceError {
 ///
 /// Deliberately does **not** retry or reconnect internally: a read failure
 /// (dropped connection, camera reboot, ...) ends this source's thread with
-/// `Err`, the same way any other fatal [`SourceElement::run`] failure
-/// does, instead of looping forever inside `run()`. Reconnecting means
-/// building a fresh `RtspSource`/[`crate::pipeline::Pipeline`] — mirrors
-/// `Pipeline` itself not being reusable once it ends: watch
+/// the error on the bus, the same way any other fatal source failure does,
+/// instead of looping forever. Reconnecting means building a fresh
+/// `RtspSource`/[`crate::pipeline::Pipeline`] — mirrors `Pipeline` itself
+/// not being reusable once it ends: watch
 /// [`crate::pipeline::Pipeline::bus`], and on error, call
 /// [`RtspSource::open`] again.
 ///
 /// Uses `Packet::read` directly instead of `Input::packets()` — the
 /// latter silently retries forever inside its own `next()` on any non-EOF
 /// error (network timeout, connection reset, ...), which would make a
-/// stuck connection un-`Stop`-able (`drain_control` never gets a turn)
-/// and this element's "fail fast, don't retry" contract impossible to
+/// stuck connection un-`Stop`-able (the pipeline's requests never get a
+/// turn) and this element's "fail fast, don't retry" contract impossible to
 /// keep.
-pub struct RtspSource {
+pub struct RtspSource(ProducingSource<Reading>);
+
+produce_source!(RtspSource);
+
+/// What an [`RtspSource`] hands on, a packet at a time as the session
+/// delivers it: all of its work, which the framework makes the source.
+struct Reading {
     pp_log: PpLog,
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
-    pads: Vec<SrcPad>,
+    /// What each stream's output declares, by stream index.
+    contracts: Vec<OutputContract>,
 }
 
 impl RtspSource {
@@ -72,21 +78,15 @@ impl RtspSource {
 
         let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
 
-        let pads = streams
+        // Per stream, from the medium the session announced: every output
+        // hands on `MediaBuffer::Packet`, so only this tells an audio
+        // stream apart from a video one. A medium this crate does not model
+        // declares nothing and is left to the runtime check.
+        let contracts = streams
             .iter()
-            .map(|s| {
-                // Per stream, from the medium the session announced: both
-                // pads emit `MediaBuffer::Packet`, so only this tells an
-                // audio stream apart from a video one. A medium this crate
-                // does not model declares nothing and is left to the
-                // runtime check.
-                match MediaKind::packet_for(s.kind) {
-                    Some(kind) => SrcPad::with_contract(
-                        format!("src_{}", s.index),
-                        OutputContract::Fixed(PortContract::packet(kind)),
-                    ),
-                    None => SrcPad::new(format!("src_{}", s.index)),
-                }
+            .map(|s| match MediaKind::packet_for(s.kind) {
+                Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
+                None => OutputContract::Unknown,
             })
             .collect();
 
@@ -101,12 +101,12 @@ impl RtspSource {
             streams.len()
         );
         Ok((
-            Self {
+            Self(ProducingSource::new(Reading {
                 name,
                 pp_log,
                 input,
-                pads,
-            },
+                contracts,
+            })),
             streams,
         ))
     }
@@ -119,19 +119,23 @@ impl RtspSource {
         &self,
         kind: ffmpeg::media::Type,
     ) -> std::result::Result<StreamInfo, RtspSourceError> {
-        self.input
+        self.0
+            .inner()
+            .input
             .streams()
             .best(kind)
             .map(|stream| StreamInfo::of(&stream))
             .ok_or(RtspSourceError::NoStream(kind))
     }
+}
 
+impl Reading {
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
     }
 }
 
-impl Element for RtspSource {
+impl Element for Reading {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -149,72 +153,55 @@ impl Element for RtspSource {
     }
 }
 
-impl Source for RtspSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        &mut self.pads
-    }
-}
-
-impl SourceElement for RtspSource {
+impl Produce for Reading {
     fn is_live(&self) -> bool {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        loop {
-            if drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
+    /// One per stream the server advertised, at the stream's own index.
+    fn outputs(&self) -> Vec<SrcPad> {
+        self.contracts
+            .iter()
+            .enumerate()
+            .map(|(index, contract)| SrcPad::with_contract(format!("src_{index}"), *contract))
+            .collect()
+    }
 
-            let mut packet = ffmpeg::Packet::empty();
-            match packet.read(&mut self.input) {
-                Ok(()) => {
-                    let index = packet.stream();
-                    // FFmpeg does not guarantee a demuxer fills
-                    // `AVPacket::time_base`, and the packet contract is that
-                    // one carries it — what a decoder downstream hands on to
-                    // its frames, and a `Pacer` paces by. Same as
-                    // `FileDemuxer::deliver_or_park`.
-                    if let Some(time_base) = self.stream(index).map(|stream| stream.time_base()) {
-                        packet.set_time_base(time_base);
-                    }
-                    if let Some(pad) = self.pads.get_mut(index) {
-                        // A downstream failure drops just this one packet
-                        // — same "report, don't die" contract `Queue`'s
-                        // worker gives a failing `Sink` — rather than
-                        // ending this whole source thread over it.
-                        if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
-                            bus.post_downstream_error(
-                                &self.pp_log,
-                                ElementType::RtspSource,
-                                self.name.clone(),
-                                error,
-                            );
-                        }
-                    }
+    /// The next packet the session delivers, on its stream's output.
+    ///
+    /// Waits inside the read, which the connection's own timeout bounds —
+    /// see [`RtspOptions::timeout`] — rather than through `wait`: a `Stop`
+    /// reaches this source between reads, at most that long after it is
+    /// sent.
+    fn produce(&mut self, _wait: &mut Wait<'_>) -> Result<Produced> {
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut self.input) {
+            Ok(()) => {
+                let index = packet.stream();
+                // FFmpeg does not guarantee a demuxer fills
+                // `AVPacket::time_base`, and the packet contract is that
+                // one carries it — what a decoder downstream hands on to
+                // its frames, and a `Pacer` paces by. Same as
+                // `FileDemuxer`'s.
+                if let Some(time_base) = self.stream(index).map(|stream| stream.time_base()) {
+                    packet.set_time_base(time_base);
                 }
-                // A real on-demand RTSP stream can send a clean EOF; a
-                // live camera essentially never will, but treat it the
-                // same way `FileDemuxer` treats running out of packets.
-                Err(ffmpeg::Error::Eof) => break,
-                // Anything else (connection reset, socket timeout, ...) is
-                // fatal — reported and this thread ends, rather than
-                // retried. See this type's own docs on why: retrying
-                // belongs to whoever's watching the bus, building a fresh
-                // `RtspSource` to reconnect with.
-                Err(error) => {
-                    pp_error!(self, "read failed: {error}");
-                    return Err(RtspSourceError::Ffmpeg(error).into());
-                }
+                Ok(Produced::On(index, MediaBuffer::Packet(Arc::new(packet))))
+            }
+            // A real on-demand RTSP stream can send a clean EOF; a
+            // live camera essentially never will, but treat it the
+            // same way `FileDemuxer` treats running out of packets.
+            Err(ffmpeg::Error::Eof) => Ok(Produced::End),
+            // Anything else (connection reset, socket timeout, ...) is
+            // fatal — reported and this thread ends, rather than
+            // retried. See this type's own docs on why: retrying
+            // belongs to whoever's watching the bus, building a fresh
+            // `RtspSource` to reconnect with.
+            Err(error) => {
+                pp_error!(self, "read failed: {error}");
+                Err(RtspSourceError::Ffmpeg(error).into())
             }
         }
-        for pad in self.pads.iter_mut() {
-            pad.push_eos(&self.pp_log)?;
-        }
-        pp_info!(self, "event=eos phase=source_completed outcome=ok");
-        Ok(())
     }
 }
 
@@ -254,6 +241,72 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "open took {elapsed:?} — the configured timeout is not reaching ffmpeg"
         );
+    }
+
+    /// Each stream's packets go out on that stream's own output, carrying
+    /// its time base, and a clean end of the session ends every output.
+    /// Read from a file, which FFmpeg opens as it would a session: no
+    /// server is needed to see how the source hands on what it reads.
+    #[test]
+    fn each_stream_goes_out_on_its_own_output_and_the_end_ends_them_all() {
+        use std::sync::{Mutex, atomic::AtomicUsize, atomic::Ordering};
+
+        use crate::{elements::AppSink, pipeline::Pipeline, stream::StreamEvent};
+
+        let Some(path) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let (source, streams) =
+            RtspSource::open("rtsp", &path, RtspOptions::default()).expect("open the fixture");
+        let kinds: Vec<_> = streams.iter().map(|stream| stream.kind).collect();
+        let seen: Arc<Vec<Mutex<Vec<ffmpeg::Rational>>>> =
+            Arc::new(streams.iter().map(|_| Mutex::default()).collect());
+        let ends = Arc::new(AtomicUsize::new(0));
+        let (pipeline, ()) = Pipeline::new("rtsp", source, |source, ctx| {
+            for output in 0..kinds.len() {
+                let sink = AppSink::with_events(
+                    format!("stream-{output}"),
+                    {
+                        let seen = Arc::clone(&seen);
+                        move |buffer| {
+                            if let MediaBuffer::Packet(packet) = buffer {
+                                seen[output].lock().unwrap().push(packet.time_base());
+                            }
+                            Ok(())
+                        }
+                    },
+                    {
+                        let ends = Arc::clone(&ends);
+                        move |event: &StreamEvent| {
+                            if let StreamEvent::Eos = event {
+                                ends.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Ok(())
+                        }
+                    },
+                );
+                let branch = ctx.branch().to(sink)?;
+                ctx.attach(source, output, branch)?;
+            }
+            Ok(())
+        })
+        .expect("wire every stream");
+        pipeline.run().expect("run");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ends.load(Ordering::SeqCst) < kinds.len() {
+            assert!(Instant::now() < deadline, "not every output ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pipeline.stop();
+
+        for (output, stream) in streams.iter().enumerate() {
+            let seen = seen[output].lock().unwrap();
+            assert!(!seen.is_empty(), "stream {output} handed nothing on");
+            assert!(
+                seen.iter().all(|&time_base| time_base == stream.time_base),
+                "stream {output}'s packets carry its time base"
+            );
+        }
     }
 
     /// A caller that never touches `RtspOptions` still has to get a bounded

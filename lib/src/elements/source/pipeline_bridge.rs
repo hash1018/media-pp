@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
@@ -6,29 +7,28 @@ use std::{
     time::Duration,
 };
 
-use crate::pp_log::{PpLog, pp_info, pp_warn};
+use crate::pp_log::{PpLog, pp_info};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{InputContract, OutputContract},
-    control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Flow, Sink, Source, SourceElement, element_pp_log},
+    control::ControlMsg,
+    element::{
+        Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait, element_pp_log,
+    },
     error::Result,
-    pad::SrcPad,
+    produce::produce_source,
     queue::OverflowPolicy,
     stream::StreamEvent,
 };
 
-/// How long [`PipelineBridge::run`] waits for a buffer before looking at its
-/// own control channel again.
-///
-/// The reason this is a poll rather than a blocking receive: a bridge with no
-/// input is the ordinary state, not a fault, and a `Stop` sent to it has to
-/// arrive while it is in exactly that state. Short enough that stopping feels
-/// immediate, long enough that an idle bridge is not a spin.
-const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How long a feeding side waiting for room sleeps before looking at its
+/// deadline and its connection again: the bridge taking a buffer wakes it
+/// sooner, but a connection replaced or a bridge gone does not.
+const ROOM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Errors specific to [`PipelineBridge`].
 #[derive(Debug, ThisError)]
@@ -105,8 +105,8 @@ impl Default for PipelineBridgeOptions {
 ///                        └──────── one bounded queue ───────┘
 /// ```
 ///
-/// The downstream half is this element, driven as its pipeline's own
-/// `SourceElement`. The upstream half is a [`Sink`] from
+/// The downstream half is this element, its pipeline's own source. The
+/// upstream half is a [`Sink`] from
 /// [`PipelineBridgeHandle::connect`], which whichever pipeline is feeding it
 /// terminates at.
 ///
@@ -173,16 +173,29 @@ impl Default for PipelineBridgeOptions {
 /// unguarded is a [`crate::elements::Pacer`] — it would be pacing one
 /// pipeline's timestamps against another pipeline's clock, which is a stream
 /// released all at once or one that never arrives.
-pub struct PipelineBridge {
+pub struct PipelineBridge(ProducingSource<Bridging>);
+
+produce_source!(PipelineBridge);
+
+/// What a [`PipelineBridge`] hands on, as its feeding side hands it over:
+/// all of its work, which the framework makes the source.
+struct Bridging {
     pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<BridgeShared>,
-    pad: SrcPad,
-    /// Its pipeline's, for the timeline a segment this begins is on.
-    state: Option<Arc<crate::playback_state::PlaybackState>>,
+    /// Rung by the feeding side as it hands something over — see
+    /// [`BridgeShared::wake`].
+    bell: Receiver<()>,
+    /// Its pipeline's, for saying how many buffers were dropped.
+    bus: Option<Bus>,
+    /// How many drops the bus has been told of.
+    reported_drops: u64,
     /// The connection whose buffers went on last, to tell when another's
     /// begin.
     handing_on: Option<u64>,
+    /// What was taken over and is still to go on, in order: a flush's
+    /// segment, another input's, and the buffer behind them.
+    owed: VecDeque<Produced>,
 }
 
 /// Shared between the bridge and every handle and sink derived from it.
@@ -194,8 +207,12 @@ struct BridgeShared {
     /// lock, or a replacement racing with it could have its own first buffer
     /// overtaken by the old input's last.
     state: Mutex<BridgeState>,
-    /// Woken by a push, by a connection change, and by `finish`.
+    /// Woken by a push, by a connection change, by `finish`, and by the
+    /// bridge taking a buffer, which makes room.
     changed: std::sync::Condvar,
+    /// The bridge's own bell, rung with `changed` by what the feeding side
+    /// does — see [`BridgeShared::wake`].
+    bell: Sender<()>,
     /// Issues a distinct identity for every `connect`, including one
     /// replacing another.
     next_connection: AtomicU64,
@@ -242,6 +259,9 @@ impl PipelineBridge {
             options.depth,
             options.policy
         );
+        // One ring is enough: the bridge looks at everything there is each
+        // time it is woken.
+        let (bell, rung) = bounded(1);
         let shared = Arc::new(BridgeShared {
             state: Mutex::new(BridgeState {
                 buffers: std::collections::VecDeque::new(),
@@ -251,6 +271,7 @@ impl PipelineBridge {
                 flush: false,
             }),
             changed: std::sync::Condvar::new(),
+            bell,
             next_connection: AtomicU64::new(1),
             dropped: AtomicU64::new(0),
             options,
@@ -259,18 +280,28 @@ impl PipelineBridge {
             shared: Arc::downgrade(&shared),
             name: name.clone(),
         };
-        let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
         (
-            Self {
+            Self(ProducingSource::new(Bridging {
                 pp_log,
                 name,
                 shared,
-                pad,
-                state: None,
+                bell: rung,
+                bus: None,
+                reported_drops: 0,
                 handing_on: None,
-            },
+                owed: VecDeque::new(),
+            })),
             handle,
         )
+    }
+}
+
+impl BridgeShared {
+    /// Wakes whoever waits on this bridge — the bridge for what the feeding
+    /// side did, and a feeding side waiting for room.
+    fn wake(&self) {
+        self.changed.notify_all();
+        let _ = self.bell.try_send(());
     }
 }
 
@@ -316,7 +347,7 @@ impl PipelineBridgeHandle {
             state.connection = Some(id);
             state.input_ended = false;
         }
-        shared.changed.notify_all();
+        shared.wake();
         Ok(Box::new(PipelineBridgeSink {
             pp_log: element_pp_log(ElementType::Other, &self.name, None),
             name: self.name.clone(),
@@ -336,7 +367,7 @@ impl PipelineBridgeHandle {
             .is_some_and(|shared| shared.state.lock().unwrap().input_ended)
     }
 
-    /// Ends the bridge: `Eos` goes downstream and its `run` returns.
+    /// Ends the bridge: `Eos` goes downstream and its thread ends.
     ///
     /// This is the ordered ending, and the difference from stopping the
     /// downstream pipeline is what a muxer down there does about it — writes
@@ -346,7 +377,7 @@ impl PipelineBridgeHandle {
             return;
         };
         shared.state.lock().unwrap().finished = true;
-        shared.changed.notify_all();
+        shared.wake();
     }
 }
 
@@ -403,7 +434,7 @@ impl Sink for PipelineBridgeSink {
             if state.buffers.len() < shared.options.depth {
                 state.buffers.push_back((self.id, buf));
                 drop(state);
-                shared.changed.notify_all();
+                shared.wake();
                 return Ok(());
             }
             match shared.options.policy {
@@ -422,7 +453,7 @@ impl Sink for PipelineBridgeSink {
                     }
                     let (guard, _) = shared
                         .changed
-                        .wait_timeout(state, left.min(CONTROL_POLL_INTERVAL))
+                        .wait_timeout(state, left.min(ROOM_POLL_INTERVAL))
                         .unwrap();
                     state = guard;
                 }
@@ -446,7 +477,7 @@ impl Sink for PipelineBridgeSink {
         state.input_ended = true;
         state.connection = None;
         drop(state);
-        shared.changed.notify_all();
+        shared.wake();
         pp_info!(self, "input ended");
         Ok(())
     }
@@ -476,13 +507,13 @@ impl Sink for PipelineBridgeSink {
                 state.buffers.clear();
                 state.flush = true;
             }
-            shared.changed.notify_all();
+            shared.wake();
         }
         Ok(())
     }
 }
 
-impl Element for PipelineBridge {
+impl Element for Bridging {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -500,45 +531,33 @@ impl Element for PipelineBridge {
     }
 
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.state = Some(Arc::clone(&context.state));
+        self.bus = Some(context.bus.for_element(context.source_id));
     }
 }
 
-impl PipelineBridge {
-    /// Begins a segment downstream: a flushed one where the feeding side's
-    /// flush crossed, and one not flushed where another input's stream
-    /// begins — see `crate::stream`. On this pipeline's current timeline,
-    /// which only its own seeks move on, and at nothing it can say: where
-    /// the feeding side's stream stands is that pipeline's to know, and the
-    /// timestamps cross as they are. Only in a pipeline, as a source's
-    /// segments are.
-    fn begin_segment(&mut self, flushed: bool, bus: &Bus) {
-        let Some(state) = &self.state else {
+impl Bridging {
+    /// Says on the bus how many buffers the feeding side dropped since it
+    /// last said so — same visibility a `Queue` gives its own drops, from
+    /// the side that has a bus to say it on.
+    fn report_drops(&mut self) {
+        let dropped = self.shared.dropped.load(Ordering::Relaxed);
+        if dropped <= self.reported_drops {
             return;
-        };
-        let segment = crate::stream::Segment {
-            id: state.timeline(),
-            flushed,
-            position: Duration::ZERO,
-            start: Duration::ZERO,
-            show_from: None,
-            backwards: false,
-        };
-        if let Err(error) =
-            crate::stream::begin_segment(std::slice::from_mut(&mut self.pad), segment, &self.pp_log)
-        {
-            bus.post_downstream_error(&self.pp_log, self.element_type(), self.name.clone(), error);
+        }
+        self.reported_drops = dropped;
+        if let Some(bus) = &self.bus {
+            bus.post(
+                &self.pp_log,
+                BusEvent::Dropped {
+                    element_type: self.element_type(),
+                    name: self.name.clone(),
+                },
+            );
         }
     }
 }
 
-impl Source for PipelineBridge {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for PipelineBridge {
+impl Produce for Bridging {
     /// Live, because it cannot be asked for a buffer it has not been given.
     /// Whether what feeds it is live is the other pipeline's business and not
     /// something this can see.
@@ -546,75 +565,63 @@ impl SourceElement for PipelineBridge {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        let mut reported_drops = 0;
-        loop {
-            let dropped = self.shared.dropped.load(Ordering::Relaxed);
-            if dropped > reported_drops {
-                reported_drops = dropped;
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::Dropped {
-                        element_type: self.element_type(),
-                        name: self.name.clone(),
-                    },
-                );
-            }
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            // Waited on with a timeout rather than blocked on, because having
-            // nothing to carry is this element's ordinary state and a `Stop`
-            // has to arrive while it is in it.
-            let taken = {
-                let shared = &self.shared;
-                let state = shared.state.lock().unwrap();
-                let (mut state, _) = shared
-                    .changed
-                    .wait_timeout(state, CONTROL_POLL_INTERVAL)
-                    .unwrap();
-                if state.finished {
-                    drop(state);
-                    pp_info!(self, "finished");
-                    if let Err(error) = self.pad.push_eos(&self.pp_log) {
-                        pp_warn!(self, "end of stream was not delivered: {error}");
-                    }
-                    return Ok(());
-                }
-                let flush = std::mem::take(&mut state.flush);
-                (state.buffers.pop_front(), flush)
-            };
-            let (taken, flush) = taken;
-            if flush {
-                self.pad.control(&ControlMsg::Flush)?;
-                self.begin_segment(true, bus);
-            }
-            if let Some((connection, buffer)) = taken {
-                self.shared.changed.notify_all();
-                // Another input's stream begins here. The first's needs no
-                // segment of its own: the stream began with one.
-                if self
-                    .handing_on
-                    .replace(connection)
-                    .is_some_and(|before| before != connection)
-                {
-                    self.begin_segment(false, bus);
-                }
-                // One buffer's failure is not this bridge's end, the same way
-                // a `Queue` reports a failing downstream and keeps its worker.
-                if let Err(error) = self.pad.push(buffer) {
-                    bus.post_downstream_error(
-                        &self.pp_log,
-                        self.element_type(),
-                        self.name.clone(),
-                        error,
-                    );
-                }
-            }
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Passthrough
+    }
+
+    /// What the feeding side handed over next, in order. A flush that
+    /// crossed goes on ahead of everything, as a flushed segment — see
+    /// `crate::stream` — and another input's stream begins with a segment of
+    /// its own, not flushed. Both are on this pipeline's current timeline,
+    /// which only its own seeks move on, and at nothing the bridge can say:
+    /// where the feeding side's stream stands is that pipeline's to know,
+    /// and the timestamps cross as they are. With nothing handed over, it
+    /// waits for the feeding side to ring.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        if let Some(owed) = self.owed.pop_front() {
+            return Ok(owed);
         }
+        self.report_drops();
+        let (taken, flush) = {
+            let mut state = self.shared.state.lock().unwrap();
+            if state.finished {
+                drop(state);
+                pp_info!(self, "finished");
+                return Ok(Produced::End);
+            }
+            let flush = std::mem::take(&mut state.flush);
+            (state.buffers.pop_front(), flush)
+        };
+        let begins = |flushed| Produced::Segment {
+            flushed,
+            position: Duration::ZERO,
+            start: Duration::ZERO,
+        };
+        if flush {
+            self.owed.push_back(begins(true));
+        }
+        if let Some((connection, buffer)) = taken {
+            // Room for the feeding side.
+            self.shared.changed.notify_all();
+            // Another input's stream begins here. The first's needs no
+            // segment of its own: the stream began with one.
+            if self
+                .handing_on
+                .replace(connection)
+                .is_some_and(|before| before != connection)
+            {
+                self.owed.push_back(begins(false));
+            }
+            self.owed.push_back(Produced::Buffer(buffer));
+        }
+        if let Some(owed) = self.owed.pop_front() {
+            return Ok(owed);
+        }
+        // Nothing handed over is this element's ordinary state, and the
+        // pipeline has to be able to reach it in it: let go as soon as it
+        // asks.
+        wait.recv(&self.bell);
+        Ok(Produced::Nothing)
     }
 }
 
@@ -1026,7 +1033,7 @@ mod tests {
     fn superseding_a_live_input_discards_what_it_had_queued() {
         let (bridge, handle) = PipelineBridge::new("bridge", PipelineBridgeOptions::default());
         // No pipeline, so nothing drains and what is queued stays queued.
-        let shared = Arc::clone(&bridge.shared);
+        let shared = Arc::clone(&bridge.0.inner().shared);
         let mut first = handle.connect().expect("the bridge is alive");
 
         first.consume(packet(1)).expect("queued behind nothing");
@@ -1054,7 +1061,7 @@ mod tests {
             },
         );
         // No pipeline: nothing drains, so the second buffer has nowhere to go.
-        let shared = Arc::clone(&bridge.shared);
+        let shared = Arc::clone(&bridge.0.inner().shared);
         let mut input = handle.connect().expect("the bridge is alive");
 
         input.consume(packet(1)).expect("fills the one slot");

@@ -84,6 +84,7 @@ use crate::elements::{
 use crate::elements::{VulkanGpuError, VulkanWindowRendererError};
 use crate::{
     control::{PrerollError, SeekError},
+    element::ProduceError,
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
         AudioResamplerError, AudioTempoError, AudioVolumeError, AudioWaveformError,
@@ -497,6 +498,10 @@ pub enum Error {
     /// A queue worker or capacity policy failed.
     #[error(transparent)]
     QueueError(#[from] QueueError),
+
+    /// See [`crate::element::ProduceError`].
+    #[error(transparent)]
+    ProduceError(#[from] ProduceError),
 
     /// See [`crate::elements::PipelineBridgeError`].
     #[error(transparent)]

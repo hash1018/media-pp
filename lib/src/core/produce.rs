@@ -16,11 +16,12 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::OutputContract,
-    control::{ChannelGone, ControlReceiver, handle_request},
+    control::{ChannelGone, ControlMsg, ControlReceiver, handle_request},
     element::{Context, Element, ElementType, Source, SourceElement},
     error::Result,
     graph::ElementId,
     pad::SrcPad,
+    playback_state::PlaybackState,
     pp_log::{PpLog, pp_info},
 };
 
@@ -39,8 +40,9 @@ use crate::{
 /// [`Pipeline::new`](crate::pipeline::Pipeline::new) or
 /// [`PipelineBuilder::add_source`](crate::pipeline::PipelineBuilder::add_source),
 /// which take a `Produce` as they take a [`SourceElement`] (see
-/// [`IntoSource`]). One output, no seeking: a source with several outputs
-/// or one that can be sought is written the direct way.
+/// [`IntoSource`]). One output by default; a source with several — a
+/// stream each, as a demuxer has — says what they are in
+/// [`Self::outputs`] and which each buffer is for in [`Produced::On`].
 pub trait Produce: Element {
     /// Whether it makes what it makes at a rate of its own — a camera, a
     /// clock of its own — rather than as fast as it is asked: see
@@ -61,6 +63,17 @@ pub trait Produce: Element {
     /// default.
     fn output_contract(&self) -> OutputContract {
         OutputContract::Unknown
+    }
+
+    /// The pads it hands on through, in the order [`Produced::On`] numbers
+    /// them — asked once, as the framework makes it a source. One by
+    /// default, named for the source and declaring
+    /// [`Self::output_contract`].
+    fn outputs(&self) -> Vec<SrcPad> {
+        vec![SrcPad::with_contract(
+            format!("{}_src", self.name()),
+            self.output_contract(),
+        )]
     }
 
     /// Stops what it reads from while the pipeline is paused — see
@@ -92,8 +105,28 @@ pub trait Produce: Element {
 
 /// What a [`Produce`] made when asked.
 pub enum Produced {
-    /// A buffer, to go on.
+    /// A buffer, to go on through the first output — the one a source with
+    /// one output has.
     Buffer(MediaBuffer),
+    /// A buffer, to go on through the output of this number — see
+    /// [`Produce::outputs`].
+    On(usize, MediaBuffer),
+    /// A new run of what it makes begins here, through every output ahead
+    /// of what it makes next — a [`Segment`](crate::stream::Segment) on the
+    /// timeline its pipeline is on: another lap of a file, another input's
+    /// stream. `position` is where the run begins in its media and `start`
+    /// where on the timeline its buffers are stamped from. `flushed`: what
+    /// it handed on before is to be let go of, as when what feeds it began
+    /// again elsewhere, and a flush goes on ahead of the segment. Only in a
+    /// pipeline: a source driven by hand begins nothing.
+    Segment {
+        /// Whether what went on before is to be let go of.
+        flushed: bool,
+        /// Where the run begins in the source's media.
+        position: Duration,
+        /// Where on the timeline its buffers are stamped from.
+        start: Duration,
+    },
     /// Nothing this time — a wait let go, or nothing was due. Asked again
     /// once the pipeline has had the thread.
     Nothing,
@@ -223,23 +256,41 @@ pub(crate) enum Received<T> {
     Gone,
 }
 
+/// Errors the framework running a [`Produce`] finds in what it was handed.
+#[derive(Debug, thiserror::Error)]
+pub enum ProduceError {
+    /// [`Produced::On`] named an output the source does not have — see
+    /// [`Produce::outputs`].
+    #[error("a buffer was made for output {index}, and there are {outputs}")]
+    NoOutput {
+        /// The output it was made for.
+        index: usize,
+        /// How many there are.
+        outputs: usize,
+    },
+}
+
 /// What a [`Produce`] is in a pipeline: the source the framework makes of
-/// it, with the pad and the loop. Nothing to call on it — it is what
+/// it, with the pads and the loop. Nothing to call on it — it is what
 /// [`IntoSource`] hands a pipeline, and what the pipeline's wiring is given.
 pub struct ProducingSource<P> {
     inner: P,
-    pad: SrcPad,
+    pads: Vec<SrcPad>,
     /// Time spent paused so far, which [`Wait::now`] leaves out.
     paused: Duration,
+    /// Its pipeline's, for the timeline a segment it begins is on — `None`
+    /// driven by hand.
+    state: Option<Arc<PlaybackState>>,
 }
 
 impl<P: Produce> ProducingSource<P> {
     pub(crate) fn new(inner: P) -> Self {
-        let pad = SrcPad::with_contract(format!("{}_src", inner.name()), inner.output_contract());
+        let pads = inner.outputs();
         Self {
             inner,
-            pad,
+            pads,
             paused: Duration::ZERO,
+            state: None,
         }
     }
 
@@ -290,13 +341,14 @@ impl<P: Produce> Element for ProducingSource<P> {
     }
 
     fn attach_context(&mut self, context: &Arc<Context>) {
+        self.state = Some(Arc::clone(&context.state));
         self.inner.attach_context(context);
     }
 }
 
 impl<P: Produce> Source for ProducingSource<P> {
     fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
+        &mut self.pads
     }
 }
 
@@ -360,11 +412,13 @@ impl<P: Produce> ProducingSource<P> {
                 paused: self.paused,
             };
             match self.inner.produce(&mut wait)? {
-                Produced::Buffer(buf) => {
-                    if let Err(error) = self.pad.push(buf) {
-                        self.report(bus, error);
-                    }
-                }
+                Produced::Buffer(buf) => self.hand_on(0, buf, bus)?,
+                Produced::On(index, buf) => self.hand_on(index, buf, bus)?,
+                Produced::Segment {
+                    flushed,
+                    position,
+                    start,
+                } => self.begin_segment(flushed, position, start, bus),
                 Produced::Nothing => {}
                 Produced::End => {
                     pp_info!(
@@ -372,12 +426,57 @@ impl<P: Produce> ProducingSource<P> {
                         "event=eos phase=source_completed outcome=ok"
                     );
                     let pp_log = self.inner.pp_log().clone();
-                    if let Err(error) = self.pad.push_eos(&pp_log) {
-                        self.report(bus, error);
+                    for index in 0..self.pads.len() {
+                        if let Err(error) = self.pads[index].push_eos(&pp_log) {
+                            self.report(bus, error);
+                        }
                     }
                     return Ok(());
                 }
             }
+        }
+    }
+
+    /// Pushes `buf` through output `index`, reporting what refuses it: one
+    /// buffer's failure after this is not the source's end. An output it
+    /// does not have is the source's own mistake, and ends it.
+    fn hand_on(&mut self, index: usize, buf: MediaBuffer, bus: &Bus) -> Result<()> {
+        let outputs = self.pads.len();
+        let pad = self
+            .pads
+            .get_mut(index)
+            .ok_or(ProduceError::NoOutput { index, outputs })?;
+        if let Err(error) = pad.push(buf) {
+            self.report(bus, error);
+        }
+        Ok(())
+    }
+
+    /// Begins a segment through every output — see [`Produced::Segment`] —
+    /// behind a flush where it is `flushed`. The flush is not the
+    /// pipeline's, so every queue after this carries it on.
+    fn begin_segment(&mut self, flushed: bool, position: Duration, start: Duration, bus: &Bus) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let segment = crate::stream::Segment {
+            id: state.timeline(),
+            flushed,
+            position,
+            start,
+            show_from: None,
+            backwards: state.backwards(),
+        };
+        if flushed {
+            for index in 0..self.pads.len() {
+                if let Err(error) = self.pads[index].control(&ControlMsg::Flush) {
+                    self.report(bus, error);
+                }
+            }
+        }
+        let pp_log = self.inner.pp_log().clone();
+        if let Err(error) = crate::stream::begin_segment(&mut self.pads, segment, &pp_log) {
+            self.report(bus, error);
         }
     }
 }
@@ -812,6 +911,191 @@ mod tests {
             .map(|(what, _)| what)
             .collect();
         assert_eq!(what, ["starting"]);
+    }
+
+    /// Makes what it is told to, in order, on two outputs, then ends.
+    struct Scripted {
+        pp_log: PpLog,
+        script: std::collections::VecDeque<Produced>,
+    }
+
+    impl Element for Scripted {
+        fn name(&self) -> Arc<str> {
+            "scripted".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Produce for Scripted {
+        fn is_live(&self) -> bool {
+            true
+        }
+        fn outputs(&self) -> Vec<SrcPad> {
+            vec![SrcPad::new("src_0"), SrcPad::new("src_1")]
+        }
+        fn produce(&mut self, _wait: &mut Wait<'_>) -> Result<Produced> {
+            Ok(self.script.pop_front().unwrap_or(Produced::End))
+        }
+    }
+
+    /// What a [`Logged`] wrote down, in order.
+    type Log = Arc<Mutex<Vec<String>>>;
+
+    /// Writes down everything it is handed: a packet as its one byte, the
+    /// stream's events and a flush as words.
+    struct Logged(PpLog, Log);
+
+    impl Element for Logged {
+        fn name(&self) -> Arc<str> {
+            "logged".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.0
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.0
+        }
+    }
+
+    impl Sink for Logged {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Packet(packet) = buf {
+                let byte = packet.data().map_or(0, |data| data[0]);
+                self.1.lock().unwrap().push(byte.to_string());
+            }
+            Ok(())
+        }
+        fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> Result<()> {
+            let word = match event {
+                crate::stream::StreamEvent::Segment(segment) if segment.flushed => "flushed",
+                crate::stream::StreamEvent::Segment(_) => "segment",
+                crate::stream::StreamEvent::Eos => "eos",
+            };
+            self.1.lock().unwrap().push(word.into());
+            Ok(())
+        }
+        fn flow(&mut self, crate::element::Flow(msg): crate::element::Flow<'_>) -> Result<()> {
+            if matches!(msg, ControlMsg::Flush) {
+                self.1.lock().unwrap().push("flush".into());
+            }
+            Ok(())
+        }
+    }
+
+    fn packet(byte: u8) -> MediaBuffer {
+        MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[byte])))
+    }
+
+    /// Runs `script` to its end with each output logged, answering both
+    /// logs and the pipeline.
+    fn scripted(script: Vec<Produced>) -> (Arc<Pipeline>, [Log; 2]) {
+        let logs = [Arc::default(), Arc::default()];
+        let source = Scripted {
+            pp_log: element_pp_log(ElementType::Other, "scripted", None),
+            script: script.into(),
+        };
+        let (pipeline, ()) = Pipeline::new("scripted", source, |source, ctx| {
+            for (output, log) in logs.iter().enumerate() {
+                let sink = Logged(
+                    element_pp_log(ElementType::Other, "logged", None),
+                    Arc::clone(log),
+                );
+                let branch = ctx.branch().to(sink)?;
+                ctx.attach(source, output, branch)?;
+            }
+            Ok(())
+        })
+        .expect("wiring succeeds");
+        pipeline.run().expect("run");
+        (pipeline, logs)
+    }
+
+    fn ended(log: &Mutex<Vec<String>>) -> bool {
+        log.lock().unwrap().last().is_some_and(|word| word == "eos")
+    }
+
+    /// A source with several outputs hands each buffer to the one it was
+    /// made for — the first, where it does not say — and ends every one.
+    #[test]
+    fn each_output_is_handed_what_was_made_for_it_and_its_end() {
+        let (pipeline, logs) = scripted(vec![
+            Produced::On(0, packet(1)),
+            Produced::On(1, packet(2)),
+            Produced::Buffer(packet(3)),
+            Produced::End,
+        ]);
+        wait_for("every output ends", || logs.iter().all(|log| ended(log)));
+        pipeline.stop();
+        assert_eq!(*logs[0].lock().unwrap(), ["segment", "1", "3", "eos"]);
+        assert_eq!(*logs[1].lock().unwrap(), ["segment", "2", "eos"]);
+    }
+
+    /// A segment a source begins goes through every output, in order with
+    /// what it made; a flushed one behind a flush, which what it made
+    /// afterwards follows.
+    #[test]
+    fn a_segment_a_source_begins_reaches_every_output_in_order() {
+        let begins = |flushed| Produced::Segment {
+            flushed,
+            position: Duration::ZERO,
+            start: Duration::ZERO,
+        };
+        let (pipeline, logs) = scripted(vec![
+            Produced::On(0, packet(1)),
+            begins(false),
+            Produced::On(0, packet(2)),
+            begins(true),
+            Produced::On(1, packet(3)),
+            Produced::End,
+        ]);
+        wait_for("every output ends", || logs.iter().all(|log| ended(log)));
+        pipeline.stop();
+        assert_eq!(
+            *logs[0].lock().unwrap(),
+            ["segment", "1", "segment", "2", "flush", "flushed", "eos"]
+        );
+        assert_eq!(
+            *logs[1].lock().unwrap(),
+            ["segment", "segment", "flush", "flushed", "3", "eos"]
+        );
+    }
+
+    /// A buffer made for an output the source does not have is the
+    /// source's own mistake: it ends, saying which, rather than dropping
+    /// the buffer without a word.
+    #[test]
+    fn a_buffer_for_an_output_there_is_not_ends_the_source() {
+        let (pipeline, _logs) = scripted(vec![Produced::On(2, packet(1))]);
+        let error = pipeline
+            .bus()
+            .iter()
+            .find_map(|event| match event {
+                BusEvent::Error { error, .. } => Some(error),
+                _ => None,
+            })
+            .expect("the source says why it ended");
+        pipeline.stop();
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::ProduceError(ProduceError::NoOutput {
+                    index: 2,
+                    outputs: 2
+                })
+            ),
+            "{error}"
+        );
     }
 
     /// A receive with a deadline gives up there, takes a message already

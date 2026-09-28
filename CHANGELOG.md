@@ -91,12 +91,25 @@ compile error with no explanation.
   feature, `EncodePath::Vulkan` always). A `match` on any of them needs an
   arm for it.
 
+- **`Produced` has `On` and `Segment` variants**, for a source with
+  several outputs and one that begins a segment of its own — see Added.
+  A `match` on `Produced` needs arms for them.
+
 - **`RackError` has a `Waits` variant**: a `Rack` refuses a `Pacer` or a
   `VideoSynchronizer`, which it could only run on the thread feeding it —
   see Added. A `match` on `RackError` needs an arm for it.
 
 ### Added
 
+- **A `Produce` can have several outputs, and begin a segment.** It says
+  what its pads are in `Produce::outputs` — one, named for it, by
+  default — and which each buffer is for with `Produced::On(n, buffer)`;
+  its end goes out through every one. `Produced::Segment` begins a new run
+  of what it makes through every output, on the timeline its pipeline is
+  on — another input's stream, another lap — behind a flush where it is
+  `flushed`. A buffer for an output it does not have ends the source with
+  `ProduceError::NoOutput`. `RtspSource`, `PipelineBridge` and
+  `WebRtcTrackSource` are written on it now, their API unchanged.
 - **A `Pacer` or `VideoSynchronizer` always runs behind a queue.** Each
   waits on the clock inside `consume`, and in a chain with nothing queued
   straight in front of it, those waits held up the demuxer or decoder
