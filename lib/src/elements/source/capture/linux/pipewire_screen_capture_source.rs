@@ -850,7 +850,7 @@ impl PipeWireScreenCaptureSource {
     /// configured output rate, not the compositor's irregular capture rate.
     /// Same contract as `DxgiCaptureSource::time_base`.
     pub fn time_base(&self) -> ffmpeg::Rational {
-        self.0.inner().frame_rate.get().invert()
+        self.0.inner().time_base()
     }
 
     /// Runtime control for the rate this captures at.
@@ -869,6 +869,12 @@ impl PipeWireScreenCaptureSource {
 }
 
 impl Capturing {
+    /// The unit each emitted frame's `pts` counts in — see
+    /// [`PipeWireScreenCaptureSource::time_base`].
+    fn time_base(&self) -> ffmpeg::Rational {
+        self.frame_rate.get().invert()
+    }
+
     /// Offers the latest captured image under this tick's own `pts`, copying
     /// it out of the shared buffer only when the PipeWire thread has captured
     /// since the last copy.
