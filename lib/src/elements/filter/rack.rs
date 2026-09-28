@@ -27,6 +27,16 @@ pub enum RackError {
         /// How many source pads it turned out to have.
         count: usize,
     },
+
+    /// One of the elements handed over waits on the clock, as a
+    /// [`Pacer`](crate::elements::Pacer) does, and runs behind a queue of
+    /// its own — which a chain gives it, and a rack, running what it holds
+    /// on the thread that feeds it, cannot.
+    #[error("a Rack runs what it holds on the thread feeding it, and {name} waits on the clock")]
+    Waits {
+        /// The offending element's own name.
+        name: Arc<str>,
+    },
 }
 
 /// A stretch of chain whose contents can be replaced while frames are
@@ -175,6 +185,11 @@ impl RackHandle {
                 return Err(RackError::NotSingleOutput {
                     name: element.name(),
                     count,
+                });
+            }
+            if element.own_queue().is_some() {
+                return Err(RackError::Waits {
+                    name: element.name(),
                 });
             }
         }
@@ -836,6 +851,39 @@ mod tests {
             })])
             .expect_err("two outputs cannot be put in a line");
         assert!(matches!(error, RackError::NotSingleOutput { count: 2, .. }));
+    }
+
+    /// What waits on the clock runs behind a queue of its own, which a
+    /// chain gives it and a rack cannot: in one, its waits would hold the
+    /// thread that feeds the rack. Refused at the handle, the whole
+    /// replacement with it, and what the rack held stays.
+    #[test]
+    fn what_waits_on_the_clock_is_refused_and_what_was_held_stays() {
+        let mut rig = rig();
+        rig.handle
+            .replace(vec![Box::new(Marker::new(
+                "first",
+                1,
+                rig.controls.clone(),
+            ))])
+            .expect("one filter");
+        rig.rack.consume(frame(0)).expect("the first line");
+
+        let error = rig
+            .handle
+            .replace(vec![
+                Box::new(Marker::new("other", 3, rig.controls.clone())),
+                Box::new(crate::elements::Pacer::new("pacer")),
+            ])
+            .expect_err("a pacer cannot go in a rack");
+        assert!(
+            matches!(&error, RackError::Waits { name } if &**name == "pacer"),
+            "{error}"
+        );
+        rig.rack.consume(frame(0)).expect("still the first line");
+
+        let received = rig.received.lock().unwrap();
+        assert_eq!(pts_of(&received[1]), 1, "what the rack held marked it");
     }
 
     /// Dropping the rack leaves the handle usable rather than panicking on a

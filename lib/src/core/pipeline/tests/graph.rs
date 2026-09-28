@@ -95,6 +95,35 @@ fn topology_lists_source_through_terminal_per_branch() {
     // this used to hang the test process forever.
 }
 
+/// What waits on the clock runs behind a queue of its own, so its waits
+/// hold up nothing upstream: the queue put straight in front of it, where
+/// there is one — as above, and as every caller that knew to put one there
+/// did — and otherwise one the chain puts there, named for it.
+#[test]
+fn what_waits_on_the_clock_runs_behind_a_queue() {
+    let source = TestVideoSource::new("video", TestVideoOptions::default());
+    let (pipeline, ()) = Pipeline::new("waits", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(Pacer::new("first"))
+            .queue("frames", 2)
+            .pipe(VideoSynchronizer::new("second"))
+            .to(NoOpSink {
+                name: "noop".into(),
+                pp_log: element_pp_log(ElementType::Other, "noop", None),
+            })?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+
+    assert_eq!(
+        pipeline.topology(),
+        "TestVideoSource(video) - Queue(first-queue) - Pacer(first) - Queue(frames) \
+         - VideoSynchronizer(second) - Other(noop)"
+    );
+}
+
 /// Initial branches handed to [`TeeBuilder`] should render as starting
 /// under `Tee(...)`, not the pipeline's source. The whole initial
 /// fan-out is committed as one subgraph.
@@ -211,10 +240,11 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
         graph.topology_diagram(),
         concat!(
             "FileDemuxer(demux)#1\n",
-            "└── [src_0] → Pacer(pacer)#5\n",
-            "              └── [pacer_src] → Tee(tee)#4\n",
-            "                                ├── [tee_src0] → Other(sink-a)#2\n",
-            "                                └── [tee_src1] → Other(sink-b)#3",
+            "└── [src_0] → Queue(pacer-queue)#5\n",
+            "              └── [pacer-queue_src] → Pacer(pacer)#6\n",
+            "                                      └── [pacer_src] → Tee(tee)#4\n",
+            "                                                        ├── [tee_src0] → Other(sink-a)#2\n",
+            "                                                        └── [tee_src1] → Other(sink-b)#3",
         )
     );
 
@@ -224,8 +254,8 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
     assert_eq!(
         branches,
         vec![
-            "FileDemuxer(demux) - Pacer(pacer) - Tee(tee) - Other(sink-a)",
-            "FileDemuxer(demux) - Pacer(pacer) - Tee(tee) - Other(sink-b)",
+            "FileDemuxer(demux) - Queue(pacer-queue) - Pacer(pacer) - Tee(tee) - Other(sink-a)",
+            "FileDemuxer(demux) - Queue(pacer-queue) - Pacer(pacer) - Tee(tee) - Other(sink-b)",
         ]
     );
 }

@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, OwnQueue, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::PlaybackClock,
     playback_state::PlaybackState,
@@ -80,10 +80,16 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// process control: pause retains the in-flight buffer for resume, while
 /// seek and stop discard it.
 ///
-/// Normally place a [`crate::queue::Queue`] upstream so the paced waits do
-/// not stall the demux/decoder feeding it and those stages can run ahead
-/// into the queue. The type does not enforce that placement; without the
-/// queue, pacing simply blocks the upstream caller on the same thread.
+/// It runs on a thread of its own, behind a [`crate::queue::Queue`], so the
+/// paced waits never stall the demuxer or decoder feeding it: a queue put
+/// straight in front of it in a chain is the one it runs behind, and where
+/// there is none the chain puts one there — see
+/// [`crate::pipeline::ChainBuilder::pipe`]. What the queue holds is how far
+/// what feeds it may run ahead. Where decoded pictures come from a hardware
+/// decoder's fixed pool, which has to cover that as well as a picture
+/// waiting here and what is downstream, put the queue in front yourself, so
+/// that its depth is the one the pool was sized for. A
+/// [`crate::elements::Rack`] cannot give it a thread, and refuses it.
 ///
 /// Every `Pacer` in a pipeline (one per stream — video, audio, ...) measures
 /// against the same [`crate::playback_clock::PlaybackClock`], so they agree
@@ -407,6 +413,10 @@ impl Sink for Pacer {
             | ControlMsg::Seek(_) => {}
         }
         Ok(())
+    }
+
+    fn own_queue(&self) -> Option<OwnQueue> {
+        Some(OwnQueue(()))
     }
 }
 

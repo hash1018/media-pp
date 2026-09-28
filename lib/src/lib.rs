@@ -19,6 +19,8 @@
 //! boundary a downstream failure can no longer be returned to the pusher, so
 //! it is reported on the [`Bus`](bus::Bus) as
 //! [`BusEvent::Error`](bus::BusEvent::Error) and the worker keeps going.
+//! What waits on the clock — a [`Pacer`](elements::Pacer) — always runs
+//! behind one: the queue in front of it, or else one the chain adds.
 //!
 //! ```no_run
 //! use std::time::Duration;

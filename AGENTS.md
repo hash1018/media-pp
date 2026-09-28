@@ -36,6 +36,11 @@ final source of truth when documentation and implementation differ.
 - A direct `Sink::consume` call is synchronous and may return `Err`. A `Queue`
   is the explicit thread and recovery boundary: it reports a downstream data
   error as `BusEvent::Error`, drops that buffer, and continues its worker.
+  The one exception to "explicit": an element that waits on the clock
+  inside `consume` — `Pacer`, `VideoSynchronizer` — answers
+  `Sink::own_queue`, and a chain runs it behind the `.queue()` straight in
+  front of it or, where there is none, one it adds; a `Rack` refuses it.
+  Its constructor takes no depth, so callers need not know.
 - What a seek leaves behind is dropped between its `Flush` and its
   segment (`crate::stream`): the pipeline's own `Flush` puts every pad it
   passes and every `Queue` worker into flushing, and whatever reaches one

@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, OwnQueue, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
     playback_state::PlaybackState,
@@ -71,7 +71,11 @@ enum Decision {
 /// cannot make the picture run ahead.
 ///
 /// Do not put a `Pacer` in the same video branch; that would pace twice.
-/// Put a [`crate::queue::Queue`] upstream so waits do not block demux/decode.
+/// Like one, it runs on a thread of its own behind a
+/// [`crate::queue::Queue`], so its waits hold up no demuxing or decoding —
+/// the queue put straight in front of it, or else one a chain puts there;
+/// see [`crate::elements::Pacer`] on that queue and a hardware decoder's
+/// pool.
 pub struct VideoSynchronizer {
     pp_log: PpLog,
     name: Arc<str>,
@@ -331,6 +335,10 @@ impl Sink for VideoSynchronizer {
             self.frame_duration = FALLBACK_FRAME_DURATION;
         }
         Ok(())
+    }
+
+    fn own_queue(&self) -> Option<OwnQueue> {
+        Some(OwnQueue(()))
     }
 }
 

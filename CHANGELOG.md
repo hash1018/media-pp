@@ -91,8 +91,23 @@ compile error with no explanation.
   feature, `EncodePath::Vulkan` always). A `match` on any of them needs an
   arm for it.
 
+- **`RackError` has a `Waits` variant**: a `Rack` refuses a `Pacer` or a
+  `VideoSynchronizer`, which it could only run on the thread feeding it —
+  see Added. A `match` on `RackError` needs an arm for it.
+
 ### Added
 
+- **A `Pacer` or `VideoSynchronizer` always runs behind a queue.** Each
+  waits on the clock inside `consume`, and in a chain with nothing queued
+  straight in front of it, those waits held up the demuxer or decoder
+  feeding it, whose thread then waited on the clock too. Every example
+  and `Player` already queued in front of one; nothing made a caller
+  who did not know to. Now `ChainBuilder::pipe` puts a queue of eight
+  in front of one, named `<name>-queue`, where no `.queue()` stands
+  straight before it; one that does is the queue it runs behind, so
+  nothing changes for a chain that already had it, and putting it there
+  yourself is how to choose its depth — for a hardware decoder's fixed
+  pool, say.
 - **`Transform::stopping`** tells a stop from a seek's flush: it lets go
   of what the run as a whole kept, beside what `reset` does, and does
   what `reset` does by default. `TimestampOrigin` and `FrameRateLimiter`

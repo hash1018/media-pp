@@ -475,7 +475,9 @@ impl Context {
 /// consuming a buffer is a plain function call on the caller's thread —
 /// zero overhead. Thread boundaries are introduced explicitly by wrapping
 /// a `Sink` in a [`crate::queue::Queue`], not by elements spawning their
-/// own threads.
+/// own threads — but for this crate's that wait on the clock inside
+/// `consume`, which a chain puts behind a queue of their own; see
+/// [`crate::elements::Pacer`].
 pub trait Sink: Element {
     /// Returns whether calling [`Self::consume`] can make progress now.
     ///
@@ -584,6 +586,14 @@ pub trait Sink: Element {
         hooks(self, msg)
     }
 
+    /// Whether this element runs behind a queue of its own, for one of this
+    /// crate's that waits on the clock inside [`Self::consume`]: a type only
+    /// this crate can make, so `None` for every other.
+    #[doc(hidden)]
+    fn own_queue(&self) -> Option<OwnQueue> {
+        None
+    }
+
     /// Reacts to an event carried in the stream, in order with the buffers
     /// around it — a [`Segment`](crate::stream::Segment) beginning a run of
     /// them, a flushed one after a seek, the end of the stream — see
@@ -609,6 +619,13 @@ pub trait Sink: Element {
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Flow<'a>(pub(crate) &'a ControlMsg);
+
+/// Says an element waits on the clock inside `consume` and runs behind a
+/// queue of its own, as [`Sink`]'s hidden hook answers it — see
+/// [`crate::elements::Pacer`]. Only this crate can make one.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct OwnQueue(pub(crate) ());
 
 /// A pause, a resume and a stop, handed to `sink`'s hooks — what
 /// [`Sink::flow`] does unless an element of this crate says otherwise.
@@ -946,6 +963,10 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
         (**self).flow(flow)
     }
 
+    fn own_queue(&self) -> Option<OwnQueue> {
+        (**self).own_queue()
+    }
+
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         (**self).stream_event(event)
     }
@@ -1010,6 +1031,10 @@ mod tests {
         fn stream_event(&mut self, _event: &StreamEvent) -> Result<()> {
             Err(crate::error::Error::Other("opinionated".into()))
         }
+
+        fn own_queue(&self) -> Option<OwnQueue> {
+            Some(OwnQueue(()))
+        }
     }
 
     fn opinionated() -> Opinionated {
@@ -1059,6 +1084,7 @@ mod tests {
                 sink.stream_event(&segment).is_err(),
                 "nor for an event in the stream"
             );
+            assert!(sink.own_queue().is_some(), "not the default of no queue");
         }
         check(Box::new(opinionated()));
         check(Box::new(opinionated()) as Box<dyn Sink>);

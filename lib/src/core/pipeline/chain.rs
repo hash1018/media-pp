@@ -23,6 +23,13 @@ use crate::{
     stream::StreamEvent,
 };
 
+/// How many buffers wait in the queue a chain puts in front of an element
+/// that runs behind one of its own, where nothing put one there — see
+/// [`ChainBuilder::pipe`]: a quarter of a second of 30 fps pictures, and
+/// few enough for a hardware decoder's fixed pool to hold with its own
+/// references.
+const OWN_QUEUE_CAPACITY: usize = 8;
+
 /// Builds one chain segment (a run of elements that all execute on the same
 /// thread). Call [`ChainBuilder::queue`] to close the current segment behind
 /// a `Queue` and start a new one on its own worker thread.
@@ -632,12 +639,26 @@ impl ChainBuilder {
     /// receives what is upstream of it and hands on through its one pad —
     /// either a [`Filter`] or a [`Transform`], which the framework makes one
     /// of (see [`IntoFilter`]). It runs on the same thread as whatever is
-    /// upstream of it — direct function call, no queue.
+    /// upstream of it — direct function call, no queue — unless it waits on
+    /// the clock inside `consume`, as a [`Pacer`] and a
+    /// [`VideoSynchronizer`] do. Those run behind a queue of their own, so
+    /// the wait holds up nothing upstream: a [`Self::queue`] added straight
+    /// before them is that queue, and where there is none this puts one of
+    /// eight there, named `<name>-queue`.
     ///
     /// [`Transform`]: crate::element::Transform
+    /// [`Pacer`]: crate::elements::Pacer
+    /// [`VideoSynchronizer`]: crate::elements::VideoSynchronizer
     pub fn pipe<M>(mut self, element: impl IntoFilter<M>) -> Self {
         let mut element = element.into_filter();
         let name = element.name();
+        let behind_a_queue = self
+            .planned
+            .last()
+            .is_some_and(|node| node.info.element_type == ElementType::Queue);
+        if element.own_queue().is_some() && !behind_a_queue {
+            self = self.queue(format!("{name}-queue"), OWN_QUEUE_CAPACITY);
+        }
         let pad_count = element.src_pads().len();
         if pad_count != 1 && self.error.is_none() {
             self.error = Some(GraphError::NotSingleOutput {
