@@ -284,11 +284,12 @@
 //! # Features and platforms
 //!
 //! The crate has no default features. Hardware backends (`d3d11`, `d3d12`,
-//! `dxgi-capture`, `cuda`, `wasapi-*`, `pipewire-*`) and the optional `ort`
-//! and `webrtc` integrations are each behind their own Cargo feature, and
-//! backend-specific types carry the backend's prefix. [docs.rs] builds this
-//! crate for Linux and therefore omits the Windows-only API; the complete
-//! reference is published separately (see the repository README).
+//! `dxgi-capture`, `cuda`, `wasapi-*`, `pipewire-*`, `coreaudio-*`) and the
+//! optional `ort` and `webrtc` integrations are each behind their own Cargo
+//! feature, and backend-specific types carry the backend's prefix. [docs.rs]
+//! builds this crate for Linux and therefore omits the Windows-only and
+//! macOS-only API; the complete reference is published separately (see the
+//! repository README).
 //!
 //! # Logging
 //!

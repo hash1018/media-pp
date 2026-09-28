@@ -1,15 +1,16 @@
 //! Plays a generated 440 Hz tone for three seconds and demonstrates click-free
 //! runtime gain and mute changes:
 //! `TestAudioSource -> AudioResampler -> AudioVolume -> Queue -> renderer`.
-//! Windows uses `WasapiRenderer`; Linux uses `PipeWireAudioRenderer`.
+//! Windows uses `WasapiRenderer`, Linux `PipeWireAudioRenderer`, macOS
+//! `CoreAudioRenderer`.
 //!
 //!     cargo run -p audio_playback
 //!     cargo run -p audio_playback -- list|<device-name-substring>
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} example supports Windows (WASAPI) and Linux (PipeWire)",
+        "{} example supports Windows (WASAPI), Linux (PipeWire) and macOS (Core Audio)",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -22,6 +23,11 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    macos_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -188,6 +194,105 @@ mod linux_example {
         );
 
         // Deliberately differs from whatever the graph reports on systems
+        // configured to 44.1kHz or mono, proving AudioResampler owns the format
+        // conversion rather than the renderer doing it implicitly.
+        let source = TestAudioSource::new("tone", TestAudioOptions::default());
+        let resampler = AudioResampler::new("resampler", output_format);
+        let (volume, volume_handle) = AudioVolume::new("volume");
+        let (pipeline, ()) = Pipeline::new("audio-playback", source, |source, context| {
+            let branch = context
+                .branch()
+                .pipe(resampler)
+                .pipe(volume)
+                .queue("audio-output", 8)
+                .to(renderer)?;
+            context.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        pipeline.run()?;
+        thread::sleep(Duration::from_secs(1));
+        println!("volume: -12 dB");
+        volume_handle.set_gain_db(-12.0)?;
+        thread::sleep(Duration::from_secs(1));
+        println!("muted");
+        volume_handle.set_muted(true);
+        thread::sleep(Duration::from_millis(500));
+        println!("unmuted");
+        volume_handle.set_muted(false);
+        thread::sleep(Duration::from_millis(500));
+        pipeline.stop();
+
+        for event in pipeline.bus().iter() {
+            if let BusEvent::Error { name, error, .. } = event {
+                eprintln!("[{name}] error: {error}");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The macOS half of the same example, the same shape again: only the
+/// renderer and its device type differ.
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use std::{thread, time::Duration};
+
+    use media_pp::{
+        Result,
+        bus::BusEvent,
+        elements::{
+            AudioResampler, AudioVolume, CoreAudioRenderer, CoreAudioRendererOptions,
+            TestAudioOptions, TestAudioSource,
+        },
+        pipeline::Pipeline,
+    };
+
+    /// TestAudioSource -> AudioResampler -> AudioVolume -> Queue ->
+    /// CoreAudioRenderer: plays a 440Hz tone for three seconds and
+    /// demonstrates click-free runtime gain/mute changes.
+    ///
+    ///     cargo run -p audio_playback
+    ///     cargo run -p audio_playback -- list
+    ///     cargo run -p audio_playback -- <device-name-substring>
+    pub(super) fn run() -> Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let devices = CoreAudioRenderer::list_devices()?;
+        let argument = std::env::args().nth(1);
+        if argument.as_deref() == Some("list") {
+            for device in &devices {
+                println!(
+                    "{}{}",
+                    device.name,
+                    if device.is_default { " (default)" } else { "" }
+                );
+            }
+            return Ok(());
+        }
+
+        let device = devices
+            .into_iter()
+            .find(|device| match &argument {
+                Some(name) => device.name.contains(name),
+                None => device.is_default,
+            })
+            .ok_or_else(|| media_pp::Error::Other("no matching output device found".into()))?;
+        println!("selected: {}", device.name);
+
+        let (renderer, output_format) =
+            CoreAudioRenderer::open("speakers", CoreAudioRendererOptions { device })?;
+        println!(
+            "output: {}Hz, {} channel(s), {:?}",
+            output_format.sample_rate, output_format.channels, output_format.sample_format
+        );
+
+        // Deliberately differs from whatever the device reports on systems
         // configured to 44.1kHz or mono, proving AudioResampler owns the format
         // conversion rather than the renderer doing it implicitly.
         let source = TestAudioSource::new("tone", TestAudioOptions::default());

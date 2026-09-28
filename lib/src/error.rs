@@ -15,6 +15,8 @@ use thiserror::Error;
 
 use crate::element::ElementType;
 
+#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+use crate::elements::CoreAudioRendererError;
 #[cfg(all(
     target_os = "linux",
     feature = "pipewire-screen-capture",
@@ -690,6 +692,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
     #[error(transparent)]
     WasapiRendererError(#[from] WasapiRendererError),
+
+    /// Core Audio rendering failed.
+    #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+    #[error(transparent)]
+    CoreAudioRendererError(#[from] CoreAudioRendererError),
 
     /// ONNX Runtime inference or detector processing failed.
     #[cfg(feature = "ort")]

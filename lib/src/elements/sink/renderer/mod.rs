@@ -1,5 +1,6 @@
 //! Terminal elements that submit media to platform renderers. Windows
-//! implementations live under [`windows`], Linux ones under [`linux`]. [`submit_error`]'s `SubmitError`
+//! implementations live under [`windows`], Linux ones under [`linux`], macOS
+//! ones under [`macos`]. [`submit_error`]'s `SubmitError`
 //! remains here because it is backend-independent and shared by D3D11/D3D12
 //! (and potentially other GPU renderers). It is
 //! `media-pp`'s own type — always available regardless of which, if
@@ -8,13 +9,16 @@
 #[cfg(any(
     test,
     all(target_os = "windows", feature = "wasapi-renderer"),
-    all(target_os = "linux", feature = "pipewire-audio-renderer")
+    all(target_os = "linux", feature = "pipewire-audio-renderer"),
+    all(target_os = "macos", feature = "coreaudio-renderer")
 ))]
 mod audio_rate;
 #[cfg(feature = "cuda")]
 mod cuda;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 mod linux;
+#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+mod macos;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
     all(target_os = "linux", feature = "vulkan")
@@ -43,6 +47,8 @@ mod windows;
 pub use cuda::*;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use linux::*;
+#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+pub use macos::*;
 pub use submit_error::SubmitError;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),

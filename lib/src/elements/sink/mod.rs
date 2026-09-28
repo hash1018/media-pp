@@ -39,6 +39,8 @@ pub use muxer::{RtspMuxer, RtspMuxerError};
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;
 pub use renderer::SubmitError;
+#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+pub use renderer::{CoreAudioRenderer, CoreAudioRendererError, CoreAudioRendererOptions};
 #[cfg(feature = "cuda")]
 pub use renderer::{CudaFrameRenderer, CudaRenderer, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

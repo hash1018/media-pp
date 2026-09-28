@@ -221,6 +221,8 @@ pub enum ElementType {
     PipeWireAudioRenderer,
     /// Windows WASAPI audio renderer sink.
     WasapiRenderer,
+    /// macOS Core Audio renderer sink.
+    CoreAudioRenderer,
     /// RTSP publishing muxer sink, one or more tracks to an external
     /// server.
     RtspMuxer,

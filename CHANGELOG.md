@@ -106,7 +106,26 @@ compile error with no explanation.
   `VideoSynchronizer`, which it could only run on the thread feeding it —
   see Added. A `match` on `RackError` needs an arm for it.
 
+- **`ElementType` has a `CoreAudioRenderer` variant**, for the macOS audio
+  renderer — see Added. A `match` on `ElementType` needs an arm for it.
+
 ### Added
+
+- **`CoreAudioRenderer`: audio playback on macOS**, behind the new
+  `coreaudio-renderer` feature. It is the Core Audio counterpart of
+  `WasapiRenderer` and `PipeWireAudioRenderer` and keeps their contract:
+  `CoreAudioRenderer::list_devices` lists the devices with output
+  channels as `CoreAudioDevice`s, the default marked; `open(name,
+  CoreAudioRendererOptions { device })` returns the format the device
+  takes — its own rate and channels, 32-bit float interleaved — for an
+  `AudioResampler` in front of it, and a frame in any other format is a
+  `FormatMismatch`; it masters the playback clock from its first frame,
+  stretches its sound to the playback rate, plays out what it holds at the
+  end of the stream and stops the device for a pause. It plays through an
+  AUHAL output unit, whose real-time callback reads a 100 ms ring the
+  renderer writes, so where playback is comes from the device's own
+  timestamps and latency rather than from what was handed over.
+  `audio_playback` plays on macOS with it.
 
 - **A `Produce` can have several outputs, and begin a segment.** It says
   what its pads are in `Produce::outputs` — one, named for it, by

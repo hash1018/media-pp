@@ -35,6 +35,8 @@ pub use crate::platform::cuda::{
 pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub use crate::platform::linux::vulkan::{VulkanGpu, VulkanGpuError};
+#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+pub use crate::platform::macos::coreaudio::CoreAudioDevice;
 #[cfg(feature = "vulkan")]
 pub use crate::platform::vulkan::device::{VulkanDevice, VulkanDeviceError};
 #[cfg(feature = "vulkan")]
@@ -143,6 +145,8 @@ pub use sink::{
     ChunkPolicy, Segment, TokenTiming, WHISPER_SAMPLE_RATE, WhisperTranscriber,
     WhisperTranscriberError,
 };
+#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+pub use sink::{CoreAudioRenderer, CoreAudioRendererError, CoreAudioRendererOptions};
 #[cfg(feature = "cuda")]
 pub use sink::{CudaFrameRenderer, CudaRenderer, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

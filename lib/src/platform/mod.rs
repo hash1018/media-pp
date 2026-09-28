@@ -9,6 +9,8 @@ pub(crate) mod cuda;
 pub(crate) mod ffmpeg;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 #[cfg(feature = "vulkan")]
 pub(crate) mod vulkan;
 #[cfg(target_os = "windows")]

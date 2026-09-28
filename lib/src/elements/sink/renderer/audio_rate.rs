@@ -11,7 +11,8 @@
 #![cfg_attr(
     not(any(
         all(target_os = "windows", feature = "wasapi-renderer"),
-        all(target_os = "linux", feature = "pipewire-audio-renderer")
+        all(target_os = "linux", feature = "pipewire-audio-renderer"),
+        all(target_os = "macos", feature = "coreaudio-renderer")
     )),
     allow(dead_code)
 )]

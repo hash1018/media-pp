@@ -137,6 +137,34 @@ x11rb = { version = "0.13", optional = true, default-features = false, features 
     "randr",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Core Audio, for `CoreAudioRenderer`: the HAL for devices and their
+# latency, AudioToolbox for the output unit that plays to one. Without their
+# default features, which bind every framework header and Objective-C class.
+objc2-audio-toolbox = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "AUComponent",
+    "AudioComponent",
+    "AudioOutputUnit",
+    "AudioUnitProperties",
+    "objc2-core-audio-types",
+] }
+objc2-core-audio = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "AudioHardware",
+    "HostTime",
+    "objc2-core-audio-types",
+] }
+objc2-core-audio-types = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
+] }
+# A device's name and UID come back as `CFString`s.
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CFString",
+] }
+
 # Every `unsafe` block in this crate states why it is sound. The rule is
 # worth enforcing rather than remembering: writing these honestly is what
 # surfaced the DMA-BUF import's create-then-destroy ordering and the GL name
@@ -246,6 +274,13 @@ mf-capture = [
 v4l2-capture = ["dep:libc"]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
+# Audio playback on macOS, through a Core Audio output unit.
+coreaudio-renderer = [
+    "dep:objc2-audio-toolbox",
+    "dep:objc2-core-audio",
+    "dep:objc2-core-audio-types",
+    "dep:objc2-core-foundation",
+]
 pipewire-screen-capture = [
     "dep:ashpd",
     "dep:async-io",

@@ -121,8 +121,8 @@ a software decode goes into it with no `#[cfg]`.
   `PipeWireAudioCaptureSource`, `V4l2CaptureSource`.
 - **Audio**: `AudioMixer`, `AudioResampler`, `AudioVolume`, `AudioGate`,
   `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `AudioTempo`,
-  `AudioWaveform`, `SwAudioEncoder`; playback through `WasapiRenderer` and
-  `PipeWireAudioRenderer`.
+  `AudioWaveform`, `SwAudioEncoder`; playback through `WasapiRenderer`,
+  `PipeWireAudioRenderer` and `CoreAudioRenderer`.
 - **Outputs**: `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`,
   `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
@@ -150,6 +150,7 @@ exist only where their feature is enabled.
 | `pipewire-audio-capture` | System, per-application and microphone audio capture | Linux |
 | `pipewire-audio-renderer` | Audio playback | Linux |
 | `v4l2-capture` | Camera capture through Video4Linux2 | Linux |
+| `coreaudio-renderer` | Audio playback | macOS |
 | `ort` | ONNX Runtime object detection (YOLOv8/v11 layout) | All |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
@@ -186,7 +187,8 @@ index of the windowed ones.
   Windows also long paths and a short target directory — see
   [`transcribe`](examples/core/transcribe/README.md).
 
-macOS has no capture, audio output or GPU backend yet — see
+macOS has audio output (`coreaudio-renderer`) and no capture or GPU backend
+yet — see
 [`docs/macos.md`](docs/macos.md). Building and testing are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

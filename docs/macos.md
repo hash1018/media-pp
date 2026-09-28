@@ -11,9 +11,9 @@ application's half. The machine setup below serves both.
 
 ## Where macOS stands
 
-Nothing in `lib/src` names macOS, Apple, VideoToolbox, Metal, Core Audio or
-ScreenCaptureKit. What a macOS build gets is everything that is not a
-platform backend:
+The one macOS backend so far is audio output: `CoreAudioRenderer`, behind
+`coreaudio-renderer`, with its device listing in `platform/macos/coreaudio.rs`.
+Beside it a macOS build gets everything that is not a platform backend:
 
 - the pipeline core, `FileDemuxer`, `RtspSource`, `AppSource`/`AppSink`, the
   test sources, and every muxer (file, segmented, HLS, RTMP, RTSP, replay
@@ -24,7 +24,7 @@ platform backend:
   / `VideoEncodeBin` with their `System` target only;
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
-It gets no capture of any kind, no audio output, no window or `VideoWindow`,
+It gets no capture of any kind, no window or `VideoWindow`,
 no `Player`, and no GPU backend that works: `cuda` compiles but finds no
 driver, and `vulkan` is discussed below.
 
@@ -247,13 +247,13 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   - Device listing is what obs-rs calls: `list_devices`, `list_formats`,
     `list_applications`/`list_processes`, each with an `is_default` where
     there is one.
-- **Audio output** — the renderer contract `Player` uses
-  (`app/player.rs`): `list_devices`, `open(name, options) -> (Self,
-  AudioFormat)`, `format()`, a `Render` taking system-memory audio frames —
-  `drain` to play out what it holds at the end, `reset` for a seek's flush,
-  `stopping`, `pausing`/`resuming` for the device, as `WasapiRenderer` and
-  `PipeWireAudioRenderer` are — registering as the audio master with the
-  playback clock, and rate through `Stretcher`.
+- **Audio output** — done: `CoreAudioRenderer` keeps the renderer contract
+  `Player` uses (`app/player.rs`), `list_devices`, `open(name, options) ->
+  (Self, AudioFormat)`, `format()` and a `Render`, as `WasapiRenderer` and
+  `PipeWireAudioRenderer` do. It plays through an AUHAL output unit whose
+  real-time callback reads a ring the renderer writes, and says where
+  playback is from the callback's host timestamps plus the device's and its
+  stream's latency. `Player` needs a window as well before it opens here.
 - **A frame renderer for a program's own presenter** — what obs-rs's
   Preview is built on: `CudaFrameRenderer` hands over device pointers,
   `D3d11FrameRenderer` textures. A Metal one hands over the `IOSurface` or
@@ -286,7 +286,8 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    build finds (and this document). Fix `render_common` so the workspace
    builds.~~ Done.
 2. Audio first: a Core Audio renderer and capture source. They are the
-   smallest backend pieces, need no GPU, and make `Player` possible.
+   smallest backend pieces, need no GPU, and make `Player` possible. The
+   renderer is done; the capture source is next.
 3. Capture in system memory: ScreenCaptureKit and the camera, feeding the
    software compositor. That is enough for obs-rs to show and record a
    screen, slowly.
