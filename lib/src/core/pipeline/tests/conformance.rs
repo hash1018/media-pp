@@ -1727,7 +1727,10 @@ fn run_sequence_turning(
                 }
                 _ => {}
             }
-            calls.begin(Call::new("under way", None, false));
+            let mut call = Call::new("under way", None, false);
+            // A step it stops is a step for as long as it runs.
+            call.step = matches!(under_way, Op::Step(_));
+            calls.begin(call);
             let pipeline = Arc::clone(&rig.pipeline);
             let (done, returned) = mpsc::channel();
             thread::spawn(move || {
@@ -1976,6 +1979,13 @@ fn judge(
                     Some((index, _)) => !calls[index].ends_paused,
                     None => !paused,
                 };
+                // A run of samples handed while the clock had not begun
+                // again ends where one is handed with the clock running: a
+                // step resets the clock again later, with no seek to begin
+                // its run.
+                if ahead.is_some() {
+                    unanchored = None;
+                }
                 if paced && !exempt {
                     match ahead {
                         Some(ahead) if playing && *ahead > EARLY.as_nanos() as i64 => {
@@ -2274,6 +2284,26 @@ fn the_matrix_meets_every_pair_of_choices() {
     }
     let labels: HashSet<_> = matrix.iter().map(|shape| shape.label()).collect();
     assert_eq!(labels.len(), matrix.len());
+}
+
+/// A step resets the playback clock, and with no seek to begin its run
+/// that run is judged on its own: what was handed while the clock ran in
+/// between ends the one before. Judged against the sample a seek's
+/// preroll showed before it, the step's picture read as a burst — and a
+/// step stopped while it was under way was not judged as a step at all.
+/// The Windows CI found it (2026-09-28); the judge was wrong, not the
+/// pipeline.
+#[test]
+fn a_step_after_the_clock_ran_again_is_judged_on_its_own() {
+    let label = "packettee-decoder-none-pacer-none-normal";
+    let shape = matrix()
+        .into_iter()
+        .find(|shape| shape.label() == label)
+        .expect("the matrix has the shape");
+    trace_if_asked();
+    if let Err(failure) = run_sequence(Shape::File(shape), 1_790_574_877_137_431_411, 12) {
+        panic!("{failure}");
+    }
 }
 
 /// On a looping file, an accurate seek made on a lap after the first shows
