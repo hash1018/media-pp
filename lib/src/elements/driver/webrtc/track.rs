@@ -188,7 +188,7 @@ fn rewritten_packet(packet: &ffmpeg::Packet, payload: &[u8]) -> MediaBuffer {
 ///
 /// Fixed for the life of the track: these are handed out once, when the
 /// track attaches, and a remote peer that later renegotiates a different
-/// direction is reported on the [`Bus`] instead (see
+/// direction is reported on the [`Bus`](crate::bus::Bus) instead (see
 /// [`WebRtcHandle::next_track`]).
 pub enum TrackEndpoints {
     /// `Direction::SendOnly` — outbound only.
@@ -284,7 +284,7 @@ impl WebRtcHandle {
     /// as the track attaches, and the endpoints are never re-issued — so a
     /// remote peer that renegotiates a different direction afterwards
     /// makes them wrong. That case is reported as
-    /// [`WebRtcError::DirectionChanged`] on the [`Bus`] rather than
+    /// [`WebRtcError::DirectionChanged`] on the [`Bus`](crate::bus::Bus) rather than
     /// silently tolerated; recovering from it means tearing the track down
     /// and adding a new one.
     ///
