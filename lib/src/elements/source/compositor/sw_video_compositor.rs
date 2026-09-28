@@ -2109,6 +2109,7 @@ mod tests {
     fn system_font() -> Option<Vec<u8>> {
         [
             "C:/Windows/Fonts/arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         ]

@@ -8,9 +8,14 @@
 //! [`stop_on_close`] and [`Shutdown`] are the same on both platforms. What
 //! fits a software decode to a renderer's input is the library's own,
 //! `SwScaler::if_needed`.
+//!
+//! On macOS there is no window renderer yet, so only [`Shutdown`] is here;
+//! `stop_on_close` follows once the library has one there.
 
 mod shutdown;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod window;
 
 pub use shutdown::Shutdown;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub use window::stop_on_close;

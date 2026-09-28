@@ -694,6 +694,7 @@ fn try_font() -> Option<Vec<u8>> {
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
     ] {
         if let Ok(data) = std::fs::read(path) {
             return Some(data);

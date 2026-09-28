@@ -12,3 +12,8 @@ media-pp = { path = "../../../lib", features = ["vulkan"] }
 
 [target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["d3d11"] }
+
+# No window renderer yet, so only `Shutdown`; the Metal one's feature goes
+# here with it, and `stop_on_close` opens to macOS then.
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib" }

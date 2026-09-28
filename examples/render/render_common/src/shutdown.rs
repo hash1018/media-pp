@@ -55,6 +55,7 @@ impl Shutdown {
 
     /// Window: records the close and hands back what to stop — whichever
     /// of the published pipelines still exist.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn request(&self) -> Vec<Arc<Pipeline>> {
         let mut state = self.state.lock().expect("shutdown state poisoned");
         state.requested = true;

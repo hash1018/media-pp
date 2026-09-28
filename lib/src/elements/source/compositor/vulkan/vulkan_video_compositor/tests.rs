@@ -377,6 +377,7 @@ fn an_unchanged_scene_is_composed_once() {
 fn try_font() -> Option<Vec<u8>> {
     [
         "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
     ]

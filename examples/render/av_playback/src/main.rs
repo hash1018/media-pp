@@ -53,6 +53,7 @@ fn main() -> media_pp::Result<()> {
     linux_example::play(path)
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod shell;
 
 /// The parts of `play` that are the same on every backend: opening the file
