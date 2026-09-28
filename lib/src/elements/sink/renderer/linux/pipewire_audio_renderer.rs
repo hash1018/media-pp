@@ -23,7 +23,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, element_pp_log},
     elements::AudioFormat,
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
@@ -297,7 +297,7 @@ type CommandResult = std::result::Result<(), String>;
 type CommandReply = SyncSender<CommandResult>;
 
 /// Sent into the PipeWire thread's own main loop. Mutations that are part of
-/// the synchronous [`Sink::control`] contract carry a reply: enqueueing a
+/// the synchronous `Sink::flow` contract carry a reply: enqueueing a
 /// command is not the same as having applied it.
 enum Command {
     SetActive {
@@ -977,7 +977,7 @@ impl Sink for PipeWireAudioRenderer {
         outcome
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         match msg {
             ControlMsg::Pause => {
                 self.set_active(false)?;
@@ -1389,6 +1389,7 @@ fn run_pipewire(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::SinkExt;
 
     fn playback() -> Playback {
         Playback {

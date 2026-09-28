@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
     pad::SrcPad,
     pool::UnboundObjectPool,
     stream::StreamEvent,
@@ -372,7 +372,7 @@ impl Sink for SwDecoder {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> crate::error::Result<()> {
         // `Stop`: no local reaction needed — abandon means there's
         // nothing to flush before this decoder's own `Drop` frees the
         // codec context.
@@ -528,7 +528,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             self.received.lock().unwrap().controls.push(msg.clone());
             Ok(())
         }
@@ -600,7 +600,7 @@ mod tests {
     }
 
     /// Every other control passes straight through — this element has no
-    /// local reaction to them (see `SwDecoder::control`'s own comment).
+    /// local reaction to them (see `SwDecoder::flow`'s own comment).
     #[test]
     fn other_controls_are_forwarded_unchanged() {
         let mut decoder = video_decoder("decoder");

@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::PlaybackClock,
     playback_state::PlaybackState,
@@ -388,7 +388,7 @@ impl Sink for Pacer {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> crate::error::Result<()> {
         // Acknowledge the interrupt that made any in-flight wait return.
         // Flush discards an interrupted old-timeline buffer.
         // A pacer that was never wired has no clock to acknowledge, and
@@ -415,6 +415,7 @@ mod tests {
     use super::*;
     use crate::clock::Clock;
     use crate::control::PrerollContext;
+    use crate::element::SinkExt;
     use std::thread;
     use std::{
         sync::mpsc,

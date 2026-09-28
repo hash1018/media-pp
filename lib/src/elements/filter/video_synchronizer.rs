@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
     playback_state::PlaybackState,
@@ -321,7 +321,7 @@ impl Sink for VideoSynchronizer {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> crate::error::Result<()> {
         if let Some(state) = &self.state {
             self.interrupt_epoch = state.interrupt_epoch();
         }
@@ -387,6 +387,7 @@ fn duration_ns(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::SinkExt;
     use crate::{
         clock::Clock, control::PrerollContext, playback_clock::PlaybackClock,
         pool::UnboundObjectPool,

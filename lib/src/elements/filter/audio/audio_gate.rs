@@ -411,6 +411,7 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
+    use crate::element::SinkExt;
     use crate::element::{Sink, Source};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 

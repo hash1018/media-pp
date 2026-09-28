@@ -8,8 +8,8 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, IntoFilter, IntoTerminal, ReversibleDecoder, Sink,
-        Source, element_pp_log,
+        Context, Element, ElementType, Filter, Flow, IntoFilter, IntoTerminal, ReversibleDecoder,
+        Sink, SinkExt, Source, element_pp_log,
     },
     error::Result,
     graph::{
@@ -179,9 +179,9 @@ impl<T: Filter> Sink for FlowTracer<T> {
 
     /// The filter's own reaction, and then the message on through its pads
     /// — the passing on that no filter does itself (see
-    /// [`Sink::control`]). Traced around both, so a log shows everything
+    /// `Sink::flow`). Traced around both, so a log shows everything
     /// after this element handle the message inside this one's record of it.
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         pp_trace!(
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"
@@ -207,7 +207,7 @@ impl<T: Filter> Sink for FlowTracer<T> {
         self.trace_origin(result)
     }
 
-    /// As [`Self::control`]: the filter's reaction — which pushes whatever
+    /// As [`Self::flow`]: the filter's reaction — which pushes whatever
     /// it answers the event with, ahead of it — and then the event on
     /// through its pads, every one of them even where one fails.
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
@@ -489,7 +489,7 @@ impl Sink for TerminalTracer {
         result.map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()))
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         pp_trace!(
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"

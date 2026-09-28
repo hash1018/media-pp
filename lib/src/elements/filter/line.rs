@@ -15,7 +15,9 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     core::pipeline::chain::FlowTracer,
-    element::{Context, Element, ElementType, Filter, ReversibleDecoder, Sink, element_pp_log},
+    element::{
+        Context, Element, ElementType, Filter, ReversibleDecoder, Sink, SinkExt, element_pp_log,
+    },
     error::Result,
     stream::StreamEvent,
 };

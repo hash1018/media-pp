@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     pad::SrcPad,
     platform::{cuda::CudaDevice, ffmpeg::AvBufferRef},
@@ -380,8 +380,8 @@ impl Sink for CudaDecoder {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
-        // Same reasoning as `D3d11Decoder::control`: nothing to do on `Stop`
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> crate::error::Result<()> {
+        // Same reasoning as `D3d11Decoder::flow`: nothing to do on `Stop`
         // (the hw device reference is released in `Drop`), flush
         // reference-frame state on `Seek`.
         //

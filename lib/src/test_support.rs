@@ -1074,7 +1074,10 @@ impl<F: crate::element::Filter> crate::element::Sink for Linked<F> {
         self.0.consume(buf)
     }
 
-    fn control(&mut self, msg: &crate::control::ControlMsg) -> crate::error::Result<()> {
+    fn flow(
+        &mut self,
+        crate::element::Flow(msg): crate::element::Flow<'_>,
+    ) -> crate::error::Result<()> {
         crate::control::deliver(&mut self.0, msg)
     }
 

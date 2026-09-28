@@ -29,7 +29,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
         element_pp_log,
     },
     error::Result,
@@ -640,7 +640,7 @@ impl Sink for SwVideoCompositorInputSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         match msg {
             ControlMsg::Stop => self.detach(),
             ControlMsg::Flush => {
@@ -1411,6 +1411,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::element::SinkExt;
     use crate::element::SourceElement;
     use crate::elements::{SwTextLayerError, TextLayer};
 

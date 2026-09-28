@@ -14,7 +14,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Sink, Source},
+    element::{Context, Element, ElementType, Filter, Flow, Sink, Source},
     error::Result,
     graph::ElementId,
     pad::SrcPad,
@@ -182,7 +182,7 @@ impl<T: Transform> Sink for TransformStage<T> {
         self.hand_on(out)
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.inner.reset();
             self.stash.clear();
@@ -307,8 +307,8 @@ macro_rules! transform_filter {
             fn accepts_seek(&self) -> bool {
                 self.0.accepts_seek()
             }
-            fn control(&mut self, msg: &$crate::control::ControlMsg) -> $crate::error::Result<()> {
-                self.0.control(msg)
+            fn flow(&mut self, flow: $crate::element::Flow<'_>) -> $crate::error::Result<()> {
+                self.0.flow(flow)
             }
             fn stream_event(
                 &mut self,
@@ -332,6 +332,7 @@ mod tests {
     use ffmpeg_next as ffmpeg;
 
     use super::*;
+    use crate::element::SinkExt;
     use crate::{
         contract::{MediaKind, PortContract},
         element::element_pp_log,

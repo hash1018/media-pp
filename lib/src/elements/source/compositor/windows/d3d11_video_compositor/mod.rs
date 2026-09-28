@@ -55,7 +55,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
         element_pp_log,
     },
     elements::VideoCompositorOptions,
@@ -643,7 +643,7 @@ impl Sink for D3d11VideoCompositorInputSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         match msg {
             ControlMsg::Stop => self.detach(),
             ControlMsg::Flush => {

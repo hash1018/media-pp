@@ -573,10 +573,9 @@ fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTra
 ///
 /// The end of the stream transcribes whatever is left, including the stretch
 /// normally held back at the live edge — nothing more is coming, so nothing
-/// can change what the model hears. A caller that stops the pipeline with
-/// [`ControlMsg::Stop`](crate::control::ControlMsg::Stop) instead abandons
-/// that audio, which is what `Stop`
-/// means everywhere else in this crate.
+/// can change what the model hears. A caller that stops the pipeline instead
+/// abandons that audio, which is what a stop means everywhere else in this
+/// crate.
 pub struct WhisperTranscriber<F>(RenderStage<Transcribing<F>>);
 
 render_sink!(WhisperTranscriber<F> where F: FnMut(&Segment) -> Result<()> + Send + 'static);

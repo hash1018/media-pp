@@ -235,7 +235,7 @@ impl RtmpMuxer {
     /// and neither `av_interleaved_write_frame` nor `av_write_trailer` is
     /// safe to call from two threads against one output at once. They also
     /// share one trailer, written once every track has reported itself done
-    /// — via `Eos` *or* [`ControlMsg::Stop`](crate::control::ControlMsg::Stop), either meaning "this track is
+    /// — via `Eos` *or* a stop, either meaning "this track is
     /// finished" rather than "abandon the broadcast" — so ending only the
     /// video pipeline while audio keeps running leaves the publish open
     /// until audio catches up too.

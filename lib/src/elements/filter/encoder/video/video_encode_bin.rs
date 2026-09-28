@@ -28,8 +28,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
+    element::{Context, Element, ElementType, Filter, Flow, Sink, Source, element_pp_log},
     elements::{
         SwEncoder, SwEncoderOptions, SwScaler, TrackFormat, VideoCodec, filter::line::Line,
     },
@@ -781,7 +780,7 @@ impl Sink for VideoEncodeBin {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         self.install();
         self.line.control(msg)
     }

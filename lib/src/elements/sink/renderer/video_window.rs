@@ -14,8 +14,7 @@ use crate::elements::{VulkanGpu as Gpu, VulkanWindowRenderer as Backend};
 use crate::{
     buffer::MediaBuffer,
     contract::InputContract,
-    control::ControlMsg,
-    element::{Context, Element, ElementType, Sink},
+    element::{Context, Element, ElementType, Flow, Sink},
     elements::{WindowControl, WindowEvents, WindowOptions},
     error::Result,
     pp_log::PpLog,
@@ -212,8 +211,8 @@ impl Sink for VideoWindow {
         self.renderer.consume(buf)
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        self.renderer.control(msg)
+    fn flow(&mut self, flow: Flow<'_>) -> Result<()> {
+        self.renderer.flow(flow)
     }
 
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {

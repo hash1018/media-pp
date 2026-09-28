@@ -226,7 +226,7 @@ impl Pipeline {
     }
 
     /// Blocks until every element downstream of every source has paused —
-    /// see [`crate::control::drain_control`] (source side) and
+    /// passed on by each source's thread and by
     /// [`crate::queue::Queue`]'s worker loop (each thread boundary). Also
     /// pauses this pipeline's `Clock` before that synchronous cascade
     /// starts, so time spent waiting for a busy downstream element to
@@ -384,7 +384,7 @@ impl Pipeline {
 
     /// Performs an early, full stop — abandons buffered work rather than
     /// draining to a natural `Eos`. This call is synchronous: it sends
-    /// [`ControlMsg::Stop`] to every source at once and waits until each
+    /// a stop to every source at once and waits until each
     /// one's own cascade has finished. It therefore cannot preempt an arbitrary
     /// source read or `Sink::consume` call already blocked inside user or
     /// external-library code; the call returns only after that work gives

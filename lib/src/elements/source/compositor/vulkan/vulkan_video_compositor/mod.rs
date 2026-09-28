@@ -32,7 +32,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
         element_pp_log,
     },
     elements::VulkanDevice,
@@ -572,7 +572,7 @@ impl Sink for VulkanVideoCompositorInputSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // Terminal for its own branch: nothing downstream to forward to. A
         // `Stop` means this upstream pipeline is done, so the registration
         // goes with it — same as `SwVideoCompositorInputSink`.

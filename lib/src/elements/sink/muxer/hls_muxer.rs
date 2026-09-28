@@ -316,7 +316,7 @@ pub enum HlsMuxerError {
 /// [`crate::elements::FileMuxer`]: call [`HlsMuxer::add_stream`] for every
 /// track before [`HlsMuxer::open`] writes the header. The returned sinks
 /// share one output lock and finalize the playlist only after every track
-/// reports `Eos` or [`ControlMsg::Stop`](crate::control::ControlMsg::Stop).
+/// reports `Eos` or a stop.
 pub struct HlsMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,
@@ -369,7 +369,7 @@ impl HlsMuxer {
     /// Writes the HLS header and returns one sink per stream, each taken
     /// out by the [`MuxerTrack`] its [`HlsMuxer::add_stream`] returned. The
     /// playlist is finalized only after every returned sink has received
-    /// `Eos` or [`ControlMsg::Stop`](crate::control::ControlMsg::Stop).
+    /// `Eos` or a stop.
     pub fn open(mut self) -> Result<MuxerSinks> {
         crate::ensure_ffmpeg();
         if self.streams.is_empty() {

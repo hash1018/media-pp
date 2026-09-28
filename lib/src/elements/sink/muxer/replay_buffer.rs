@@ -53,7 +53,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, element_pp_log},
     error::Result,
     pp_log::{PpLog, pp_error, pp_info},
     stream::StreamEvent,
@@ -622,7 +622,7 @@ impl Sink for ReplayTrackSink {
         false
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // Terminal, so nothing is forwarded.
         match msg {
             // What is held belongs to the timeline being discarded.
@@ -649,6 +649,7 @@ fn micros(value: i64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::SinkExt;
     use crate::error::Error;
 
     /// Every packet of a file, with the tracks it declares — the file stands

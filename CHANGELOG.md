@@ -29,6 +29,27 @@ compile error with no explanation.
     `stream_event`, and a filter of your own that pushed `Eos` on after
     draining now only drains.
 
+- **`Sink::control` is gone, and control stays inside the crate.** A sink
+  of your own hears a pause, a resume and a stop through the new
+  `Sink::pausing`, `Sink::resuming` and `Sink::stopping` hooks, which do
+  nothing by default, and a seek through the flushed
+  `StreamEvent::Segment` its `stream_event` is handed — where it lets go
+  of what it held from before the seek. `ControlMsg`, `PrerollContext`,
+  `ControlSender`, `ControlReceiver`, `control::channel`,
+  `ControlOutcome`, `drain_control` and `control::deliver` are no longer
+  public; `control` keeps `SeekError`, `SeekRejection`,
+  `SeekRejectReason` and `PrerollError`. A `consume`-only sink needs
+  nothing; one that matched `ControlMsg::Pause`/`Resume`/`Stop` in
+  `control` writes those arms as the hooks, and one that matched
+  `ControlMsg::Flush` or `Seek` reacts to a segment with `flushed` set.
+
+- **`SourceElement` is implemented only by this crate's sources.** Its
+  loop answers the pipeline through a channel that is no longer public.
+  A source of your own is a `Produce`, which `Pipeline::new` and
+  `add_source` take as they take any source; one with several outputs, or
+  one that can be sought, has no way to be written outside the crate for
+  now. `SourceElement` stays nameable, as a bound.
+
 - **`AppSink::with_control` is `AppSink::with_events`**, whose closure is
   handed each `&StreamEvent` — the end, and each segment, a seek's one
   flushed — instead of each `ControlMsg`. A closure that finalized on

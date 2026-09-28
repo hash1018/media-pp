@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::InputContract,
     control::ControlMsg,
-    element::{Context, Element, ElementType, Sink},
+    element::{Context, Element, ElementType, Flow, Sink},
     error::Result,
     graph::ElementId,
     pp_log::PpLog,
@@ -130,7 +130,7 @@ impl<R: Render> Sink for RenderStage<R> {
     }
 
     /// The end is where it drains; a seek's flushed segment is handled with
-    /// the `Flush` before it, in `control`.
+    /// the `Flush` before it, in `flow`.
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         match event {
             StreamEvent::Eos => self.inner.drain(),
@@ -138,7 +138,7 @@ impl<R: Render> Sink for RenderStage<R> {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         match msg {
             ControlMsg::Pause => self.inner.pausing(),
             ControlMsg::Resume => self.inner.resuming(),
@@ -241,8 +241,8 @@ macro_rules! render_sink {
             fn accepts_seek(&self) -> bool {
                 self.0.accepts_seek()
             }
-            fn control(&mut self, msg: &$crate::control::ControlMsg) -> $crate::error::Result<()> {
-                self.0.control(msg)
+            fn flow(&mut self, flow: $crate::element::Flow<'_>) -> $crate::error::Result<()> {
+                self.0.flow(flow)
             }
             fn stream_event(
                 &mut self,

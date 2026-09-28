@@ -169,11 +169,9 @@ impl FileDemuxerHandle {
     /// Read once per lap, at the end of the file — never mid-file. So
     /// turning it off part way through means "play this lap out and then
     /// finish", not "stop now", and the stream still ends with a real
-    /// `Eos` rather than being abandoned the way [`ControlMsg::Stop`]
+    /// `Eos` rather than being abandoned the way a stop
     /// abandons it. Turning it on part way through takes effect at the end
     /// the source was already heading for.
-    ///
-    /// [`ControlMsg::Stop`]: crate::control::ControlMsg::Stop
     pub fn set_looping(&self, looping: bool) {
         self.looping.store(looping, Ordering::Relaxed);
     }

@@ -34,7 +34,7 @@ use crate::{
         self, ControlMsg, ControlReceiver, ControlSender, Direct, Registration, RequestKind,
         Workers,
     },
-    element::{Context, Element, ElementType, Sink, element_pp_log},
+    element::{Context, Element, ElementType, Flow, Sink, SinkExt, element_pp_log},
     error::{Result, ThreadSpawnError},
     playback_state::{Bell, PlaybackState},
     stats::ElementCounters,
@@ -106,7 +106,7 @@ pub enum OverflowPolicy {
     /// pushing into this `Queue`, and transitively every `Queue`
     /// upstream of *that*, since each one's worker can't get back to its
     /// own `control_rx` until its current `downstream.consume()` call
-    /// returns (see [`Queue::control`]'s own docs on why control is only
+    /// returns (control is only
     /// ever checked *between* buffers, not able to preempt one already
     /// in flight). Timing out bounds that: it's what lets a `Stop` sent
     /// to an upstream `Queue` eventually reach it instead of waiting
@@ -144,7 +144,7 @@ impl Default for OverflowPolicy {
 /// drives it via direct `Sink::consume` calls, until it hits another
 /// `Queue`.
 ///
-/// [`ControlMsg`] crosses this same thread boundary through a separate
+/// What the pipeline asks crosses this same thread boundary through a separate
 /// channel from data. The worker checks that channel before entering its
 /// combined wait on every iteration, so a control message already pending
 /// at that point jumps ahead of the data backlog. A control message that
@@ -558,7 +558,7 @@ impl Sink for Queue {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // Carried across, this blocks until the worker — and everything on
         // its thread after it — has handled the message. Never stuck behind
         // a data backlog: the worker checks its channel before every buffer
@@ -1951,7 +1951,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             Err(crate::error::Error::Other(format!(
                 "simulated {msg:?} failure"
             )))
@@ -2232,7 +2232,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             let label = match msg {
                 ControlMsg::Flush => "flush",
                 ControlMsg::Seek(_) => "seek",

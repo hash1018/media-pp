@@ -14,7 +14,7 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{InputContract, OutputContract},
     control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, Source, SourceElement, element_pp_log},
     error::Result,
     pad::SrcPad,
     queue::OverflowPolicy,
@@ -150,8 +150,10 @@ impl Default for PipelineBridgeOptions {
 /// [`PipelineBridgeOptions::policy`]. That is a queue behaving like a queue
 /// rather than anything the bridge decides.
 ///
-/// What does not cross is control itself, with one exception: see
-/// [`Sink::control`] on the input this hands out. Seeking is refused here
+/// What does not cross is control itself, with one exception: the flush a
+/// seek on the feeding side sends, which the input this hands out passes
+/// across ahead of the flushed segment the bridge then begins. Seeking is
+/// refused here
 /// outright — it is not a [`crate::element::SeekableSource`] — the timeline
 /// belongs to whatever feeds the bridge, and an application holding both
 /// pipelines seeks the one that owns it.
@@ -428,21 +430,6 @@ impl Sink for PipelineBridgeSink {
         }
     }
 
-    /// `Flush` crosses; nothing else does.
-    ///
-    /// The test is whether the message means something inside an element or
-    /// something about the pipeline that sent it. `Flush` is the first: drop
-    /// what you are holding, which downstream *must* hear after a seek or it
-    /// keeps frames belonging to a timeline that has been left. Ordering is
-    /// not a difficulty for this one message, because arriving ahead of the
-    /// buffers it invalidates is exactly what it is for.
-    ///
-    /// The rest name the sender's own clock. Injecting `Pause` here would
-    /// leave this side's elements believing they are paused while this side's
-    /// [`crate::clock::Clock`] — the one a `Pacer` and the playback clock
-    /// actually read — keeps running. Two authorities over one timeline is
-    /// the defect, not the missing feature; the downstream pipeline has its
-    /// own `pause`, `finish` and `stop` for what its owner wants of it.
     /// The input's end, not the bridge's — see the type docs. The input's
     /// segments stop here: the bridge begins its own.
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
@@ -464,7 +451,22 @@ impl Sink for PipelineBridgeSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    /// `Flush` crosses; nothing else does.
+    ///
+    /// The test is whether the message means something inside an element or
+    /// something about the pipeline that sent it. `Flush` is the first: drop
+    /// what you are holding, which downstream *must* hear after a seek or it
+    /// keeps frames belonging to a timeline that has been left. Ordering is
+    /// not a difficulty for this one message, because arriving ahead of the
+    /// buffers it invalidates is exactly what it is for.
+    ///
+    /// The rest name the sender's own clock. Injecting `Pause` here would
+    /// leave this side's elements believing they are paused while this side's
+    /// [`crate::clock::Clock`] — the one a `Pacer` and the playback clock
+    /// actually read — keeps running. Two authorities over one timeline is
+    /// the defect, not the missing feature; the downstream pipeline has its
+    /// own `pause`, `finish` and `stop` for what its owner wants of it.
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         let Some(shared) = self.shared.upgrade() else {
             return Ok(());
         };
@@ -621,6 +623,7 @@ mod tests {
     use std::sync::{Mutex as StdMutex, atomic::AtomicUsize};
 
     use super::*;
+    use crate::element::SinkExt;
     use crate::{elements::AppSink, pipeline::Pipeline};
 
     /// What crossed the bridge, in order.
@@ -689,7 +692,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             if matches!(msg, ControlMsg::Flush) {
                 self.flushed.fetch_add(1, Ordering::Relaxed);
             }

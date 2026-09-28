@@ -347,6 +347,7 @@ mod tests {
     use super::*;
     use crate::control::ControlMsg;
     use crate::element::Sink;
+    use crate::element::SinkExt;
     use crate::test_support::capture;
 
     const RATE: u32 = 48_000;

@@ -18,7 +18,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
     error::D3d11SharedDeviceError,
     pad::SrcPad,
     platform::{
@@ -564,8 +564,8 @@ impl Sink for D3d11Decoder {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
-        // Same reasoning as `D3d12Decoder::control`: nothing to do on
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> crate::error::Result<()> {
+        // Same reasoning as `D3d12Decoder::flow`: nothing to do on
         // `Stop` (the hw device context is freed in `Drop`), flush
         // reference-frame state on `Flush`.
         //
@@ -663,6 +663,7 @@ unsafe extern "C" fn get_format(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::SinkExt;
     use crate::test_support::try_d3d11_gpu;
 
     /// Regression test for a real crash (`STATUS_ACCESS_VIOLATION`/

@@ -787,6 +787,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
+    use crate::element::SinkExt;
     use crate::{clock::Clock, control::ControlMsg, element::Sink, playback_clock::PlaybackMaster};
 
     fn frame(format: AudioFormat, samples: usize) -> ffmpeg::frame::Audio {

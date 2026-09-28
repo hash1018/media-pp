@@ -617,7 +617,7 @@ impl Sink for Watched {
         }
         self.inner.stream_event(event)
     }
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         if *msg == ControlMsg::Flush {
             self.told.lock().unwrap().push(Told::Flush);
         }

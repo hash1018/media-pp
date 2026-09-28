@@ -41,7 +41,8 @@ use crate::{
     },
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, ReversibleDecoder, Sink, Source, element_pp_log,
+        Context, Element, ElementType, Filter, Flow, ReversibleDecoder, Sink, Source,
+        element_pp_log,
     },
     elements::{DecodeThreading, SwDecoder, filter::line::Line},
     error::{Error, Result},
@@ -675,7 +676,7 @@ impl Sink for VideoDecodeBin {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         self.install();
         // A replacement line starts without the packets a Flush or Stop told
         // the decoder to forget. The preroll it may be in, it reads from the
@@ -1744,6 +1745,7 @@ mod tests {
         use std::time::Duration;
 
         use super::*;
+        use crate::element::SinkExt;
         use crate::{
             control::PrerollContext, elements::D3d11Download, test_support::try_encoded_packets,
         };

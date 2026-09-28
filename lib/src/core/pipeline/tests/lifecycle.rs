@@ -186,7 +186,7 @@ impl Sink for StopRecordingSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         if *msg == ControlMsg::Stop {
             self.stopped.store(true, Ordering::Release);
         }
@@ -473,7 +473,7 @@ impl Sink for SlowPauseSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         if *msg == ControlMsg::Pause {
             thread::sleep(self.pause_delay);
         }
@@ -698,8 +698,8 @@ fn hear_each_request_once() {
     let heard: [Arc<Mutex<Vec<String>>>; 3] = Default::default();
     let sink = |at: usize| {
         let heard = Arc::clone(&heard[at]);
-        Answering::new(NAMES[at], move |msg| {
-            heard.lock().unwrap().push(format!("{msg:?}"));
+        Answering::new(NAMES[at], move |hook| {
+            heard.lock().unwrap().push(hook.to_string());
             Ok(())
         })
         .0
@@ -743,8 +743,8 @@ fn hear_each_request_once() {
 /// was returned to the source, which ended its thread over it.
 #[test]
 fn a_sink_refusing_control_on_the_source_thread_does_not_end_the_source() {
-    let (sink, taken) = Answering::new("refusing", |msg| match msg {
-        ControlMsg::Pause => Err(crate::error::Error::Other("refused".into())),
+    let (sink, taken) = Answering::new("refusing", |hook| match hook {
+        "Pause" => Err(crate::error::Error::Other("refused".into())),
         _ => Ok(()),
     });
     let (pipeline, ()) = Pipeline::new(
@@ -780,8 +780,9 @@ fn a_sink_refusing_control_on_the_source_thread_does_not_end_the_source() {
     assert_eq!(errors.len(), 1, "the refusal, reported: {errors:?}");
 }
 
-/// A terminal that answers each control request with `answer`, and counts
-/// the buffers it takes.
+/// A terminal as one outside this crate is written: it hears the pipeline
+/// through the public hooks alone — `answer` is handed the name of each one
+/// called — and counts the buffers it takes.
 struct Answering<F> {
     pp_log: PpLog,
     name: Arc<str>,
@@ -791,7 +792,7 @@ struct Answering<F> {
 
 impl<F> Answering<F>
 where
-    F: FnMut(&ControlMsg) -> Result<()> + Send + 'static,
+    F: FnMut(&'static str) -> Result<()> + Send + 'static,
 {
     fn new(name: &str, answer: F) -> (Self, Arc<AtomicUsize>) {
         let taken = Arc::new(AtomicUsize::new(0));
@@ -825,14 +826,22 @@ impl<F: Send + 'static> Element for Answering<F> {
 
 impl<F> Sink for Answering<F>
 where
-    F: FnMut(&ControlMsg) -> Result<()> + Send + 'static,
+    F: FnMut(&'static str) -> Result<()> + Send + 'static,
 {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         self.taken.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        (self.answer)(msg)
+    fn pausing(&mut self) -> Result<()> {
+        (self.answer)("Pause")
+    }
+
+    fn resuming(&mut self) -> Result<()> {
+        (self.answer)("Resume")
+    }
+
+    fn stopping(&mut self) -> Result<()> {
+        (self.answer)("Stop")
     }
 }

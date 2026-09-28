@@ -16,7 +16,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
         element_pp_log,
     },
     elements::AudioFormat,
@@ -633,7 +633,7 @@ impl Sink for MixerInputSink {
     /// freeze/resume, and a live capture source doesn't seek. Removal is
     /// conditional on the registration ID: a late `Stop` from a replaced
     /// sink must not remove the newer input using the same name.
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // Offline, what an input held before a flush is not what comes after.
         if *msg == ControlMsg::Flush
             && let Some(shared) = self.shared.upgrade()
@@ -1087,6 +1087,7 @@ mod tests {
     use crate::pp_log::PpLog;
 
     use super::*;
+    use crate::element::SinkExt;
     use std::thread;
 
     use crate::{bus::BusEvent, element::SourceElement, pipeline::Pipeline};
@@ -1522,7 +1523,7 @@ mod tests {
     /// shutdown signal a live source like `WasapiCaptureSource` ever sends,
     /// since it never reaches `Eos` on its own — used to leave a stale
     /// entry in the mixer's input map forever, because only `Eos` cleared
-    /// it. `Sink::control` is what a `Queue`/`Pipeline` actually calls on
+    /// it. `Sink::flow` is what a `Queue`/`Pipeline` actually calls on
     /// `Stop` (mirrored by hand here, since this input isn't wired into a
     /// real second `Pipeline` in this test), not `consume`.
     #[test]

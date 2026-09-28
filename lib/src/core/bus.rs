@@ -60,7 +60,7 @@ pub enum BusEvent {
         /// Caller-selected instance name of the queue that dropped the buffer.
         name: Arc<str>,
     },
-    /// Posted by [`crate::control::drain_control`] once
+    /// Posted by the source's thread once
     /// [`crate::element::SeekableSource::seek`] returns — `requested` is
     /// whatever [`crate::pipeline::Pipeline::seek`] was called with;
     /// `landed` is where the source actually ended up, which the source

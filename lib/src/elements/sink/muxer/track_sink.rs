@@ -25,7 +25,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, element_pp_log},
     error::{Error, Result},
     pp_log::{PpLog, pp_error, pp_info},
     stream::StreamEvent,
@@ -318,7 +318,7 @@ impl<M: Muxer> Sink for TrackSink<M> {
         self.timeline.is_some()
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // Terminal, so nothing is forwarded.
         match msg {
             ControlMsg::Seek(_) => {
@@ -347,6 +347,7 @@ impl<M> Drop for TrackSink<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::SinkExt;
     use crate::elements::{AudioCodec, FileMuxerError, SwAudioEncoder, SwAudioEncoderOptions};
 
     /// A file muxer in all but name, so the options can be varied freely.

@@ -59,12 +59,12 @@ impl StopReceiver {
 /// a sensible meaning for a connection that isn't part of one.
 pub trait Driver: Element {
     /// Drives this task until it ends on its own or `stop.is_stopped()`
-    /// says to abandon — check it periodically, the same spirit as
-    /// [`crate::control::drain_control`] for a
-    /// [`crate::element::SourceElement`]. `bus` is this task's own way to
-    /// report a failure without necessarily ending itself over it — see
-    /// [`crate::element::SourceElement::run`]'s docs for the same
-    /// convention.
+    /// says to abandon — check it periodically, in the same spirit as a
+    /// [`crate::element::SourceElement`] answering its pipeline between
+    /// reads. `bus` is this task's own way to report a failure without
+    /// necessarily ending itself over it: post a
+    /// [`crate::bus::BusEvent::Error`] and keep going, and return `Err`
+    /// only where the task cannot go on at all.
     fn run(&mut self, stop: &StopReceiver, bus: &Bus) -> Result<()>;
 }
 

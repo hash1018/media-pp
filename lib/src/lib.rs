@@ -54,9 +54,11 @@
 //!   owns, and how it behaves under error and runtime control.
 //! - [`pipeline`] builds and runs a graph; [`element`] and [`pad`] are the
 //!   traits and the one output port everything is wired through.
-//! - [`buffer`] is what travels between elements, [`control`] is what
-//!   Pause/Resume/Stop/Seek travel through, and [`bus`] is how an element
-//!   reports something the caller could not have been handed directly.
+//! - [`buffer`] is what travels between elements and [`stream`] what
+//!   describes it in order with it — where it begins, where a seek begins
+//!   it again, where it ends; [`bus`] is how an element reports something
+//!   the caller could not have been handed directly, and [`control`] why a
+//!   seek was refused.
 //!
 //! # Buffer and timeline contract
 //!
@@ -249,8 +251,9 @@
 //! in its `starting`, and is let go of in its `stopping`, which the
 //! framework calls there. [`Pipeline::new`](pipeline::Pipeline::new)
 //! takes one as it takes any [`SourceElement`](element::SourceElement). A
-//! source with several outputs, or one that can be sought, implements
-//! `SourceElement` itself.
+//! source with several outputs, or one that can be sought, is one of this
+//! crate's own for now — `FileDemuxer` is both — since answering a seek
+//! is still each such source's own loop, which only this crate writes.
 //!
 //! # Writing a terminal
 //!
@@ -260,7 +263,9 @@
 //! seek or a stop, and `pausing` and `resuming` for a device of its own.
 //! The framework does the rest, and [`ChainBuilder::to`](pipeline::ChainBuilder::to)
 //! takes one as it takes any [`Sink`](element::Sink). A terminal that routes
-//! the stream itself — a muxer of several tracks — implements `Sink`.
+//! the stream itself — a muxer of several tracks — implements `Sink`: it
+//! hears a pause, a resume and a stop through its hooks, and a seek, and
+//! its stream's end, through [`Sink::stream_event`](element::Sink::stream_event).
 //!
 //! # Watching it run
 //!
@@ -319,9 +324,27 @@ pub use app::player;
 pub use core::diagnostics::{log, pp_log, stats};
 pub use core::timing::{clock, playback_clock, rate};
 pub use core::{
-    buffer, bus, color, contract, control, driver, element, graph, pad, pipeline, pool, queue,
-    stream, subtitle,
+    buffer, bus, color, contract, driver, element, graph, pad, pipeline, pool, queue, stream,
+    subtitle,
 };
+
+/// Why a pipeline refused a seek, and why a preroll did not finish.
+///
+/// What the pipeline asks of its elements — pause, resume, seek, stop —
+/// travels inside this crate, on a channel of its own to each of the
+/// pipeline's threads. An element of your own hears of it through its
+/// hooks: a sink's [`pausing`](element::Sink::pausing),
+/// [`resuming`](element::Sink::resuming) and
+/// [`stopping`](element::Sink::stopping), a seek as the flushed
+/// [`Segment`](stream::Segment) that begins its stream again, and a
+/// [`Produce`](element::Produce)'s through the loop the framework runs for
+/// it.
+pub mod control {
+    pub use crate::core::control::{PrerollError, SeekError, SeekRejectReason, SeekRejection};
+    // What travels inside: every item of the module behind this one, which
+    // is `pub` there only so that the traits' hidden hooks may name it.
+    pub(crate) use crate::core::control::*;
+}
 
 // Same flat-namespace reasoning as above, but crate-private: `schedule`/
 // `time` are pacing/rescale internals `crate::elements` builds on, not

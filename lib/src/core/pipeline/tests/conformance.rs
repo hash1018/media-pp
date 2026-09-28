@@ -222,7 +222,7 @@ impl Sink for Recorder {
 
     /// The one place these tests read how control is carried: where a new
     /// timeline is announced to a terminal, today by a `Seek` reaching it.
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         if let ControlMsg::Seek(target) = msg {
             self.log.lock().unwrap().push(Entry::Timeline(*target));
         }

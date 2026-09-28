@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
@@ -373,12 +373,12 @@ impl Sink for D3d12Decoder {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
-        // `Stop`: no local reaction needed — see `SwDecoder::control`;
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> crate::error::Result<()> {
+        // `Stop`: no local reaction needed — see `SwDecoder::flow`;
         // same reasoning applies to the hw device context, freed in
         // `Drop`.
         //
-        // `Flush`: same reasoning as `SwDecoder::control` too — discard
+        // `Flush`: same reasoning as `SwDecoder::flow` too — discard
         // leftover reference-frame state before decoding resumes from
         // the new position.
         //

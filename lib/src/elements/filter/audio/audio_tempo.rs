@@ -260,6 +260,7 @@ mod tests {
     use super::*;
     use crate::clock::Clock;
     use crate::control::ControlMsg;
+    use crate::element::SinkExt;
     use crate::element::{Sink, Source};
     use crate::elements::AppSink;
 

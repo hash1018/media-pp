@@ -9,7 +9,7 @@ use crate::{
     buffer::{MediaBuffer, release_picture},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -325,7 +325,7 @@ impl Sink for PauseGate {
         self.pad.push(forwarded)
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // `Stop` abandons this run, so a pipeline started again owes nothing
         // to what the last one skipped.
         //
@@ -353,6 +353,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::element::SinkExt;
 
     fn capture(element: &mut PauseGate) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

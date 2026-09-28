@@ -9,7 +9,7 @@ use crate::{
     buffer::{MediaBuffer, release_picture},
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -239,7 +239,7 @@ impl Sink for FrameRateLimiter {
         self.pad.push(MediaBuffer::Video(Arc::new(stamped)))
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // `Stop` abandons this run, so a pipeline started again begins a new
         // output timeline at zero like the first one did.
         //
@@ -266,6 +266,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::element::SinkExt;
 
     fn capture(element: &mut FrameRateLimiter) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

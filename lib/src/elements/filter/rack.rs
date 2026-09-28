@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
+    element::{Context, Element, ElementType, Filter, Flow, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
     stash::OutputStash,
@@ -307,7 +307,7 @@ impl Sink for Rack {
 
     /// Reaches what is installed, which is not necessarily what has been
     /// handed to the handle — see this type's own docs.
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // Into the rack here, and past it once this returns, so an element
         // inside sees a Flush before the element after the rack does, exactly
         // as it would if the two were linked directly.
@@ -346,6 +346,7 @@ mod tests {
 
     use super::*;
     use crate::contract::{MediaKind, MemoryDomain, PortContract};
+    use crate::element::SinkExt;
     use crate::pool::UnboundObjectPool;
 
     /// Records what reached the end of the branch the rack is in.
@@ -375,7 +376,7 @@ mod tests {
             self.received.lock().unwrap().push(buf);
             Ok(())
         }
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             self.controls.lock().unwrap().push(msg.clone());
             Ok(())
         }
@@ -441,7 +442,7 @@ mod tests {
             self.pad.push(MediaBuffer::Video(Arc::new(next)))
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             self.controls.lock().unwrap().push(msg.clone());
             Ok(())
         }
@@ -954,7 +955,7 @@ mod tests {
             fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
                 self.pad.push(buf)
             }
-            fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+            fn flow(&mut self, _flow: Flow<'_>) -> Result<()> {
                 Err(crate::error::Error::Other("no controls here".into()))
             }
         }

@@ -74,7 +74,7 @@ pub enum RtspMuxerError {
 /// independently, so a seek can shift them relative to each other by however
 /// far apart their last outputs were.
 ///
-/// It also finalizes on `Eos` alone, not on [`ControlMsg::Stop`](crate::control::ControlMsg::Stop). A live
+/// It also finalizes on `Eos` alone, not on a stop. A live
 /// publish that is abandoned has nothing that needs a valid trailer to be
 /// readable — unlike a file, which is why
 /// [`FileMuxer`](crate::elements::FileMuxer) treats `Stop` as a track

@@ -545,28 +545,43 @@ pub trait Sink: Element {
         None
     }
 
-    /// Reacts to a [`ControlMsg`] — drops what belongs to the timeline a
-    /// `Flush` ends, arms for a `Preroll`, lets go of a device on `Stop` —
-    /// on the thread delivering it, in order with the data around it.
+    /// The pipeline pausing — called on the thread that carries it here,
+    /// in order with the data around it: stop what this sink plays or
+    /// sends through, a device of its own. What reaches it while paused, a
+    /// preroll's or a step's samples, it takes as ever. By default nothing.
     ///
-    /// Only the reaction. Passing the message on is not this element's to
-    /// do: a filter in a graph is behind a wrapper that hands it on through
-    /// the filter's [`Source::src_pads`] once this returns, whatever it
-    /// returns ([`crate::control::deliver`] does the same for a filter
-    /// driven by hand); a terminal has nothing after it; and an element that
-    /// routes control its own way — a [`crate::queue::Queue`], across a
-    /// thread, a [`crate::elements::Tee`], to branches that come and go —
-    /// does that from here. So an element with nothing of its own to reset
-    /// leaves this alone, and a message added later reaches every element
-    /// whether or not that element knows of it.
-    ///
-    /// An error goes back to whoever sent the message. The message has
-    /// still gone on downstream: one element failing to pause must not
-    /// leave the rest of the graph running. Sent by the pipeline, it goes
-    /// on the bus as this element's, wherever the element is: the source
-    /// or the queue passing the message on reports it and goes on.
-    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+    /// Only the reaction: the pipeline tells every element after this one
+    /// itself, whatever this returns. An error goes on the bus as this
+    /// sink's, and the pause goes on regardless — one element failing to
+    /// pause must not leave the rest of the graph running.
+    fn pausing(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    /// The pipeline playing on after a pause: start again what
+    /// [`Self::pausing`] stopped. As there, only the reaction. By default
+    /// nothing.
+    fn resuming(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// The pipeline stopping: let go of what this sink holds, abandoned
+    /// rather than finished — no end of the stream follows a stop. As
+    /// [`Self::pausing`], only the reaction. By default nothing.
+    ///
+    /// A seek is not a stop: what a sink holds from before one it lets go
+    /// of where the flushed segment the seek begins reaches
+    /// [`Self::stream_event`].
+    fn stopping(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// What the pipeline asks of every element, as this crate's own
+    /// elements take it: a type only this crate can make or read. The
+    /// default hands a pause, a resume and a stop to the hooks above.
+    #[doc(hidden)]
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
+        hooks(self, msg)
     }
 
     /// Reacts to an event carried in the stream, in order with the buffers
@@ -574,16 +589,56 @@ pub trait Sink: Element {
     /// them, a flushed one after a seek, the end of the stream — see
     /// [`crate::stream`].
     ///
-    /// Only the reaction, as with [`Self::control`]: a filter pushes what it
-    /// answers the event with from here — a decoder what it still holds at
-    /// the end — and the graph passes the event on through its pads once
-    /// this returns, whatever it returns. A terminal's reaction to the end
-    /// is where it finishes: a muxer its file, a renderer what it still has
-    /// to play.
+    /// Only the reaction: a filter pushes what it answers the event with
+    /// from here — a decoder what it still holds at the end — and the graph
+    /// passes the event on through its pads once this returns, whatever it
+    /// returns. A terminal's reaction to the end is where it finishes: a
+    /// muxer its file, a renderer what it still has to play.
     fn stream_event(&mut self, _event: &StreamEvent) -> Result<()> {
         Ok(())
     }
 }
+
+/// What the pipeline asks of an element, as [`Sink`]'s hidden hook is
+/// handed it — a type nothing outside this crate can make or read, which
+/// keeps the hook this crate's own. A sink of your own hears a pause, a
+/// resume and a stop through [`Sink::pausing`], [`Sink::resuming`] and
+/// [`Sink::stopping`], and a seek through the flushed segment
+/// [`Sink::stream_event`] is handed; one that wraps another sink hands it
+/// on whole.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct Flow<'a>(pub(crate) &'a ControlMsg);
+
+/// A pause, a resume and a stop, handed to `sink`'s hooks — what
+/// [`Sink::flow`] does unless an element of this crate says otherwise.
+pub(crate) fn hooks<S: Sink + ?Sized>(sink: &mut S, msg: &ControlMsg) -> Result<()> {
+    match msg {
+        ControlMsg::Pause => sink.pausing(),
+        ControlMsg::Resume => sink.resuming(),
+        ControlMsg::Stop => sink.stopping(),
+        ControlMsg::Flush | ControlMsg::Preroll(_) | ControlMsg::Seek(_) => Ok(()),
+    }
+}
+
+/// How this crate hands a sink what the pipeline asks: `sink.control(msg)`
+/// for [`Sink::flow`] with the message wrapped.
+///
+/// Only the reaction. Passing the message on is not the sink's to do: a
+/// filter in a graph is behind a wrapper that hands it on through the
+/// filter's [`Source::src_pads`] once this returns, whatever it returns
+/// (`control::deliver` does the same for a filter driven by hand); a
+/// terminal has nothing after it; and an element that routes control its
+/// own way — a `Queue`, across a thread, a `Tee`, to branches that come and
+/// go — does that from its hook. An error goes back to whoever sent the
+/// message, and the message has still gone on downstream.
+pub(crate) trait SinkExt: Sink {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        self.flow(Flow(msg))
+    }
+}
+
+impl<S: Sink + ?Sized> SinkExt for S {}
 
 /// An element with one or more output ports. It sends data downstream by
 /// pushing into its own `src_pads()` (e.g. `self.src_pads()[0].push(buf)`)
@@ -606,12 +661,15 @@ pub trait Source: Element {
     fn src_pads(&mut self) -> &mut [SrcPad];
 }
 
-/// A pure source: has output but no input. Its `run` method drives the
-/// production loop and pushes buffers into its own src pad(s) until EOS or
-/// an error. [`crate::pipeline::Pipeline::run`] normally invokes that loop
-/// on the pipeline's background source thread; a caller may also invoke a
-/// concrete implementation directly. Sources typically wrap blocking I/O
-/// reads (demuxer, file/network source).
+/// A pure source: has output but no input. Its loop, which the pipeline
+/// runs on a thread of its own, pushes buffers into its own src pad(s) and
+/// answers what the pipeline asks in between — pause, seek, stop — until
+/// its stream ends.
+///
+/// Implemented only by this crate's sources: the loop is handed a channel
+/// nothing outside can name, and answering it right is what this crate's
+/// sources share. A source of your own is a [`Produce`], which the
+/// framework makes one of — see [`IntoSource`].
 pub trait SourceElement: Source {
     /// Whether this source produces data from a live, externally advancing
     /// input rather than from a finite or application-controlled timeline.
@@ -645,35 +703,34 @@ pub trait SourceElement: Source {
     }
 
     /// Drives this source until `Eos` (normal completion),
-    /// [`crate::pipeline::Pipeline::finish`], or `Stop` (see
-    /// [`ControlMsg::Stop`]) — call [`crate::control::drain_control`]
-    /// once per loop iteration to make `control` responsive between
-    /// blocking reads.
+    /// `Pipeline::finish`, or `Stop` — calling `control::drain_control`
+    /// once per loop iteration to stay responsive between blocking reads.
     ///
     /// `bus` is this source's own way to report a failure pushing into
     /// one of its pads *without* treating it as fatal — post a
-    /// [`crate::bus::BusEvent::Error`] and keep going (drop that one
-    /// buffer), the same way a [`crate::queue::Queue`] handles a failing
-    /// downstream `Sink` — rather than returning `Err` and ending this
-    /// source's thread over one bad buffer. A returned `Err` is still
-    /// how genuinely fatal failures (this source can't continue at all)
-    /// reach [`crate::pipeline::Pipeline::run`], which posts it to `bus`
-    /// itself.
+    /// `BusEvent::Error` and keep going (drop that one buffer), the same
+    /// way a `Queue` handles a failing downstream `Sink` — rather than
+    /// returning `Err` and ending this source's thread over one bad buffer.
+    /// A returned `Err` is still how genuinely fatal failures (this source
+    /// can't continue at all) reach `Pipeline::run`, which posts it to
+    /// `bus` itself.
+    #[doc(hidden)]
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()>;
 
     /// Reacts to one control message before it is forwarded to this source's
-    /// own pads — the same ordering [`SeekableSource::seek`] gets, and for the same
-    /// reason: whatever this source holds must already reflect the message by
-    /// the time downstream elements see it.
+    /// own pads — the same ordering `SeekableSource::seek` gets, and for the
+    /// same reason: whatever this source holds must already reflect the
+    /// message by the time downstream elements see it.
     ///
-    /// This is the source-side counterpart of [`Sink::control`], and exists
-    /// for a source that holds state of its own. [`crate::elements::FileDemuxer`]
-    /// uses it for both messages that touch its read-ahead: `Flush` discards
-    /// packets belonging to the timeline being left, and `Preroll` is what
-    /// makes it hold a blocked pad's packets instead of waiting on that pad.
+    /// The source-side counterpart of a sink's hidden hook, for a source
+    /// that holds state of its own. `FileDemuxer` uses it for both messages
+    /// that touch its read-ahead: `Flush` discards packets belonging to the
+    /// timeline being left, and `Preroll` is what makes it hold a blocked
+    /// pad's packets instead of waiting on that pad.
     ///
     /// The default is a no-op. A source that hands every packet straight to a
     /// pad has nothing of its own to keep in step.
+    #[doc(hidden)]
     fn on_control(&mut self, _msg: &ControlMsg) {}
 
     /// Called as a `Pause` arrives, before it is passed downstream: what the
@@ -709,19 +766,17 @@ pub trait SourceElement: Source {
 pub trait SeekableSource: SourceElement {
     /// Repositions this source to `target`, an absolute position from the
     /// start of the media (e.g. `av_seek_frame` for
-    /// [`crate::elements::FileDemuxer`]). Called by
-    /// [`crate::control::drain_control`] as part of handling
-    /// [`ControlMsg::Seek`], *before* that message is forwarded to the
-    /// source's own pads — so whatever's read next comes from the new
-    /// position by the time downstream elements receive the new timeline
-    /// announcement. Buffered and stateful old-timeline data is discarded by
-    /// the preceding [`ControlMsg::Flush`].
+    /// [`crate::elements::FileDemuxer`]). Called on the source's own thread
+    /// as it takes the seek, *before* the seek is passed to the source's
+    /// own pads — so whatever's read next comes from the new position by the
+    /// time downstream elements receive the segment it begins. Buffered and
+    /// stateful old-timeline data is discarded by the flush before it.
     ///
     /// Returns where this actually landed, which is allowed to differ
     /// from `target` — a container seek can only ever reposition to a
     /// keyframe at or before it (landing mid-GOP would leave downstream
     /// decoders/muxers with no reference frame to start from), so
-    /// `target` is a request, not a guarantee. `drain_control` reports
+    /// `target` is a request, not a guarantee. The source reports
     /// the gap between the two via [`crate::bus::BusEvent::Seeked`];
     /// callers that need to know where playback actually resumed should
     /// watch that instead of assuming `target` took effect verbatim.
@@ -875,8 +930,20 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
         (**self).as_reversible()
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
-        (**self).control(msg)
+    fn pausing(&mut self) -> Result<()> {
+        (**self).pausing()
+    }
+
+    fn resuming(&mut self) -> Result<()> {
+        (**self).resuming()
+    }
+
+    fn stopping(&mut self) -> Result<()> {
+        (**self).stopping()
+    }
+
+    fn flow(&mut self, flow: Flow<'_>) -> Result<()> {
+        (**self).flow(flow)
     }
 
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
@@ -928,7 +995,15 @@ mod tests {
             InputContract::Fixed(PortContract::packet(MediaKind::AudioPacket))
         }
 
-        fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        fn pausing(&mut self) -> Result<()> {
+            Err(crate::error::Error::Other("opinionated".into()))
+        }
+
+        fn resuming(&mut self) -> Result<()> {
+            Err(crate::error::Error::Other("opinionated".into()))
+        }
+
+        fn stopping(&mut self) -> Result<()> {
             Err(crate::error::Error::Other("opinionated".into()))
         }
 
@@ -959,9 +1034,18 @@ mod tests {
                 "not the default of Unknown"
             );
             sink.consume(packet()).unwrap();
+            assert!(sink.pausing().is_err(), "not the default of doing nothing");
+            assert!(sink.resuming().is_err(), "nor here");
+            assert!(sink.stopping().is_err(), "nor here");
+            for msg in [ControlMsg::Pause, ControlMsg::Resume, ControlMsg::Stop] {
+                assert!(
+                    sink.control(&msg).is_err(),
+                    "the pipeline's {msg:?} reaches its hook"
+                );
+            }
             assert!(
-                sink.control(&ControlMsg::Pause).is_err(),
-                "not the default of doing nothing"
+                sink.control(&ControlMsg::Flush).is_ok(),
+                "and a flush none: the flushed segment is where a sink hears a seek"
             );
             let segment = crate::stream::StreamEvent::Segment(Arc::new(crate::stream::Segment {
                 id: 1,

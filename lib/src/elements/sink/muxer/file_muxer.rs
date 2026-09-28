@@ -185,7 +185,7 @@ impl FileMuxer {
     /// `av_interleaved_write_frame` nor `av_write_trailer` is safe to call
     /// from multiple threads against the same file at once. They also
     /// share one trailer: it's written once every track has reported
-    /// itself done — via `Eos` *or* [`ControlMsg::Stop`](crate::control::ControlMsg::Stop), either meaning
+    /// itself done — via `Eos` *or* a stop, either meaning
     /// "this track is finished" rather than "abandon the whole file" —
     /// not on whichever track finishes first, which would silently
     /// truncate whatever the other track(s) still had left to write. A
@@ -237,6 +237,7 @@ mod tests {
     use crate::buffer::MediaBuffer;
     use crate::contract::{InputContract, MediaKind, PortContract};
     use crate::control::ControlMsg;
+    use crate::element::SinkExt;
     use crate::element::{Sink, Source};
     use crate::elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions};
 

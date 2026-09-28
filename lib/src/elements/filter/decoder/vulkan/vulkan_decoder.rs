@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
     elements::{VulkanDevice, filter::is_codec_drain_boundary},
     pad::SrcPad,
     platform::ffmpeg::AvBufferRef,
@@ -306,7 +306,7 @@ impl Sink for VulkanDecoder {
         }
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> crate::error::Result<()> {
         // Reference-frame state belongs to the timeline a seek leaves; the
         // samples decoded while a preroll catches up exist only to warm the
         // codec.

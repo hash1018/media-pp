@@ -202,6 +202,7 @@ mod tests {
     use super::*;
     use crate::control::ControlMsg;
     use crate::element::Sink;
+    use crate::element::SinkExt;
     use crate::pool::UnboundObjectPool;
 
     /// One frame with its own picture. System memory, because what this gate

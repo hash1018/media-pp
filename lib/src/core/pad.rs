@@ -12,7 +12,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::OutputContract,
     control::ControlMsg,
-    element::{ElementType, Sink},
+    element::{ElementType, Sink, SinkExt},
     error::Result,
     pp_log::{PpLog, pp_trace},
     stats::PadCounters,
@@ -225,7 +225,7 @@ impl SrcPad {
     /// Pushing into an unlinked pad is a no-op, same as `push`.
     ///
     /// Not public: an element never passes control on itself — see
-    /// [`crate::element::Sink::control`] — and one that did would hand
+    /// `Sink::flow` — and one that did would hand
     /// everything after it each message twice.
     pub(crate) fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // A seek's own, and nobody else's — see `crate::stream`.

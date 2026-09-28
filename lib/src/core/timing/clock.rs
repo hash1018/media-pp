@@ -113,7 +113,7 @@ impl Clock {
     /// startup (see the type docs). Unconditional, regardless of current
     /// state.
     ///
-    /// Called on [`crate::control::ControlMsg::Seek`]
+    /// Called on a seek
     /// (see [`crate::pipeline::Pipeline::seek`]): the old anchor measured
     /// real time elapsed *for the pre-seek position* — after a jump, a
     /// `Pacer`'s `elapsed_secs` (relative to its own now-reset

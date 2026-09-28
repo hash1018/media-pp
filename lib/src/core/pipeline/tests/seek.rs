@@ -228,7 +228,7 @@ impl Sink for ControlRecordingSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         let label = match msg {
             ControlMsg::Pause => "pause",
             ControlMsg::Resume => "resume",

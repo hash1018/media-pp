@@ -24,7 +24,7 @@ use crate::stream::StreamEvent;
 use crate::test_support::try_test_video;
 use crate::{
     control::{ControlReceiver, drain_control},
-    element::{Source, SourceElement},
+    element::{Flow, SinkExt, Source, SourceElement},
     pad::SrcPad,
 };
 

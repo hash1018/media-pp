@@ -292,6 +292,7 @@ pub(crate) fn an_input_that_ends_is_shown_again<C: VideoCompositorControl>(
     picture: impl Fn() -> crate::buffer::MediaBuffer,
 ) {
     use crate::control::ControlMsg;
+    use crate::element::SinkExt;
 
     let CompositorInput { mut sink, layer } = handle
         .add_source("ends", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))

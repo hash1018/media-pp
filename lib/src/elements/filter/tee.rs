@@ -12,7 +12,7 @@ use crate::{
     bus::BusEvent,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Sink, element_pp_log},
+    element::{Context, Element, ElementType, Flow, Sink, element_pp_log},
     error::Result,
     graph::{BranchId, ElementId, GraphError, Incoming, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
@@ -764,7 +764,7 @@ impl Sink for Tee {
         Ok(())
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // Control failures follow the same isolation rule as data failures:
         // report the failed branch, but still deliver the message to every
         // sibling. This is especially important for Stop and Pause.
@@ -911,7 +911,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, _flow: Flow<'_>) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 Err(crate::error::Error::Other(

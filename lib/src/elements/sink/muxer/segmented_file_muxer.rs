@@ -14,7 +14,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, SinkExt, element_pp_log},
     error::Result,
     stream::StreamEvent,
 };
@@ -191,7 +191,7 @@ impl SegmentedFileMuxer {
     ///
     /// The final segment is finalized the same way a plain [`FileMuxer`]
     /// finalizes its one file: once every track has reported `Eos` *or*
-    /// [`ControlMsg::Stop`] (see [`FileMuxer::open`]'s own docs) — a
+    /// a stop (see [`FileMuxer::open`]'s own docs) — a
     /// rotation mid-recording reuses that exact mechanism to close the
     /// outgoing segment before opening the next one.
     pub fn open(mut self) -> Result<MuxerSinks> {
@@ -646,7 +646,7 @@ impl Sink for SegmentedTrackSink {
         false
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         if *msg == ControlMsg::Stop {
             self.group.finish_stop(self.track_index)?;
         }

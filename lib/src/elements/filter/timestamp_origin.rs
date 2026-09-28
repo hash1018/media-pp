@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
 };
@@ -185,7 +185,7 @@ impl Sink for TimestampOrigin {
         self.pad.push(MediaBuffer::Packet(Arc::new(rebased)))
     }
 
-    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         // `Stop` abandons this run, so a pipeline started again begins a new
         // timeline at zero like the first one did.
         //
@@ -206,6 +206,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::element::SinkExt;
 
     fn capture(element: &mut TimestampOrigin) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

@@ -1,5 +1,6 @@
-//! Pause, Resume, Stop, Flush, Seek, and Finish — and the channel they travel
-//! through.
+//! Why a pipeline refused a seek and why a preroll failed — and, inside
+//! this crate, Pause, Resume, Stop, Flush, Seek and Finish, and the channel
+//! they travel through.
 //!
 //! Control reaches every thread of a pipeline directly — each source and
 //! each [`Queue`](crate::queue::Queue)'s worker, on a channel of its own —
@@ -7,11 +8,17 @@
 //! stopping at the next queue, which has its own: see `Direct`. Not with
 //! the data, because unlike [`Eos`](crate::stream::StreamEvent::Eos) it has
 //! to reach elements mid-stream, ahead of whatever is already backed up.
+//! An element of your own hears of it through its hooks: a sink's
+//! [`pausing`](crate::element::Sink::pausing),
+//! [`resuming`](crate::element::Sink::resuming) and
+//! [`stopping`](crate::element::Sink::stopping), a seek as the flushed
+//! [`Segment`](crate::stream::Segment) that begins its stream again, and a
+//! [`Produce`](crate::element::Produce)'s through the framework's loop.
 //!
-//! A [`SourceElement`](crate::element::SourceElement) loop stays responsive by
-//! calling [`drain_control`] every iteration. The returned [`ControlOutcome`]
-//! is not only a "should I stop" flag: a source that schedules against the
-//! wall clock must add `paused_for` back into its own timing, or resuming will
+//! A source loop of this crate's stays responsive by calling
+//! `drain_control` every iteration. The `ControlOutcome` it returns is not
+//! only a "should I stop" flag: a source that schedules against the wall
+//! clock must add `paused_for` back into its own timing, or resuming will
 //! look like a burst of catch-up work owed all at once.
 
 use std::{
@@ -27,7 +34,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{
     bus::{Bus, BusEvent},
-    element::{ElementType, Filter, SourceElement},
+    element::{ElementType, Filter, SinkExt, SourceElement},
     error::Result,
     graph::{ElementId, NodeInfo},
     pad::SrcPad,
@@ -36,7 +43,7 @@ use crate::{
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
 /// — travels the same pad-to-pad path `MediaBuffer` does (see
-/// [`crate::element::Sink::control`]), but through a dedicated channel
+/// `Sink::flow`), but through a dedicated channel
 /// instead of riding along as data: unlike `Eos`, it has to be able to
 /// reach every element even mid-stream, and (for `Queue`) jump ahead of
 /// whatever data is already backed up rather than wait in line behind it.
@@ -808,7 +815,7 @@ pub(crate) fn handle_request<S: SourceElement>(
 }
 
 /// Applies one source-only graceful completion request. Unlike
-/// [`apply_one`], this never calls `Sink::control`: EOS has to sit behind every
+/// [`apply_one`], this never calls `Sink::flow`: EOS has to sit behind every
 /// already-produced buffer in each data path so queues and stateful elements
 /// drain in order. Playing backwards, a [`crate::element::ReversibleSource`] first reads the
 /// stretch under way to its end — see [`crate::element::ReversibleSource::finish_stretch`].
@@ -992,7 +999,7 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
 /// graph does for every filter in it, for code that drives one by hand: a
 /// bin of your own passing control to the elements it holds, a test.
 ///
-/// The filter reacts first ([`Sink::control`](crate::element::Sink::control)), so whatever it holds
+/// The filter reacts first (`Sink::flow`), so whatever it holds
 /// already reflects the message by the time the elements after it see it.
 /// The message goes on even where that reaction failed, and through every
 /// pad even where one of them failed: a `Pause` or `Stop` stopped at the
@@ -1080,7 +1087,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::MediaBuffer,
-        element::{Element, ElementType, Sink, Source, element_pp_log},
+        element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
         pad::SrcPad,
     };
 
@@ -1346,7 +1353,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             self.order
                 .lock()
                 .unwrap()
@@ -1432,7 +1439,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             if *msg == ControlMsg::Pause {
                 thread::sleep(self.pause_delay);
             }
@@ -1631,7 +1638,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
             self.noted.lock().unwrap().push(msg.clone());
             if self.refuses {
                 return Err(crate::error::Error::Other("refused".into()));
@@ -1675,7 +1682,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        fn flow(&mut self, _flow: Flow<'_>) -> Result<()> {
             Err(crate::error::Error::Other("cannot pause".into()))
         }
     }

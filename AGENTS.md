@@ -205,7 +205,13 @@ final source of truth when documentation and implementation differ.
   `SourceElement::pausing` and `resuming`, not in a pause loop of its own.
   Wall-clock-driven sources must add `ControlOutcome::paused_for` back into their
   scheduling state so Resume does not emit a catch-up burst.
-- `Sink::control` is an element's own reaction and nothing more. The graph
+- Control stays inside the crate: `ControlMsg` reaches this crate's
+  elements through `Sink::flow`, a hidden hook whose argument nothing
+  outside can name (the crate calls it as `SinkExt::control`), and a sink
+  outside the crate hears a pause, a resume and a stop through
+  `Sink::pausing`, `resuming` and `stopping`, which `flow`'s default
+  calls, and a seek through the flushed segment. `flow` is an element's
+  own reaction and nothing more. The graph
   passes each message on through a filter's `src_pads()` after it
   (`control::deliver` for a filter driven by hand), to every pad even where
   one fails; an element never forwards control itself, and `SrcPad::control`
