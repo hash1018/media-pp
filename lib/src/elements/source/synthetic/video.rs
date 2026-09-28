@@ -152,6 +152,13 @@ impl TestVideoSource {
     pub fn time_base(&self) -> ffmpeg::Rational {
         self.0.inner().time_base()
     }
+
+    /// The next frame at once, not when it is due — for a test fixture
+    /// written as fast as it encodes, stamped as a paced run stamps it.
+    #[cfg(test)]
+    pub(crate) fn next_frame(&mut self) -> MediaBuffer {
+        MediaBuffer::Video(Arc::new(self.0.inner_mut().generate_frame()))
+    }
 }
 
 impl Generating {

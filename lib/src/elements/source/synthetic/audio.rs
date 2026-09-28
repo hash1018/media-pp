@@ -124,6 +124,14 @@ impl TestAudioSource {
     pub fn time_base(&self) -> ffmpeg::Rational {
         self.0.inner().time_base()
     }
+
+    /// The next `count` samples at once, not when they are owed — for a
+    /// test fixture written as fast as it encodes, stamped as a paced run
+    /// stamps them.
+    #[cfg(test)]
+    pub(crate) fn next_samples(&mut self, count: usize) -> MediaBuffer {
+        MediaBuffer::Audio(Arc::new(self.0.inner_mut().generate_frame(count)))
+    }
 }
 
 impl Generating {

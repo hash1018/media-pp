@@ -254,11 +254,12 @@ fn build_sound(
     name: &str,
     seconds: f64,
 ) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use crate::element::{Sink, Source};
     use crate::elements::{
         AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
         TestAudioSource,
     };
-    use crate::pipeline::Pipeline;
+    use crate::stream::{StreamEvent, deliver};
 
     let directory = std::env::temp_dir().join("media-pp-fixtures");
     std::fs::create_dir_all(&directory)?;
@@ -267,7 +268,7 @@ fn build_sound(
     let _ = std::fs::remove_file(&partial);
 
     let (sample_rate, channels) = (48_000, 2);
-    let tone = TestAudioSource::new(
+    let mut tone = TestAudioSource::new(
         format!("{name}-tone"),
         TestAudioOptions {
             sample_rate,
@@ -275,7 +276,7 @@ fn build_sound(
             frequency: 440.0,
         },
     );
-    let encoder = SwAudioEncoder::new(
+    let mut encoder = SwAudioEncoder::new(
         format!("{name}-encoder"),
         SwAudioEncoderOptions {
             codec: AudioCodec::Aac,
@@ -287,16 +288,15 @@ fn build_sound(
     let mut muxer = FileMuxer::create(&partial)?;
     let track = muxer.add_stream("audio", &encoder)?;
     let mut sinks = muxer.open()?;
-    let sink = sinks.take(track)?;
-    let (pipeline, ()) = Pipeline::new(format!("{name}-fixture"), tone, move |source, ctx| {
-        let branch = ctx.branch().pipe(encoder).to(sink)?;
-        ctx.attach(source, 0, branch)?;
-        Ok(())
-    })?;
-    pipeline.run()?;
-    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-    pipeline.stop();
-    drop(pipeline);
+    encoder.src_pads()[0].link(sinks.take(track)?);
+    // Written at once, as `build_fixture` writes its sound.
+    let total = (seconds * f64::from(sample_rate)).round() as usize;
+    let chunk = sample_rate as usize / 100;
+    for start in (0..total).step_by(chunk) {
+        encoder.consume(tone.next_samples(chunk.min(total - start)))?;
+    }
+    deliver(&mut encoder, &StreamEvent::Eos)?;
+    drop(encoder);
     Ok(match std::fs::rename(&partial, &path) {
         Ok(()) => path,
         Err(_) => partial,
@@ -746,12 +746,12 @@ const FIXTURE_FPS: i32 = 30;
 
 /// Builds one, or reports why it could not.
 ///
-/// Takes `seconds` of real time: both synthetic sources pace themselves to the
-/// rate they claim, which is what makes the file's own timing worth measuring.
-///
-/// `Stop` rather than an end of stream, because neither source has an end —
-/// they generate until told otherwise. A muxer finalizes on either, so the
-/// file that lands is complete.
+/// Written as fast as it encodes, every frame and every sample stamped by
+/// its count, as the synthetic sources stamp a paced run. Not a paced run
+/// itself: a video source that falls behind drops the frames it owes rather
+/// than bursting them, so on a loaded machine an eight-second recording
+/// came out with two seconds of picture, and every seek past them landed on
+/// its last frame.
 fn build_fixture(
     name: &str,
     seconds: f64,
@@ -759,11 +759,12 @@ fn build_fixture(
     codec: VideoCodec,
     max_b_frames: Option<u32>,
 ) -> std::result::Result<Fixture, Box<dyn std::error::Error>> {
+    use crate::element::{Sink, Source};
     use crate::elements::{
         AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions,
-        SwScaler, TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
+        TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
     };
-    use crate::pipeline::PipelineBuilder;
+    use crate::stream::{StreamEvent, deliver};
     use ffmpeg_next as ffmpeg;
 
     let directory = std::env::temp_dir().join("media-pp-fixtures");
@@ -777,7 +778,7 @@ fn build_fixture(
     let _ = std::fs::remove_file(&partial);
 
     let channels = 2;
-    let video = TestVideoSource::new(
+    let mut video = TestVideoSource::new(
         format!("{name}-video"),
         TestVideoOptions {
             width: FIXTURE_WIDTH,
@@ -785,7 +786,7 @@ fn build_fixture(
             frame_rate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
         },
     );
-    let audio = TestAudioSource::new(
+    let mut audio = TestAudioSource::new(
         format!("{name}-audio"),
         TestAudioOptions {
             sample_rate: audio_rate,
@@ -794,7 +795,7 @@ fn build_fixture(
         },
     );
 
-    let video_encoder = SwEncoder::new(
+    let mut video_encoder = SwEncoder::new(
         format!("{name}-video-encoder"),
         SwEncoderOptions {
             codec,
@@ -814,7 +815,7 @@ fn build_fixture(
             max_b_frames,
         },
     )?;
-    let audio_encoder = SwAudioEncoder::new(
+    let mut audio_encoder = SwAudioEncoder::new(
         format!("{name}-audio-encoder"),
         SwAudioEncoderOptions {
             codec: AudioCodec::Aac,
@@ -828,40 +829,25 @@ fn build_fixture(
     let video_track = muxer.add_stream("video", &video_encoder)?;
     let audio_track = muxer.add_stream("audio", &audio_encoder)?;
     let mut sinks = muxer.open()?;
-    let video_sink = sinks.take(video_track)?;
-    let audio_sink = sinks.take(audio_track)?;
+    video_encoder.src_pads()[0].link(sinks.take(video_track)?);
+    audio_encoder.src_pads()[0].link(sinks.take(audio_track)?);
 
-    // The encoder takes YUV420P and the synthetic source does not produce it,
-    // the same conversion `tee_recording` puts in front of its own encoder.
-    let scaler = SwScaler::new(
-        format!("{name}-to-yuv"),
-        ffmpeg::format::Pixel::YUV420P,
-        FIXTURE_WIDTH,
-        FIXTURE_HEIGHT,
-        ffmpeg::software::scaling::Flags::BILINEAR,
-    );
-
-    let builder = PipelineBuilder::new(format!("{name}-fixture"));
-    let (builder, ()) = builder.add_source(video, move |source, context| {
-        let branch = context
-            .branch()
-            .pipe(scaler)
-            .pipe(video_encoder)
-            .to(video_sink)?;
-        context.attach(source, 0, branch)?;
-        Ok(())
-    })?;
-    let (builder, ()) = builder.add_source(audio, move |source, context| {
-        let branch = context.branch().pipe(audio_encoder).to(audio_sink)?;
-        context.attach(source, 0, branch)?;
-        Ok(())
-    })?;
-    let pipeline = builder.build();
-
-    pipeline.run()?;
-    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-    pipeline.stop();
-    drop(pipeline);
+    // Each frame's sound just ahead of it, so the muxer interleaves as it
+    // goes rather than holding one track until the other catches up. The
+    // sample count is worked out from the total so far, which keeps it exact
+    // at a rate that is no whole number of samples a frame.
+    let frames = (seconds * FIXTURE_FPS as f64).round() as i64;
+    let mut samples = 0;
+    for index in 0..frames {
+        let owed = (index + 1) * i64::from(audio_rate) / i64::from(FIXTURE_FPS);
+        audio_encoder.consume(audio.next_samples((owed - samples) as usize))?;
+        samples = owed;
+        video_encoder.consume(video.next_frame())?;
+    }
+    // Each track finishes on its own end; the file, once both have.
+    deliver(&mut video_encoder, &StreamEvent::Eos)?;
+    deliver(&mut audio_encoder, &StreamEvent::Eos)?;
+    drop((video_encoder, audio_encoder));
 
     // Where another run still has the old file open, Windows will not
     // replace it; this run then reads its own copy, left behind like the
