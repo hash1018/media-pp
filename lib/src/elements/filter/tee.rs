@@ -732,18 +732,34 @@ impl Sink for Tee {
         let graph = preroll
             .as_ref()
             .map(|_| self.shared.context.graph.snapshot());
-        branches.into_iter().all(|branch| {
+        // A branch the preroll holds takes what comes by having it kept —
+        // see `hand_out` — so it stands in no sibling's way. With every
+        // branch held, though, nothing here needs anything more before the
+        // preroll ends, and whatever this took would only be kept, to be
+        // handed on all at once as playback goes on: in front of a `Tee`
+        // after a pacer, a burst of everything decoded in the meantime,
+        // shown unpaced. So it is not ready, and what is behind it waits.
+        // A branch whose terminals drop what reaches them until the preroll
+        // ends — the sound, played backwards — wants nothing either.
+        let mut held = 0;
+        let mut active = 0;
+        for branch in branches {
             if !branch.active.load(Ordering::Acquire) {
-                return true;
+                continue;
             }
+            active += 1;
             if let (Some(context), Some(graph)) = (&preroll, &graph) {
                 let terminals = graph.terminal_ids_from(branch.root_id);
-                if context.are_ready(&terminals) {
-                    return true;
+                if context.wants_nothing_from(&terminals) {
+                    held += 1;
+                    continue;
                 }
             }
-            lock_unpoisoned(&branch.pad).ready_consume()
-        })
+            if !lock_unpoisoned(&branch.pad).ready_consume() {
+                return false;
+            }
+        }
+        active == 0 || held < active
     }
 
     /// A Tee duplicates rather than transforms, so it accepts every kind
@@ -1832,6 +1848,88 @@ mod tests {
             "what was kept, then what followed"
         );
         assert_eq!(*late.lock().unwrap(), [1, 2, 3]);
+    }
+
+    /// A branch the preroll holds stands in no sibling's way, but with every
+    /// branch held the `Tee` takes nothing more until the preroll ends.
+    ///
+    /// It took everything: a held branch answered ready, so with all of them
+    /// held the `Tee` still did, and kept what came for each — everything
+    /// decoded while the pipeline got round to ending the preroll. That went
+    /// on at once as playback did: behind a pacer, a burst, and a playing
+    /// seek on a slow machine showed the picture a second or two past where
+    /// it landed. Found by obs-rs's CI on a runner without a GPU.
+    #[test]
+    fn a_tee_every_branch_of_which_a_preroll_holds_takes_no_more() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let branch = |name: &'static str| {
+            context
+                .branch()
+                .to(PtsSink {
+                    pp_log: element_pp_log(ElementType::Other, name, None),
+                    name,
+                    seen: Arc::clone(&seen),
+                })
+                .unwrap()
+        };
+        let tee_branch = context
+            .tee("tee")
+            .branch(branch("first"))
+            .branch(branch("second"))
+            .build()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+        let snapshot = context.graph.snapshot();
+        let terminals = snapshot.terminal_ids();
+        let preroll = Arc::new(crate::control::PrerollContext::new(terminals.clone()));
+        context
+            .state
+            .enter(crate::playback_state::Phase::Prerolling(Arc::clone(
+                &preroll,
+            )));
+        assert!(upstream.ready_consume(), "neither has its sample yet");
+
+        preroll.mark_ready(terminals[0]);
+        assert!(
+            upstream.ready_consume(),
+            "one held, and the other still wants its sample"
+        );
+
+        preroll.mark_ready(terminals[1]);
+        assert!(
+            !upstream.ready_consume(),
+            "every branch held: nothing more is taken"
+        );
+
+        context.state.enter(crate::playback_state::Phase::Playing);
+        assert!(
+            upstream.ready_consume(),
+            "and once playback goes on, all is"
+        );
+
+        // Played backwards, where one branch's terminal drops what reaches
+        // it until the preroll ends and so never has a sample to take.
+        let preroll =
+            Arc::new(crate::control::PrerollContext::new([terminals[0]]).silencing([terminals[1]]));
+        context
+            .state
+            .enter(crate::playback_state::Phase::Prerolling(Arc::clone(
+                &preroll,
+            )));
+        assert!(
+            upstream.ready_consume(),
+            "the one that counts wants its sample"
+        );
+        preroll.mark_ready(terminals[0]);
+        assert!(
+            !upstream.ready_consume(),
+            "and once it has it, the one that drops everything wants nothing"
+        );
     }
 
     /// What a preroll kept for a branch — the end of the stream with it —

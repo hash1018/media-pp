@@ -331,6 +331,19 @@ impl PrerollContext {
         !state.cancelled && terminals.iter().all(|id| state.ready.contains(id))
     }
 
+    /// Whether nothing in one downstream branch wants more of this preroll:
+    /// each of `terminals` has its samples, or drops what reaches it.
+    pub(crate) fn wants_nothing_from(&self, terminals: &[ElementId]) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.cancelled
+            && terminals
+                .iter()
+                .all(|id| state.ready.contains(id) || self.silenced.contains(id))
+    }
+
     /// Returns whether every expected terminal has completed this preroll.
     pub fn is_complete(&self) -> bool {
         let state = self
