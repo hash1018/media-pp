@@ -191,6 +191,8 @@ pub(crate) struct PlaybackState {
     /// Whether decoders decode every picture however late pictures come,
     /// which only a test asks for, through `decode_everything`.
     decodes_everything: AtomicBool,
+    /// Whether the pipeline is finishing — see [`Self::is_finishing`].
+    finishing: AtomicBool,
 }
 
 /// The picture one terminal last took.
@@ -221,6 +223,7 @@ impl PlaybackState {
             accurate: AtomicBool::new(false),
             picture_late_ns: AtomicU64::new(0),
             decodes_everything: AtomicBool::new(false),
+            finishing: AtomicBool::new(false),
         })
     }
 
@@ -402,6 +405,22 @@ impl PlaybackState {
     /// it here.
     pub(crate) fn accurate(&self) -> bool {
         self.accurate.load(Ordering::Acquire)
+    }
+
+    /// Whether the pipeline is finishing: every source ends its stream
+    /// where it has read to, rather than where its media ends. So an end
+    /// that comes before a seek's target was reached is not the media's —
+    /// what a decoder held from before the target is warming up, never
+    /// something to show, and it lets it go rather than showing it as the
+    /// media's last.
+    pub(crate) fn is_finishing(&self) -> bool {
+        self.finishing.load(Ordering::Acquire)
+    }
+
+    /// Says the pipeline is finishing — the pipeline's to call, before it
+    /// asks its sources to end their streams.
+    pub(crate) fn finish(&self) {
+        self.finishing.store(true, Ordering::Release);
     }
 
     /// Sets whether the timeline about to begin shows from its target — the

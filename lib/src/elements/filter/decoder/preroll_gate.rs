@@ -90,13 +90,18 @@ pub(super) struct PrerollGate {
     /// What the decoder made that its pad could not take while a preroll
     /// held the graph.
     stash: OutputStash,
+    /// The pipeline's playback state, which says whether an end is one a
+    /// finish cut short — `None` for a decoder wired into no pipeline.
+    state: Option<Arc<PlaybackState>>,
 }
 
 impl PrerollGate {
-    /// Reads from `state` whether a preroll holds the graph — what a
-    /// decoder's `attach_context` hands on.
+    /// Reads from `state` whether a preroll holds the graph, and whether
+    /// the pipeline is finishing — what a decoder's `attach_context` hands
+    /// on.
     pub(super) fn attach(&mut self, state: &Arc<PlaybackState>) {
         self.stash.attach(state);
+        self.state = Some(Arc::clone(state));
     }
 
     /// Whether the decoder can take its next packet — what its
@@ -281,9 +286,22 @@ impl PrerollGate {
     /// whatever `pad` says, since after the end nothing would take it; and
     /// where no sample reached the target, the last one before it — the
     /// stream's last presentable, which is what a seek past it shows.
+    ///
+    /// Not where the pipeline is finishing. Then the end comes where the
+    /// source had read to, and before the target it is no end of the
+    /// media: what the decoder holds from before the target is warming up.
+    /// Shown, a finish right after an accurate seek played the sound from
+    /// before where it was sought to.
     pub(super) fn push_eos_candidate(&mut self, pad: &mut SrcPad) -> crate::error::Result<()> {
         let kept = self.stash.release_all(pad);
-        let candidate = self.candidate.take().filter(|_| !self.reached);
+        let finishing = self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.is_finishing());
+        let candidate = self
+            .candidate
+            .take()
+            .filter(|_| !self.reached && !finishing);
         self.reached = true;
         match candidate {
             Some(candidate) => kept.and(pad.push(candidate)),
@@ -641,6 +659,34 @@ mod tests {
         gate.push_admitted(video(1_967), &mut out.pad).unwrap();
         gate.push_eos_candidate(&mut out.pad).unwrap();
         assert_eq!(*out.taken.lock().unwrap(), [1_967]);
+    }
+
+    /// An end that a finish brought, before the target was reached, shows
+    /// nothing from before it: the source ended where it had read to, not
+    /// where the media ends.
+    ///
+    /// It showed the last sample before the target, as for a seek past the
+    /// end: a finish right after an accurate seek, before the sound reached
+    /// its target, played the sound from before it. Found by the
+    /// conformance sequences under load.
+    #[test]
+    fn an_end_a_finish_brought_shows_nothing_from_before_the_target() {
+        let state = PlaybackState::new();
+        let mut gate = PrerollGate::default();
+        gate.attach(&state);
+        let mut out = screen(false);
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin_segment(&showing(Duration::from_secs(2)), &mut out.pad)
+            .unwrap();
+        gate.push_admitted(video(1_933), &mut out.pad).unwrap();
+        gate.push_admitted(video(1_967), &mut out.pad).unwrap();
+
+        state.finish();
+        gate.push_eos_candidate(&mut out.pad).unwrap();
+        assert!(
+            out.taken.lock().unwrap().is_empty(),
+            "nothing from before 2 s"
+        );
     }
 
     /// Ahead of the end, and ahead of a segment, what is kept goes

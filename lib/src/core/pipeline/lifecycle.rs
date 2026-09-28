@@ -459,6 +459,9 @@ impl Pipeline {
             pp_log: &self.pp_log,
             "event=finish phase=requested"
         );
+        // Before the request, as whatever restricts flow is written: what
+        // reaches a decoder from here on ends a stream cut short.
+        self.state.finish();
         if self.paused.load(Ordering::Acquire) {
             self.paused.store(false, Ordering::Release);
             self.resume_runtime();
