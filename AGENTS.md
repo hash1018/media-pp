@@ -105,7 +105,8 @@ final source of truth when documentation and implementation differ.
   plane/stride bounds, texture array index, and device ownership as applicable.
 - A filter that makes each buffer into none, one or several is a
   `Transform`: its media work, with `drain` for what it still holds at the
-  end and `reset` for what a `Flush` or `Stop` lets go of. The framework's
+  end, `reset` for what a `Flush` lets go of and `stopping` for what a
+  `Stop` lets go of beside it (by default the same). The framework's
   stage owns its pad, hands `Eos` on after the drain, keeps what the pad
   cannot take while a preroll holds the graph (`OutputStash`, which the
   decoders' gate, a bin and a rack keep too), and never shows it a control

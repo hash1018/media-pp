@@ -173,8 +173,8 @@ impl Transform for Gating {
 
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         let MediaBuffer::Video(frame) = &buf else {
-            // Everything that is not a picture — end of stream above all —
-            // has nothing to be unchanged about.
+            // Everything that is not a picture has nothing to be unchanged
+            // about.
             out.push(buf);
             return Ok(());
         };

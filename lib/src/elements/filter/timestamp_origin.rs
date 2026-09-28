@@ -7,10 +7,9 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
+    transform::{TransformStage, transform_filter},
 };
 
 /// Shifts a packet stream so that its timeline starts at zero, taking the
@@ -81,28 +80,33 @@ use crate::{
 /// One packet copy each, to leave the `Arc` this was handed untouched — a
 /// sibling branch off the same `Tee` must not see this branch's timeline.
 /// The same copy [`crate::elements::FileMuxer`] already makes to rescale.
-pub struct TimestampOrigin {
+pub struct TimestampOrigin(TransformStage<Rebasing>);
+
+transform_filter!(TimestampOrigin);
+
+/// What a [`TimestampOrigin`] does to each packet: all of its work, which
+/// the framework makes the filter.
+struct Rebasing {
     pp_log: PpLog,
     name: Arc<str>,
     /// The first timestamp seen, subtracted from every packet after it.
     /// `None` until the first packet that carries one.
     origin: Option<i64>,
-    pad: SrcPad,
 }
 
 impl TimestampOrigin {
     pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
-        let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
         let pp_log = element_pp_log(ElementType::TimestampOrigin, &name, None);
-        Self {
+        Self(TransformStage::new(Rebasing {
             pp_log,
             name,
             origin: None,
-            pad,
-        }
+        }))
     }
+}
 
+impl Rebasing {
     /// The origin to subtract, establishing it from this packet if it is the
     /// first one carrying a timestamp at all.
     ///
@@ -130,7 +134,7 @@ impl TimestampOrigin {
     }
 }
 
-impl Element for TimestampOrigin {
+impl Element for Rebasing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -148,13 +152,7 @@ impl Element for TimestampOrigin {
     }
 }
 
-impl Source for TimestampOrigin {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for TimestampOrigin {
+impl Transform for Rebasing {
     /// Encoded media of either kind. It reads timestamps and nothing else, so
     /// which medium the packets carry does not matter — but frames are not
     /// what it handles, and a chain that wired them here would be wrong
@@ -163,14 +161,18 @@ impl Sink for TimestampOrigin {
         InputContract::Fixed(PortContract::Packets(MediaKindSet::PACKETS))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Passthrough
+    }
+
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         let MediaBuffer::Packet(packet) = &buf else {
-            // `Eos` above all: a muxer finalizes on it, and it carries no
-            // timeline to move.
-            return self.pad.push(buf);
+            out.push(buf);
+            return Ok(());
         };
         let Some(origin) = self.origin_for(packet) else {
-            return self.pad.push(buf);
+            out.push(buf);
+            return Ok(());
         };
         // Copied rather than moved: the `Arc` may be shared with a sibling
         // branch off the same `Tee`, which must not see this branch's
@@ -182,21 +184,20 @@ impl Sink for TimestampOrigin {
         if let Some(dts) = packet.dts() {
             rebased.set_dts(Some(dts - origin));
         }
-        self.pad.push(MediaBuffer::Packet(Arc::new(rebased)))
+        out.push(MediaBuffer::Packet(Arc::new(rebased)));
+        Ok(())
     }
 
-    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
-        // `Stop` abandons this run, so a pipeline started again begins a new
-        // timeline at zero like the first one did.
-        //
-        // `Flush` deliberately does not: it announces a new position in the
-        // *same* timeline, and forgetting the origin would restart the output
-        // at zero mid-stream — timestamps going backwards, which is not
-        // something a muxer accepts or a caller asked for.
-        if *msg == ControlMsg::Stop {
-            self.origin = None;
-        }
-        Ok(())
+    /// Nothing: a seek announces a new position in the *same* timeline, and
+    /// forgetting the origin would restart the output at zero mid-stream —
+    /// timestamps going backwards, which is not something a muxer accepts or
+    /// a caller asked for.
+    fn reset(&mut self) {}
+
+    /// A stop abandons this run, so a pipeline started again begins a new
+    /// timeline at zero like the first one did.
+    fn stopping(&mut self) {
+        self.origin = None;
     }
 }
 
@@ -206,7 +207,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::element::SinkExt;
+    use crate::control::ControlMsg;
+    use crate::element::{Sink, SinkExt, Source};
 
     fn capture(element: &mut TimestampOrigin) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

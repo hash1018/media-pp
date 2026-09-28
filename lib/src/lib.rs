@@ -229,9 +229,10 @@
 //! A filter that makes buffers of buffers — converts, scales, analyses —
 //! implements [`Transform`](element::Transform): what each buffer becomes,
 //! what it still holds when the stream ends (`drain`), and what it lets go
-//! of when a seek leaves the timeline behind (`reset`). The framework gives
-//! it its one pad, hands the end of the stream on after the drain and resets
-//! it on a seek; it never sees a control message. `pipe` takes one as it
+//! of when a seek leaves the timeline behind (`reset`) or a stop abandons the
+//! run (`stopping`). The framework gives it its one pad, hands the end of the
+//! stream on after the drain and resets it on a seek; it never sees a
+//! control message. `pipe` takes one as it
 //! takes any filter, and [`IntoFilter::into_filter`](element::IntoFilter::into_filter)
 //! makes one of it where a list of filters is asked for, as a
 //! [`Rack`](elements::Rack)'s is. A filter that routes the stream itself —

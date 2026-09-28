@@ -49,9 +49,18 @@ pub trait Transform: Element {
         Ok(())
     }
 
-    /// Lets go of what belongs to the timeline a seek has left, or to a
-    /// stream that has been stopped. Nothing by default.
+    /// Lets go of what belongs to the timeline a seek has left. A stop lets
+    /// go of it too — see [`Self::stopping`]. Nothing by default.
     fn reset(&mut self) {}
+
+    /// Lets go of what the run as a whole kept, beside what
+    /// [`Self::reset`] does: a stop abandons the run, and a pipeline run
+    /// again begins its output anew, where a seek only moves within it — a
+    /// timeline taken from the first buffer, a count of what went out. What
+    /// `reset` does by default.
+    fn stopping(&mut self) {
+        self.reset();
+    }
 
     /// What it takes — see [`Sink::input_contract`]. Nothing said by default.
     fn input_contract(&self) -> InputContract {
@@ -183,10 +192,17 @@ impl<T: Transform> Sink for TransformStage<T> {
     }
 
     fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            self.inner.reset();
-            self.stash.clear();
+        match msg {
+            ControlMsg::Flush => self.inner.reset(),
+            ControlMsg::Stop => self.inner.stopping(),
+            ControlMsg::Pause
+            | ControlMsg::Resume
+            | ControlMsg::Preroll(_)
+            | ControlMsg::Seek(_) => {
+                return Ok(());
+            }
         }
+        self.stash.clear();
         Ok(())
     }
 
@@ -518,6 +534,61 @@ mod tests {
 
         stage.control(&ControlMsg::Stop).expect("reset");
         assert_eq!(resets.load(Ordering::SeqCst), 2);
+    }
+
+    /// Counts what it is told: resets and stops.
+    struct Timeline {
+        pp_log: PpLog,
+        told: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Element for Timeline {
+        fn name(&self) -> Arc<str> {
+            "timeline".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Transform for Timeline {
+        fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
+            out.push(buf);
+            Ok(())
+        }
+
+        fn reset(&mut self) {
+            self.told.lock().unwrap().push("reset");
+        }
+
+        fn stopping(&mut self) {
+            self.told.lock().unwrap().push("stopping");
+        }
+    }
+
+    /// A seek's `Flush` goes to `reset` and a `Stop` to `stopping` alone —
+    /// for a transform whose output timeline a stop begins again and a seek
+    /// does not, as `TimestampOrigin`'s and `FrameRateLimiter`'s do.
+    #[test]
+    fn a_flush_resets_and_a_stop_stops() {
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let mut stage = TransformStage::new(Timeline {
+            pp_log: element_pp_log(ElementType::Other, "timeline", None),
+            told: Arc::clone(&told),
+        });
+        stage.control(&ControlMsg::Pause).expect("nothing to do");
+        stage.control(&ControlMsg::Flush).expect("reset");
+        stage.control(&ControlMsg::Stop).expect("stopped");
+        assert_eq!(*told.lock().unwrap(), ["reset", "stopping"]);
     }
 
     /// A drain that fails is answered with its error, and the stream still

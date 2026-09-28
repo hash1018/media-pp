@@ -93,6 +93,12 @@ compile error with no explanation.
 
 ### Added
 
+- **`Transform::stopping`** tells a stop from a seek's flush: it lets go
+  of what the run as a whole kept, beside what `reset` does, and does
+  what `reset` does by default. `TimestampOrigin` and `FrameRateLimiter`
+  are transforms now, their output timeline begun again by a stop and
+  kept across a seek as before.
+
 - **`Render` writes a terminal as what it does with each buffer.**
   `render` for each one, `drain` before its end is taken, `reset` for a
   seek or a stop, and `pausing` and `resuming` for a device it stops while

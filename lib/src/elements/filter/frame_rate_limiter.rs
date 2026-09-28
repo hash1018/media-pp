@@ -8,11 +8,10 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::{MediaBuffer, release_picture},
     contract::{InputContract, MediaKind, OutputContract, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Output, Transform, element_pp_log},
     error::Result,
-    pad::SrcPad,
     pool::UnboundObjectPool,
+    transform::{TransformStage, transform_filter},
 };
 
 /// Errors specific to [`FrameRateLimiter`].
@@ -80,7 +79,13 @@ pub enum FrameRateLimiterError {
 ///
 /// A reference to the frames it keeps and nothing at all for the ones it
 /// drops. No pixels are read, copied or converted here.
-pub struct FrameRateLimiter {
+pub struct FrameRateLimiter(TransformStage<Limiting>);
+
+transform_filter!(FrameRateLimiter);
+
+/// What a [`FrameRateLimiter`] does to each frame: all of its work, which
+/// the framework makes the filter.
+struct Limiting {
     pp_log: PpLog,
     name: Arc<str>,
     /// Frames per second out.
@@ -99,7 +104,6 @@ pub struct FrameRateLimiter {
     /// `release_picture` when one comes back, so an idle wrapper does not
     /// pin a picture the producer's pool wants returned.
     wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
-    pad: SrcPad,
 }
 
 impl FrameRateLimiter {
@@ -111,22 +115,26 @@ impl FrameRateLimiter {
     /// there is no second value here to disagree with the stream.
     pub fn new(name: impl Into<String>, rate: ffmpeg::Rational) -> Self {
         let name: Arc<str> = name.into().into();
-        let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
         let pp_log = element_pp_log(ElementType::FrameRateLimiter, &name, None);
-        Self {
+        Self(TransformStage::new(Limiting {
             pp_log,
             name,
             rate,
             next_tick: None,
             forwarded: 0,
             wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
-            pad,
-        }
+        }))
     }
 
     /// The unit this element's output `pts` are in, which is what an encoder
     /// or muxer after it has to be told.
     pub fn time_base(&self) -> ffmpeg::Rational {
+        self.0.inner().time_base()
+    }
+}
+
+impl Limiting {
+    fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(self.rate.denominator(), self.rate.numerator())
     }
 
@@ -148,7 +156,7 @@ impl FrameRateLimiter {
     }
 }
 
-impl Element for FrameRateLimiter {
+impl Element for Limiting {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -166,13 +174,7 @@ impl Element for FrameRateLimiter {
     }
 }
 
-impl Source for FrameRateLimiter {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl Sink for FrameRateLimiter {
+impl Transform for Limiting {
     /// Video frames. It reads a timestamp and forwards a reference, so where
     /// the pixels live is not its business — but packets are not what it
     /// handles, and audio has no frame rate to limit.
@@ -180,11 +182,14 @@ impl Sink for FrameRateLimiter {
         InputContract::Fixed(PortContract::any_frame(MediaKind::VideoFrame))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Passthrough
+    }
+
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         let MediaBuffer::Video(frame) = &buf else {
-            // `Eos` above all: whatever follows finalizes on it, and it
-            // carries no timestamp to place.
-            return self.pad.push(buf);
+            out.push(buf);
+            return Ok(());
         };
         // A frame with no timestamp cannot be placed on the output timeline,
         // and guessing would put it wherever the last one happened to land.
@@ -236,27 +241,23 @@ impl Sink for FrameRateLimiter {
         stamped.set_pts(Some(self.forwarded));
         crate::buffer::set_time_base(&mut stamped, self.time_base());
         self.forwarded += 1;
-        self.pad.push(MediaBuffer::Video(Arc::new(stamped)))
+        out.push(MediaBuffer::Video(Arc::new(stamped)));
+        Ok(())
     }
 
-    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
-        // `Stop` abandons this run, so a pipeline started again begins a new
-        // output timeline at zero like the first one did.
-        //
-        // `Flush` deliberately does not reset the count: it announces a new
-        // position in the same output stream, and restarting the timestamps
-        // would send them backwards — which is not something a muxer accepts.
-        // The tick does go, because the position it was tracking is no longer
-        // where the source is.
-        match msg {
-            ControlMsg::Stop => {
-                self.next_tick = None;
-                self.forwarded = 0;
-            }
-            ControlMsg::Flush => self.next_tick = None,
-            _ => {}
-        }
-        Ok(())
+    /// The tick goes, because the position it was tracking is no longer
+    /// where the source is; the count does not: a seek announces a new
+    /// position in the same output stream, and restarting the timestamps
+    /// would send them backwards — which is not something a muxer accepts.
+    fn reset(&mut self) {
+        self.next_tick = None;
+    }
+
+    /// A stop abandons this run, so a pipeline started again begins a new
+    /// output timeline at zero like the first one did.
+    fn stopping(&mut self) {
+        self.next_tick = None;
+        self.forwarded = 0;
     }
 }
 
@@ -266,7 +267,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::element::SinkExt;
+    use crate::control::ControlMsg;
+    use crate::element::{Sink, SinkExt, Source};
 
     fn capture(element: &mut FrameRateLimiter) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -451,7 +453,10 @@ mod tests {
             crate::Error::FrameRateLimiterError(FrameRateLimiterError::NoTimeBase)
         ));
         assert!(stamps(&received).is_empty());
-        assert!(limiter.next_tick.is_none(), "the timeline has not started");
+        assert!(
+            limiter.0.inner().next_tick.is_none(),
+            "the timeline has not started"
+        );
 
         limiter.consume(frame(Some(20))).unwrap();
         assert_eq!(stamps(&received), vec![0]);

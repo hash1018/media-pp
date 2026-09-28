@@ -264,8 +264,7 @@ impl Sink for PauseGate {
                 // SAFETY: as above, for the other medium.
                 (unsafe { frame.as_ref().as_ptr() }, frame.pts())
             }
-            // `Eos` above all: whatever follows finalizes on it, and it
-            // carries no timeline to move.
+            // A packet carries no timeline this moves.
             _ => return self.pad.push(buf),
         };
         // Nothing can be placed on the output timeline without one, and
