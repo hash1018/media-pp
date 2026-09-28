@@ -54,6 +54,14 @@ pub trait Render: Element {
         Ok(())
     }
 
+    /// Lets go of what a stopped stream leaves, where that is more than a
+    /// seek's flush does — a device's stream deactivated and the position it
+    /// masters handed back, as well as its queued sound. What
+    /// [`Self::reset`] does, by default.
+    fn stopping(&mut self) -> Result<()> {
+        self.reset()
+    }
+
     /// Stops its device while the pipeline is paused. Nothing by default.
     fn pausing(&mut self) -> Result<()> {
         Ok(())
@@ -142,7 +150,8 @@ impl<R: Render> Sink for RenderStage<R> {
         match msg {
             ControlMsg::Pause => self.inner.pausing(),
             ControlMsg::Resume => self.inner.resuming(),
-            ControlMsg::Flush | ControlMsg::Stop => self.inner.reset(),
+            ControlMsg::Flush => self.inner.reset(),
+            ControlMsg::Stop => self.inner.stopping(),
             ControlMsg::Seek(_) | ControlMsg::Preroll(_) => Ok(()),
         }
     }
@@ -328,6 +337,62 @@ mod tests {
             self.note("resuming");
             Ok(())
         }
+    }
+
+    /// Tells a stop from a seek's flush, as a device that deactivates for a
+    /// stop does.
+    struct Stopping(Noting);
+
+    impl Element for Stopping {
+        fn name(&self) -> Arc<str> {
+            self.0.name()
+        }
+        fn element_type(&self) -> ElementType {
+            self.0.element_type()
+        }
+        fn pp_log(&self) -> &PpLog {
+            self.0.pp_log()
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            self.0.pp_log_mut()
+        }
+    }
+
+    impl Render for Stopping {
+        fn render(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.0.render(buf)
+        }
+        fn reset(&mut self) -> Result<()> {
+            self.0.reset()
+        }
+        fn stopping(&mut self) -> Result<()> {
+            self.0.note("stopping");
+            Ok(())
+        }
+    }
+
+    /// A flush lets go of what a seek left and a stop of what a stopped
+    /// stream leaves, which a terminal may tell apart: a stop is
+    /// `stopping`, which is `reset` where it says nothing of its own.
+    #[test]
+    fn a_flush_resets_and_a_stop_stops() {
+        use crate::{control::ControlMsg, element::SinkExt};
+
+        let noting = |seen: &Arc<Mutex<Vec<&'static str>>>| Noting {
+            pp_log: element_pp_log(ElementType::Other, "noting", None),
+            seen: Arc::clone(seen),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut telling = RenderStage::new(Stopping(noting(&seen)));
+        telling.control(&ControlMsg::Flush).unwrap();
+        telling.control(&ControlMsg::Stop).unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["reset", "stopping"]);
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut plain = RenderStage::new(noting(&seen));
+        plain.control(&ControlMsg::Flush).unwrap();
+        plain.control(&ControlMsg::Stop).unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["reset", "reset"]);
     }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) {

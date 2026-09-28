@@ -22,7 +22,7 @@
 //! usually offers it *only* compressed: dropping to the raw format would drop
 //! to 640x480, which is not the mode the user picked.
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
@@ -30,15 +30,13 @@ use thiserror::Error as ThisError;
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     elements::VideoFormat,
     error::Result,
-    pad::SrcPad,
     platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device},
     pool::UnboundObjectPool,
+    produce::produce_source,
 };
 
 /// How many packets in a row the decoder may refuse before the source gives
@@ -102,17 +100,24 @@ pub struct V4l2CaptureOptions {
 ///
 /// The Linux counterpart of Windows' `MfCaptureSource`, with the same
 /// shape: `open` answers with the source and the geometry it
-/// negotiated, `run` pushes frames until it is stopped or the device goes
+/// negotiated, it hands on frames until it is stopped or the device goes
 /// away, and a device that disappears mid-capture ends the source with an
 /// error rather than reconnecting — a pipeline is one-shot, so coming back
 /// is whoever watches the bus building a new one.
-pub struct V4l2CaptureSource {
+pub struct V4l2CaptureSource(ProducingSource<Capturing>);
+
+produce_source!(V4l2CaptureSource);
+
+/// What a [`V4l2CaptureSource`] hands on, a picture at a time as the
+/// camera delivers them: all of its work, which the framework makes the
+/// source.
+struct Capturing {
     name: Arc<str>,
     pp_log: PpLog,
     input: ffmpeg::format::context::Input,
     stream: usize,
     decoder: ffmpeg::decoder::Video,
-    /// How many packets in a row the decoder has refused — see `deliver`.
+    /// How many packets in a row the decoder has refused — see `decode`.
     undecodable: u32,
     /// Built on the first frame rather than at open: what the decoder
     /// actually produces is not knowable until it has produced one, and a
@@ -120,8 +125,9 @@ pub struct V4l2CaptureSource {
     /// layout.
     scaler: Option<ffmpeg::software::scaling::Context>,
     format: VideoFormat,
-    pads: Vec<SrcPad>,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Pictures one packet decoded to and not yet handed on.
+    ready: VecDeque<MediaBuffer>,
 }
 
 // SAFETY: the only member without a `Send` of its own is the scaling
@@ -129,7 +135,7 @@ pub struct V4l2CaptureSource {
 // — the same reasoning `SwScaler` states, and for the same missing impl in
 // ffmpeg-next. Every method that touches it takes `&mut self`, so no two
 // threads reach it at once, and a source is driven by one worker thread.
-unsafe impl Send for V4l2CaptureSource {}
+unsafe impl Send for Capturing {}
 
 impl V4l2CaptureSource {
     /// Opens the camera and negotiates a mode.
@@ -242,15 +248,8 @@ impl V4l2CaptureSource {
             height,
             decoder.format()
         );
-        let pads = vec![SrcPad::with_contract(
-            format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::System,
-            )),
-        )];
         Ok((
-            Self {
+            Self(ProducingSource::new(Capturing {
                 name,
                 pp_log,
                 input,
@@ -259,9 +258,9 @@ impl V4l2CaptureSource {
                 scaler: None,
                 undecodable: 0,
                 format,
-                pads,
                 pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-            },
+                ready: VecDeque::new(),
+            })),
             format,
         ))
     }
@@ -275,9 +274,11 @@ impl V4l2CaptureSource {
     pub fn list_formats(device: &str) -> std::io::Result<Vec<V4l2CaptureFormat>> {
         crate::platform::linux::v4l2::list_formats(device)
     }
+}
 
-    /// Decodes one packet and pushes whatever pictures it made.
-    fn deliver(&mut self, packet: &ffmpeg::Packet, bus: &Bus) -> Result<()> {
+impl Capturing {
+    /// Decodes one packet into whatever pictures it makes, ready to go on.
+    fn decode(&mut self, packet: &ffmpeg::Packet) -> Result<()> {
         if let Err(error) = self.decoder.send_packet(packet) {
             // One packet the decoder would not take — a truncated JPEG from a
             // camera that was unplugged mid-frame, most often. The next one
@@ -307,19 +308,8 @@ impl V4l2CaptureSource {
         while self.decoder.receive_frame(&mut decoded).is_ok() {
             let mut converted = self.pool.get();
             self.convert(&decoded, &mut converted)?;
-            if let Err(error) = self.pads[0].push(MediaBuffer::Video(Arc::new(converted))) {
-                // Reported rather than fatal, the same contract every other
-                // source here keeps: a sink that failed is not a camera that
-                // stopped.
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::Error {
-                        element_type: ElementType::V4l2CaptureSource,
-                        name: self.name.clone(),
-                        error,
-                    },
-                );
-            }
+            self.ready
+                .push_back(MediaBuffer::Video(Arc::new(converted)));
         }
         Ok(())
     }
@@ -406,7 +396,7 @@ fn open_input(
     Ok(input)
 }
 
-impl Element for V4l2CaptureSource {
+impl Element for Capturing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -424,46 +414,46 @@ impl Element for V4l2CaptureSource {
     }
 }
 
-impl Source for V4l2CaptureSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        &mut self.pads
-    }
-}
-
-impl SourceElement for V4l2CaptureSource {
+impl Produce for Capturing {
     fn is_live(&self) -> bool {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        loop {
-            if drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
+    fn output_contract(&self) -> OutputContract {
+        OutputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::System,
+        ))
+    }
 
-            let mut packet = ffmpeg::Packet::empty();
-            match packet.read(&mut self.input) {
-                Ok(()) => {
-                    if packet.stream() == self.stream {
-                        self.deliver(&packet, bus)?;
-                    }
+    /// The next picture the camera delivered, as NV12.
+    ///
+    /// Waits inside the read, which the camera's own frame interval bounds,
+    /// rather than through `wait`: a request reaches this source between
+    /// frames.
+    fn produce(&mut self, _wait: &mut Wait<'_>) -> Result<Produced> {
+        if let Some(picture) = self.ready.pop_front() {
+            return Ok(Produced::Buffer(picture));
+        }
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut self.input) {
+            Ok(()) => {
+                if packet.stream() == self.stream {
+                    self.decode(&packet)?;
                 }
-                // A camera does not end its own stream; if it says so, it has
-                // been unplugged.
-                Err(ffmpeg::Error::Eof) => break,
-                Err(error) => {
-                    pp_error!(self, "read failed: {error}");
-                    return Err(V4l2CaptureSourceError::Ffmpeg(error).into());
-                }
+                Ok(self
+                    .ready
+                    .pop_front()
+                    .map_or(Produced::Nothing, Produced::Buffer))
+            }
+            // A camera does not end its own stream; if it says so, it has
+            // been unplugged.
+            Err(ffmpeg::Error::Eof) => Ok(Produced::End),
+            Err(error) => {
+                pp_error!(self, "read failed: {error}");
+                Err(V4l2CaptureSourceError::Ffmpeg(error).into())
             }
         }
-        for pad in self.pads.iter_mut() {
-            pad.push_eos(&self.pp_log)?;
-        }
-        pp_info!(self, "event=eos phase=source_completed outcome=ok");
-        Ok(())
     }
 }
 
@@ -473,6 +463,7 @@ mod tests {
     use crate::bus::Bus;
     use crate::control::{ControlMsg, channel};
     use crate::element::Sink;
+    use crate::element::{Source, SourceElement};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 

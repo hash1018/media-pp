@@ -5,7 +5,7 @@ use std::{
         mpsc::{self, RecvTimeoutError},
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use enumflags2::BitFlags;
@@ -32,14 +32,12 @@ use crate::{
 
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
-    bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
     elements::VideoFormat,
     error::Result,
-    pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    produce::produce_source,
     schedule::PeriodicSchedule,
 };
 
@@ -50,9 +48,11 @@ use crate::{
 /// compositor that never answers into an error instead of a permanent hang.
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bounds `Stop` latency at very low configured [`PipeWireScreenCaptureOptions::frame_rate`]
-/// values, where "wait until the next tick" on its own could otherwise be a
-/// long, unresponsive block. Same idea as `DxgiCaptureSource`'s own constant.
+/// How often a wait for the next tick looks at what the PipeWire thread
+/// reports — a failure, dropped buffers — at a low configured
+/// [`PipeWireScreenCaptureOptions::frame_rate`], where waiting a whole tick
+/// would leave it unread that long. Same idea as `DxgiCaptureSource`'s own
+/// constant; a request from the pipeline ends a wait at once either way.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 
 /// How long the portal-session watcher waits before re-checking whether the
@@ -510,10 +510,25 @@ struct Terminate;
 /// constructor rather than an option because it needs a
 /// `CudaDevice` to allocate against, and the two modes
 /// negotiate mutually exclusive buffer kinds.
-pub struct PipeWireScreenCaptureSource {
+pub struct PipeWireScreenCaptureSource(ProducingSource<Capturing>);
+
+produce_source!(PipeWireScreenCaptureSource);
+
+/// What a [`PipeWireScreenCaptureSource`] hands on, a picture a tick: all of
+/// its work, which the framework makes the source.
+struct Capturing {
     name: Arc<str>,
     pp_log: PpLog,
-    pad: SrcPad,
+    /// What its one output declares: CPU frames from `open`, CUDA-resident
+    /// ones from `open_gpu` — settled at construction, so a downstream
+    /// filter can be checked against it.
+    contract: OutputContract,
+    /// When each frame is due, on the clock a pause does not move — made as
+    /// the first is asked for.
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a tick's work was done since the schedule last moved: it
+    /// moves on once that work is done, as the next is asked for.
+    ticked: bool,
     width: u32,
     height: u32,
     /// The configured output rate: the unit `pts` counts in, what
@@ -763,14 +778,13 @@ impl PipeWireScreenCaptureSource {
         );
 
         Ok((
-            Self {
+            Self(ProducingSource::new(Capturing {
                 // `open` emits CPU frames and `open_gpu` CUDA-resident
                 // ones, and which of the two is settled here — so a
                 // downstream filter can be checked against it.
-                pad: SrcPad::with_contract(
-                    format!("{name}_src"),
-                    OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, memory)),
-                ),
+                contract: OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, memory)),
+                schedule: None,
+                ticked: false,
                 name: name.into(),
                 pp_log,
                 width,
@@ -819,7 +833,7 @@ impl PipeWireScreenCaptureSource {
                 session,
                 #[cfg(feature = "cuda")]
                 gpu,
-            },
+            })),
             VideoFormat {
                 width,
                 height,
@@ -836,7 +850,7 @@ impl PipeWireScreenCaptureSource {
     /// configured output rate, not the compositor's irregular capture rate.
     /// Same contract as `DxgiCaptureSource::time_base`.
     pub fn time_base(&self) -> ffmpeg::Rational {
-        self.frame_rate.get().invert()
+        self.0.inner().frame_rate.get().invert()
     }
 
     /// Runtime control for the rate this captures at.
@@ -850,9 +864,11 @@ impl PipeWireScreenCaptureSource {
     /// nothing new answers with the picture it already has, exactly as it does
     /// at the configured rate.
     pub fn frame_rate(&self) -> FrameRateHandle {
-        self.frame_rate.handle()
+        self.0.inner().frame_rate.handle()
     }
+}
 
+impl Capturing {
     /// Offers the latest captured image under this tick's own `pts`, copying
     /// it out of the shared buffer only when the PipeWire thread has captured
     /// since the last copy.
@@ -1074,7 +1090,7 @@ impl PipeWireScreenCaptureSource {
     }
 }
 
-impl Drop for PipeWireScreenCaptureSource {
+impl Drop for Capturing {
     fn drop(&mut self) {
         // Dropping the sender alone would not wake a blocked main loop, so
         // signal first, then join the thread this element owns.
@@ -1142,7 +1158,7 @@ fn close_session(
     })
 }
 
-impl Element for PipeWireScreenCaptureSource {
+impl Element for Capturing {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -1160,91 +1176,76 @@ impl Element for PipeWireScreenCaptureSource {
     }
 }
 
-impl Source for PipeWireScreenCaptureSource {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        std::slice::from_mut(&mut self.pad)
-    }
-}
-
-impl SourceElement for PipeWireScreenCaptureSource {
+impl Produce for Capturing {
     fn is_live(&self) -> bool {
         true
     }
 
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "started");
-        let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
-        loop {
-            let outcome = drain_control(control, self, bus)?;
-            if outcome.stopped {
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            if outcome.paused_for > Duration::ZERO {
-                schedule.resume_after_pause(outcome.paused_for, Instant::now());
-            }
+    fn output_contract(&self) -> OutputContract {
+        self.contract
+    }
 
-            // Followed here rather than at construction, so a rate set through
-            // `frame_rate()` while this is running is kept from the next tick.
-            let interval = self.frame_rate.interval();
-            if schedule.interval() != interval {
-                pp_info!(self, "frame rate is now {}", self.frame_rate.get());
-                schedule.set_interval(interval, Instant::now());
-            }
-
-            if let Some(count) = self.take_unmappable_report() {
-                pp_warn!(
-                    self,
-                    "dropped {count} GPU-resident (DMA-BUF) buffer(s): this element only \
-                     reads CPU-mapped buffers, so the captured image is frozen at the last \
-                     readable frame"
-                );
-            }
-            if let Some(count) = self.take_short_report() {
-                pp_warn!(
-                    self,
-                    "dropped {count} buffer(s) whose chunk described less than a \
-                     {}x{} frame: the captured image is whatever last arrived whole",
-                    self.width,
-                    self.height
-                );
-            }
-            if let Some(error) = self.take_worker_error() {
-                pp_error!(self, "capture failed: {error}");
-                return Err(error.into());
-            }
-
-            // Nothing to poll: the PipeWire thread fills `latest` on its own.
-            // Sleeping in `POLL_GRANULARITY` slices keeps `Stop` responsive at
-            // low `frame_rate` without busy-waiting.
-            let remaining = schedule.remaining(Instant::now());
-            if !remaining.is_zero() {
-                std::thread::sleep(remaining.min(POLL_GRANULARITY));
-                continue;
-            }
-
-            let Some(frame) = self.emit_frame() else {
-                // Still advance even though there's nothing to emit this
-                // tick — otherwise the next iteration's `remaining` is zero
-                // and this busy-loops instead of waiting for the next tick.
-                schedule.advance_after_tick(Instant::now());
-                continue;
-            };
-            if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::Error {
-                        element_type: ElementType::PipeWireScreenCaptureSource,
-                        name: self.name.clone(),
-                        error,
-                    },
-                );
-            }
-            // Advance only now that this tick's own work (copy + push, which a
-            // slow downstream can stretch arbitrarily) is done — see
-            // `TestVideoSource::run`'s identical correction.
-            schedule.advance_after_tick(Instant::now());
+    /// The latest captured picture, once its tick is due on the schedule —
+    /// kept on the clock a pause does not move, so playing on after one is
+    /// not a burst of the ticks it would have owed.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let now = wait.now();
+        // Followed here rather than at construction, so a rate set through
+        // `frame_rate()` while this is running is kept from the next tick.
+        let interval = self.frame_rate.interval();
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
+        // Moved on only once the last tick's own work (copy and push, which
+        // a slow downstream can stretch arbitrarily) is done — see
+        // `TestVideoSource`'s identical correction for why the placement
+        // matters.
+        if std::mem::take(&mut self.ticked) {
+            schedule.advance_after_tick(now);
         }
+        let rate_changed = schedule.interval() != interval;
+        if rate_changed {
+            schedule.set_interval(interval, now);
+        }
+        let due = now + schedule.remaining(now);
+        if rate_changed {
+            pp_info!(self, "frame rate is now {}", self.frame_rate.get());
+        }
+
+        if let Some(count) = self.take_unmappable_report() {
+            pp_warn!(
+                self,
+                "dropped {count} GPU-resident (DMA-BUF) buffer(s): this element only \
+                 reads CPU-mapped buffers, so the captured image is frozen at the last \
+                 readable frame"
+            );
+        }
+        if let Some(count) = self.take_short_report() {
+            pp_warn!(
+                self,
+                "dropped {count} buffer(s) whose chunk described less than a \
+                 {}x{} frame: the captured image is whatever last arrived whole",
+                self.width,
+                self.height
+            );
+        }
+        if let Some(error) = self.take_worker_error() {
+            pp_error!(self, "capture failed: {error}");
+            return Err(error.into());
+        }
+
+        // Nothing to poll: the PipeWire thread fills `latest` on its own.
+        // Waited for in `POLL_GRANULARITY` slices, so what that thread
+        // reports is looked at even at a low `frame_rate`.
+        if !wait.until(due.min(now + POLL_GRANULARITY)) || wait.now() < due {
+            return Ok(Produced::Nothing);
+        }
+        // The schedule moves on even for a tick with nothing to emit, or
+        // the next would be due at once.
+        self.ticked = true;
+        Ok(self.emit_frame().map_or(Produced::Nothing, |frame| {
+            Produced::Buffer(MediaBuffer::Video(Arc::new(frame)))
+        }))
     }
 }
 
@@ -2664,18 +2665,17 @@ mod tests {
     /// directly — which is what makes the repeat path testable at all: opening
     /// a real one needs the portal, and therefore a user answering a dialog.
     /// Everything `Drop` touches is `None`.
-    fn offline_source(width: u32, height: u32) -> PipeWireScreenCaptureSource {
+    fn offline_source(width: u32, height: u32) -> Capturing {
         let name = "offline";
-        PipeWireScreenCaptureSource {
+        Capturing {
             name: name.into(),
             pp_log: element_pp_log(ElementType::PipeWireScreenCaptureSource, name, None),
-            pad: SrcPad::with_contract(
-                format!("{name}_src"),
-                OutputContract::Fixed(PortContract::frame(
-                    MediaKind::VideoFrame,
-                    MemoryDomain::System,
-                )),
-            ),
+            contract: OutputContract::Fixed(PortContract::frame(
+                MediaKind::VideoFrame,
+                MemoryDomain::System,
+            )),
+            schedule: None,
+            ticked: false,
             width,
             height,
             frame_rate: FrameRate::new(ffmpeg::Rational::new(30, 1)),
@@ -2713,7 +2713,7 @@ mod tests {
 
     /// What the PipeWire thread does when a whole image arrives: fill the
     /// shared buffer and say a capture happened.
-    fn capture_into(source: &PipeWireScreenCaptureSource, fill: u8) {
+    fn capture_into(source: &Capturing, fill: u8) {
         let mut latest = source.latest.lock().unwrap();
         latest.pixels.fill(fill);
         latest.have_frame = true;

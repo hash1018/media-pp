@@ -266,7 +266,8 @@
 //! A terminal that does something with each buffer — plays it, shows it,
 //! hands it out of the pipeline — implements [`Render`](element::Render):
 //! `render` for each buffer, `drain` before its end is taken, `reset` for a
-//! seek or a stop, and `pausing` and `resuming` for a device of its own.
+//! seek or a stop — `stopping` for a stop, where it does more — and
+//! `pausing` and `resuming` for a device of its own.
 //! The framework does the rest, and [`ChainBuilder::to`](pipeline::ChainBuilder::to)
 //! takes one as it takes any [`Sink`](element::Sink). A terminal that routes
 //! the stream itself — a muxer of several tracks — implements `Sink`: it

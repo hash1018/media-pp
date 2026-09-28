@@ -22,8 +22,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, element_pp_log},
+    element::{Element, ElementType, Render, element_pp_log},
     elements::AudioFormat,
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
@@ -32,7 +31,7 @@ use crate::{
         PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
     },
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
-    stream::StreamEvent,
+    render::{RenderStage, render_sink},
 };
 
 /// How long [`PipeWireAudioRenderer::open`] waits for the stream to negotiate a
@@ -386,7 +385,14 @@ fn complete_device_drain(
 /// `consume` therefore hands frames to a bounded queue instead of writing to a
 /// device buffer directly, and an empty queue is covered with silence rather
 /// than stalling the graph.
-pub struct PipeWireAudioRenderer {
+pub struct PipeWireAudioRenderer(RenderStage<Rendering>);
+
+render_sink!(PipeWireAudioRenderer);
+
+/// What a [`PipeWireAudioRenderer`] does with each frame — queues it for
+/// the PipeWire thread to play: all of its work, which the framework makes
+/// the terminal.
+struct Rendering {
     name: Arc<str>,
     pp_log: PpLog,
     format: AudioFormat,
@@ -398,7 +404,7 @@ pub struct PipeWireAudioRenderer {
     primed: bool,
     /// Whether any sound has been handed to the stream since it was last
     /// emptied — opened, flushed, stopped or drained. Without any, an `Eos`
-    /// has nothing to wait for — see [`Self::drain`].
+    /// has nothing to wait for — see [`Self::play_out`].
     handed: bool,
     /// Media timestamp the first submitted frame carried, and how far the
     /// submitted range now extends. `None` until the first frame with a `pts`.
@@ -532,7 +538,7 @@ impl PipeWireAudioRenderer {
         );
 
         Ok((
-            Self {
+            Self(RenderStage::new(Rendering {
                 name: name.into(),
                 pp_log,
                 format,
@@ -545,16 +551,18 @@ impl PipeWireAudioRenderer {
                 stretcher: Stretcher::new(format),
                 commands: Some(command_tx),
                 worker: Some(worker),
-            },
+            })),
             format,
         ))
     }
 
-    /// The format [`Sink::consume`] accepts, unchanged since `open`.
+    /// The format [`Sink::consume`](crate::element::Sink::consume) accepts, unchanged since `open`.
     pub fn format(&self) -> AudioFormat {
-        self.format
+        self.0.inner.format
     }
+}
 
+impl Rendering {
     /// Nanoseconds `frames` samples occupy at the negotiated rate.
     /// The same span as [`Self::frames_ns`], as a `Duration` to wait for.
     fn frames_duration(&self, frames: u64) -> Duration {
@@ -599,7 +607,7 @@ impl PipeWireAudioRenderer {
         Ok(self.frames_ns(pts.max(0) as u64))
     }
 
-    fn render(&mut self, frame: &ffmpeg::frame::Audio) -> Result<()> {
+    fn play(&mut self, frame: &ffmpeg::frame::Audio) -> Result<()> {
         let actual_rate = frame.rate();
         let actual_channels = frame.channel_layout().channels() as u16;
         if frame.format() != self.format.sample_format
@@ -779,7 +787,7 @@ impl PipeWireAudioRenderer {
     /// stream the graph is running, and asked of a paused one it never did —
     /// this waited out `DEVICE_DRAIN_TIMEOUT`, five seconds in which the
     /// pipeline's next control reached nothing behind it.
-    fn drain(&mut self) -> Result<()> {
+    fn play_out(&mut self) -> Result<()> {
         // What the stretcher still holds is the end of the sound too.
         let pieces = self
             .stretcher
@@ -899,7 +907,7 @@ impl PipeWireAudioRenderer {
     }
 }
 
-impl Drop for PipeWireAudioRenderer {
+impl Drop for Rendering {
     fn drop(&mut self) {
         if let Some(commands) = self.commands.take() {
             let _ = commands.send(Command::Terminate);
@@ -912,7 +920,7 @@ impl Drop for PipeWireAudioRenderer {
     }
 }
 
-impl Element for PipeWireAudioRenderer {
+impl Element for Rendering {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -947,7 +955,7 @@ impl Element for PipeWireAudioRenderer {
     }
 }
 
-impl Sink for PipeWireAudioRenderer {
+impl Render for Rendering {
     /// Writes samples into the PipeWire stream buffer.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -956,19 +964,16 @@ impl Sink for PipeWireAudioRenderer {
         ))
     }
 
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    fn render(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Audio(frame) => self.render(&frame),
+            MediaBuffer::Audio(frame) => self.play(&frame),
             other => Err(PipeWireAudioRendererError::UnexpectedBuffer(other.kind()).into()),
         }
     }
 
     /// The end of the stream is played out before it is taken.
-    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
-        let StreamEvent::Eos = event else {
-            return Ok(());
-        };
-        let outcome = self.drain();
+    fn drain(&mut self) -> Result<()> {
+        let outcome = self.play_out();
         pp_trace!(
             self,
             "event=eos phase=drained outcome={}",
@@ -977,43 +982,42 @@ impl Sink for PipeWireAudioRenderer {
         outcome
     }
 
-    fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
-        match msg {
-            ControlMsg::Pause => {
-                self.set_active(false)?;
-                self.publish_position(false)?;
-            }
-            ControlMsg::Resume => {
-                self.set_active(true)?;
-                self.publish_position(true)?;
-            }
-            ControlMsg::Stop => {
-                // `Stop` means abandon, not natural EOS: discard queued audio
-                // instead of draining it. Cleanup is best-effort because an
-                // already-dead stream has satisfied Stop's observable goal.
-                if let Err(error) = self.flush() {
-                    pp_warn!(self, "failed to flush while stopping: {error}");
-                }
-                if let Err(error) = self.set_active(false) {
-                    pp_warn!(self, "failed to deactivate while stopping: {error}");
-                }
-                let position_result = self.publish_position(false);
-                self.timeline = None;
-                self.stretcher.reset();
-                self.primed = false;
-                self.handed = false;
-                position_result?;
-            }
-            ControlMsg::Flush => {
-                // Discard everything queued from the old timeline.
-                self.flush()?;
-                self.handed = false;
-                self.timeline = None;
-                self.stretcher.reset();
-            }
-            ControlMsg::Seek(_) | ControlMsg::Preroll(_) => {}
-        }
+    fn pausing(&mut self) -> Result<()> {
+        self.set_active(false)?;
+        self.publish_position(false)
+    }
+
+    fn resuming(&mut self) -> Result<()> {
+        self.set_active(true)?;
+        self.publish_position(true)
+    }
+
+    /// Discards everything queued from the timeline a seek left.
+    fn reset(&mut self) -> Result<()> {
+        self.flush()?;
+        self.handed = false;
+        self.timeline = None;
+        self.stretcher.reset();
         Ok(())
+    }
+
+    /// `Stop` means abandon, not natural EOS: discard queued audio instead
+    /// of draining it, and hand back the position it masters. Cleanup is
+    /// best-effort because an already-dead stream has satisfied Stop's
+    /// observable goal.
+    fn stopping(&mut self) -> Result<()> {
+        if let Err(error) = self.flush() {
+            pp_warn!(self, "failed to flush while stopping: {error}");
+        }
+        if let Err(error) = self.set_active(false) {
+            pp_warn!(self, "failed to deactivate while stopping: {error}");
+        }
+        let position_result = self.publish_position(false);
+        self.timeline = None;
+        self.stretcher.reset();
+        self.primed = false;
+        self.handed = false;
+        position_result
     }
 }
 
@@ -1389,7 +1393,11 @@ fn run_pipewire(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::SinkExt;
+    use crate::{
+        control::ControlMsg,
+        element::{Sink, SinkExt},
+        stream::StreamEvent,
+    };
 
     fn playback() -> Playback {
         Playback {

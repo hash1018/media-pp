@@ -122,7 +122,8 @@ final source of truth when documentation and implementation differ.
   `Filter` as a newtype over `TransformStage` (`transform_filter!`).
 - A terminal that does something with each buffer — plays, shows, counts,
   hands it out — is a `Render`: `render` for each buffer, `drain` before
-  its end is taken, `reset` for a `Flush` or `Stop`, and `pausing` and
+  its end is taken, `reset` for a `Flush` and `stopping` for a `Stop` (by
+  default the same), and `pausing` and
   `resuming` for a device it stops for a pause. The framework turns the
   control messages into those and never shows it one; what the terminal
   wrapper does — the preroll's counting, holding while paused — is
@@ -209,16 +210,12 @@ final source of truth when documentation and implementation differ.
   stopping and restarting its input for a pause goes in `pausing` and
   `resuming`. An element of this crate moved onto one keeps its public
   name as a newtype over `ProducingSource` (`produce_source!`).
-- Every `SourceElement` loop still written by hand — the Linux captures,
-  until they are `Produce`s — must remain responsive to Pause, Resume, Stop,
-  and Seek. It drains its channel with `drain_control`, or, where it selects on the
-  channel beside its data, hands each request it takes to
-  `control::handle_request` — never applies one itself: a source that passed a
-  `Pause` on without pausing deadlocked a seek (208af56). What it has to do to
-  stop and restart its own input — a capture device — goes in
-  `SourceElement::pausing` and `resuming`, not in a pause loop of its own.
-  Wall-clock-driven sources must add `ControlOutcome::paused_for` back into their
-  scheduling state so Resume does not emit a catch-up burst.
+- Every source of this crate is a `Produce`; a `SourceElement` loop written
+  by hand is left only in tests. Such a loop must remain responsive to
+  Pause, Resume, Stop, and Seek: it drains its channel with `drain_control`
+  (test-only), or hands each request it takes to `control::handle_request` —
+  never applies one itself: a source that passed a `Pause` on without
+  pausing deadlocked a seek (208af56).
 - Control stays inside the crate: `ControlMsg` reaches this crate's
   elements through `Sink::flow`, a hidden hook whose argument nothing
   outside can name (the crate calls it as `SinkExt::control`), and a sink

@@ -680,8 +680,8 @@ impl ControlSender {
 pub(crate) struct ChannelGone;
 
 impl ControlReceiver {
-    // Only `drain_control`'s, which only the Linux captures still call.
-    #[allow(dead_code)]
+    // Only `drain_control`'s, which only the test sources still call.
+    #[cfg(test)]
     pub(crate) fn try_recv(&self) -> Option<(RequestKind, Sender<()>)> {
         self.rx.try_recv().ok().map(|r| (r.kind, r.ack))
     }
@@ -747,14 +747,14 @@ pub struct ControlOutcome {
 ///
 /// Drains every pending message (see `apply_one` for what "handling
 /// one" means, including `Pause`'s blocking wait). Non-blocking if
-/// nothing's pending — a [`SourceElement::run`] whose own "next unit of
-/// work" can't be waited on via `control`'s own channel (a Linux capture's
-/// blocking read) calls this once before that blocking step. A
-/// [`crate::element::Produce`] never does: the framework runs its loop.
+/// nothing's pending — a test source whose own [`SourceElement::run`] loop
+/// cannot wait on `control`'s own channel calls this once per turn. Every
+/// source of this crate is a [`crate::element::Produce`], whose loop the
+/// framework runs.
 ///
 /// See [`ControlOutcome`] for what the return value means.
-// Only the Linux captures, not yet written as a `Produce`, call it now.
-#[allow(dead_code)]
+// Only the test sources that run a loop of their own call it now.
+#[cfg(test)]
 pub fn drain_control<S: SourceElement>(
     control: &ControlReceiver,
     source: &mut S,

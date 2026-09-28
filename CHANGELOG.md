@@ -124,6 +124,12 @@ compile error with no explanation.
   at its end until stopped or sought back into what it reads.
   `RtspSource`, `PipelineBridge`, `WebRtcTrackSource` and `FileDemuxer`
   are written on it now, their API unchanged.
+- **`Render::stopping`** tells a stop from a seek's flush, as
+  `Transform::stopping` does: `reset` by default. `PipeWireAudioRenderer`
+  is a `Render` now and uses it — a stop deactivates its stream and hands
+  back the position it masters, a flush only empties its queue — and the
+  V4L2 and PipeWire captures are `Produce`s, so every source of this crate
+  runs the framework's loop. Their API is unchanged.
 - **A `Pacer` or `VideoSynchronizer` always runs behind a queue.** Each
   waits on the clock inside `consume`, and in a chain with nothing queued
   straight in front of it, those waits held up the demuxer or decoder
