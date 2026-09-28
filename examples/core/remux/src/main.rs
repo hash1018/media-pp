@@ -2,8 +2,7 @@
 //! for — video, audio and subtitles — straight into a new `.mp4`
 //! container, with no decode/re-encode, just repackaging. Packets pass
 //! through byte-for-byte; only their timestamps get rescaled to whatever
-//! time_base the output container actually assigns each stream (see
-//! `FileMuxer::open`'s own docs).
+//! time_base the output container actually assigns each stream.
 //!
 //! Which streams those are is asked of `MediaKind::packet_for` rather than
 //! listed here, so this does not go stale as the crate learns to carry
@@ -17,7 +16,7 @@
 //! stream's `FileMuxer` sink from that same source thread, no multi-source
 //! coordination needed.
 //!
-//!     cargo run -p remux -- [input.mp4] [output.mp4]
+//!     cargo run -p remux -- input.mp4 [output.mp4]
 
 fn main() -> impl std::process::Termination {
     example::run()

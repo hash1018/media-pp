@@ -1,10 +1,11 @@
-//! Demux -> SwDecoder -> SwScaler (640x640 RGB24) -> OrtDetector, drawing every
-//! detection straight onto the same 640x640 frame `OrtDetector` saw and
-//! presenting it in a plain window. Deliberately not DX12: `D3d12Renderer`
-//! has no hook for drawing an overlay, so this blits pixels straight into a
-//! `winit` window via `softbuffer` instead — no GPU, no `renderer-engine`.
+//! FileDemuxer -> SwDecoder -> Queue -> SwScaler (640x640 RGB24) ->
+//! OrtDetector, drawing every detection straight onto the same 640x640 frame
+//! `OrtDetector` saw and presenting it in a plain window. The boxes are drawn
+//! on the CPU and blitted into a `winit` window through `softbuffer`; no GPU
+//! renderer is involved.
 //!
-//! No `Pacer` in this pipeline, so frames show up as fast as decode +
+//! The model is an Ultralytics YOLOv8 or YOLOv11 ONNX export with a 640x640
+//! input. No `Pacer` in this pipeline, so frames show up as fast as decode +
 //! inference allow, not at real playback speed.
 //!
 //!     cargo run -p detect -- path/to/model.onnx path/to/video.mp4

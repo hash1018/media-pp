@@ -1,12 +1,11 @@
 # gpu_video_compositor
 
-Two `TestVideoSource` pipelines -> `SwScaler(NV12)` -> upload -> GPU compositor
--> `Tee` -> {renderer for live display,
-`download -> SwScaler(YUV420P) -> SwEncoder -> FileMuxer` for simultaneous
-recording}. The foreground layer moves at runtime through
-its layer handle, same as the CPU `video_compositor` example, but every frame
-this composites never touches the CPU until the recording branch's own
-download.
+Two `TestVideoSource` pipelines -> `SwScaler(NV12)` -> upload -> GPU
+compositor -> `Tee` -> {`Queue` -> renderer for live display, `Queue` ->
+download -> `SwScaler(YUV420P)` -> `Queue` -> `SwEncoder` -> `FileMuxer` for
+simultaneous recording}. The foreground layer moves at runtime through its
+layer handle, as in the CPU `video_compositor`, but nothing composited touches
+the CPU until the recording branch's download.
 
 - Windows: `D3d11Upload` -> `D3d11VideoCompositor` -> `D3d11WindowRenderer` /
   `D3d11Download`
@@ -14,15 +13,14 @@ download.
   drawing the CUDA frames on a `VulkanGpu` made for that CUDA device /
   `CudaDownload`
 
-Both branches run the identical graph, terminal sinks, layer settings, and
-CLI — the foreground is drawn at 0.85 opacity with `VideoFit::Cover` on
-either backend. On the CUDA side those two are exactly why it composites with
-copies and a blend kernel rather than libavfilter: no CUDA filter there can
-crop, and none can blend.
+Both platforms run the same graph, layer settings and CLI — the foreground at
+0.85 opacity with `VideoFit::Cover`. On CUDA those two are why the compositor
+scales with libavfilter's `scale_cuda` but crops by copy and blends with its
+own kernel: no CUDA filter there can crop or blend.
 
 ```sh
 cargo run -p gpu_video_compositor -- [output.mp4] [seconds]
 ```
 
-`output.mp4` defaults to `gpu_video_compositor.mp4` and `seconds` defaults to
-`5`. Needs an NVIDIA GPU on Linux.
+It records to `gpu_video_compositor.mp4` for 5 seconds by default; closing
+the window or Escape ends it early. Needs an NVIDIA GPU on Linux.

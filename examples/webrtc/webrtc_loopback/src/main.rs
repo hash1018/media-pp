@@ -166,10 +166,6 @@ mod example {
         Ok(())
     }
 
-    /// Wires `source` into its own `Pipeline`, forwarding every packet it
-    /// produces into a `CountingSink` that increments `count` — a
-    /// `WebRtcTrackSource` is a plain `SourceElement`, so it plugs into
-    /// `Pipeline`/`ChainBuilder` exactly like any other source.
     /// Both halves of the one `Direction::SendRecv` track this example
     /// opens. `TrackEndpoints` carries only what the negotiated direction
     /// permits, so this is where "we asked for SendRecv" turns back into a
@@ -182,6 +178,10 @@ mod example {
         (sink, source)
     }
 
+    /// Wires `source` into its own `Pipeline`, forwarding every packet it
+    /// produces into a `CountingSink` that increments `count` — a
+    /// `WebRtcTrackSource` is a source like any other, so it plugs into
+    /// `Pipeline`/`ChainBuilder` the same way.
     fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
         let sink = CountingSink {
             count,

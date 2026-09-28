@@ -2,18 +2,16 @@
 //! staying on the GPU from the moment it is captured to the moment it is
 //! encoded.
 //!
-//! `PipeWireScreenCaptureSource` (GPU mode) `-> Queue -> CudaConverter ->
-//! CudaVideoCompositor` (+ `CudaTextLayerHandle`) `-> Queue -> CudaEncoder ->
-//! FileMuxer`.
+//! Two pipelines: `PipeWireScreenCaptureSource` (GPU mode) `-> Queue ->
+//! CudaConverter ->` a `CudaVideoCompositor` input, and the compositor (with
+//! a `CudaTextLayerHandle`) `-> Queue -> CudaEncoder -> FileMuxer`.
 //!
-//! The contrast with `screen_record_nvenc` is the point of the graph. That
-//! example records the capture untouched, which needs no conversion at all:
-//! the capture is BGRA and NVENC ingests BGRA directly. The moment anything
-//! wants to *draw* on the capture, that stops being enough — the compositor
-//! works in NV12, like everything else on the CUDA path that is not the
-//! encoder — so `CudaConverter` sits between them. Nothing here comes back to
-//! system memory: the capture is imported as a CUDA surface, converted by a
-//! kernel, composited by a kernel, and encoded by NVENC.
+//! The contrast with `screen_record_nvenc`, which records the capture
+//! untouched, is the point: here something draws on it. The canvas is NV12,
+//! and converting the BGRA capture up front lets it be copied in rather than
+//! blended as BGRA. Nothing comes back to system memory: the capture is
+//! imported as a CUDA surface, converted and composited by kernels, and
+//! encoded by NVENC.
 //!
 //! The clock in the corner is redrawn once a second, so the recording proves
 //! the overlay is live rather than a watermark baked in once. Any number of

@@ -39,6 +39,8 @@
 //!
 //! The language is detected unless `--language` names it, which is slower
 //! and can be fooled by a stretch of music — see the README.
+//! `--align` times each word against the audio rather than taking
+//! whisper.cpp's estimate, which cuts the lines more cleanly between chunks.
 //! `--sidecar out.srt` (or `.vtt`) also writes the lines to a subtitle file
 //! of their own, through a second `FileMuxer`.
 //!

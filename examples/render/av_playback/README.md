@@ -13,7 +13,7 @@ the GPU:
 
 ```text
 Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
-         -> D3d12WindowRenderer
+         [-> SwScaler] -> D3d12WindowRenderer
 Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
          -> VulkanWindowRenderer
 ```
@@ -37,4 +37,5 @@ q
 ```
 
 `seek` decodes forward to the frame covering the requested instant.
-`keyseek` previews the first decodable frame at the preceding keyframe.
+`keyseek` previews the first decodable frame at the preceding keyframe. It
+ends at the end of the file, on `q`, Escape, or closing the window.

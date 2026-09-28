@@ -1,4 +1,5 @@
-//! TestVideoSource -> SwScaler -> D3d11Upload -> D3d11WindowRenderer: a
+//! TestVideoSource -> Queue -> SwScaler -> Queue -> D3d11Upload -> Queue ->
+//! D3d11WindowRenderer: a
 //! synthetic `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU,
 //! then uploaded to a GPU `Pixel::D3D11` texture on the *renderer's own*
 //! `ID3D11Device` before being presented in the renderer's own window —
@@ -55,7 +56,8 @@ mod windows_example {
         let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, ()) = Pipeline::new("d3d11-upload", source, |source, ctx| {
-            // `Pixel::NV12` — the only layout `D3d11Upload` accepts.
+            // `Pixel::NV12`, converted on the CPU to show that path; the
+            // upload would also take the YUV420P as it comes.
             let scaler = SwScaler::to_format(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,

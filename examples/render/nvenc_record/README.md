@@ -1,6 +1,7 @@
 # nvenc_record
 
-`AppSource -> SwScaler(NV12) -> upload -> NVENC -> FileMuxer`: encodes
+`AppSource -> SwScaler(NV12) -> D3d11Upload -> Queue -> D3d11VideoEncoder
+(h264_nvenc) -> FileMuxer`: encodes
 GPU-resident frames on the GPU's own NVENC block straight into a playable
 `.mp4`, with no CPU readback anywhere after the upload.
 

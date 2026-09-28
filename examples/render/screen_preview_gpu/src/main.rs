@@ -77,9 +77,8 @@ mod windows_example {
     /// renderer's own window, no `SwScaler` (desktop content is already
     /// BGRA/RGB, no YUV conversion needed, and `D3d11WindowRenderer`
     /// letterboxes any capture size into the window on its own). Compare
-    /// against the Windows-only `screen_preview_cpu`, which captures to a
-    /// plain CPU `Pixel::BGRA` frame instead and converts it to YUV420P for
-    /// the D3D12 CPU-upload path.
+    /// against `screen_preview_cpu`, which captures to a plain CPU
+    /// `Pixel::BGRA` frame instead, which the D3D12 renderer uploads itself.
     ///
     /// The DXGI GPU path has no cursor because `CaptureMode::Gpu` doesn't
     /// support cursor compositing yet; the WGC path requests cursor capture.
@@ -423,7 +422,7 @@ mod linux_example {
 
         for event in pipeline.bus().iter() {
             println!("{event}");
-            // Same reasoning as the Windows branch: only stop for `Eos`, or an
+            // Same reasoning as the Windows branch: only stop for `Finished`, or an
             // `Error` that means the capture's own `run()` thread ended — one
             // dropped frame elsewhere is not a reason to end the demo.
             let source_died = matches!(

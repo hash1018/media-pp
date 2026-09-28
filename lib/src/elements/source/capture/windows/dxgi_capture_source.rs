@@ -631,10 +631,12 @@ impl DxgiCaptureSource {
     /// by [`DxgiCaptureOptions::area`]; a mismatch is rejected before desktop
     /// duplication or textures are created. Under [`CaptureMode::Gpu`], this
     /// lets capture, filters, compositors, encoders, and renderers share one
-    /// device without a system-memory round trip. Device injection does not
-    /// remove the existing GPU copies: duplication surfaces first refresh the
-    /// internal latest-image textures, then each emission gets an independent
-    /// composite texture that downstream may retain after `ReleaseFrame`.
+    /// device without a system-memory round trip. With one output, each
+    /// acquired frame is drawn straight into a composite texture; with
+    /// several, each output keeps a latest image the composite is assembled
+    /// from. A tick that captured nothing hands on the composite it already
+    /// has, and a composite downstream may still hold is never written again,
+    /// so it may be kept past `ReleaseFrame`.
     pub fn open_with_device(
         name: impl Into<String>,
         options: DxgiCaptureOptions,

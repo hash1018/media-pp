@@ -1,4 +1,5 @@
-//! `AppSource -> SwScaler(NV12) -> upload -> NVENC -> FileMuxer`: encodes
+//! `AppSource -> SwScaler(NV12) -> D3d11Upload -> Queue -> D3d11VideoEncoder
+//! (h264_nvenc) -> FileMuxer`: encodes
 //! GPU-resident frames on the GPU's own NVENC block straight into a playable
 //! `.mp4`, with no CPU readback anywhere after the upload.
 //!
@@ -85,8 +86,8 @@ mod windows_example {
 
         let (pipeline, ()) = Pipeline::new("nvenc-record", source, |source, ctx| {
             // AppSource emits YUV420P on the CPU, so this one SwScaler is the
-            // only format conversion in the graph; the upload requires NV12
-            // and everything downstream of it is GPU-resident.
+            // only format conversion in the graph; the encoder is opened for
+            // NV12, and everything from the upload on is GPU-resident.
             let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,

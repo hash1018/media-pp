@@ -9,8 +9,8 @@ Three pipelines meet at one compositor:
 ```text
 AppSource(BGRA) -> D3d11Upload -> D3d11ChromaKey -> "keyed" layer
 TestVideoSource -> SwScaler(NV12) -> D3d11Upload -> "background" layer
-D3d11VideoCompositor -> D3d11Download -> SwScaler(YUV420P)
-    -> SwEncoder -> FileMuxer
+D3d11VideoCompositor -> Queue -> D3d11Download -> SwScaler(YUV420P)
+    -> Queue -> SwEncoder -> FileMuxer
 ```
 
 `AppSource` stands in for a real external producer — a camera or capture SDK's

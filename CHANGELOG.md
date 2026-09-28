@@ -46,9 +46,9 @@ compile error with no explanation.
 - **`SourceElement` is implemented only by this crate's sources.** Its
   loop answers the pipeline through a channel that is no longer public.
   A source of your own is a `Produce`, which `Pipeline::new` and
-  `add_source` take as they take any source; one with several outputs, or
-  one that can be sought, has no way to be written outside the crate for
-  now. `SourceElement` stays nameable, as a bound.
+  `add_source` take as they take any source — with several outputs, a
+  segment of its own, or seeking and playing backwards where it can (see
+  Added). `SourceElement` stays nameable, as a bound.
 
 - **`AppSink::with_control` is `AppSink::with_events`**, whose closure is
   handed each `&StreamEvent` — the end, and each segment, a seek's one
@@ -171,9 +171,9 @@ compile error with no explanation.
   `TestAudioSource`, `AppSource`, `AudioMixer`, the four video
   compositors, the Windows captures (`DxgiCaptureSource`,
   `WgcCaptureSource`, `MfCaptureSource`, `WasapiCaptureSource`) and
-  `D3d11SharedTextureSource` are written this way now; a pause no longer waits out `TestVideoSource`'s
-  current frame interval, nor a request a live mixer's tick or a WASAPI
-  capture's poll.
+  `D3d11SharedTextureSource` are written this way now; a pause no longer
+  waits out `TestVideoSource`'s current frame interval, nor a request a
+  live mixer's tick or a WASAPI capture's poll.
 
 - **`Transform` writes a filter as its media work alone.** Its `transform`
   makes what each buffer answers to — nothing, one buffer or several — into
@@ -305,6 +305,17 @@ compile error with no explanation.
   reads its lap this way now.
 
 ### Fixed
+
+- **A playing seek behind a `Tee` shows where it landed.** With every
+  branch of a `Tee` held by a seek's preroll, the `Tee` still took what
+  came, and everything decoded meanwhile went on at once, past the pacer,
+  as playback did: the picture a second or two past the target, and the
+  sound before it let through at once. A `Tee` with every branch held now
+  waits.
+
+- **A finish right after an accurate seek plays nothing from before the
+  target.** Ending the stream before the sound had reached the target used
+  to hand on the last sample before it, as the end of the media would.
 
 - **A preroll's terminal is handed only what it asks for.** A transform
   that makes several buffers of one — a tempo stretch, `CudaScaler`, a

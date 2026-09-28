@@ -3,8 +3,10 @@
 `capture -> NVENC -> FileMuxer`: records the desktop into a playable `.mp4`
 with no CPU color conversion anywhere in the graph.
 
-- Windows: `DxgiCaptureSource` (GPU mode) `-> D3d11VideoEncoder -> FileMuxer`
-- Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> CudaEncoder -> FileMuxer`
+- Windows: `DxgiCaptureSource` (GPU mode) `-> Queue -> D3d11VideoEncoder ->
+  FileMuxer`
+- Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> Queue -> CudaEncoder ->
+  FileMuxer`
 
 The contrast with `screen_record_software` is the whole point. That example runs
 `capture -> SwScaler -> SwEncoder`: every frame is converted BGRA->YUV420P by

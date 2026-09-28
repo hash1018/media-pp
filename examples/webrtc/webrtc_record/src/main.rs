@@ -1,4 +1,4 @@
-//! Sends one file's first video and audio streams as H.264/Opus over two
+//! Sends one file's best video and audio streams as H.264/Opus over two
 //! WebRTC tracks, then records both received tracks into one MP4 without
 //! decoding or re-encoding on the receiving side.
 //!

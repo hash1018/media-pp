@@ -7,7 +7,8 @@
 //! `TestVideoSource -> Queue -> SwEncoder -> WebRtcTrackSink` and
 //! `TestAudioSource -> Queue -> SwAudioEncoder -> WebRtcTrackSink`.
 //!
-//! Receive: one `WebRtcTrackSource -> CountingSink` pipeline per track.
+//! Receive: one pipeline with two `WebRtcTrackSource -> CountingSink`
+//! sources, one per track.
 //!
 //!     cargo run -p webrtc_av_loopback
 

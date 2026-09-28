@@ -1,9 +1,10 @@
 # rtsp_source
 
-`RtspSource -> Queue -> PacketCounter`: connects to a live RTSP stream and
-counts video packets on the queue's worker thread for a few seconds, then
-stops — proves `RtspSource` actually connects, negotiates a transport, and
-demuxes real packets from a live camera, not just that it compiles.
+`RtspSource -> Queue -> PacketCounter`: connects to a live RTSP stream,
+counts video packets on the queue's worker thread for 10 seconds, then stops —
+proves `RtspSource` connects, negotiates a transport and demuxes real packets
+from a live camera or server. A dropped connection ends it early with the
+error.
 
 ```sh
 cargo run -p rtsp_source -- rtsp://host:port/path

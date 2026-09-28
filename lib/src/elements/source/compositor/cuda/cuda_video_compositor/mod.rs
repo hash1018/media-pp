@@ -741,13 +741,15 @@ impl Composed {
 /// waiting for. The background fill in front of them is a kernel, and the
 /// reader has no way to know whether it or the copies have landed.
 ///
-/// # NV12 only
+/// # NV12 and BGRA
 ///
-/// Inputs and output are NV12 CUDA surfaces. A capture produces BGRA and
-/// nothing on the CUDA path converts RGB to YUV (see
-/// [`crate::elements::CudaScaler`]), so a capture has to be converted on the
-/// CPU before it can be composited here. Decoded video needs nothing:
-/// [`crate::elements::CudaDecoder`] already produces NV12.
+/// Inputs are NV12 or BGRA CUDA surfaces, and the canvas is NV12 unless
+/// [`Self::with_format`] asks for BGRA. An opaque BT.709 limited-range NV12
+/// layer on an NV12 canvas is placed with a plain copy, and a translucent
+/// one blended in place; anything else — a capture's BGRA, NV12 in other
+/// colour — is drawn by a kernel that converts it. Converting a capture up
+/// front with [`crate::elements::CudaConverter`] is a choice, for the copy
+/// path, not a requirement.
 ///
 /// # Blending
 ///

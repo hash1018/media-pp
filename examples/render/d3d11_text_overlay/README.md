@@ -2,14 +2,15 @@
 
 A moving-gradient `TestVideoSource` background composited with a
 `D3d11TextLayerHandle` clock in front of it, recorded to an mp4 — proves
-dynamic text (not just a static watermark) actually updates on screen: the
+dynamic text (not just a static watermark) actually updates in the recording: the
 overlaid text changes once a second while the recording runs, so the output
 file's frames differ over time if `D3d11TextLayerHandle::set_text` is really
 re-rasterizing and re-uploading each call.
 
 The background runs as its own `Pipeline` (`TestVideoSource -> SwScaler ->
 upload`) feeding a compositor source input; the compositor's output runs as a
-second `Pipeline` (`download -> SwScaler -> SwEncoder -> FileMuxer`). The text
+second `Pipeline` (`Queue -> download -> SwScaler -> Queue -> SwEncoder ->
+FileMuxer`). The text
 layer itself never receives `Pipeline` frames — it's a handle driven directly
 by `set_text`/`set_position`, built through the compositor's own
 `add_text_layer`.
@@ -28,4 +29,5 @@ other.
 cargo run -p d3d11_text_overlay -- [output.mp4] [seconds]
 ```
 
-While recording, use the arrow keys to move the text, or `q` to stop early.
+It records to `d3d11_text_overlay.mp4` for 5 seconds by default; while it
+runs, the arrow keys move the text and `q` stops early.

@@ -1,14 +1,14 @@
 # audio_playback
 
 `TestAudioSource -> AudioResampler -> AudioVolume -> Queue -> renderer`: plays
-a 440Hz tone for three seconds and demonstrates click-free runtime gain/mute
-changes. `AudioResampler` deliberately targets a rate/channel count that
-differs from the device's own, proving it owns the format conversion rather
-than the renderer doing it implicitly.
+a 440 Hz tone for three seconds and changes its gain and mute while it plays,
+without clicks. The tone is made at 48 kHz stereo whatever the device uses,
+and `AudioResampler` converts it to the device's format, so the renderer never
+converts implicitly.
 
-Both platforms run the identical graph and CLI; only the renderer and its
-device type differ — `WasapiRenderer` on Windows, `PipeWireAudioRenderer` on
-Linux.
+The renderer is `WasapiRenderer` on Windows and `PipeWireAudioRenderer` on
+Linux. A device name that matches nothing is an error on Windows; on Linux it
+falls back to the first sink, as does a session with no default.
 
 ```sh
 cargo run -p audio_playback

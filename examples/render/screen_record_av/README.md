@@ -7,7 +7,8 @@ one `Pipeline` via `PipelineBuilder` — each on its own thread, but one
 `pipeline.finish()` reaches both.
 
 Neither capture source ever reaches a natural `Eos` (same as `screen_record_software`),
-so this runs until `q` + Enter in the same terminal, which `finish()`es the
+so this runs until `q` + Enter in the same terminal (or a capture error stops
+it), which `finish()`es the
 pipeline: each source places an `Eos` behind its last buffer, both encoders
 flush what they still hold, and the MP4's trailer is written once *every*
 track, video and audio both, has ended — not on whichever finishes first.

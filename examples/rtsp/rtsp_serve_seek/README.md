@@ -1,10 +1,9 @@
 # rtsp_serve_seek
 
-Same Demux -> Queue -> Pacer -> RtspMuxer chain as `rtsp_serve` (video and
-audio both, when the file has them), plus a terminal prompt that reads
-timestamps and calls `Pipeline::seek` with them while the stream is live —
-lets a viewer jump around a live-served RTSP stream instead of only watching
-it play straight through.
+The same `FileDemuxer -> Queue -> Pacer -> RtspMuxer` chain as `rtsp_serve`
+(video and audio both, when the file has them), plus a terminal prompt that
+pauses, resumes and seeks the pipeline while the stream is live, so a viewer
+can jump around a served stream instead of only watching it play through.
 
 ```sh
 cargo run -p rtsp_serve_seek -- path/to/video.mp4 [rtsp://host:port/path]

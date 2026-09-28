@@ -1,34 +1,24 @@
 # cuda_text_overlay
 
 A moving-gradient `TestVideoSource` background composited with a
-`CudaTextLayerHandle` clock in front of it, recorded to an mp4 — proves dynamic
-text (not just a static watermark) actually updates: the overlaid text changes
-once a second while the recording runs, so the output file's frames differ over
-time if `CudaTextLayerHandle::set_text` is really re-rasterizing and
-re-uploading each call.
+`CudaTextLayerHandle` clock in front of it, recorded to an mp4. The text
+changes once a second, so the file's frames differ over time only if
+`set_text` really re-rasterizes and re-uploads each call.
 
 The background runs as its own `Pipeline` (`TestVideoSource -> SwScaler ->
-CudaUpload`) feeding a compositor source input; the compositor's output runs as
-a second `Pipeline` (`CudaDownload -> SwScaler -> SwEncoder -> FileMuxer`). The
-text layer itself never receives `Pipeline` frames — it's a handle driven
-directly by `set_text`/`set_position`, built through the compositor's own
-`add_text_layer`.
+CudaUpload`) feeding a compositor input; the compositor's output runs as a
+second one (`Queue -> CudaDownload -> SwScaler -> Queue -> SwEncoder ->
+FileMuxer`). The text layer receives no frames — it is a handle driven by
+`set_text` and `set_position`, made by the compositor's `add_text_layer`.
 
-The graph is platform-independent. CUDA is a vendor backend rather than a
-platform one, so the library dependency carries no per-target table and the
-pipeline has no `cfg` switch — it builds and runs the same way on Windows and
-Linux. `d3d11_text_overlay` is the D3D11 counterpart for the same graph.
-
-Two things do differ per OS, and both are about the host rather than the GPU:
-the raw-key terminal (`ReadConsoleInputW` on Windows, a termios raw-mode
-terminal on Unix) and the system font path. The example prints which font it
-found; a machine with none of the candidates gets a clear error rather than an
-empty overlay.
-
-Needs an NVIDIA GPU.
+The graph is the same on Windows and Linux; `d3d11_text_overlay` is the
+D3D11 counterpart. Only the raw-key terminal and the system font path differ
+per OS; the example prints the font it found, and a machine with none of the
+candidates gets a clear error. Needs an NVIDIA GPU.
 
 ```sh
 cargo run -p cuda_text_overlay -- [output.mp4] [seconds]
 ```
 
-While recording, use the arrow keys to move the text, or `q` to stop early.
+It records to `cuda_text_overlay.mp4` for 5 seconds by default; while it
+runs, the arrow keys move the text and `q` stops early.

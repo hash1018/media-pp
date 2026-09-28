@@ -1,6 +1,6 @@
 # rtsp_serve
 
-Demux -> Queue -> Pacer -> RtspMuxer: remuxes a file's packets (no
+`FileDemuxer -> Queue -> Pacer -> RtspMuxer`: remuxes a file's packets (no
 re-encoding) and publishes them at real playback speed to an already-running
 RTSP server.
 

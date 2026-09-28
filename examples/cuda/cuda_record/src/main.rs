@@ -1,5 +1,5 @@
-//! `AppSource -> SwScaler(NV12) -> CudaUpload -> CudaEncoder -> FileMuxer`:
-//! encodes GPU-resident frames on the GPU's own NVENC block straight into a
+//! `AppSource -> SwScaler(NV12) -> CudaUpload -> Queue -> CudaEncoder ->
+//! FileMuxer`: encodes GPU-resident frames on the GPU's own NVENC block straight into a
 //! playable `.mp4`, with no CPU readback anywhere after the upload.
 //!
 //! The contrast with a software tail is the point: a recording branch that

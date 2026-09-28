@@ -173,7 +173,7 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   per-domain layout match. `MemoryDomainSet` has three bits left.
 - **Errors and element types** — each backend element has a `cfg`'d variant
   in `error.rs` (`Error` is `#[non_exhaustive]`) and an `ElementType` in
-  `core/element.rs:40`.
+  `core/element.rs:50`.
 - **The device** — the counterpart of `D3d11Gpu`, `CudaDevice` and
   `VulkanDevice`: one per process, shared by every element on it, holding
   the `MTLDevice`, a command queue, and FFmpeg's `AV_HWDEVICE_TYPE_VIDEOTOOLBOX`
@@ -181,7 +181,7 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   generate it in `build.rs` the way the `vulkan` feature generates
   `hwcontext_vulkan.h`.
 - **Decode** — a `DecodeTarget` variant in
-  `filter/decoder/video_decode_bin.rs:80` and every method that matches on
+  `filter/decoder/video_decode_bin.rs:83` and every method that matches on
   it: `domain`, `decodes`, `keeps_alpha`, `converts_10bit`, `makes_rgb`,
   `hardware_format`, `convert`, `software_format`, `hardware_decoder`,
   `upload`, `made_rgb`, and the `no_video_device` and `refused` arms. The
@@ -203,8 +203,11 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   compile WGSL with naga at construction; naga also writes Metal Shading
   Language (its `msl-out` feature), so the existing shaders may carry over
   without a shader toolchain.
-- **Capture** — `SourceElement`s that say they are live, with `time_base()`
-  and a `FrameRateHandle`:
+- **Capture** — `Produce`s that say they are live (`is_live`), with
+  `time_base()` and a `FrameRateHandle`, setting the device up in `starting`
+  and letting it go in `stopping`, on the source's own thread, and stopping
+  it for a pause in `pausing`/`resuming`, as the Windows and Linux captures
+  do:
   - screen and window: ScreenCaptureKit (`SCStream` with an
     `SCContentFilter` for a display or a window), in system memory and as
     `IOSurface` frames on the device, as `PipeWireScreenCaptureSource` has
@@ -219,9 +222,11 @@ a breaking change: `MemoryDomain` and `ElementType` are not
     there is one.
 - **Audio output** — the renderer contract `Player` uses
   (`app/player.rs`): `list_devices`, `open(name, options) -> (Self,
-  AudioFormat)`, `format()`, a `Sink` taking system-memory audio frames and
-  handling `Pause`/`Resume`/`Stop`/`Flush`/`Eos`, registering as the audio
-  master with the playback clock, and rate through `Stretcher`.
+  AudioFormat)`, `format()`, a `Render` taking system-memory audio frames —
+  `drain` to play out what it holds at the end, `reset` for a seek's flush,
+  `stopping`, `pausing`/`resuming` for the device, as `WasapiRenderer` and
+  `PipeWireAudioRenderer` are — registering as the audio master with the
+  playback clock, and rate through `Stretcher`.
 - **A frame renderer for a program's own presenter** — what obs-rs's
   Preview is built on: `CudaFrameRenderer` hands over device pointers,
   `D3d11FrameRenderer` textures. A Metal one hands over the `IOSurface` or

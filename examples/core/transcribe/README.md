@@ -13,11 +13,12 @@ FileDemuxer ───────┤              ┌─ audio packets ───
                                        ─ Queue ─ WhisperTranscriber
                                                        │         │
                                                     segments ────┘
+                                                       │
+                                        (--sidecar) FileMuxer, .srt or .vtt
 ```
 
-The picture and the sound are copied through as packets — nothing is decoded
-for them and nothing re-encoded. Only the audio is decoded, and only to be
-resampled into the one shape Whisper reads: 16 kHz mono f32.
+The picture and the sound are copied through as packets. Only the audio is
+decoded, and only to be resampled into what Whisper reads: 16 kHz mono f32.
 
 ```sh
 cargo run -p transcribe --release -- model.bin input.mp4 [output.mp4]
@@ -25,114 +26,55 @@ cargo run -p transcribe --release --features gpu -- --language ko --align model.
 cargo run -p transcribe --release --features gpu -- --sidecar out.srt model.bin input.mp4
 ```
 
-`--release` matters more than usual here: a debug build of the inference is
-slower than real time even on a GPU.
+The output defaults to `transcribed.mp4`, and is only ever an MP4, since
+`mov_text` is the text track MP4 takes. `--release` matters: a debug build of
+the inference is slower than real time even on a GPU.
 
-The language is detected unless `--language` names it. Name it where it is
-known: detection runs again for every few seconds of audio, which cost 60%
-more time on the measurement below, and a stretch of music can be heard as
-a different language from the speech around it.
-
-`--align` times each word against the audio rather than taking whisper.cpp's
-estimate, which is what decides where a line is cut between one round and
-the next. Estimated times left pieces said twice at the seams — "13시간 /
-시간 정도" — where aligned ones left one in the whole minute, for about 5%
-more time. Which alignment heads to use is worked out from the model file;
-for a model with no known heads, such as a distilled one, it says so in the
-log and estimates instead. Whether it aligned shows in whisper.cpp's own
-output as `dtw = 1`.
+- `--language` skips detection, which otherwise runs again for every chunk —
+  60% more time on the measurement below — and can hear music as another
+  language. See `WhisperTranscriber::with_language`.
+- `--align` times each word against the audio instead of taking whisper.cpp's
+  estimate, which is what cuts lines cleanly between chunks, for about 5%
+  more time. See `TokenTiming`.
+- `--sidecar out.srt|out.vtt` also writes the lines to a subtitle file of
+  their own, as they arrive.
 
 ## The model
 
 A whisper.cpp GGML file, from
 [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp).
-Nothing that size belongs in a repository, so this takes a path. `ggml-base.bin`
-(148 MB) is enough to see it work; `ggml-large-v3-turbo.bin` (1.6 GB) is what
-gets a language other than English right. `ggml-small.bin` (488 MB) is faster
-and mishears more: on Korean it wrote 알프스 삼백 for 알프스 산맥.
+`ggml-base.bin` (148 MB) is enough to see it work; `ggml-large-v3-turbo.bin`
+(1.6 GB) is what gets a language other than English right. `ggml-small.bin`
+(488 MB) is faster and mishears more: on Korean it wrote 알프스 삼백 for
+알프스 산맥.
 
 ## CPU or GPU
 
-`--features gpu` builds whisper.cpp's Vulkan backend, which needs the
-[Vulkan SDK](https://vulkan.lunarg.com/) at build time — its shader compiler,
-not its runtime, which ships with every graphics driver. Vulkan rather than
-CUDA because CUDA needs a 3 GB toolkit to build and serves only NVIDIA.
-
-The difference is not small. Measured with this example on an i5-12400F with
-an RTX 3050, against a minute of dense Korean speech — nearly two words a
-second — with `--language ko`:
+`--features gpu` builds whisper.cpp's Vulkan backend (`whisper-vulkan`). On
+an i5-12400F with an RTX 3050, against a minute of dense Korean speech with
+`--language ko`:
 
 | model | CPU | Vulkan |
 |---|---|---|
 | `small` | — | 9.7x real time |
-| `large-v3-turbo` | slower than 0.07x — stopped after 14 minutes | 6.5x |
+| `large-v3-turbo` | slower than 0.07x — stopped after 14 minutes | 6.4x |
 
-Transcribing a whole file in one pass is several times faster than this, and
-the difference is the streaming loop rather than the model: every inference
-pays for a whole 30-second encoder window to hear eight seconds of audio,
-four of them context. That is the price of lines arriving while the audio is
-still coming in, and on a CPU it is not affordable at all.
+A whole file in one pass is several times faster; the streaming loop pays for
+a 30-second encoder window to hear each few seconds (see `ChunkPolicy`). The
+first GPU run also waits for the driver to compile the shaders, which is
+cached after. whisper.cpp falls back to the CPU silently where it finds no
+GPU; its log says `whisper_backend_init_gpu: using Vulkan0 backend` when it
+does.
 
-The first GPU run also pays for the driver to compile whisper.cpp's shaders,
-which took over a minute here and under two seconds every run after — that
-cache outlives the process.
-
-### Building the GPU feature on Windows
-
-ggml builds its Vulkan shader generator as a CMake ExternalProject, and the
-paths that produces run past Windows' 260-character limit. Two things are
-needed, and neither alone was enough here.
-
-Long paths on, from an elevated prompt — without this MSBuild cannot create
-the directories at all (MSB4018 / MSB6003):
-
-```text
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
-```
-
-And a short target directory. MSBuild honours long paths once the setting is
-on, but `FileTracker` — the native tool it logs file access with — does not,
-and fails with FTK1011 from a target directory as ordinary as
-`D:\Project\media-pp\target`:
-
-```text
-set CARGO_TARGET_DIR=C:\t
-```
-
-Turning `FileTracker` off with `TrackFileAccess=false` clears FTK1011 and
-breaks the ExternalProject's step ordering instead, so it is not a way round
-the second. The CPU build needs neither, and nor does Linux.
-
-whisper.cpp falls back to the CPU without complaining when it finds no GPU, so
-a run that seems inexplicably slow is worth checking against its own log:
-
-```text
-whisper_backend_init_gpu: using Vulkan0 backend
-```
+Building it on Windows needs long paths enabled (from an elevated prompt:
+`reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f`)
+and a short target directory, such as `set CARGO_TARGET_DIR=C:\t`: MSBuild's
+`FileTracker` ignores long paths and fails with FTK1011. Linux needs neither.
 
 ## Why the subtitles arrive late
 
-`WhisperTranscriber` gathers a few seconds before transcribing any of them,
-then holds back the newest second as too uncertain to report — a word only
-half-heard is guessed at, and the guess changes once the rest of it arrives.
-So a line for the fifth second is handed over while the tenth is being
-written, and at the end of a file the last lines arrive after every video and
-audio packet has already been muxed.
-
-That is not something to work around. A packet's place in an MP4 is its
-timestamp and not its arrival, and the index is written at the end, so a
-sample landing late still lands where it belongs. The `Queue` before the
-transcriber is what keeps the waiting off the demuxer's thread.
-
-## A subtitle file beside it
-
-`--sidecar out.srt` or `--sidecar out.vtt` writes the same lines to a file of
-their own as well, in SubRip or WebVTT by the extension. It is a second
-`FileMuxer` with one text track, fed the same line in its own codec — see
-`subtitle::Codec` — and it is written as the lines arrive, where the MP4's
-track is indexed only when the copy is finished.
-
-## What it does not do
-
-The copy itself is only ever an MP4, because `mov_text` is what MP4 takes
-and this writes `mov_text` into it.
+`WhisperTranscriber` gathers a few seconds before transcribing and holds back
+the newest second as too uncertain to report, so at the end of a file the
+last lines arrive after every video and audio packet has been muxed. That is
+fine: a sample's place in an MP4 is its timestamp, not its arrival. The
+`Queue` before the transcriber keeps the waiting off the demuxer's thread.

@@ -2,7 +2,8 @@
 
 `FileDemuxer -> D3d11Decoder -> D3d11Scaler (960x540) -> Queue -> Pacer ->
 D3d11WindowRenderer`: decodes and resizes video entirely on one shared D3D11
-device, then presents the fixed-size NV12 output in the renderer's own window
+device, then presents the fixed-size output — in the decoder's own format,
+NV12 or P010 for 10-bit — in the renderer's own window
 at real playback speed. Decoded array-texture slices go directly through the
 D3D11 video processor, and neither scaling nor rendering maps the pixels to
 system memory.

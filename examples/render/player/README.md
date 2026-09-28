@@ -7,8 +7,9 @@ the sound played, a `VideoWindow` and the platform's audio output, built by
 `Player::open`:
 
 ```text
-FileDemuxer -> VideoDecodeBin -> Queue -> VideoSynchronizer -> VideoWindow
-            -> SwDecoder -> AudioResampler -> Queue -> audio renderer
+FileDemuxer -> Queue -> VideoDecodeBin -> Queue -> VideoSynchronizer
+            [-> SwScaler, for a software decode the window cannot take] -> VideoWindow
+            -> Queue -> SwDecoder -> AudioResampler -> AudioVolume -> Queue -> audio renderer
 ```
 
 `VideoDecodeBin` decodes onto the window's GPU: D3D11VA on Windows, NVDEC on

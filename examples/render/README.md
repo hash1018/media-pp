@@ -36,7 +36,7 @@ restore token can be passed as the last argument on later runs.
 | [`sw_decode_render`](sw_decode_render/) | Software-decode and render | Windows / Linux | CPU decode -> `VideoWindow`, one program for both | EOS, Escape or close window | `<video>` |
 | [`test_video`](test_video/) | Render a synthetic source | Windows / Linux | CPU frame -> platform GPU upload | Escape or close window | None |
 | [`transcode_render`](transcode_render/) | Encode/decode round trip | Windows / Linux | OpenH264 round trip -> platform GPU | Escape or close window | None |
-| [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames | Windows / Linux | D3D11 / CUDA compositor | Escape or close window | None |
+| [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames, shown and recorded | Windows / Linux | D3D11 / CUDA compositor | Fixed duration, Escape or close window | `[output.mp4] [seconds]` |
 | [`cuda_decode_render`](cuda_decode_render/) | NVDEC decode/render in the renderer's own window | Linux | CUDA, `VulkanWindowRenderer::open` | EOS, Escape or close window; Space pauses, F or a double click fills the screen | `<video>` |
 | [`vulkan_window_render`](vulkan_window_render/) | Render into a `winit` window with the library's Vulkan renderer | Linux | CPU NV12, YUV420P or BGRA (`--format`), or CUDA with `--cuda`, `VulkanWindowRenderer` | Close window, or after `--seconds N` | None; `--file <video>` plays a file |
 | [`d3d11_decode_render`](d3d11_decode_render/) | D3D11VA decode/render in the renderer's own window | Windows | D3D11 zero-copy, `D3d11WindowRenderer` | EOS, Escape or close window; Space pauses, F or a double click fills the screen | `<video>` |
@@ -51,5 +51,4 @@ restore token can be passed as the last argument on later runs.
 executable example. Every example draws through one of the library's window
 renderers in a window of its own — `D3d11WindowRenderer` or
 `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux — and what
-is left in it is turning a close of that window into a stop, and on Linux
-fitting a software decode to `VulkanWindowRenderer`'s input.
+is left in it is turning a close of that window into a stop.

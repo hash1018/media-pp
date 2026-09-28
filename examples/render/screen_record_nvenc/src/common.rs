@@ -1,7 +1,7 @@
 //! Everything about this example that is not the GPU stack: argument
 //! parsing and the fixed-duration recording loop. Both backends drive the
 //! identical shell, so the only thing that differs between platforms is how
-//! the capture source, upload, and encoder are constructed.
+//! the capture source and encoder are constructed.
 
 use std::{
     thread,

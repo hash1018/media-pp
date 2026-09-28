@@ -5,8 +5,8 @@
 //! re-rasterizing and re-uploading each call.
 //!
 //! `TestVideoSource -> SwScaler(NV12) -> CudaUpload -> CudaVideoCompositor
-//! (+ CudaTextLayerHandle) -> CudaDownload -> SwScaler(YUV420P) -> SwEncoder
-//! -> FileMuxer`. Every composite and every text blend happens on the GPU; the
+//! (+ CudaTextLayerHandle) -> Queue -> CudaDownload -> SwScaler(YUV420P) ->
+//! Queue -> SwEncoder -> FileMuxer`. Every composite and every text blend happens on the GPU; the
 //! frame only comes back for the software encoder.
 //!
 //! Nothing about the graph is platform-specific — CUDA is a vendor backend,

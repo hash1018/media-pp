@@ -48,9 +48,10 @@ final source of truth when documentation and implementation differ.
   there. No buffer carries a number saying which seek it is from. An
   element that hands buffers to a worker of its own drops what it holds on
   `Flush` and hands on nothing between the `Flush` and the segment.
-- A `SourceElement::run` implementation should likewise report a recoverable
-  per-buffer pad-push error to its `Bus` and continue. Return `Err` only when the
-  source cannot meaningfully continue.
+- A source likewise goes on past one buffer's failure: the framework posts a
+  failed pad push to the `Bus`, and a `Produce` posts what fails for one part
+  of what it makes — a compositor layer it cannot draw — itself. `produce`
+  returns `Err` only when the source cannot meaningfully continue.
 - Fan-in/fan-out and batched processing must isolate failures. A bad mixer input,
   Tee branch, or compositor layer must not prevent valid siblings from being
   processed. Avoid `try_for_each`, an unreviewed `?`, or an early return that
@@ -363,13 +364,14 @@ final source of truth when documentation and implementation differ.
   less audio than it was given then only fills a queue more slowly. See
   `audio_mixer.rs`'s `against_a_file` tests, where removing the `Pacer` makes a
   test that reproduces an 8% shortfall pass against the bug.
-- A change to how control travels — a new `ControlMsg`, a source loop, an
-  element that waits on the clock, a `Queue` or `Tee` path — runs the control
-  conformance sequences pinned to two cores, a few hundred of them, before it
-  lands (see `CONTRIBUTING.md`). A new element that waits, holds buffers, or
-  has a source loop of its own joins the matrix there as a choice on one of
-  its axes, and the matrix pairs it with every other choice. These races do
-  not show on a free machine. A bug the matrix finds that is not fixed at
+- A change to how control travels — a new `ControlMsg`, the framework's
+  source loop or a `Produce`'s waits, an element that waits on the clock, a
+  `Queue` or `Tee` path — runs the control conformance sequences pinned to
+  two cores, a few hundred of them, alone and loaded, before it lands (see
+  `CONTRIBUTING.md`). A new element that waits, holds buffers, or produces
+  several outputs joins the matrix there as a choice on one of its axes, and
+  the matrix pairs it with every other choice. These races do not show on a
+  free machine. A bug the matrix finds that is not fixed at
   once goes into its `KNOWN_BROKEN` list with an ignored test that
   reproduces it — never into a looser promise.
 - For stress tests, leak investigations, fitted-slope interpretation, or new

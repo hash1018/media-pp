@@ -1,23 +1,20 @@
 # screen_record_software
 
-`CaptureSource -> SwScaler -> SwEncoder -> FileMuxer`: captures the desktop live
-and encodes it straight into a playable `.mp4` file — no window, no renderer,
-just a headless recording (compare `screen_preview_cpu`, which renders the
-same CPU-frame path instead of encoding it on Windows and Linux).
+`DxgiCaptureSource | PipeWireScreenCaptureSource -> Queue -> SwScaler -> Queue
+-> SwEncoder -> FileMuxer`: captures the desktop and encodes it into a
+playable `.mp4` — a headless recording (compare `screen_preview_cpu`, which
+shows the same CPU-frame path in a window instead).
 
-The capture source never reaches `Eos` on its own; this just captures for a
-fixed duration and then `pipeline.finish()`es: the capture places an `Eos`
-behind its last frame, the encoder flushes what it still holds, and the muxer
-writes the MP4's trailer after it. `stop()` would finalize a playable file
-too — `FileMuxer` writes the trailer on `Stop` as well — but abandon the
-frames still in the queue and the encoder, a few hundred milliseconds of the
-end.
+A capture never ends by itself, so this records for a fixed time and then
+calls `pipeline.finish()`: the capture ends its stream behind its last frame,
+the encoder flushes what it holds, and the muxer writes the trailer after it.
+`stop()` would also leave a playable file — `FileMuxer` writes the trailer on
+a stop too — but abandon the last few hundred milliseconds still queued.
 
-Both platforms run the same graph, codec, and terminus. On Windows,
-`DxgiCaptureSource` captures the whole desktop via DXGI Desktop Duplication.
-On Linux, `PipeWireScreenCaptureSource` captures through xdg-desktop-portal:
-Wayland has no way to name a monitor, so the compositor prompts on the first
-run and hands back a restore token that skips the prompt on later runs.
+On Windows `DxgiCaptureSource` captures the whole desktop through DXGI Desktop
+Duplication. On Linux `PipeWireScreenCaptureSource` captures through
+xdg-desktop-portal: the compositor prompts on the first run and hands back a
+restore token that skips the prompt later.
 
 ```sh
 # Windows
@@ -26,3 +23,5 @@ cargo run -p screen_record_software -- [output.mp4] [seconds]
 # Linux
 cargo run -p screen_record_software -- [output.mp4] [seconds] [monitor|window] [restore-token]
 ```
+
+It records to `screen_record_software.mp4` for 5 seconds by default.

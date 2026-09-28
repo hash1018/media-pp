@@ -12,12 +12,8 @@ On both, the renderer draws the capture's system-memory BGRA as it comes,
 uploading and scaling it itself, in a window of its own. The capture includes
 the cursor.
 
-No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously emitted
-variable-rate (real wall-clock pts, push-on-change), and removing `Pacer`
-against that measurably caused judder. It's since been rewritten to emit at
-a constant rate on a drift-free absolute schedule instead — the same pattern
-`TestVideoSource` uses. The constant-rate/drift-free change was the actual
-fix, not the presence of a `Pacer` stage.
+No `Pacer`: the capture emits at a constant rate on a drift-free schedule of
+its own.
 
 ```sh
 cargo run -p screen_preview_cpu

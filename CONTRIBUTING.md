@@ -20,8 +20,9 @@ skip, saying why, on a machine without the hardware.
 seek, frame step, rate, looping, finish and stop — and stop while another
 call is under way — against the shapes of pipeline this crate is used in,
 and checks what every terminal was handed: nothing new once a pause has
-returned, nothing from before a seek after it, an `Eos` after a finish, and
-no call that fails to return. The file shapes are a matrix of six axes —
+returned, nothing from before a seek after it, nothing paced running ahead
+of the playback clock, an `Eos` after a finish, and no call that fails to
+return. The file shapes are a matrix of six axes —
 how the picture fans out, what decodes it, what filters it, what paces it,
 what the sound goes through, how deep the queues are — covering every pair
 of choices; `MEDIA_PP_CONTROL_FULL=1` runs every combination. What a known
@@ -29,10 +30,13 @@ bug breaks is listed in `KNOWN_BROKEN`, beside the ignored test that
 reproduces it, and comes back into the sequences when the bug is fixed. An
 ordinary test run plays a few fixed sequences. The races these are for show
 when threads are short of cores, so CI also runs them pinned to two, seeded
-from the clock:
+from the clock, once on their own and once with two busy threads beside them
+(`MEDIA_PP_CONTROL_LOAD`), since some bursts showed only with other work
+around:
 
 ```sh
 MEDIA_PP_CONTROL_ITERS=10 MEDIA_PP_CONTROL_RANDOM=1 taskset -c 0,1 cargo test -p media-pp --lib -- conformance
+MEDIA_PP_CONTROL_ITERS=10 MEDIA_PP_CONTROL_RANDOM=1 MEDIA_PP_CONTROL_LOAD=2 taskset -c 0,1 cargo test -p media-pp --lib -- conformance
 ```
 
 On Windows, set the shell's own affinity first —
@@ -40,7 +44,7 @@ On Windows, set the shell's own affinity first —
 and cargo and the tests inherit it. A failure prints its shape, its seed and
 the steps it took, and the line that replays it:
 `MEDIA_PP_CONTROL_SHAPE=<shape> MEDIA_PP_CONTROL_SEED=<seed>` runs exactly
-that sequence, and
+that sequence (`MEDIA_PP_CONTROL_STEPS` sets its length, 12 by default), and
 `MEDIA_PP_CONTROL_TRACE=<directory>` writes the crate's log there at `Trace`,
 every control message at every element, for reading what it did. A change to
 how control travels — a new message, a new element that waits, a new source

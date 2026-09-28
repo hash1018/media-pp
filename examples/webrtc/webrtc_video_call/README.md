@@ -1,48 +1,30 @@
 # webrtc_video_call
 
-A two-way video call between two `WebRtcPeer`s in one process, each presenting
-what the *other* peer sent into its own window. It runs on Windows and Linux.
+A two-way video call between two `WebRtcPeer`s in one process, each showing
+what the other sent in a window of its own, on Windows and Linux.
 
-One `Direction::SendRecv` track carries both directions on a single connection
-(`webrtc_loopback` is the minimal version of that), so `WebRtcHandle::next_track`
-hands each side a `TrackEndpoints::SendRecv` — a `WebRtcTrackSink` to encode
-into and a `WebRtcTrackSource` to decode from. There is no second `add_track`
-for the return direction. Peer-b did not originate that track, so it declares
-`Codec::H264` on its outbound sink before sending. Both endpoints expose the
-codec families retained by SDP negotiation immediately: the source list says
-what may arrive, while the sink list says what peer-b may send. The source's
-`codec()` remains `None` until RTP arrives and then reports what peer-a actually
-sent. Peer-b selects H.264 from the sink list because its own encoder produces
-H.264; the inbound selection does not force the reverse direction to match.
+One `Direction::SendRecv` track carries both directions on one connection
+(`webrtc_loopback` is the minimal version), so `next_track` hands each side a
+`TrackEndpoints::SendRecv`: a sink to encode into and a source to decode from.
+Peer-b, which did not originate the track, declares its outbound codec with
+`set_source_parameters(&encoder.parameters())`, checked against what was
+negotiated.
 
-The two callers deliberately differ in where their video comes from, so the
-call has a generated stream going one way and a real file the other:
+The two callers differ in where their video comes from:
 
-- peer-a sends `TestVideoSource -> Queue -> SwEncoder -> WebRtcTrackSink`.
+- peer-a sends `TestVideoSource -> Queue -> SwEncoder -> WebRtcTrackSink`;
 - peer-b sends `FileDemuxer -> SwDecoder -> Queue -> Pacer -> SwScaler ->
-  Queue -> SwEncoder -> WebRtcTrackSink`. `SwScaler` brings the file to the
-  fixed 640x480 both renderers are wired up at, and `Pacer` holds it to
-  playback speed — without it the whole file would be encoded and sent in
-  seconds rather than played as a call.
-- Each side receives `WebRtcTrackSource -> Queue -> SwDecoder -> renderer`
-  (`D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux), which
-  draws the decoded YUV420P as it comes and uploads it itself. Neither receive
-  path needs a `Pacer`: these packets arrive at the rate the other side
-  encoded them, so the timeline is already real. The send pipelines start
-  first, then each
-  receiver calls `WebRtcTrackSource::wait_stream_info` with a two-second
-  timeout. That reports the codec from the first actual RTP payload, not from
-  the other peer's encoder object or merely from the SDP capability list. The
-  returned `WebRtcStreamInfo` creates the minimal FFmpeg decoder parameters,
-  and the first packet remains in the source queue while that H.264 decoder
-  pipeline is built. No cross-peer encoder-parameter wiring or example-local
-  FFmpeg FFI is needed.
+  Queue -> SwEncoder -> WebRtcTrackSink`, scaled to the 640x480 both windows
+  are wired for, and paced so the file plays as a call rather than being sent
+  in seconds;
+- each side receives `WebRtcTrackSource -> Queue -> SwDecoder -> renderer`
+  (`D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux), with no
+  `Pacer`, since packets arrive at the rate the other side encoded them. Each
+  receiver is built once `WebRtcTrackSource::wait_stream_info` has seen the
+  codec in actual RTP — for H.264, once SPS and PPS have arrived.
 
-Each window is its renderer's own: two `D3d12WindowRenderer::open` calls on
-one `D3d12Gpu` on Windows, or two `VulkanWindowRenderer::open` calls on one
-`VulkanGpu` on Linux. `render_common::stop_on_close` watches both, so closing
-either window (or pressing Escape in it) ends the whole call; the file side
-also ends on its own when the file runs out.
+Closing either window, or Escape in it, ends the whole call, and so does the
+file running out.
 
 ```sh
 cargo run -p webrtc_video_call -- path/to/video.mp4

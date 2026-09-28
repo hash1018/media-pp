@@ -39,8 +39,18 @@ working tree.
   runtime error it was meant to pre-empt; confirm a passing chain is covered,
   not just a refused one.
 - For concurrency, check lock scope, callbacks and blocking calls under locks,
-  source control responsiveness, Queue recovery boundaries, and fan-in/fan-out
-  failure isolation.
+  Queue recovery boundaries, and fan-in/fan-out failure isolation.
+- For control and the stream plane, check that no element forwards a control
+  message itself or applies one it merely received (only the framework and
+  the routing elements — Queue, Tee, bins, racks — send one on); that a
+  source waits only through its `Wait` and a new source is a `Produce`, not a
+  hand-written loop; that phase is read from `PlaybackState`, with
+  restrictions written before their message and releases travelling only as
+  a message; that what a `Flush` leaves is dropped until the flushed segment;
+  and that `Segment` and `Eos` stay in order with the buffers. A change here,
+  or an element that waits or holds buffers, needs the control conformance
+  matrix run pinned to two cores and loaded (`CONTRIBUTING.md`); a failing
+  seed there is evidence, a passing unloaded run is not.
 - For logging, verify stable graph identity, correct `PpLog` attribution,
   disabled-level hot-path cost, and complete topology/control records.
 - For public and gated code, compare module declarations, imports, flat

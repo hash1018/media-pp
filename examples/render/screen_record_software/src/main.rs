@@ -1,7 +1,7 @@
 //! Records the desktop through the software-encoding path:
-//! `CaptureSource -> SwScaler -> SwEncoder -> FileMuxer`.
+//! `capture -> Queue -> SwScaler -> Queue -> SwEncoder -> FileMuxer`.
 //! Windows captures through DXGI; Linux uses PipeWire and the desktop portal.
-//! Both run for a fixed duration and stop the pipeline to finalize the MP4.
+//! Both run for a fixed duration and finish the pipeline to finalize the MP4.
 //!
 //! ```text
 //! cargo run -p screen_record_software -- [output.mp4] [seconds]
@@ -42,7 +42,7 @@ mod windows_example {
     /// DxgiCaptureSource -> SwScaler -> SwEncoder -> FileMuxer: captures the
     /// desktop live via DXGI Desktop Duplication and encodes it straight into
     /// a playable `.mp4` file — no window, no renderer, just a headless
-    /// recording (compare the Windows-only `screen_preview_cpu`, which renders
+    /// recording (compare `screen_preview_cpu`, which renders
     /// instead of encoding).
     ///
     /// `DxgiCaptureSource` never reaches `Eos` on its own (see its own docs);

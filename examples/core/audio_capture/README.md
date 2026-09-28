@@ -1,18 +1,12 @@
 # audio_capture
 
 `WasapiCaptureSource -> FrameCounter` (Windows) / `PipeWireAudioCaptureSource
--> FrameCounter` (Linux): lists every audio device, picks one, captures ~3
-seconds from it and reports how many buffers came through — a smoke test for
-each backend's list-devices-then-pick device API.
+-> FrameCounter` (Linux): lists every audio device, picks one, captures about
+three seconds from it and reports how many buffers came through.
 
-Both platforms run the identical CLI, pipeline, and `FrameCounter` terminus —
-only the source element and its device type differ, which is the point of
-showing them side by side. `WasapiCaptureSource` on Windows and
-`PipeWireAudioCaptureSource` on Linux line up closely: audio capture needs no
-portal on either platform, a device of kind `Render`/`Sink` is captured
-through loopback/monitor (system audio), and `Capture`/`Source` is a
-microphone. Screen capture is where the two platforms genuinely diverge — see
-`PipeWireScreenCaptureSource`'s own documentation.
+A device of kind `Render`/`Sink` is captured through loopback or monitor
+(system audio), and `Capture`/`Source` is a microphone. On Linux, where no
+node of the wanted kind is marked default, any node of that kind is taken.
 
 ```sh
 cargo run -p audio_capture              # default render device (system audio / loopback)

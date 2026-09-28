@@ -1,6 +1,7 @@
 # d3d11_upload
 
-`TestVideoSource -> SwScaler -> D3d11Upload -> D3d11WindowRenderer`: a
+`TestVideoSource -> Queue -> SwScaler -> Queue -> D3d11Upload -> Queue ->
+D3d11WindowRenderer`: a
 synthetic `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then
 uploaded to a GPU `Pixel::D3D11` texture on the renderer's own `ID3D11Device`
 before being presented in the renderer's own window — proves `D3d11Upload`'s
