@@ -158,8 +158,9 @@ final source of truth when documentation and implementation differ.
 - Preserve media metadata across transforms unless the element intentionally
   creates a new timeline: PTS, duration, packet `time_base`, and video
   color-space/range are part of the buffer contract, not optional decoration.
-- Forward `Eos`. Stateful codecs, resamplers, and muxers must drain/flush delayed
-  data before forwarding or finalizing it. `Stop` means abandon, not natural EOS.
+- The end of a stream is `StreamEvent::Eos`, not a buffer. Stateful codecs,
+  resamplers, and muxers drain/flush delayed data on it, before the graph
+  passes it on or the file is finalized. `Stop` means abandon, not natural EOS.
 - Video frames from `UnboundObjectPool` travel as
   `Arc<UnboundObjectPoolRef<_>>`. Never mutate a frame after publishing it, and
   never return/reuse its backing resource while downstream `Arc` clones exist.
@@ -216,10 +217,11 @@ final source of truth when documentation and implementation differ.
   carries across only what is sent without the pipeline — a `Stop` after a
   source failed, a `Flush` a bridge injects. A Queue control failure is
   reported without leaving the control cascade permanently blocked.
-- What describes the stream travels in it (`crate::stream`): so far the
+- What describes the stream travels in it (`crate::stream`): the
   `Segment` each stream begins with and each seek begins again — and a
   looping file at each lap, and a bridge where its feeding side flushed or
-  another input begins, those on the timeline they come in — in order
+  another input begins, those on the timeline they come in — and the
+  `Eos` it ends with, in order
   with the buffers. An element reacts through `Sink::stream_event`, pushing
   from there whatever it answers the event with; the graph passes the event
   on through its pads, as it does control. Only an element that routes the

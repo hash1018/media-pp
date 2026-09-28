@@ -273,7 +273,7 @@ impl PrerollGate {
                     crate::buffer::set_time_base(frame, time_base);
                 }
             }
-            MediaBuffer::Packet(_) | MediaBuffer::Eos => {}
+            MediaBuffer::Packet(_) => {}
         }
     }
 

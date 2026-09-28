@@ -145,7 +145,7 @@ pub enum D3d11VideoEncoderError {
     MissingTexture,
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("D3d11VideoEncoder only accepts Video or Eos buffers, got {0}")]
+    #[error("D3d11VideoEncoder only accepts Video buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// A frame arrived with a `pts` but no unit to read it in — see
@@ -882,8 +882,6 @@ impl Transform for Encoding {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.encode(&frame, out),
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             other => Err(D3d11VideoEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -1072,8 +1070,7 @@ mod tests {
                         panic!("{codec:?}/{input_format:?} frame {index}: {error}")
                     });
             }
-            encoder
-                .consume(MediaBuffer::Eos)
+            crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
                 .unwrap_or_else(|error| panic!("{codec:?}/{input_format:?} Eos: {error}"));
 
             let produced = packets.load(std::sync::atomic::Ordering::Relaxed);
@@ -1260,7 +1257,7 @@ mod tests {
         let mut scaler =
             D3d11Scaler::new("test-to-nv12", &gpu, D3d11ScalerFormat::Nv12, width, height)
                 .expect("the scaler opens");
-        scaler.src_pads()[0].link(Box::new(encoder));
+        scaler.src_pads()[0].link(Box::new(crate::test_support::Linked(encoder)));
 
         let pool = crate::pool::UnboundObjectPool::new(
             0,
@@ -1278,8 +1275,7 @@ mod tests {
                 .consume(MediaBuffer::Video(Arc::new(frame)))
                 .expect("a frame is converted and encoded");
         }
-        scaler
-            .consume(MediaBuffer::Eos)
+        crate::stream::deliver(&mut scaler, &crate::stream::StreamEvent::Eos)
             .expect("the file is finished");
         drop(scaler);
 
@@ -1490,7 +1486,7 @@ mod tests {
                 .consume(MediaBuffer::Video(Arc::new(frame)))
                 .unwrap_or_else(|error| panic!("valid frame {index}: {error}"));
         }
-        encoder.consume(MediaBuffer::Eos).expect("valid Eos");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("valid Eos");
         assert!(
             packets.load(std::sync::atomic::Ordering::Relaxed) > 0,
             "valid frames after rejected inputs produced no packets"
@@ -1606,7 +1602,7 @@ mod tests {
                     .consume(MediaBuffer::Video(Arc::new(frame)))
                     .unwrap_or_else(|error| panic!("frame {index}: {error}"));
             }
-            encoder.consume(MediaBuffer::Eos).expect("Eos");
+            crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("Eos");
 
             let timestamps = timestamps.lock().unwrap().clone();
             assert!(!timestamps.is_empty(), "30 GPU frames produced no packets");

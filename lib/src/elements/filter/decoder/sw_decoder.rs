@@ -11,6 +11,7 @@ use crate::{
     element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
     pad::SrcPad,
     pool::UnboundObjectPool,
+    stream::StreamEvent,
 };
 
 use super::backwards::Stretch;
@@ -234,6 +235,36 @@ fn threads_in_use(decoder: &ffmpeg::decoder::Video) -> (i32, bool) {
     }
 }
 
+impl SwDecoder {
+    /// Drains what the codec still holds at the end of the stream, through
+    /// the preroll gate, and lets go of what the gate kept.
+    fn end(&mut self) -> crate::error::Result<()> {
+        match &mut self.kind {
+            Kind::Video(decoder) => {
+                decoder
+                    .send_eof()
+                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+                    .map_err(SwDecoderError::from)?;
+                drain_video(
+                    decoder,
+                    &mut self.pad,
+                    &self.pool,
+                    &mut self.preroll_gate,
+                    &mut self.stretch,
+                )?;
+            }
+            Kind::Audio(decoder) => {
+                decoder
+                    .send_eof()
+                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+                    .map_err(SwDecoderError::from)?;
+                drain_audio(decoder, &mut self.pad, &mut self.preroll_gate)?;
+            }
+        }
+        self.preroll_gate.push_eos_candidate(&mut self.pad)
+    }
+}
+
 impl Element for SwDecoder {
     fn name(&self) -> Arc<str> {
         self.name.clone()
@@ -322,32 +353,6 @@ impl Sink for SwDecoder {
                     }
                 }
             }
-            MediaBuffer::Eos => {
-                match &mut self.kind {
-                    Kind::Video(decoder) => {
-                        decoder
-                            .send_eof()
-                            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                            .map_err(SwDecoderError::from)?;
-                        drain_video(
-                            decoder,
-                            &mut self.pad,
-                            &self.pool,
-                            &mut self.preroll_gate,
-                            &mut self.stretch,
-                        )?;
-                    }
-                    Kind::Audio(decoder) => {
-                        decoder
-                            .send_eof()
-                            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                            .map_err(SwDecoderError::from)?;
-                        drain_audio(decoder, &mut self.pad, &mut self.preroll_gate)?;
-                    }
-                }
-                self.preroll_gate.push_eos_candidate(&mut self.pad)?;
-                self.pad.push(MediaBuffer::Eos)
-            }
             other => {
                 let _ = other;
                 Ok(())
@@ -356,10 +361,15 @@ impl Sink for SwDecoder {
     }
 
     /// The segment the stream is in, which the preroll gate puts a seek's
-    /// target on the samples' timeline by.
-    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
-        let crate::stream::StreamEvent::Segment(segment) = event.0;
-        self.preroll_gate.begin_segment(segment, &mut self.pad)
+    /// target on the samples' timeline by; and at the end, what the codec
+    /// still holds, ahead of the end the graph passes on after it.
+    fn stream_event(&mut self, event: &StreamEvent) -> crate::error::Result<()> {
+        match event {
+            StreamEvent::Segment(segment) => {
+                self.preroll_gate.begin_segment(segment, &mut self.pad)
+            }
+            StreamEvent::Eos => self.end(),
+        }
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
@@ -486,6 +496,7 @@ mod tests {
     struct Received {
         buffers: Vec<MediaBuffer>,
         controls: Vec<ControlMsg>,
+        ended: bool,
     }
 
     struct CapturingSink {
@@ -519,6 +530,13 @@ mod tests {
 
         fn control(&mut self, msg: &ControlMsg) -> Result<()> {
             self.received.lock().unwrap().controls.push(msg.clone());
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            if let StreamEvent::Eos = event {
+                self.received.lock().unwrap().ended = true;
+            }
             Ok(())
         }
     }
@@ -662,22 +680,15 @@ mod tests {
                 break;
             }
         }
-        decoder.consume(MediaBuffer::Eos).expect("eos failed");
+        crate::stream::deliver(&mut decoder, &StreamEvent::Eos).expect("eos failed");
 
         let received = received.lock().unwrap();
-        let (last, frames) = received
-            .buffers
-            .split_last()
-            .expect("the decoder pushed nothing at all");
+        assert!(received.ended, "the end was not passed on");
         assert!(
-            last.is_eos(),
-            "Eos was not the last buffer — delayed frames escaped after it"
-        );
-        assert!(
-            !frames.is_empty(),
+            !received.buffers.is_empty(),
             "no frames were decoded from the configured fixture"
         );
-        for buf in frames {
+        for buf in &received.buffers {
             let MediaBuffer::Video(frame) = buf else {
                 panic!("a video decoder pushed a buffer that was not a video frame");
             };
@@ -755,7 +766,7 @@ mod tests {
                     .expect("decodes");
             }
             let before = received.lock().unwrap().buffers.len();
-            decoder.consume(MediaBuffer::Eos).expect("drains");
+            crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos).expect("drains");
             let pictures = received
                 .lock()
                 .unwrap()

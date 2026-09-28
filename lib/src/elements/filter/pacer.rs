@@ -12,6 +12,7 @@ use crate::{
     pad::SrcPad,
     playback_clock::PlaybackClock,
     playback_state::PlaybackState,
+    stream::StreamEvent,
     time::{MediaTimestamp, TimeBase},
 };
 
@@ -277,23 +278,19 @@ enum Timing {
 }
 
 impl Timing {
-    /// `None` for `Eos`, which is never waited for.
-    fn of(buffer: &MediaBuffer) -> Option<Self> {
+    fn of(buffer: &MediaBuffer) -> Self {
         let (pts, time_base) = match buffer {
             MediaBuffer::Packet(packet) => (packet.pts(), Some(packet.time_base())),
             MediaBuffer::Video(frame) => (frame.pts(), crate::buffer::time_base(frame)),
             MediaBuffer::Audio(frame) => (frame.pts(), crate::buffer::time_base(frame)),
-            MediaBuffer::Eos => return None,
         };
         let Some(pts) = pts else {
-            return Some(Self::Untimed);
+            return Self::Untimed;
         };
-        Some(
-            match time_base.and_then(|unit| TimeBase::try_new(unit).ok()) {
-                Some(unit) => Self::At(pts, unit),
-                None => Self::Unitless(buffer.kind()),
-            },
-        )
+        match time_base.and_then(|unit| TimeBase::try_new(unit).ok()) {
+            Some(unit) => Self::At(pts, unit),
+            None => Self::Unitless(buffer.kind()),
+        }
     }
 }
 
@@ -327,18 +324,13 @@ impl Source for Pacer {
     }
 }
 
-impl Sink for Pacer {
-    /// Pacing is a delay, not a transform: every kind is held until its
-    /// own PTS comes due and then forwarded unchanged.
-    fn input_contract(&self) -> InputContract {
-        InputContract::Any
-    }
-
-    fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-        self.pending.push_back(buf);
+impl Pacer {
+    /// Hands on what is pending, each at its time, keeping what cannot go
+    /// yet for the next call — unless `ends`, when the stream is over and
+    /// there will be none: then everything goes, waited for but not kept.
+    fn hand_on_pending(&mut self, ends: bool) -> crate::error::Result<()> {
         let mut handed_on = false;
         while let Some(buf) = self.pending.pop_front() {
-            let ends = buf.is_eos() || self.pending.iter().any(MediaBuffer::is_eos);
             // What was kept goes first, and what came with it waits while
             // the terminal has stopped taking — as one does when it has the
             // samples a preroll asked of it. Handed on regardless, a picture
@@ -350,10 +342,7 @@ impl Sink for Pacer {
                 self.pending.push_front(buf);
                 return Ok(());
             }
-            let ready = match Timing::of(&buf) {
-                Some(timing) => self.wait_for(timing)?,
-                None => true,
-            };
+            let ready = self.wait_for(Timing::of(&buf))?;
             // Kept for the next call only while there will be one. With the
             // end of the stream in, there will not: the thread feeding this
             // has nothing left to hand it, and what was kept was dropped with
@@ -375,6 +364,28 @@ impl Sink for Pacer {
             handed_on = true;
         }
         Ok(())
+    }
+}
+
+impl Sink for Pacer {
+    /// Pacing is a delay, not a transform: every kind is held until its
+    /// own PTS comes due and then forwarded unchanged.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Any
+    }
+
+    fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+        self.pending.push_back(buf);
+        self.hand_on_pending(false)
+    }
+
+    /// What was kept goes on ahead of the end of the stream, which came
+    /// after it — waited for, but not kept: see `hand_on_pending`.
+    fn stream_event(&mut self, event: &StreamEvent) -> crate::error::Result<()> {
+        match event {
+            StreamEvent::Eos => self.hand_on_pending(true),
+            StreamEvent::Segment(_) => Ok(()),
+        }
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
@@ -534,7 +545,7 @@ mod tests {
         );
         assert_eq!(pacer.pending.len(), 1, "the next waits its turn");
 
-        pacer.consume(MediaBuffer::Eos).expect("the end");
+        crate::stream::deliver(&mut pacer, &crate::stream::StreamEvent::Eos).expect("the end");
         assert_eq!(
             *taken.lock().unwrap(),
             [Some(0), Some(60), Some(61), None],
@@ -564,7 +575,7 @@ mod tests {
         pacer.consume(packet(60)).expect("interrupted");
         assert_eq!(pacer.pending.len(), 1, "kept for the next call");
 
-        pacer.consume(MediaBuffer::Eos).expect("the end");
+        crate::stream::deliver(&mut pacer, &crate::stream::StreamEvent::Eos).expect("the end");
         assert!(pacer.pending.is_empty(), "all handed on, the end with it");
     }
 

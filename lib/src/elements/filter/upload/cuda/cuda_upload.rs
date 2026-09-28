@@ -333,8 +333,6 @@ impl Transform for Uploading {
                 out.push(MediaBuffer::Video(uploaded));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => Err(CudaUploadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -451,7 +449,7 @@ mod tests {
             return;
         };
         upload.consume(nv12_frame(64, 64, 1234)).expect("upload");
-        upload.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut upload, &crate::stream::StreamEvent::Eos).expect("eos");
 
         let received = received.lock().unwrap();
         let MediaBuffer::Video(frame) = &received[0] else {
@@ -459,10 +457,6 @@ mod tests {
         };
         assert_eq!(frame.format(), ffmpeg::format::Pixel::CUDA);
         assert_eq!(frame.pts(), Some(1234), "upload dropped the pts");
-        assert!(
-            received.last().is_some_and(MediaBuffer::is_eos),
-            "Eos was not forwarded"
-        );
     }
 
     /// The BGRA path a screen capture uses: what a capture source already

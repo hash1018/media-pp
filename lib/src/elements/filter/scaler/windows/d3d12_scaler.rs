@@ -144,7 +144,7 @@ pub enum D3d12ScalerError {
     },
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("D3d12Scaler only accepts Video and Eos buffers, got a {0}")]
+    #[error("D3d12Scaler only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
     /// Waiting for GPU completion returned an invalid or failed status.
@@ -418,8 +418,6 @@ impl Transform for Scaling {
                 out.push(MediaBuffer::Video(scaled));
                 Ok(())
             }
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let error = D3d12ScalerError::UnsupportedBuffer(other.kind());
                 pp_error!(self, "{error}");
@@ -741,20 +739,7 @@ mod tests {
         let error = scaler
             .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
             .expect_err("a packet must be rejected");
-        assert!(error.to_string().contains("Video and Eos"));
-
-        let received = Arc::new(Mutex::new(Vec::new()));
-        scaler.src_pads()[0].link(Box::new(CapturingSink {
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-            received: received.clone(),
-        }));
-        scaler
-            .consume(MediaBuffer::Eos)
-            .expect("EOS should forward");
-        assert!(matches!(
-            received.lock().unwrap().as_slice(),
-            [MediaBuffer::Eos]
-        ));
+        assert!(error.to_string().contains("only accepts Video buffers"));
     }
 
     #[test]

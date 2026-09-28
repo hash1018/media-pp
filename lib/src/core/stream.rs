@@ -1,7 +1,8 @@
 //! The stream plane: what describes a stream travels in it, in order with
 //! its buffers — see `docs/stream-events.md`.
 //!
-//! So far the one event is the [`Segment`]: every stream begins with one,
+//! Two events: the [`Segment`], and the end of the stream. Every stream
+//! begins with a segment,
 //! every seek begins one again, and so do a looping file at each lap and a
 //! [`PipelineBridge`](crate::elements::PipelineBridge) where its feeding
 //! side flushed or another input's stream begins — those last not on a
@@ -10,7 +11,11 @@
 //! begins both as a caller names a place in the media and on the timeline
 //! its buffers are stamped on — two places a looping file keeps a lap or
 //! more apart — and, for an accurate seek, where on that timeline what is
-//! shown begins, which is what a decoder drops what comes before by.
+//! shown begins, which is what a decoder drops what comes before by. And
+//! every stream that ends ends with [`StreamEvent::Eos`], behind its last
+//! buffer: stateful elements hand on what they still hold ahead of it, and
+//! a muxer finishes its file on it. Unlike a `Stop`, it asks for the stream
+//! to be completed rather than abandoned.
 //!
 //! # How an event travels
 //!
@@ -44,14 +49,15 @@
 //! anywhere else — an element driven by hand, a bridge passing its feeding
 //! side's on — is only the elements' to react to, and flushes no pad.
 //!
-//! # Not public yet
+//! # Reacting to one
 //!
-//! The hook an element reacts through,
-//! [`Sink::stream_event`](crate::element::Sink::stream_event), takes an
-//! [`Event`], which nothing outside this crate can name, so nothing outside
-//! can override it until the protocol settles. An element outside the crate
-//! is handed the stream through the framework's wrappers, which pass every
-//! event on around it.
+//! An element reacts through
+//! [`Sink::stream_event`](crate::element::Sink::stream_event): a filter by
+//! pushing what it answers the event with — a decoder what it still holds
+//! at the end — which the framework then follows with the event itself
+//! through the filter's pads. A [`Transform`](crate::element::Transform) or
+//! a [`Render`](crate::element::Render) is never handed one: the framework
+//! drains, resets and ends it.
 
 use std::{fmt, sync::Arc, time::Duration};
 
@@ -62,42 +68,47 @@ use crate::{
     pp_log::{PpLog, pp_trace},
 };
 
-/// Something about the stream, carried in it.
+/// Something about the stream, carried in it — see this module's docs.
 #[derive(Clone)]
-pub(crate) enum StreamEvent {
+#[non_exhaustive]
+pub enum StreamEvent {
     /// A run of buffers on one timeline begins: everything after it, up to
     /// the next, belongs to it.
     Segment(Arc<Segment>),
+    /// The stream ends: nothing follows it but another stream's segment.
+    Eos,
 }
 
-/// Where a run of buffers begins — see this module's docs.
-pub(crate) struct Segment {
+/// Where a run of buffers begins — see this module's docs. Made by the
+/// source that begins it; an element only reads one.
+#[non_exhaustive]
+pub struct Segment {
     /// Which of the pipeline's timelines it is on — which seek's, and one
     /// for the stream as it starts: the pipeline's own count, which each
     /// seek moves on before it flushes. A lap of a looping file and what a
     /// bridge begins are on the timeline they come in, a seek not having
     /// begun them.
-    pub(crate) id: u64,
+    pub id: u64,
     /// Whether it follows a flush, so that what an element holds from
     /// before it belongs to a timeline the pipeline has left.
-    pub(crate) flushed: bool,
+    pub flushed: bool,
     /// Where it begins, as a caller names a place in the media — a seek's
     /// target.
-    pub(crate) position: Duration,
+    pub position: Duration,
     /// The same place on the timeline its buffers are stamped on, which a
     /// looping file carries a lap further on for every lap played.
-    pub(crate) start: Duration,
+    pub start: Duration,
     /// Where what is shown begins, on the same timeline, for an accurate
     /// seek: the source lands on a keyframe before it and what is decoded
     /// from there up to it is only there to decode what follows. `None`
     /// where everything is shown from wherever the source landed — a
     /// stream starting, a seek to a keyframe.
-    pub(crate) show_from: Option<Duration>,
+    pub show_from: Option<Duration>,
     /// Whether its buffers come played backwards — a picture's stretches
     /// read from the end, their `pts` going down. A rate that changes
     /// without turning round begins no segment, so this says only which
     /// way, and the playback clock says how fast.
-    pub(crate) backwards: bool,
+    pub backwards: bool,
 }
 
 /// Read by the trace records at each boundary an event crosses.
@@ -114,6 +125,7 @@ impl fmt::Display for StreamEvent {
                 segment.show_from,
                 segment.backwards
             ),
+            Self::Eos => f.write_str("eos"),
         }
     }
 }
@@ -125,16 +137,10 @@ pub(crate) enum Item {
     Event(StreamEvent),
 }
 
-/// An event as [`Sink::stream_event`](crate::element::Sink::stream_event)
-/// is handed it: a type only this crate can name, which keeps that hook this
-/// crate's own — see this module's docs.
-#[derive(Clone, Copy)]
-pub struct Event<'a>(pub(crate) &'a StreamEvent);
-
 /// A place in a source's media, as
 /// [`SeekableSource::on_timeline`](crate::element::SeekableSource::on_timeline)
-/// is asked about it: a type only this crate can name, for the reason
-/// [`Event`] is one.
+/// is asked about it: a type only this crate can name, which keeps that
+/// hook this crate's own.
 #[derive(Clone, Copy)]
 pub struct Position(pub(crate) Duration);
 
@@ -182,4 +188,17 @@ pub(crate) fn begin_segment(pads: &mut [SrcPad], segment: Segment, pp_log: &PpLo
         }
     }
     first
+}
+
+/// Hands `event` to a filter driven by hand as the graph would: its own
+/// reaction, then the event on through its pads, a failure in either
+/// keeping the other from none of them.
+#[cfg(test)]
+pub(crate) fn deliver<F: crate::element::Filter + ?Sized>(
+    filter: &mut F,
+    event: &StreamEvent,
+) -> Result<()> {
+    let reacted = filter.stream_event(event);
+    let forwarded = forward(filter.src_pads(), event);
+    reacted.and(forwarded)
 }

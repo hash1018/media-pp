@@ -5,7 +5,7 @@
 //! each [`Queue`](crate::queue::Queue)'s worker, on a channel of its own —
 //! and each thread passes it on pad to pad to the elements on that thread,
 //! stopping at the next queue, which has its own: see `Direct`. Not with
-//! the data, because unlike [`Eos`](crate::buffer::MediaBuffer::Eos) it has
+//! the data, because unlike [`Eos`](crate::stream::StreamEvent::Eos) it has
 //! to reach elements mid-stream, ahead of whatever is already backed up.
 //!
 //! A [`SourceElement`](crate::element::SourceElement) loop stays responsive by
@@ -410,7 +410,7 @@ fn name_terminals(pending: &[NodeInfo]) -> String {
 
 /// A request carried by a control channel. Ordinary controls cascade through
 /// the graph immediately; `Finish` is source-only because graceful completion
-/// must enter the graph as an ordered [`crate::buffer::MediaBuffer::Eos`].
+/// must enter the graph as an ordered [`crate::stream::StreamEvent::Eos`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RequestKind {
     Control(ControlMsg),

@@ -236,8 +236,6 @@ impl Transform for Stretching {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => self.stretch(frame, out),
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioTempoError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioTempoError::UnsupportedBuffer("Video").into()),
         }
@@ -337,9 +335,8 @@ mod tests {
                 .consume(MediaBuffer::Audio(tenth(at)))
                 .expect("consume");
         }
-        tempo.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut tempo, &crate::stream::StreamEvent::Eos).expect("eos");
         let out = out.lock().unwrap();
-        assert!(matches!(out.last(), Some(MediaBuffer::Eos)), "the end last");
         let got = samples(&out) as f64;
         let expected = f64::from(RATE);
         assert!(
@@ -367,8 +364,8 @@ mod tests {
             .expect("consume");
         tempo.control(&ControlMsg::Flush).expect("flush");
         let before = out.lock().unwrap().len();
-        tempo.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut tempo, &crate::stream::StreamEvent::Eos).expect("eos");
         let out = out.lock().unwrap();
-        assert_eq!(out.len(), before + 1, "only the end");
+        assert_eq!(out.len(), before, "nothing it held comes back");
     }
 }

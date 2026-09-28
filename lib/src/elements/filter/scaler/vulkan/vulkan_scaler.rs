@@ -54,7 +54,7 @@ pub enum VulkanScalerError {
     FrameRef(i32),
 
     /// The sink received something other than a decoded video frame.
-    #[error("VulkanScaler only accepts Video and Eos buffers, got a {0}")]
+    #[error("VulkanScaler only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
     /// The frame is not a Vulkan frame at all.
@@ -728,8 +728,6 @@ impl Transform for Scaling {
                 out.push(MediaBuffer::Video(scaled));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");

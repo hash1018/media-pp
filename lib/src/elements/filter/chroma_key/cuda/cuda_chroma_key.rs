@@ -389,8 +389,6 @@ impl Transform for Keying {
                 out.push(MediaBuffer::Video(keyed));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => Err(CudaChromaKeyError::UnsupportedBuffer(other.kind()).into()),
         }
     }

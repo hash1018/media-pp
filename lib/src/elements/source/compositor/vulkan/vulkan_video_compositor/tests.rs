@@ -811,13 +811,16 @@ fn a_composition_encodes_without_leaving_the_gpu() {
             .consume(MediaBuffer::Video(Arc::new(composed)))
             .expect("the composition encodes");
     }
-    encoder.consume(MediaBuffer::Eos).unwrap();
+    crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
 
     let mut decoder = SwDecoder::new("check", encoder.parameters()).unwrap();
     let decoded = capture(&mut decoder);
     for packet in packets.lock().unwrap().drain(..) {
         decoder.consume(packet).unwrap();
     }
+    decoder
+        .stream_event(&crate::stream::StreamEvent::Eos)
+        .unwrap();
     let decoded = decoded.lock().unwrap();
     let pictures: Vec<_> = decoded
         .iter()

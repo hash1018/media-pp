@@ -65,9 +65,9 @@
 //! packet time bases, and video color information survive every stage that
 //! does not deliberately create a new timeline.
 //!
-//! [`Eos`](buffer::MediaBuffer::Eos) is data, and it is forwarded like data:
-//! stateful stages (encoders holding delayed frames, muxers, resamplers)
-//! flush on it before passing it on. That is what separates the two ways a
+//! The end of a stream, [`Eos`](stream::StreamEvent::Eos), travels in it
+//! behind its last buffer: stateful stages (encoders holding delayed frames,
+//! muxers, resamplers) flush on it before it goes on. That is what separates the two ways a
 //! pipeline ends — [`Pipeline::finish`](pipeline::Pipeline::finish) sends
 //! ordered EOS from the source and drains everything behind it, while
 //! [`Pipeline::stop`](pipeline::Pipeline::stop) abandons buffered work.
@@ -320,7 +320,7 @@ pub use core::diagnostics::{log, pp_log, stats};
 pub use core::timing::{clock, playback_clock, rate};
 pub use core::{
     buffer, bus, color, contract, control, driver, element, graph, pad, pipeline, pool, queue,
-    subtitle,
+    stream, subtitle,
 };
 
 // Same flat-namespace reasoning as above, but crate-private: `schedule`/
@@ -336,7 +336,6 @@ pub(crate) use core::produce;
 pub(crate) use core::render;
 pub(crate) use core::repeat;
 pub(crate) use core::stash;
-pub(crate) use core::stream;
 pub(crate) use core::timing::{schedule, time};
 #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) use core::tone_map;

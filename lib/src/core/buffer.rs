@@ -52,14 +52,6 @@ pub enum MediaBuffer {
     /// [time base](time_base), and duration describe the audio contract a
     /// transforming element must either preserve or deliberately replace.
     Audio(Arc<ffmpeg::frame::Audio>),
-
-    /// Ordered end-of-stream marker.
-    ///
-    /// Stateful elements flush delayed output before forwarding it, and
-    /// muxers finalize their output after receiving it. Unlike
-    /// [`crate::control::ControlMsg::Stop`], this requests natural completion
-    /// rather than abandoning buffered work.
-    Eos,
 }
 
 impl MediaBuffer {
@@ -81,11 +73,6 @@ impl MediaBuffer {
         MediaBuffer::Video(Arc::new(slot))
     }
 
-    /// Returns whether this buffer is the ordered [`MediaBuffer::Eos`] marker.
-    pub fn is_eos(&self) -> bool {
-        matches!(self, MediaBuffer::Eos)
-    }
-
     /// Stable, human-readable variant name for diagnostics emitted when
     /// elements are wired to an incompatible media type.
     pub fn kind(&self) -> &'static str {
@@ -93,7 +80,6 @@ impl MediaBuffer {
             MediaBuffer::Packet(_) => "Packet",
             MediaBuffer::Video(_) => "Video",
             MediaBuffer::Audio(_) => "Audio",
-            MediaBuffer::Eos => "Eos",
         }
     }
 }
@@ -240,7 +226,6 @@ mod tests {
             MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())).kind(),
             "Audio"
         );
-        assert_eq!(MediaBuffer::Eos.kind(), "Eos");
     }
 
     /// A frame no one has described says nothing, rather than a unit of

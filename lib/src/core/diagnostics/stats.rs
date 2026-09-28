@@ -542,8 +542,8 @@ mod tests {
     use crate::pad::SrcPad;
 
     /// A pad counts the bytes of the packets through it — what makes an
-    /// encoder's output a bitrate — and nothing for decoded media or `Eos`,
-    /// which are buffers of a size no one chose.
+    /// encoder's output a bitrate — and nothing for decoded media, which
+    /// are buffers of a size no one chose, or for the end of the stream.
     #[test]
     fn a_pad_counts_the_bytes_of_the_packets_it_pushes_and_nothing_else() {
         let mut pad = SrcPad::new("out");
@@ -557,7 +557,7 @@ mod tests {
             crate::pool::UnboundObjectPool::new(1, ffmpeg_next::frame::Video::empty, |_| {}).get(),
         )))
         .expect("an unlinked pad takes anything");
-        pad.push(MediaBuffer::Eos)
+        pad.push_event(&crate::stream::StreamEvent::Eos)
             .expect("an unlinked pad takes anything");
 
         let read = pad.counters().read(now_ns());

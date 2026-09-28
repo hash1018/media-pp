@@ -69,6 +69,7 @@ use crate::{
     produce::produce_source,
     schedule::PeriodicSchedule,
     stats::TickCounters,
+    stream::StreamEvent,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
@@ -618,17 +619,6 @@ impl Sink for D3d11VideoCompositorInputSink {
                     .into()
                 })
             }
-            // Offline an input's end is part of the picture: what it holds is
-            // still shown to its last frame's end. Live, it shows nothing from
-            // here — its layer goes with its stream — but stays, so a file
-            // sought back after its end is shown again.
-            MediaBuffer::Eos => {
-                match &input.timed {
-                    Some(timed) => timed.end(),
-                    None => input.latest_frame.store(None),
-                }
-                Ok(())
-            }
             MediaBuffer::Packet(_) => {
                 Err(D3d11VideoCompositorError::UnsupportedBuffer("Packet").into())
             }
@@ -636,6 +626,21 @@ impl Sink for D3d11VideoCompositorInputSink {
                 Err(D3d11VideoCompositorError::UnsupportedBuffer("Audio").into())
             }
         }
+    }
+
+    /// Its stream's end. Offline it is part of the picture: what it holds is
+    /// still shown to its last frame's end, after which it is no longer
+    /// waited for. Live it shows nothing from here — its layer goes with its
+    /// stream — but the input stays, so a file sought back after its end is
+    /// shown again; a `Stop` is what removes it.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let (StreamEvent::Eos, Some(input)) = (event, self.input.upgrade()) {
+            match &input.timed {
+                Some(timed) => timed.end(),
+                None => input.latest_frame.store(None),
+            }
+        }
+        Ok(())
     }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {

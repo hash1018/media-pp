@@ -363,8 +363,6 @@ impl Transform for Adjusting {
                 out.push(MediaBuffer::Audio(frame));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioVolumeError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioVolumeError::UnsupportedBuffer("Video").into()),
         }

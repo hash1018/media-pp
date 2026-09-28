@@ -279,7 +279,7 @@ mod example {
                     next_due = now + frame_interval;
                 }
             }
-            handle.push(MediaBuffer::Eos)
+            handle.finish()
         })
     }
 }

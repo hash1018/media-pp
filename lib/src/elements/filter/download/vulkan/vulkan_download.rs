@@ -33,7 +33,7 @@ pub enum VulkanDownloadError {
     FrameRef(i32),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("VulkanDownload only accepts Video and Eos buffers, got a {0}")]
+    #[error("VulkanDownload only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
     /// The frame is not a Vulkan frame.
@@ -218,8 +218,6 @@ impl Transform for Downloading {
                 out.push(MediaBuffer::Video(downloaded));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => Err(VulkanDownloadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -274,7 +272,7 @@ mod tests {
                 .consume(MediaBuffer::video(frame))
                 .expect("upload a frame");
         }
-        upload.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut upload, &crate::stream::StreamEvent::Eos).expect("eos");
         let mut download = VulkanDownload::new("download", device);
         let downloaded = capture(&mut download);
         for buffer in uploaded.lock().unwrap().drain(..) {
@@ -303,7 +301,7 @@ mod tests {
     }
 
     /// Up and back again, NV12, BGRA and P010 come back as they went, with
-    /// their timestamps, and the end of the stream is passed on.
+    /// their timestamps.
     #[test]
     fn every_layout_comes_back_as_it_went_up() {
         let Some(device) = try_vulkan_device() else {
@@ -320,11 +318,7 @@ mod tests {
             .map(|(pts, &format)| frame(format, 64, 32, pts as i64))
             .collect();
         let back = round_trip(&device, sent.clone());
-        assert_eq!(back.len(), formats.len() + 1, "{} buffers", back.len());
-        assert!(
-            back.last().is_some_and(MediaBuffer::is_eos),
-            "Eos passed on"
-        );
+        assert_eq!(back.len(), formats.len(), "{} buffers", back.len());
         for (sent, back) in sent.iter().zip(&back) {
             let MediaBuffer::Video(back) = back else {
                 panic!("expected a Video buffer, got {}", back.kind());

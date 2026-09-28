@@ -286,8 +286,6 @@ impl Transform for Limiting {
                 out.push(MediaBuffer::Audio(frame));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioLimiterError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioLimiterError::UnsupportedBuffer("Video").into()),
         }

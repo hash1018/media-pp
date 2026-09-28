@@ -28,6 +28,7 @@ use crate::{
     element::{Element, ElementType, Sink, element_pp_log},
     error::{Error, Result},
     pp_log::{PpLog, pp_error, pp_info},
+    stream::StreamEvent,
 };
 
 /// One track registered with a muxer's `add_stream`, waiting for its `open`.
@@ -295,11 +296,19 @@ impl<M: Muxer> Sink for TrackSink<M> {
                     .write(&mut packet)
                     .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}"))
             }
-            MediaBuffer::Eos => self.finish(),
             other => {
                 pp_error!(self, "unsupported buffer: {}", other.kind());
                 Err(M::unsupported_buffer(other.kind()))
             }
+        }
+    }
+
+    /// The end of this track's stream finishes the track; the file is
+    /// finished once every track has.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        match event {
+            StreamEvent::Eos => self.finish(),
+            StreamEvent::Segment(_) => Ok(()),
         }
     }
 
@@ -474,7 +483,7 @@ mod tests {
                 .consume(MediaBuffer::Audio(Arc::new(frame)))
                 .unwrap();
         }
-        encoder.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
 
         let finer = ffmpeg::Rational::new(1, 96_000);
         let mut expected = Vec::new();
@@ -490,7 +499,7 @@ mod tests {
                 .unwrap();
         }
         assert!(!expected.is_empty(), "the encoder produced packets");
-        sink.consume(MediaBuffer::Eos).unwrap();
+        sink.stream_event(&crate::stream::StreamEvent::Eos).unwrap();
         drop(sink);
 
         let mut input = ffmpeg::format::input(&path).expect("the file reads back");
@@ -522,7 +531,8 @@ mod tests {
         assert!(!seek_refused(&mut sink));
         sink.control(&ControlMsg::Stop).expect("stop");
         assert!(!finalized(&path), "Stop must not write the trailer here");
-        sink.consume(MediaBuffer::Eos).expect("eos");
+        sink.stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("eos");
         assert!(finalized(&path), "Eos must write the trailer");
         drop(sink);
         std::fs::remove_file(&path).ok();

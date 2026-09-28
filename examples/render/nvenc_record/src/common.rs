@@ -90,7 +90,7 @@ pub fn spawn_feeder(
                 next_due = now + frame_interval;
             }
         }
-        handle.push(MediaBuffer::Eos)
+        handle.finish()
     })
 }
 

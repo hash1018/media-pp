@@ -17,7 +17,7 @@ use crate::{
     graph::{BranchId, ElementId, GraphError, Incoming, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
     pipeline::{ChainBuilder, DetachedBranch},
-    stream::{Event, Item, StreamEvent},
+    stream::{Item, StreamEvent},
 };
 
 /// Fans a single input out to multiple sinks. [`TeeBuilder`] owns the
@@ -598,7 +598,7 @@ impl Tee {
         let kept = &mut self.owed[index].1;
         // What describes the stream is kept however much of it is dropped,
         // and so is its end.
-        let droppable = matches!(item, Item::Buffer(buf) if !buf.is_eos());
+        let droppable = matches!(item, Item::Buffer(_));
         if kept.len() >= MAX_OWED && droppable {
             if kept.len() == MAX_OWED {
                 pp_warn!(
@@ -759,8 +759,8 @@ impl Sink for Tee {
 
     /// Handed to every branch as a buffer is: in order with the buffers,
     /// kept with what a preroll holds back for one.
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
-        self.hand_out(Item::Event(event.0.clone()));
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        self.hand_out(Item::Event(event.clone()));
         Ok(())
     }
 
@@ -1219,8 +1219,15 @@ mod tests {
     }
 
     impl Sink for RecordingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            lock_unpoisoned(&self.seen).push(if buf.is_eos() { "eos" } else { "data" });
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            lock_unpoisoned(&self.seen).push("data");
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            if let StreamEvent::Eos = event {
+                lock_unpoisoned(&self.seen).push("eos");
+            }
             Ok(())
         }
     }
@@ -1445,12 +1452,16 @@ mod tests {
     }
 
     impl Sink for SlowRecordingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            let is_eos = buf.is_eos();
-            if !is_eos {
-                thread::sleep(Duration::from_millis(30));
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            thread::sleep(Duration::from_millis(30));
+            lock_unpoisoned(&self.seen).push("data");
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            if let StreamEvent::Eos = event {
+                lock_unpoisoned(&self.seen).push("eos");
             }
-            lock_unpoisoned(&self.seen).push(if is_eos { "eos" } else { "data" });
             Ok(())
         }
     }
@@ -1878,7 +1889,7 @@ mod tests {
         upstream
             .push(MediaBuffer::Packet(Arc::new(packet)))
             .unwrap();
-        upstream.push(MediaBuffer::Eos).unwrap();
+        upstream.push_event(&StreamEvent::Eos).unwrap();
         assert!(seen.lock().unwrap().is_empty(), "held by the preroll");
 
         // Paused, then a step's preroll asks for more.

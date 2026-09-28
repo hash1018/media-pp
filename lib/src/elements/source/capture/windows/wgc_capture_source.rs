@@ -202,7 +202,7 @@ impl Default for WgcCaptureOptions {
 /// range.
 ///
 /// Runs until `Stop` — a live capture has no natural end, so this never
-/// reaches [`MediaBuffer::Eos`] on its own. The captured window going away
+/// reaches the end of its stream on its own. The captured window going away
 /// ends the source with [`WgcCaptureSourceError::TargetGone`] instead, which
 /// reaches the caller as a
 /// [`BusEvent::Error`](crate::bus::BusEvent::Error); whether that means

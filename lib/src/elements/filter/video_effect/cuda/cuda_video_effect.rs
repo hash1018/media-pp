@@ -327,8 +327,6 @@ impl Transform for Applying {
                 out.push(MediaBuffer::Video(output));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");

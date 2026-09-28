@@ -28,7 +28,7 @@ pub enum SwAudioEncoderError {
     CodecNotFound(String),
 
     /// The sink received a buffer other than decoded audio or end-of-stream.
-    #[error("SwAudioEncoder only accepts Audio or Eos buffers, got {0}")]
+    #[error("SwAudioEncoder only accepts Audio buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// [`SwAudioEncoder`] only ever resamples to `Sample::F32` (packed or
@@ -547,8 +547,6 @@ impl Transform for Encoding {
                     .map_err(SwAudioEncoderError::from)?;
                 self.drain_pending(false, out)
             }
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             other => Err(SwAudioEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -630,14 +628,15 @@ mod tests {
 
     impl Sink for RecordingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            match buf {
-                MediaBuffer::Packet(_) => {
-                    *self.packets.lock().unwrap() += 1;
-                }
-                MediaBuffer::Eos => {
-                    self.eos.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                _ => {}
+            if let MediaBuffer::Packet(_) = buf {
+                *self.packets.lock().unwrap() += 1;
+            }
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> Result<()> {
+            if let crate::stream::StreamEvent::Eos = event {
+                self.eos.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             Ok(())
         }
@@ -701,9 +700,8 @@ mod tests {
                 ))))
                 .expect("consume should succeed");
         }
-        encoder
-            .consume(MediaBuffer::Eos)
-            .expect("consume(Eos) should succeed");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
+            .expect("the end should drain the encoder");
 
         assert!(
             *packets.lock().unwrap() > 0,
@@ -780,9 +778,8 @@ mod tests {
                 ))))
                 .expect("consume should succeed");
         }
-        encoder
-            .consume(MediaBuffer::Eos)
-            .expect("consume(Eos) should succeed");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
+            .expect("the end should drain the encoder");
 
         let packets = packets.lock().unwrap();
         assert!(!packets.is_empty(), "expected at least one packet");
@@ -832,9 +829,8 @@ mod tests {
                 ))))
                 .expect("consume should succeed");
         }
-        encoder
-            .consume(MediaBuffer::Eos)
-            .expect("consume(Eos) should succeed");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
+            .expect("the end should drain the encoder");
 
         assert!(
             *packets.lock().unwrap() > 0,

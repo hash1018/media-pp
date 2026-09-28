@@ -81,7 +81,7 @@ pub enum VulkanEncoderError {
     Ffmpeg(#[from] ffmpeg::Error),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("VulkanEncoder only accepts Video and Eos buffers, got a {0}")]
+    #[error("VulkanEncoder only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
     /// The frame is not a Vulkan frame.
@@ -442,8 +442,6 @@ impl Transform for Encoding {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.encode(&frame, out),
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             other => Err(VulkanEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -546,6 +544,9 @@ mod tests {
         for packet in packets {
             decoder.consume(packet.clone()).expect("decodes");
         }
+        decoder
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("drains");
         let decoded = decoded.lock().unwrap();
         decoded
             .iter()
@@ -580,13 +581,9 @@ mod tests {
             let frame = uploaded.lock().unwrap().remove(0);
             encoder.consume(frame).expect("encode");
         }
-        encoder.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos");
 
         let packets = std::mem::take(&mut *packets.lock().unwrap());
-        assert!(
-            packets.last().is_some_and(MediaBuffer::is_eos),
-            "Eos passed on"
-        );
         for packet in &packets {
             if let MediaBuffer::Packet(packet) = packet {
                 assert_eq!(packet.time_base(), encoder.time_base());

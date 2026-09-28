@@ -329,8 +329,6 @@ impl Transform for Downloading {
                 out.push(MediaBuffer::Video(downloaded));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(D3d11DownloadError::UnsupportedBuffer("Packet").into())

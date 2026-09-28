@@ -136,7 +136,7 @@ pub enum D3d11ScalerError {
     UnsupportedByVideoProcessor(DXGI_FORMAT),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("D3d11Scaler only accepts Video and Eos buffers, got a {0}")]
+    #[error("D3d11Scaler only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 }
 
@@ -737,9 +737,6 @@ impl Transform for Scaling {
                 out.push(MediaBuffer::Video(scaled));
                 Ok(())
             }
-            // The stage's, never handed here. Nothing is buffered — one
-            // `Blt` per frame — so there is nothing to drain either.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -1092,7 +1089,7 @@ mod tests {
         scaler.src_pads()[0].link(Box::new(download));
 
         scaler.consume(source).expect("scale");
-        scaler.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut scaler, &crate::stream::StreamEvent::Eos).expect("eos");
 
         let received = received.lock().unwrap();
         let MediaBuffer::Video(scaled) = &received[0] else {
@@ -1114,10 +1111,6 @@ mod tests {
                 );
             }
         }
-        assert!(
-            received.last().is_some_and(MediaBuffer::is_eos),
-            "Eos was not forwarded"
-        );
     }
 
     /// The decode/encode path's format. The video processor could convert

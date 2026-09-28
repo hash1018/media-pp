@@ -56,6 +56,7 @@ use crate::{
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
     pp_log::{PpLog, pp_error, pp_info},
+    stream::StreamEvent,
 };
 
 /// Errors specific to [`ReplayBuffer`]. Converts into the crate-wide `Error`
@@ -82,7 +83,7 @@ pub enum ReplayBufferError {
 
     /// A track's sink received a buffer other than a packet or
     /// end-of-stream.
-    #[error("replay buffer tracks only accept Packet or Eos buffers, got {0}")]
+    #[error("replay buffer tracks only accept Packet buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 }
 
@@ -487,7 +488,7 @@ impl Clip {
         // once the last of them reports done.
         let mut finished = Ok(());
         for sink in &mut sinks {
-            let done = sink.consume(MediaBuffer::Eos);
+            let done = sink.stream_event(&StreamEvent::Eos);
             if finished.is_ok() {
                 finished = done;
             }
@@ -606,10 +607,6 @@ impl Sink for ReplayTrackSink {
                     .push(self.track, packet, self.shared.length);
                 Ok(())
             }
-            // What is held stays saveable after its stream has ended: the
-            // last stretch of something that finished is still the last
-            // stretch of it.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 pp_error!(self, "unsupported buffer: {}", other.kind());
                 Err(ReplayBufferError::UnsupportedBuffer(other.kind()).into())
@@ -1069,7 +1066,8 @@ mod tests {
         feed(&mut sinks, &recorded.packets);
 
         for sink in &mut sinks {
-            sink.consume(MediaBuffer::Eos).expect("eos");
+            sink.stream_event(&crate::stream::StreamEvent::Eos)
+                .expect("eos");
         }
         assert!(
             handle.buffered() > Duration::ZERO,

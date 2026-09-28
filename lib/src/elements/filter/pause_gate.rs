@@ -540,21 +540,6 @@ mod tests {
         assert_eq!(stamps(&received), vec![0, 1, 2]);
     }
 
-    /// A muxer finalizes on it, so it must arrive however the gate is set.
-    #[test]
-    fn end_of_stream_is_forwarded_even_while_paused() {
-        let (mut gate, handle) = PauseGate::new("gate");
-        let received = capture(&mut gate);
-        handle.set_paused(true);
-
-        gate.consume(MediaBuffer::Eos).unwrap();
-
-        assert!(matches!(
-            received.lock().unwrap().first(),
-            Some(MediaBuffer::Eos)
-        ));
-    }
-
     /// `Stop` ends this run, so a pipeline started again owes nothing to what
     /// the last one skipped. `Flush` is a new position in the same timeline,
     /// and forgetting the total there would send the output backwards.

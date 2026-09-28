@@ -9,7 +9,7 @@
 //! while something upstream is being tested; each hands back a
 //! [`CounterHandle`] to read what it counted.
 //!
-//! A sink is where [`Eos`](crate::buffer::MediaBuffer::Eos) stops travelling
+//! A sink is where [`Eos`](crate::stream::StreamEvent::Eos) stops travelling
 //! and has to be acted on: anything holding delayed data flushes and finalizes
 //! there. A sink's `consume` is also a plain synchronous call — it must bound
 //! its own blocking, since the [`Queue`](crate::queue::Queue) in front of it

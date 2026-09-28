@@ -456,20 +456,6 @@ mod tests {
         assert_eq!(stamps(&received), vec![0]);
     }
 
-    /// A muxer finalizes on it, so it must arrive whatever the rate is doing.
-    #[test]
-    fn end_of_stream_is_forwarded() {
-        let mut limiter = sixty_into(30);
-        let received = capture(&mut limiter);
-
-        limiter.consume(MediaBuffer::Eos).unwrap();
-
-        assert!(matches!(
-            received.lock().unwrap().first(),
-            Some(MediaBuffer::Eos)
-        ));
-    }
-
     /// `Stop` ends this run, so a pipeline started again writes a new stream
     /// from zero. `Flush` is a new position in the *same* stream, and
     /// restarting the count there would send timestamps backwards.

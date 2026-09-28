@@ -16,7 +16,7 @@ use crate::{
     error::Result,
     pp_log::{PpLog, pp_trace},
     stats::PadCounters,
-    stream::{Event, Item, StreamEvent},
+    stream::{Item, StreamEvent},
 };
 
 /// An output port an [`Element`](crate::element::Element) owns. Data only
@@ -119,14 +119,8 @@ impl SrcPad {
     /// nobody cared to link), and so does pushing between a seek's `Flush`
     /// and the start of the stream the seek begins: what is pushed then is
     /// from the position the seek left.
-    ///
-    /// A stream ends once: an `Eos` pushed after one that went, with nothing
-    /// in between, is dropped too. Whatever pushed it twice — a source asked
-    /// to finish while it waited, paused, at the end it had already handed
-    /// on — would have a muxer finish its file twice.
     pub fn push(&mut self, buf: MediaBuffer) -> Result<()> {
-        let is_eos = buf.is_eos();
-        if self.flushing || (is_eos && self.ended) {
+        if self.flushing {
             return Ok(());
         }
         let bytes = match &buf {
@@ -137,11 +131,8 @@ impl SrcPad {
             Some(sink) => sink.consume(buf),
             None => Ok(()),
         };
-        // Ended only once it has gone: one refused can be pushed again.
-        self.ended = if is_eos { result.is_ok() } else { false };
-        if !is_eos {
-            self.counters.pushed(result.is_ok(), bytes);
-        }
+        self.ended = false;
+        self.counters.pushed(result.is_ok(), bytes);
         result
     }
 
@@ -172,7 +163,7 @@ impl SrcPad {
             "event=eos phase=sending pad={}",
             self.name
         );
-        let result = self.push(MediaBuffer::Eos);
+        let result = self.push_event(&StreamEvent::Eos);
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: pp_log,
@@ -191,6 +182,11 @@ impl SrcPad {
     /// Hands `event` to whatever this pad is linked to, where it goes in
     /// order with what was pushed before it — see [`crate::stream`]. Not
     /// counted: it is not data. An unlinked pad drops it, as `push` does.
+    ///
+    /// A stream ends once: an `Eos` handed on after one that went, with
+    /// nothing in between, is dropped. Whatever sent it twice — a source
+    /// asked to finish while it waited, paused, at the end it had already
+    /// handed on — would have a muxer finish its file twice.
     pub(crate) fn push_event(&mut self, event: &StreamEvent) -> Result<()> {
         match event {
             StreamEvent::Segment(segment) if segment.flushed => {
@@ -201,11 +197,18 @@ impl SrcPad {
             _ if self.flushing => return Ok(()),
             // A new stream, which can end in its turn.
             StreamEvent::Segment(_) => self.ended = false,
+            StreamEvent::Eos if self.ended => return Ok(()),
+            StreamEvent::Eos => {}
         }
-        match &mut self.peer {
-            Some(sink) => sink.stream_event(Event(event)),
+        let result = match &mut self.peer {
+            Some(sink) => sink.stream_event(event),
             None => Ok(()),
+        };
+        // Ended only once it has gone: one refused can be sent again.
+        if matches!(event, StreamEvent::Eos) {
+            self.ended = result.is_ok();
         }
+        result
     }
 
     /// Pushes a buffer or hands on an event, whichever `item` is — for an
@@ -267,13 +270,16 @@ mod tests {
     }
 
     impl Sink for Heard {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            let word = if buf.is_eos() { "eos" } else { "data" };
-            self.heard.lock().unwrap().push(word);
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.heard.lock().unwrap().push("data");
             Ok(())
         }
-        fn stream_event(&mut self, _event: Event<'_>) -> Result<()> {
-            self.heard.lock().unwrap().push("segment");
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            let word = match event {
+                StreamEvent::Segment(_) => "segment",
+                StreamEvent::Eos => "eos",
+            };
+            self.heard.lock().unwrap().push(word);
             Ok(())
         }
     }
@@ -304,13 +310,13 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "heard", None),
             heard: Arc::clone(&heard),
         }));
-        pad.push(MediaBuffer::Eos).unwrap();
-        pad.push(MediaBuffer::Eos).unwrap();
+        pad.push_event(&StreamEvent::Eos).unwrap();
+        pad.push_event(&StreamEvent::Eos).unwrap();
         pad.push(packet()).unwrap();
-        pad.push(MediaBuffer::Eos).unwrap();
+        pad.push_event(&StreamEvent::Eos).unwrap();
         pad.push_event(&segment()).unwrap();
-        pad.push(MediaBuffer::Eos).unwrap();
-        pad.push(MediaBuffer::Eos).unwrap();
+        pad.push_event(&StreamEvent::Eos).unwrap();
+        pad.push_event(&StreamEvent::Eos).unwrap();
         assert_eq!(
             *heard.lock().unwrap(),
             ["eos", "data", "eos", "segment", "eos"]

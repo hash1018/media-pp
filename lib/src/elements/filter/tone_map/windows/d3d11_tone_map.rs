@@ -116,7 +116,7 @@ pub enum D3d11ToneMapError {
     },
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("D3d11ToneMap only accepts Video and Eos buffers, got a {0}")]
+    #[error("D3d11ToneMap only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 }
 
@@ -419,8 +419,6 @@ impl Transform for Mapping {
             }
             // One `Draw` per frame, pushed before `consume` returns, so
             // there is nothing to drain.
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");

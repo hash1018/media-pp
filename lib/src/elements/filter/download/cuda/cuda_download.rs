@@ -34,7 +34,7 @@ pub enum CudaDownloadError {
 
     /// The sink received a buffer other than decoded video or end-of-stream.
 
-    #[error("CudaDownload only accepts Video and Eos buffers, got a {0}")]
+    #[error("CudaDownload only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
     /// The frame is not a surface of the layout this was built for, on this
     /// element's own device.
@@ -252,8 +252,6 @@ impl Transform for Downloading {
                 out.push(MediaBuffer::Video(downloaded));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => Err(CudaDownloadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -387,7 +385,7 @@ mod tests {
         upload
             .consume(MediaBuffer::video(nv12_pattern(width, height, 4321)))
             .expect("upload then download");
-        upload.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut upload, &crate::stream::StreamEvent::Eos).expect("eos");
 
         let received = received.lock().unwrap();
         let MediaBuffer::Video(frame) = &received[0] else {
@@ -409,10 +407,6 @@ mod tests {
                 assert_eq!(actual, expected, "plane {plane} row {row} mismatch");
             }
         }
-        assert!(
-            received.last().is_some_and(MediaBuffer::is_eos),
-            "Eos was not forwarded"
-        );
     }
 
     /// The same round trip in BGRA, the layout a screen capture produces.

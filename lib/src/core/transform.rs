@@ -20,6 +20,7 @@ use crate::{
     pad::SrcPad,
     pp_log::PpLog,
     stash::OutputStash,
+    stream::StreamEvent,
 };
 
 /// A filter written as its media work alone: each buffer in, what it makes
@@ -177,22 +178,6 @@ impl<T: Transform> Sink for TransformStage<T> {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let mut out = Output::default();
-        if buf.is_eos() {
-            // What is kept goes first, then what it holds, and the end after
-            // it whether or not draining failed: a stream that is over is
-            // over, and after its end nothing would take what was kept.
-            let kept = self.stash.release_all(&mut self.pad);
-            let drained = self.inner.drain(&mut out);
-            let mut handed = Ok(());
-            for buf in out.made {
-                let pushed = self.pad.push(buf);
-                if handed.is_ok() {
-                    handed = pushed;
-                }
-            }
-            let ended = self.pad.push(MediaBuffer::Eos);
-            return kept.and(drained).and(handed).and(ended);
-        }
         self.inner.transform(buf, &mut out)?;
         self.hand_on(out)
     }
@@ -210,8 +195,25 @@ impl<T: Transform> Sink for TransformStage<T> {
     /// having let it go; only one that begins a lap or a bridge's new input
     /// can, and then a preroll's terminal is handed what it would otherwise
     /// have waited for.
-    fn stream_event(&mut self, _event: crate::stream::Event<'_>) -> Result<()> {
-        self.stash.release_all(&mut self.pad)
+    ///
+    /// At the end, what the transform still holds goes on too, after what
+    /// was kept — and the graph passes the end on after it whether or not
+    /// draining failed: a stream that is over is over.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        let kept = self.stash.release_all(&mut self.pad);
+        if !matches!(event, StreamEvent::Eos) {
+            return kept;
+        }
+        let mut out = Output::default();
+        let drained = self.inner.drain(&mut out);
+        let mut handed = Ok(());
+        for buf in out.made {
+            let pushed = self.pad.push(buf);
+            if handed.is_ok() {
+                handed = pushed;
+            }
+        }
+        kept.and(drained).and(handed)
     }
 }
 
@@ -310,7 +312,7 @@ macro_rules! transform_filter {
             }
             fn stream_event(
                 &mut self,
-                event: $crate::stream::Event<'_>,
+                event: &$crate::stream::StreamEvent,
             ) -> $crate::error::Result<()> {
                 self.0.stream_event(event)
             }
@@ -333,23 +335,67 @@ mod tests {
     use crate::{
         contract::{MediaKind, PortContract},
         element::element_pp_log,
-        test_support::capture,
     };
 
     fn packet(tag: u8) -> MediaBuffer {
         MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[tag])))
     }
 
-    /// The tag of each packet in `buffers`, and `None` for the end.
+    /// The tag of each packet in `buffers`.
     fn tags(buffers: &[MediaBuffer]) -> Vec<Option<u8>> {
         buffers
             .iter()
             .map(|buf| match buf {
                 MediaBuffer::Packet(packet) => Some(packet.data().expect("a payload")[0]),
-                MediaBuffer::Eos => None,
-                _ => panic!("only packets and the end are made here"),
+                _ => panic!("only packets are made here"),
             })
             .collect()
+    }
+
+    /// Writes down the tag of each packet it takes, and `None` for the end.
+    struct Heard(PpLog, Arc<Mutex<Vec<Option<u8>>>>);
+
+    impl Element for Heard {
+        fn name(&self) -> Arc<str> {
+            "heard".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.0
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.0
+        }
+    }
+
+    impl Sink for Heard {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.1.lock().unwrap().extend(tags(&[buf]));
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            if let StreamEvent::Eos = event {
+                self.1.lock().unwrap().push(None);
+            }
+            Ok(())
+        }
+    }
+
+    /// Links a [`Heard`] to `stage`'s pad, and returns what it will have
+    /// heard.
+    fn hear<T: Transform>(stage: &mut TransformStage<T>) -> Arc<Mutex<Vec<Option<u8>>>> {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        stage.src_pads()[0].link(Box::new(Heard(
+            element_pp_log(ElementType::Other, "heard", None),
+            Arc::clone(&heard),
+        )));
+        heard
     }
 
     /// Hands each packet on one late — on the next one's arrival, or when
@@ -396,7 +442,6 @@ mod tests {
 
     impl Transform for Delay {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
-            assert!(!buf.is_eos(), "the end is the stage's to hand on");
             if let Some(held) = self.held.replace(buf) {
                 out.push(held);
             }
@@ -436,15 +481,15 @@ mod tests {
     fn what_a_transform_holds_goes_on_before_the_end() {
         let (delay, _) = Delay::new();
         let mut stage = TransformStage::new(delay);
-        let received = capture(&mut stage);
+        let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
-        assert!(tags(&received.lock().unwrap()).is_empty(), "one late");
+        assert!(heard.lock().unwrap().is_empty(), "one late");
         stage.consume(packet(2)).expect("the first goes on");
-        stage.consume(MediaBuffer::Eos).expect("drained and ended");
+        crate::stream::deliver(&mut stage, &StreamEvent::Eos).expect("drained and ended");
 
         assert_eq!(
-            tags(&received.lock().unwrap()),
+            *heard.lock().unwrap(),
             [Some(1), Some(2), None],
             "the second on the drain, and the end after it"
         );
@@ -456,16 +501,16 @@ mod tests {
     fn a_flush_or_a_stop_lets_go_of_what_it_holds() {
         let (delay, resets) = Delay::new();
         let mut stage = TransformStage::new(delay);
-        let received = capture(&mut stage);
+        let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
         stage.control(&ControlMsg::Pause).expect("nothing to do");
         assert_eq!(resets.load(Ordering::SeqCst), 0, "a pause is not a reset");
         stage.control(&ControlMsg::Flush).expect("reset");
         assert_eq!(resets.load(Ordering::SeqCst), 1);
-        stage.consume(MediaBuffer::Eos).expect("ended");
+        crate::stream::deliver(&mut stage, &StreamEvent::Eos).expect("ended");
         assert_eq!(
-            tags(&received.lock().unwrap()),
+            *heard.lock().unwrap(),
             [None],
             "what the flush let go of came back"
         );
@@ -481,14 +526,14 @@ mod tests {
         let (mut delay, _) = Delay::new();
         delay.drain_fails = true;
         let mut stage = TransformStage::new(delay);
-        let received = capture(&mut stage);
+        let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
         assert!(
-            stage.consume(MediaBuffer::Eos).is_err(),
+            crate::stream::deliver(&mut stage, &StreamEvent::Eos).is_err(),
             "the drain's error"
         );
-        assert_eq!(tags(&received.lock().unwrap()), [Some(1), None]);
+        assert_eq!(*heard.lock().unwrap(), [Some(1), None]);
     }
 
     /// Makes two packets of each one: its own, and one tagged 100 more.

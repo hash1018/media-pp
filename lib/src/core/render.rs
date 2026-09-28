@@ -17,6 +17,7 @@ use crate::{
     error::Result,
     graph::ElementId,
     pp_log::PpLog,
+    stream::StreamEvent,
 };
 
 /// A terminal written as what it does with each buffer: plays it, shows
@@ -125,10 +126,16 @@ impl<R: Render> Sink for RenderStage<R> {
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        if buf.is_eos() {
-            return self.inner.drain();
-        }
         self.inner.render(buf)
+    }
+
+    /// The end is where it drains; a seek's flushed segment is handled with
+    /// the `Flush` before it, in `control`.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        match event {
+            StreamEvent::Eos => self.inner.drain(),
+            StreamEvent::Segment(_) => Ok(()),
+        }
     }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
@@ -237,6 +244,12 @@ macro_rules! render_sink {
             fn control(&mut self, msg: &$crate::control::ControlMsg) -> $crate::error::Result<()> {
                 self.0.control(msg)
             }
+            fn stream_event(
+                &mut self,
+                event: &$crate::stream::StreamEvent,
+            ) -> $crate::error::Result<()> {
+                self.0.stream_event(event)
+            }
         }
     };
 }
@@ -291,8 +304,7 @@ mod tests {
     }
 
     impl Render for Noting {
-        fn render(&mut self, buf: MediaBuffer) -> Result<()> {
-            assert!(!buf.is_eos(), "the end goes to drain");
+        fn render(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.note("render");
             Ok(())
         }

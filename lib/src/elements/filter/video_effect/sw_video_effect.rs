@@ -187,8 +187,6 @@ impl Transform for Applying {
                 out.push(MediaBuffer::Video(output));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -426,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_is_refused_and_eos_forwarded() {
+    fn audio_is_refused() {
         let (mut element, _handle, received) = new_effect(brighter());
         let error = element
             .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
@@ -435,7 +433,6 @@ mod tests {
             error,
             crate::error::Error::SwVideoEffectError(SwVideoEffectError::UnsupportedBuffer("Audio"))
         ));
-        element.consume(MediaBuffer::Eos).expect("eos");
-        assert!(received.lock().unwrap()[0].is_eos());
+        assert!(received.lock().unwrap().is_empty());
     }
 }

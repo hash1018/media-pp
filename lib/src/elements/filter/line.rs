@@ -17,7 +17,7 @@ use crate::{
     core::pipeline::chain::FlowTracer,
     element::{Context, Element, ElementType, Filter, ReversibleDecoder, Sink, element_pp_log},
     error::Result,
-    stream::{Event, StreamEvent},
+    stream::StreamEvent,
 };
 
 /// A straight line of elements run inside another element, which pushes on
@@ -149,7 +149,7 @@ impl Line {
             if std::mem::take(&mut self.behind)
                 && let Some(segment) = &self.segment
             {
-                head.stream_event(Event(segment))?;
+                head.stream_event(segment)?;
             }
             head.consume(buf)?;
         }
@@ -158,15 +158,28 @@ impl Line {
 
     /// Sends `event` down the line, which stops at its end as control does,
     /// and answers what came out of the end ahead of it, for the owner to
-    /// push on before the graph passes the event on through the owner's pad.
+    /// push on before the graph passes the event on through the owner's pad
+    /// — at the end of the stream, what the line's elements still held.
     pub(crate) fn stream_event(&mut self, event: &StreamEvent) -> Result<Vec<MediaBuffer>> {
-        // Every event so far is a segment, and what a line filled anew is
-        // handed first.
-        let StreamEvent::Segment(_) = event;
-        self.segment = Some(event.clone());
-        self.behind = false;
+        match event {
+            // What a line filled anew is handed first.
+            StreamEvent::Segment(_) => {
+                self.segment = Some(event.clone());
+                self.behind = false;
+            }
+            // A line filled anew that has seen nothing yet is handed the
+            // stream's segment ahead of its end, as of its first buffer.
+            StreamEvent::Eos => {
+                if let Some(head) = &mut self.head
+                    && std::mem::take(&mut self.behind)
+                    && let Some(segment) = &self.segment
+                {
+                    head.stream_event(segment)?;
+                }
+            }
+        }
         if let Some(head) = &mut self.head {
-            head.stream_event(Event(event))?;
+            head.stream_event(event)?;
         }
         Ok(self.take_made())
     }

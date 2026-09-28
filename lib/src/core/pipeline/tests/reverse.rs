@@ -602,11 +602,16 @@ impl Sink for Watched {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let told = match &buf {
             MediaBuffer::Packet(packet) => Some(Told::Packet(packet.dts())),
-            MediaBuffer::Eos => Some(Told::Eos),
             _ => None,
         };
         self.told.lock().unwrap().extend(told);
         self.inner.consume(buf)
+    }
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let StreamEvent::Eos = event {
+            self.told.lock().unwrap().push(Told::Eos);
+        }
+        self.inner.stream_event(event)
     }
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if *msg == ControlMsg::Flush {

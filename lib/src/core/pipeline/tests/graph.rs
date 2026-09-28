@@ -706,10 +706,7 @@ impl Element for AlwaysFailingSink {
 }
 
 impl Sink for AlwaysFailingSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        if buf.is_eos() {
-            return Ok(());
-        }
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Err(crate::Error::Other("the connection went away".into()))
     }
 }

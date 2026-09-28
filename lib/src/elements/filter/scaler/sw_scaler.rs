@@ -290,8 +290,6 @@ impl Transform for Scaling {
                 out.push(MediaBuffer::Video(scaled));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(SwScalerError::UnsupportedBuffer("Packet").into())
@@ -851,18 +849,6 @@ mod tests {
             assert_eq!(frame.width(), 80);
             assert_eq!(frame.height(), 60);
         }
-    }
-
-    #[test]
-    fn eos_forwards_downstream() {
-        let (mut scaler, received) = new_scaler(ffmpeg::format::Pixel::RGB24, 80, 60);
-        scaler
-            .consume(MediaBuffer::Eos)
-            .expect("eos must forward cleanly");
-        assert!(matches!(
-            received.lock().unwrap().as_slice(),
-            [MediaBuffer::Eos]
-        ));
     }
 
     #[test]

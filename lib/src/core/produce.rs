@@ -588,11 +588,13 @@ mod tests {
     }
 
     impl Sink for Arriving {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            if buf.is_eos() {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.1.at.lock().unwrap().push(Instant::now());
+            Ok(())
+        }
+        fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> Result<()> {
+            if let crate::stream::StreamEvent::Eos = event {
                 self.1.ended.store(true, Ordering::SeqCst);
-            } else {
-                self.1.at.lock().unwrap().push(Instant::now());
             }
             Ok(())
         }

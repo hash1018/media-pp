@@ -28,7 +28,7 @@ pub enum D3d12DownloadError {
     UnsupportedFormat(ffmpeg::format::Pixel),
     /// The sink received a buffer other than decoded video or end-of-stream.
 
-    #[error("D3d12Download only accepts Video and Eos buffers, got a {0}")]
+    #[error("D3d12Download only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
     /// The frame does not retain the D3D12 hardware frames context that owns it.
 
@@ -215,8 +215,6 @@ impl Transform for Downloading {
                 out.push(MediaBuffer::Video(downloaded));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let error = D3d12DownloadError::UnsupportedBuffer(other.kind());
                 pp_error!(self, "{error}");
@@ -388,6 +386,6 @@ mod tests {
         let error = download
             .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
             .expect_err("a packet must be rejected");
-        assert!(error.to_string().contains("Video and Eos"));
+        assert!(error.to_string().contains("only accepts Video buffers"));
     }
 }

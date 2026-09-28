@@ -17,7 +17,7 @@ use crate::{
 #[derive(Debug, ThisError)]
 pub enum AppSourceError {
     /// The source has stopped or end-of-stream was already submitted.
-    #[error("AppSource has already ended (its Pipeline finished, or Eos was already pushed)")]
+    #[error("AppSource has already ended (its Pipeline finished, or its stream was finished)")]
     Closed,
 }
 
@@ -33,9 +33,9 @@ pub enum AppSourceError {
 /// `Stop` (or any other control message) is handled the moment it arrives,
 /// even if [`AppSourceHandle::push`] never gets called again.
 ///
-/// Push [`MediaBuffer::Eos`] when done, or just drop every
+/// Call [`AppSourceHandle::finish`] when done, or just drop every
 /// [`AppSourceHandle`] clone — either ends the stream the same way, with
-/// exactly one `Eos` of its own on `src_pads()`.
+/// exactly one end of its own on `src_pads()`.
 ///
 /// Has no timeline of its own, so it is not a
 /// [`SeekableSource`](crate::element::SeekableSource): there is nothing to
@@ -62,7 +62,8 @@ pub(crate) struct Receiving {
     /// Whether what it is handed is made at a rate of its own — see
     /// [`AppSource::receiving`].
     live: bool,
-    data_rx: Receiver<MediaBuffer>,
+    /// What the application hands over: a buffer, or `None` for the end.
+    data_rx: Receiver<Option<MediaBuffer>>,
 }
 
 /// A cheaply-cloneable handle for pushing buffers into an [`AppSource`]
@@ -71,7 +72,7 @@ pub(crate) struct Receiving {
 #[derive(Clone)]
 pub struct AppSourceHandle {
     name: Arc<str>,
-    data_tx: Sender<MediaBuffer>,
+    data_tx: Sender<Option<MediaBuffer>>,
 }
 
 impl AppSource {
@@ -129,7 +130,16 @@ impl AppSourceHandle {
     /// clone of it, e.g. after its `Pipeline` finished) is gone.
     pub fn push(&self, buf: MediaBuffer) -> Result<()> {
         self.data_tx
-            .send(buf)
+            .send(Some(buf))
+            .map_err(|_| AppSourceError::Closed.into())
+    }
+
+    /// Ends the stream behind whatever was pushed before it, blocking for
+    /// room as `push` does. Dropping every clone ends it the same way; this
+    /// is for a producer that is done but keeps its handle.
+    pub fn finish(&self) -> Result<()> {
+        self.data_tx
+            .send(None)
             .map_err(|_| AppSourceError::Closed.into())
     }
 
@@ -139,7 +149,7 @@ impl AppSourceHandle {
     /// channel was full and `buf` was *not* sent; `Err` only means
     /// `AppSource` itself is gone.
     pub fn try_push(&self, buf: MediaBuffer) -> Result<bool> {
-        match self.data_tx.try_send(buf) {
+        match self.data_tx.try_send(Some(buf)) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => Err(AppSourceError::Closed.into()),
@@ -178,11 +188,11 @@ impl Produce for Receiving {
     /// pushed one, or where every [`AppSourceHandle`] is gone.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         Ok(match wait.recv(&self.data_rx) {
-            Received::Got(buf) if buf.is_eos() => {
+            Received::Got(None) => {
                 pp_info!(self, "event=eos phase=source_received");
                 Produced::End
             }
-            Received::Got(buf) => Produced::Buffer(buf),
+            Received::Got(Some(buf)) => Produced::Buffer(buf),
             Received::LetGo => Produced::Nothing,
             Received::Gone => {
                 pp_info!(self, "every AppSourceHandle dropped, ending");
@@ -227,10 +237,8 @@ mod tests {
     }
 
     impl crate::element::Sink for CountingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            if !buf.is_eos() {
-                self.count.fetch_add(1, Ordering::SeqCst);
-            }
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -254,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn pushed_buffers_reach_downstream_then_eos_ends_it() {
+    fn pushed_buffers_reach_downstream_then_finish_ends_it() {
         let (source, handle) = AppSource::new("app-source", 4);
         let count = Arc::new(AtomicUsize::new(0));
         let pipeline = wire(source, count.clone());
@@ -263,7 +271,7 @@ mod tests {
         for _ in 0..5 {
             handle.push(packet()).unwrap();
         }
-        handle.push(MediaBuffer::Eos).unwrap();
+        handle.finish().unwrap();
 
         let events: Vec<_> = pipeline.bus().iter().collect();
         assert!(
@@ -275,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_every_handle_without_eos_still_ends_cleanly() {
+    fn dropping_every_handle_without_finish_still_ends_cleanly() {
         let (source, handle) = AppSource::new("app-source", 4);
         let count = Arc::new(AtomicUsize::new(0));
         let pipeline = wire(source, count.clone());
@@ -283,7 +291,7 @@ mod tests {
 
         handle.push(packet()).unwrap();
         handle.push(packet()).unwrap();
-        drop(handle); // no explicit Eos — the channel disconnecting must end `run` on its own
+        drop(handle); // no explicit finish — the channel disconnecting must end `run` on its own
 
         let events: Vec<_> = pipeline.bus().iter().collect();
         assert!(

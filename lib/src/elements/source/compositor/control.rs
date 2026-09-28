@@ -291,7 +291,6 @@ pub(crate) fn an_input_that_ends_is_shown_again<C: VideoCompositorControl>(
     handle: &C,
     picture: impl Fn() -> crate::buffer::MediaBuffer,
 ) {
-    use crate::buffer::MediaBuffer;
     use crate::control::ControlMsg;
 
     let CompositorInput { mut sink, layer } = handle
@@ -300,7 +299,8 @@ pub(crate) fn an_input_that_ends_is_shown_again<C: VideoCompositorControl>(
     sink.consume(picture()).expect("a picture");
     assert!(layer.latest_frame().is_some(), "shown");
 
-    sink.consume(MediaBuffer::Eos).expect("its end");
+    sink.stream_event(&crate::stream::StreamEvent::Eos)
+        .expect("its end");
     assert!(layer.latest_frame().is_none(), "nothing once it has ended");
     assert_eq!(handle.source_count(), 1, "and still there");
     sink.consume(picture()).expect("sought back");

@@ -590,11 +590,11 @@ impl Sink for WebRtcTrackSink {
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        if !matches!(buf, MediaBuffer::Packet(_) | MediaBuffer::Eos) {
+        if !matches!(buf, MediaBuffer::Packet(_)) {
             let kind = match buf {
                 MediaBuffer::Video(_) => "Video",
                 MediaBuffer::Audio(_) => "Audio",
-                MediaBuffer::Packet(_) | MediaBuffer::Eos => unreachable!("matched above"),
+                MediaBuffer::Packet(_) => unreachable!("matched above"),
             };
             pp_error!(self, "unsupported buffer: {kind}");
             return Err(WebRtcError::UnsupportedBuffer(kind).into());
@@ -971,10 +971,6 @@ impl SourceElement for WebRtcTrackSource {
                 }
                 recv(self.data_rx) -> buf => {
                     match buf {
-                        Ok(buf) if buf.is_eos() => {
-                            pp_info!(self, "event=eos phase=source_received");
-                            break;
-                        }
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
                                 bus.post_downstream_error(

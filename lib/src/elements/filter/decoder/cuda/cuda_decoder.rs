@@ -354,15 +354,6 @@ impl Sink for CudaDecoder {
                     .map_err(|error| self.decode_error(error))?;
                 self.drain()
             }
-            MediaBuffer::Eos => {
-                self.decoder
-                    .send_eof()
-                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(|error| self.decode_error(error))?;
-                self.drain()?;
-                self.preroll_gate.push_eos_candidate(&mut self.pad)?;
-                self.pad.push(MediaBuffer::Eos)
-            }
             other => {
                 let _ = other;
                 Ok(())
@@ -371,10 +362,22 @@ impl Sink for CudaDecoder {
     }
 
     /// The segment the stream is in, which the preroll gate puts a seek's
-    /// target on the samples' timeline by.
-    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
-        let crate::stream::StreamEvent::Segment(segment) = event.0;
-        self.preroll_gate.begin_segment(segment, &mut self.pad)
+    /// target on the samples' timeline by; and at the end, what the codec
+    /// still holds, ahead of the end the graph passes on after it.
+    fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
+        match event {
+            crate::stream::StreamEvent::Segment(segment) => {
+                self.preroll_gate.begin_segment(segment, &mut self.pad)
+            }
+            crate::stream::StreamEvent::Eos => {
+                self.decoder
+                    .send_eof()
+                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+                    .map_err(|error| self.decode_error(error))?;
+                self.drain()?;
+                self.preroll_gate.push_eos_candidate(&mut self.pad)
+            }
+        }
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
@@ -501,7 +504,7 @@ mod tests {
                 break;
             }
         }
-        decoder.consume(MediaBuffer::Eos).expect("eos failed");
+        crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos).expect("eos failed");
 
         let received = received.lock().unwrap();
         let frames: Vec<_> = received
@@ -523,10 +526,6 @@ mod tests {
             );
             assert!(frame.pts().is_some(), "a decoded frame lost its pts");
         }
-        assert!(
-            received.last().is_some_and(MediaBuffer::is_eos),
-            "Eos was not forwarded after draining"
-        );
     }
 
     /// The decoder must reject a non-video stream with its own typed error

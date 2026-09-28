@@ -48,7 +48,9 @@ mod tests {
                 .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
                 .expect("a packet counts");
         }
-        counter.consume(MediaBuffer::Eos).expect("Eos passes");
+        counter
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("Eos passes");
         drop(counter);
 
         assert_eq!(count.get(), 3);

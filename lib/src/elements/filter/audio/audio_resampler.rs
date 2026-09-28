@@ -293,8 +293,6 @@ impl Transform for Resampling {
                     .map_err(AudioResamplerError::from)?;
                 self.push_frames(frames, out)
             }
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioResamplerError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioResamplerError::UnsupportedBuffer("Video").into()),
         }
@@ -354,7 +352,7 @@ mod tests {
         resampler
             .consume(f32_packed_frame(48_000, 2, 960, 48_000))
             .unwrap();
-        resampler.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut resampler, &crate::stream::StreamEvent::Eos).unwrap();
 
         let received = received.lock().unwrap();
         let audio: Vec<_> = received
@@ -379,7 +377,6 @@ mod tests {
                 pair[0].pts().map(|pts| pts + pair[0].samples() as i64)
             );
         }
-        assert!(matches!(received.last(), Some(MediaBuffer::Eos)));
     }
 
     #[test]
@@ -392,7 +389,7 @@ mod tests {
         resampler
             .consume(f32_packed_frame(44_100, 1, 441, 441))
             .unwrap();
-        resampler.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut resampler, &crate::stream::StreamEvent::Eos).unwrap();
 
         assert!(received.lock().unwrap().iter().any(|buffer| {
             matches!(buffer, MediaBuffer::Audio(frame) if frame.rate() == 48_000 && frame.channels() == 2)
@@ -418,7 +415,7 @@ mod tests {
         resampler
             .consume(MediaBuffer::Audio(Arc::new(frame)))
             .unwrap();
-        resampler.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut resampler, &crate::stream::StreamEvent::Eos).unwrap();
 
         let received = received.lock().unwrap();
         let first = received
@@ -462,7 +459,7 @@ mod tests {
         resampler
             .consume(f32_packed_frame(48_000, 2, 960, 9_600))
             .unwrap();
-        resampler.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut resampler, &crate::stream::StreamEvent::Eos).unwrap();
         let first = received
             .lock()
             .unwrap()

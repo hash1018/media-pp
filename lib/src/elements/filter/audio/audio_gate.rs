@@ -392,8 +392,6 @@ impl Transform for Gating {
                 out.push(MediaBuffer::Audio(frame));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioGateError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioGateError::UnsupportedBuffer("Video").into()),
         }

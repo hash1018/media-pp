@@ -48,6 +48,7 @@ use crate::{
     produce::produce_source,
     schedule::PeriodicSchedule,
     stats::TickCounters,
+    stream::StreamEvent,
 };
 
 mod text_handle;
@@ -544,24 +545,26 @@ impl Sink for CudaVideoCompositorInputSink {
                     .into()
                 })
             }
-            MediaBuffer::Eos => {
-                // Offline an input's end is part of the picture: what it holds
-                // is still shown to its last frame's end. Live, it shows
-                // nothing from here — its layer goes with its stream — but
-                // stays, so a file sought back after its end is shown again.
-                if let Some(input) = self.input.upgrade() {
-                    match &input.timed {
-                        Some(timed) => timed.end(),
-                        None => input.latest_frame.store(None),
-                    }
-                }
-                Ok(())
-            }
             other => {
                 pp_error!(self, "unsupported buffer: {}", other.kind());
                 Err(CudaVideoCompositorError::UnsupportedBuffer(other.kind()).into())
             }
         }
+    }
+
+    /// Its stream's end. Offline it is part of the picture: what it holds is
+    /// still shown to its last frame's end, after which it is no longer
+    /// waited for. Live it shows nothing from here — its layer goes with its
+    /// stream — but the input stays, so a file sought back after its end is
+    /// shown again; a `Stop` is what removes it.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let (StreamEvent::Eos, Some(input)) = (event, self.input.upgrade()) {
+            match &input.timed {
+                Some(timed) => timed.end(),
+                None => input.latest_frame.store(None),
+            }
+        }
+        Ok(())
     }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {

@@ -381,18 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn end_of_stream_is_forwarded_whatever_came_before() {
-        let mut gate = ChangeGate::new("gate", Duration::from_secs(60));
-        let forwarded = capture(&mut gate);
-
-        gate.consume(picture(1)).expect("first");
-        gate.consume(MediaBuffer::Eos).expect("eos");
-
-        let received = forwarded.lock().unwrap();
-        assert!(matches!(received[1], MediaBuffer::Eos));
-    }
-
-    #[test]
     fn a_flush_makes_the_next_picture_new_again() {
         let mut gate = ChangeGate::new("gate", Duration::ZERO);
         let forwarded = capture(&mut gate);

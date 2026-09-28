@@ -708,7 +708,6 @@ impl Render for Rendering {
                 .inspect_err(|error| pp_error!(self, "render failed: {error}")),
             MediaBuffer::Packet(_) => Err(WasapiRendererError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(WasapiRendererError::UnsupportedBuffer("Video").into()),
-            MediaBuffer::Eos => Ok(()),
         }
     }
 

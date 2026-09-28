@@ -135,9 +135,16 @@ impl Sink for Room {
             MediaBuffer::Packet(packet) => packet.pts(),
             MediaBuffer::Video(frame) => frame.pts(),
             MediaBuffer::Audio(frame) => frame.pts(),
-            MediaBuffer::Eos => None,
         };
         self.taken.lock().unwrap().push(pts);
+        Ok(())
+    }
+
+    /// The end, taken as `None` in its place among the buffers.
+    fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
+        if let crate::stream::StreamEvent::Eos = event {
+            self.taken.lock().unwrap().push(None);
+        }
         Ok(())
     }
 }
@@ -717,7 +724,7 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
             .expect("the AV1 encoder takes a frame");
     }
     encoder
-        .consume(MediaBuffer::Eos)
+        .stream_event(&crate::stream::StreamEvent::Eos)
         .expect("the AV1 encoder flushes");
     drop(encoder);
     let packets = std::mem::take(&mut *packets.lock().unwrap());
@@ -1029,6 +1036,51 @@ pub(crate) fn capture(
         received: received.clone(),
     }));
     received
+}
+
+/// A filter linked by hand behind another, as a pipeline would have it:
+/// what it is told and what its stream carries goes on through its pads
+/// after its own reaction — see [`crate::stream::deliver`]. Linked bare, a
+/// filter drains at the end and what follows it never ends.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub(crate) struct Linked<F>(pub(crate) F);
+
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+impl<F: crate::element::Filter> crate::element::Element for Linked<F> {
+    fn name(&self) -> Arc<str> {
+        self.0.name()
+    }
+
+    fn element_type(&self) -> ElementType {
+        self.0.element_type()
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        self.0.pp_log()
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        self.0.pp_log_mut()
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+impl<F: crate::element::Filter> crate::element::Sink for Linked<F> {
+    fn ready_consume(&mut self) -> bool {
+        self.0.ready_consume()
+    }
+
+    fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+        self.0.consume(buf)
+    }
+
+    fn control(&mut self, msg: &crate::control::ControlMsg) -> crate::error::Result<()> {
+        crate::control::deliver(&mut self.0, msg)
+    }
+
+    fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
+        crate::stream::deliver(&mut self.0, event)
+    }
 }
 
 /// The one picture `filter` makes of `buf` — for a test that uses a filter

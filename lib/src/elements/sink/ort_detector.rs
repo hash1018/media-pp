@@ -283,7 +283,6 @@ where
                     .inspect_err(|error| pp_error!(self, "detect failed: {error}"))?;
                 (self.on_detections)(&frame, &detections)
             }
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(OrtDetectorError::UnsupportedBuffer("Packet").into())

@@ -1003,7 +1003,7 @@ impl SourceElement for EndingSource {
                     self.pad
                         .push(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))?;
                 }
-                self.pad.push(MediaBuffer::Eos)?;
+                self.pad.push_eos(&self.pp_log)?;
             }
             thread::sleep(Duration::from_millis(1));
         }
@@ -2041,7 +2041,7 @@ fn what_was_read_before_a_seek_does_not_arrive_after_it() {
         at_ms: 0,
     };
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = crate::elements::AppSink::with_control(
+    let sink = crate::elements::AppSink::with_events(
         "recorder",
         {
             let seen = Arc::clone(&seen);
@@ -2056,8 +2056,9 @@ fn what_was_read_before_a_seek_does_not_arrive_after_it() {
         },
         {
             let seen = Arc::clone(&seen);
-            move |msg| {
-                if matches!(msg, ControlMsg::Seek(_)) {
+            // Where the seek's stream begins.
+            move |event: &StreamEvent| {
+                if matches!(event, StreamEvent::Segment(segment) if segment.flushed) {
                     seen.lock().unwrap().push("seek".into());
                 }
                 Ok(())

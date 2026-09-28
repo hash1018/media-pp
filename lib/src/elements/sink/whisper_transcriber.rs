@@ -571,7 +571,7 @@ fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTra
 ///
 /// # EOS
 ///
-/// [`MediaBuffer::Eos`] transcribes whatever is left, including the stretch
+/// The end of the stream transcribes whatever is left, including the stretch
 /// normally held back at the live edge — nothing more is coming, so nothing
 /// can change what the model hears. A caller that stops the pipeline with
 /// [`ControlMsg::Stop`](crate::control::ControlMsg::Stop) instead abandons

@@ -218,8 +218,6 @@ impl Transform for Keying {
                 out.push(MediaBuffer::Video(keyed));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(SwChromaKeyError::UnsupportedBuffer("Packet").into())
@@ -719,13 +717,5 @@ mod tests {
         assert_eq!(alpha(0), 0, "keyed while it was on");
         assert_eq!(alpha(1), 255, "passed through while it was off");
         assert_eq!(alpha(2), 0, "and keyed again once it was back on");
-    }
-    #[test]
-    fn eos_is_forwarded() {
-        let (mut key, _handle, received) = new_chroma_key(default_options());
-        key.consume(MediaBuffer::Eos).expect("Eos must forward");
-
-        let received = received.lock().unwrap();
-        assert!(matches!(received[0], MediaBuffer::Eos));
     }
 }

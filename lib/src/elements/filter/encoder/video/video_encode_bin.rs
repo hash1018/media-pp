@@ -36,7 +36,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     pp_log::{PpLog, pp_info},
-    stream::Event,
+    stream::StreamEvent,
 };
 
 /// What the software path hands its encoder when the frames were RGB:
@@ -788,10 +788,10 @@ impl Sink for VideoEncodeBin {
 
     /// Down the line, what it answers pushed ahead of it — the graph passes
     /// the event on through this bin's pad once this returns.
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         self.install();
         let mut first = Ok(());
-        for made in self.line.stream_event(event.0)? {
+        for made in self.line.stream_event(event)? {
             if let Err(error) = self.pad.push(made) {
                 first = first.and(Err(error));
             }
@@ -869,7 +869,8 @@ mod tests {
         for frame in frames {
             bin.consume(frame).expect("a frame encodes");
         }
-        bin.consume(MediaBuffer::Eos).expect("the encoder drains");
+        crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos)
+            .expect("the encoder drains");
         std::mem::take(&mut *received.lock().unwrap())
     }
 
@@ -886,6 +887,9 @@ mod tests {
         for packet in packets {
             decoder.consume(packet).expect("the stream decodes");
         }
+        decoder
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("the decoder drains");
         let pictures: Vec<_> = received
             .lock()
             .unwrap()
@@ -931,10 +935,6 @@ mod tests {
         assert!(
             matches!(made.first(), Some(MediaBuffer::Packet(packet)) if packet.is_key()),
             "{path:?}: the stream starts on a keyframe"
-        );
-        assert!(
-            made.last().is_some_and(MediaBuffer::is_eos),
-            "{path:?}: the end of stream follows the packets"
         );
         let (pictures, rgb, space) = decoded(parameters, made);
         // Said, not left to a guess: read untagged, a 320x240 picture is
@@ -1092,6 +1092,8 @@ mod tests {
             sink.consume(made)
                 .expect("the muxer takes what the bin made");
         }
+        sink.stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("the track ends");
         drop(sink);
         drop(sinks);
 

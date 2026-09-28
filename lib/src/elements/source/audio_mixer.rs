@@ -25,6 +25,7 @@ use crate::{
     error::Result,
     playback_state::{Bell, PlaybackState},
     produce::produce_source,
+    stream::StreamEvent,
 };
 
 /// How often a live [`AudioMixer`] mixes and emits a combined frame — the
@@ -51,7 +52,7 @@ pub enum AudioMixerError {
     Ffmpeg(#[from] ffmpeg_next::Error),
 
     /// An input sink received a buffer other than decoded audio or end-of-stream.
-    #[error("AudioMixer inputs only accept Audio or Eos buffers, got {0}")]
+    #[error("AudioMixer inputs only accept Audio buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// [`MixerHandle::set_mix_format`] was given a format nothing can be
@@ -592,21 +593,28 @@ impl Sink for MixerInputSink {
                 drop(inputs);
                 shared.arrived.ring();
             }
-            MediaBuffer::Eos => {
-                let mut inputs = shared.inputs.lock().unwrap();
-                if let Some(input) = inputs.get_mut(&self.name)
-                    && input.id == self.id
-                {
-                    input.eos = true;
-                }
-                drop(inputs);
-                shared.arrived.ring();
-            }
             other => {
-                pp_error!(self, "unsupported buffer: expected Audio or Eos");
+                pp_error!(self, "unsupported buffer: expected Audio");
                 return Err(AudioMixerError::UnsupportedBuffer(other.kind()).into());
             }
         }
+        Ok(())
+    }
+
+    /// Its stream's end: once what it holds is mixed, it drops out of the
+    /// mix, which goes on without it.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        let (StreamEvent::Eos, Some(shared)) = (event, self.shared.upgrade()) else {
+            return Ok(());
+        };
+        let mut inputs = shared.inputs.lock().unwrap();
+        if let Some(input) = inputs.get_mut(&self.name)
+            && input.id == self.id
+        {
+            input.eos = true;
+        }
+        drop(inputs);
+        shared.arrived.ring();
         Ok(())
     }
 
@@ -1550,7 +1558,7 @@ mod tests {
 
         // What a `Queue`/`Pipeline` actually calls on this input's own
         // `Sink` when its upstream capture pipeline is stopped — never
-        // `consume(Eos)`, since `WasapiCaptureSource` doesn't send one.
+        // its end, since `WasapiCaptureSource` doesn't send one.
         input_a.control(&ControlMsg::Stop).unwrap();
 
         assert_eq!(
@@ -1616,7 +1624,9 @@ mod tests {
                 0.75, 480, 48000,
             ))))
             .unwrap();
-        stale.consume(MediaBuffer::Eos).unwrap();
+        stale
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .unwrap();
         stale.control(&ControlMsg::Stop).unwrap();
 
         assert_eq!(
@@ -1642,7 +1652,9 @@ mod tests {
                 0.25, 480, 48000,
             ))))
             .unwrap();
-        current.consume(MediaBuffer::Eos).unwrap();
+        current
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .unwrap();
         {
             let inputs = shared.inputs.lock().unwrap();
             let input = inputs.get("mic").expect("replacement remains registered");

@@ -324,26 +324,6 @@ mod tests {
         assert_eq!(stamps(&received), vec![(None, None), (Some(0), Some(0))]);
     }
 
-    /// `Eos` is what makes a muxer write its trailer. Swallowing or delaying
-    /// it would leave a file that never finishes.
-    #[test]
-    fn end_of_stream_is_forwarded() {
-        let mut origin = TimestampOrigin::new("origin");
-        let received = capture(&mut origin);
-
-        origin.consume(packet(Some(500), Some(500))).unwrap();
-        origin.consume(MediaBuffer::Eos).unwrap();
-
-        assert!(
-            received
-                .lock()
-                .unwrap()
-                .last()
-                .is_some_and(MediaBuffer::is_eos),
-            "a muxer downstream would never finalize its file"
-        );
-    }
-
     /// `Stop` abandons the run, so a pipeline started again begins at zero
     /// rather than continuing to subtract the first run's origin.
     #[test]

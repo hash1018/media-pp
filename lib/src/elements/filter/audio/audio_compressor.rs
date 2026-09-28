@@ -321,8 +321,6 @@ impl Transform for Compressing {
                 out.push(MediaBuffer::Audio(frame));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioCompressorError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioCompressorError::UnsupportedBuffer("Video").into()),
         }

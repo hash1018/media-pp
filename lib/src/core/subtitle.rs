@@ -403,7 +403,8 @@ mod tests {
             .expect("first line");
         sink.consume(codec.packet("second line", 2_660, 1_340))
             .expect("second line");
-        sink.consume(MediaBuffer::Eos).expect("eos closes the file");
+        sink.stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("eos closes the file");
 
         let written = std::fs::read_to_string(&path).expect("a text file");
         std::fs::remove_file(&path).ok();
@@ -465,7 +466,8 @@ mod tests {
         let mut sink = muxer.open().expect("header").take(text).expect("its sink");
         sink.consume(Codec::SubRip.packet("첫 번째 자막", 1_000, 1_660))
             .expect("a line");
-        sink.consume(MediaBuffer::Eos).expect("eos");
+        sink.stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("eos");
 
         let mut input = ffmpeg::format::input(&path).expect("a readable file");
         let stream = input

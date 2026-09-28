@@ -73,7 +73,7 @@ mod example {
                     handle.push(MediaBuffer::Packet(Arc::new(packet)))?;
                 }
             }
-            handle.push(MediaBuffer::Eos)
+            handle.finish()
         });
 
         for event in pipeline.bus().iter() {

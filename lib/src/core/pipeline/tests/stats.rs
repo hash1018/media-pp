@@ -261,8 +261,12 @@ impl Element for LingeringEosSink {
 }
 
 impl Sink for LingeringEosSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        if buf.is_eos() {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        Ok(())
+    }
+
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let StreamEvent::Eos = event {
             thread::sleep(self.linger);
         }
         Ok(())

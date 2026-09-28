@@ -37,6 +37,7 @@ use crate::{
     produce::produce_source,
     schedule::PeriodicSchedule,
     stats::TickCounters,
+    stream::StreamEvent,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
@@ -615,20 +616,6 @@ impl Sink for SwVideoCompositorInputSink {
                 })
                 .into()
             }),
-            // Live, an input's end shows nothing from here — its layer goes
-            // with its stream — but the input stays, so a file sought back
-            // after its end is shown again. A `Stop` is what removes it.
-            (MediaBuffer::Eos, None) => {
-                input.latest_frame.store(None);
-                Ok(())
-            }
-            // Offline an input's end is part of the picture: what it holds is
-            // still shown to its last frame's end, after which it is no longer
-            // waited for.
-            (MediaBuffer::Eos, Some(timed)) => {
-                timed.end();
-                Ok(())
-            }
             (MediaBuffer::Packet(_), _) => {
                 Err(SwVideoCompositorError::UnsupportedBuffer("Packet").into())
             }
@@ -636,6 +623,21 @@ impl Sink for SwVideoCompositorInputSink {
                 Err(SwVideoCompositorError::UnsupportedBuffer("Audio").into())
             }
         }
+    }
+
+    /// Its stream's end. Offline it is part of the picture: what it holds is
+    /// still shown to its last frame's end, after which it is no longer
+    /// waited for. Live it shows nothing from here — its layer goes with its
+    /// stream — but the input stays, so a file sought back after its end is
+    /// shown again; a `Stop` is what removes it.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let (StreamEvent::Eos, Some(input)) = (event, self.input.upgrade()) {
+            match &input.timed {
+                Some(timed) => timed.end(),
+                None => input.latest_frame.store(None),
+            }
+        }
+        Ok(())
     }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {

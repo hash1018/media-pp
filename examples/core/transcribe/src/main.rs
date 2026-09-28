@@ -62,7 +62,7 @@ mod example {
     };
     use media_pp::ffmpeg;
     use media_pp::{
-        buffer::MediaBuffer, bus::BusEvent, element::Sink, ffmpeg::media, pipeline::Pipeline,
+        bus::BusEvent, element::Sink, ffmpeg::media, pipeline::Pipeline, stream::StreamEvent,
         subtitle,
     };
 
@@ -332,9 +332,9 @@ mod example {
         /// index; the sidecar has been written line by line and only needs
         /// closing.
         fn finish(&mut self) -> media_pp::Result<()> {
-            self.track.consume(MediaBuffer::Eos)?;
+            self.track.stream_event(&StreamEvent::Eos)?;
             if let Some((_, sink)) = &mut self.sidecar {
-                sink.consume(MediaBuffer::Eos)?;
+                sink.stream_event(&StreamEvent::Eos)?;
             }
             Ok(())
         }

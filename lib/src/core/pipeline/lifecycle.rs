@@ -432,7 +432,7 @@ impl Pipeline {
     }
 
     /// Gracefully completes every source and waits for the whole graph to
-    /// drain. Each source stops producing and places `MediaBuffer::Eos` behind
+    /// drain. Each source stops producing and places the end of its stream behind
     /// its already-produced data; queues preserve that order, stateful codecs
     /// flush delayed output, and muxers finalize only after their EOS arrives.
     ///

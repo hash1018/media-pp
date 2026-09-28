@@ -694,20 +694,15 @@ fn every_element_hears_each_request_once() {
 }
 
 fn hear_each_request_once() {
-    use crate::elements::AppSink;
-
     const NAMES: [&str; 3] = ["behind-two", "behind-three", "no-queue"];
     let heard: [Arc<Mutex<Vec<String>>>; 3] = Default::default();
     let sink = |at: usize| {
         let heard = Arc::clone(&heard[at]);
-        AppSink::with_control(
-            NAMES[at],
-            |_buffer| Ok(()),
-            move |msg| {
-                heard.lock().unwrap().push(format!("{msg:?}"));
-                Ok(())
-            },
-        )
+        Answering::new(NAMES[at], move |msg| {
+            heard.lock().unwrap().push(format!("{msg:?}"));
+            Ok(())
+        })
+        .0
     };
     let (pipeline, ()) = Pipeline::new(
         "heard-once",
@@ -748,23 +743,10 @@ fn hear_each_request_once() {
 /// was returned to the source, which ended its thread over it.
 #[test]
 fn a_sink_refusing_control_on_the_source_thread_does_not_end_the_source() {
-    use crate::elements::AppSink;
-
-    let taken = Arc::new(AtomicUsize::new(0));
-    let sink = AppSink::with_control(
-        "refusing",
-        {
-            let taken = Arc::clone(&taken);
-            move |_buffer| {
-                taken.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        },
-        |msg| match msg {
-            ControlMsg::Pause => Err(crate::error::Error::Other("refused".into())),
-            _ => Ok(()),
-        },
-    );
+    let (sink, taken) = Answering::new("refusing", |msg| match msg {
+        ControlMsg::Pause => Err(crate::error::Error::Other("refused".into())),
+        _ => Ok(()),
+    });
     let (pipeline, ()) = Pipeline::new(
         "refused",
         TestVideoSource::new("gen", TestVideoOptions::default()),
@@ -796,4 +778,61 @@ fn a_sink_refusing_control_on_the_source_thread_does_not_end_the_source() {
         }
     }
     assert_eq!(errors.len(), 1, "the refusal, reported: {errors:?}");
+}
+
+/// A terminal that answers each control request with `answer`, and counts
+/// the buffers it takes.
+struct Answering<F> {
+    pp_log: PpLog,
+    name: Arc<str>,
+    taken: Arc<AtomicUsize>,
+    answer: F,
+}
+
+impl<F> Answering<F>
+where
+    F: FnMut(&ControlMsg) -> Result<()> + Send + 'static,
+{
+    fn new(name: &str, answer: F) -> (Self, Arc<AtomicUsize>) {
+        let taken = Arc::new(AtomicUsize::new(0));
+        let sink = Self {
+            pp_log: element_pp_log(ElementType::Other, name, None),
+            name: name.into(),
+            taken: Arc::clone(&taken),
+            answer,
+        };
+        (sink, taken)
+    }
+}
+
+impl<F: Send + 'static> Element for Answering<F> {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl<F> Sink for Answering<F>
+where
+    F: FnMut(&ControlMsg) -> Result<()> + Send + 'static,
+{
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        self.taken.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        (self.answer)(msg)
+    }
 }

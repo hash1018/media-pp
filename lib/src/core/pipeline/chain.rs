@@ -20,7 +20,7 @@ use crate::{
     playback_state::PlaybackState,
     queue::{OverflowPolicy, Queue},
     stats::ElementCounters,
-    stream::{Event, StreamEvent},
+    stream::StreamEvent,
 };
 
 /// Builds one chain segment (a run of elements that all execute on the same
@@ -165,30 +165,14 @@ impl<T: Filter> Sink for FlowTracer<T> {
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let is_eos = buf.is_eos();
-        if is_eos {
-            pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
-        }
         let call = self
             .counters
             .as_deref()
-            .map(|counters| counters.begin(is_eos));
+            .map(|counters| counters.begin(false));
         let result = mark_stretch(&mut self.stretches, &mut self.inner, &buf)
             .and_then(|()| self.inner.consume(buf));
         if let Some(call) = call {
             call.end(result.is_ok());
-        }
-        if is_eos {
-            match &result {
-                Ok(()) => pp_trace!(
-                    pp_log: self.inner.pp_log(),
-                    "event=eos phase=completed outcome=ok"
-                ),
-                Err(error) => pp_trace!(
-                    pp_log: self.inner.pp_log(),
-                    "event=eos phase=completed outcome=error error={error}"
-                ),
-            }
         }
         self.trace_origin(result)
     }
@@ -226,27 +210,42 @@ impl<T: Filter> Sink for FlowTracer<T> {
     /// As [`Self::control`]: the filter's reaction — which pushes whatever
     /// it answers the event with, ahead of it — and then the event on
     /// through its pads, every one of them even where one fails.
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
-        let Event(carried) = event;
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         pp_trace!(
             pp_log: self.inner.pp_log(),
-            "event={carried} phase=received"
+            "event={event} phase=received"
         );
-        let StreamEvent::Segment(segment) = carried;
-        if let Some(stretches) = &mut self.stretches {
-            stretches.backwards = segment.backwards;
-        }
-        let reacted = self.inner.stream_event(event);
-        let forwarded = crate::stream::forward(self.inner.src_pads(), carried);
+        let call = match event {
+            StreamEvent::Eos => self
+                .counters
+                .as_deref()
+                .map(|counters| counters.begin(true)),
+            StreamEvent::Segment(_) => None,
+        };
+        let reacted = match event {
+            StreamEvent::Segment(segment) => {
+                if let Some(stretches) = &mut self.stretches {
+                    stretches.backwards = segment.backwards;
+                }
+                self.inner.stream_event(event)
+            }
+            // The last stretch ends with the stream.
+            StreamEvent::Eos => end_last_stretch(&mut self.stretches, &mut self.inner)
+                .and_then(|()| self.inner.stream_event(event)),
+        };
+        let forwarded = crate::stream::forward(self.inner.src_pads(), event);
         let result = reacted.and(forwarded);
+        if let Some(call) = call {
+            call.end(result.is_ok());
+        }
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: self.inner.pp_log(),
-                "event={carried} phase=completed outcome=ok"
+                "event={event} phase=completed outcome=ok"
             ),
             Err(error) => pp_trace!(
                 pp_log: self.inner.pp_log(),
-                "event={carried} phase=completed outcome=error error={error}"
+                "event={event} phase=completed outcome=error error={error}"
             ),
         }
         self.trace_origin(result)
@@ -256,7 +255,7 @@ impl<T: Filter> Sink for FlowTracer<T> {
 /// Tells a [`ReversibleDecoder`] where a stretch played backwards begins
 /// and ends, before it is handed `buf`: a stretch ends where a packet's
 /// decode time goes back, the next beginning with that packet, and the
-/// last ends with the end of the stream.
+/// last ends with the end of the stream (`end_last_stretch`).
 fn mark_stretch<T: Filter>(
     stretches: &mut Option<Stretches>,
     inner: &mut T,
@@ -273,36 +272,45 @@ fn mark_stretch<T: Filter>(
     let Some(reversible) = inner.as_reversible() else {
         return Ok(());
     };
-    match buf {
-        MediaBuffer::Packet(packet) => {
-            let decoded = packet.dts().or_else(|| packet.pts());
-            let goes_back = matches!(
-                (stretches.last, decoded),
-                (Some(last), Some(now)) if now < last
-            );
-            if stretches.open && goes_back {
-                stretches.open = false;
-                pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=end");
-                reversible.end_stretch()?;
-            }
-            if !stretches.open {
-                stretches.open = true;
-                pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=begin");
-                reversible.begin_stretch()?;
-            }
-            if decoded.is_some() {
-                stretches.last = decoded;
-            }
-        }
-        MediaBuffer::Eos if stretches.open => {
+    if let MediaBuffer::Packet(packet) = buf {
+        let decoded = packet.dts().or_else(|| packet.pts());
+        let goes_back = matches!(
+            (stretches.last, decoded),
+            (Some(last), Some(now)) if now < last
+        );
+        if stretches.open && goes_back {
             stretches.open = false;
-            stretches.last = None;
             pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=end");
             reversible.end_stretch()?;
         }
-        _ => {}
+        if !stretches.open {
+            stretches.open = true;
+            pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=begin");
+            reversible.begin_stretch()?;
+        }
+        if decoded.is_some() {
+            stretches.last = decoded;
+        }
     }
     Ok(())
+}
+
+/// Ends the stretch under way, where one is, as the stream ends — see
+/// `mark_stretch`.
+fn end_last_stretch<T: Filter>(stretches: &mut Option<Stretches>, inner: &mut T) -> Result<()> {
+    let Some(stretches) = stretches else {
+        return Ok(());
+    };
+    if !stretches.open {
+        return Ok(());
+    }
+    stretches.open = false;
+    stretches.last = None;
+    let Some(reversible) = inner.as_reversible() else {
+        return Ok(());
+    };
+    pp_trace!(pp_log: reversible.pp_log(), "event=stretch phase=end");
+    reversible.end_stretch()
 }
 
 impl<T: Element> FlowTracer<T> {
@@ -443,10 +451,7 @@ impl Sink for TerminalTracer {
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let is_eos = buf.is_eos();
-        if is_eos {
-            pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
-        } else if self
+        if self
             .state
             .preroll()
             .is_some_and(|context| context.drops_for(self.id))
@@ -460,7 +465,7 @@ impl Sink for TerminalTracer {
             MediaBuffer::Video(frame) => picture_position(frame),
             _ => None,
         };
-        let call = self.counters.begin(is_eos);
+        let call = self.counters.begin(false);
         let result = self.inner.consume(buf);
         call.end(result.is_ok());
         if result.is_ok()
@@ -474,37 +479,10 @@ impl Sink for TerminalTracer {
         if result.is_ok()
             && let Some(context) = self.state.preroll()
         {
-            if is_eos {
-                context.mark_eos(self.id);
-            } else {
-                context.mark_ready(self.id);
-            }
+            context.mark_ready(self.id);
             // A `Tee` holding a sibling branch back for this one looks
             // again now, rather than when it next happens to.
             self.state.sample_taken();
-        }
-        if is_eos {
-            match &result {
-                Ok(()) => {
-                    pp_trace!(
-                        pp_log: self.inner.pp_log(),
-                        "event=eos phase=completed outcome=ok"
-                    );
-                    self.bus.post(
-                        self.inner.pp_log(),
-                        BusEvent::Eos {
-                            element_type: self.inner.element_type(),
-                            name: self.inner.name(),
-                        },
-                    );
-                    let on = self.timeline.unwrap_or_else(|| self.state.timeline());
-                    self.completion.terminal_ended(self.id, on, &self.bus);
-                }
-                Err(error) => pp_trace!(
-                    pp_log: self.inner.pp_log(),
-                    "event=eos phase=completed outcome=error error={error}"
-                ),
-            }
         }
         // The end of a branch is where a muxer sits, so this is the stamp
         // that matters most — see `FlowTracer::trace_origin`.
@@ -540,27 +518,56 @@ impl Sink for TerminalTracer {
         result
     }
 
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
-        let Event(carried) = event;
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         pp_trace!(
             pp_log: self.inner.pp_log(),
-            "event={carried} phase=received"
+            "event={event} phase=received"
         );
-        let StreamEvent::Segment(segment) = carried;
-        self.timeline = Some(segment.id);
-        let result = self
-            .inner
-            .stream_event(event)
-            .map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()));
+        let result = match event {
+            StreamEvent::Segment(segment) => {
+                self.timeline = Some(segment.id);
+                self.inner.stream_event(event)
+            }
+            StreamEvent::Eos => self.end(),
+        }
+        .map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()));
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: self.inner.pp_log(),
-                "event={carried} phase=completed outcome=ok"
+                "event={event} phase=completed outcome=ok"
             ),
             Err(error) => pp_trace!(
                 pp_log: self.inner.pp_log(),
-                "event={carried} phase=completed outcome=error error={error}"
+                "event={event} phase=completed outcome=error error={error}"
             ),
+        }
+        result
+    }
+}
+
+impl TerminalTracer {
+    /// The end of the stream, where the terminal finishes — a muxer its
+    /// file, a renderer what it has to play — and, once it has, what that
+    /// ends: a preroll waiting on it, and the terminal itself, on the bus
+    /// and for the pipeline to say when every one has.
+    fn end(&mut self) -> Result<()> {
+        let call = self.counters.begin(true);
+        let result = self.inner.stream_event(&StreamEvent::Eos);
+        call.end(result.is_ok());
+        if result.is_ok() {
+            if let Some(context) = self.state.preroll() {
+                context.mark_eos(self.id);
+                self.state.sample_taken();
+            }
+            self.bus.post(
+                self.inner.pp_log(),
+                BusEvent::Eos {
+                    element_type: self.inner.element_type(),
+                    name: self.inner.name(),
+                },
+            );
+            let on = self.timeline.unwrap_or_else(|| self.state.timeline());
+            self.completion.terminal_ended(self.id, on, &self.bus);
         }
         result
     }

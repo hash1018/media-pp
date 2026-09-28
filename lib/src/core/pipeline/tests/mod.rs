@@ -20,6 +20,7 @@ use crate::elements::{
     TestVideoSource, VideoSynchronizer,
 };
 use crate::graph::GraphError;
+use crate::stream::StreamEvent;
 use crate::test_support::try_test_video;
 use crate::{
     control::{ControlReceiver, drain_control},
@@ -116,12 +117,15 @@ impl Element for SlowEosSink {
 }
 
 impl Sink for SlowEosSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        if buf.is_eos() {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        thread::sleep(Duration::from_millis(5));
+        self.count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let StreamEvent::Eos = event {
             self.saw_eos.store(true, Ordering::Release);
-        } else {
-            thread::sleep(Duration::from_millis(5));
-            self.count.fetch_add(1, Ordering::AcqRel);
         }
         Ok(())
     }
@@ -177,15 +181,13 @@ impl Element for CountingSink {
     }
 }
 impl Sink for CountingSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        // Anything but `Eos` counts — covers `FileDemuxer`'s `Packet`s
-        // (what every other test using this sink actually sends) and
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        // Every buffer counts — `FileDemuxer`'s `Packet`s (what every other
+        // test using this sink actually sends) and
         // `TestVideoSource`/`TestAudioSource`'s `Video`/`Audio` frames
         // (what `multi_source_pipeline_stops_every_source_from_one_stop_call`
         // sends) alike.
-        if !buf.is_eos() {
-            self.count.fetch_add(1, Ordering::SeqCst);
-        }
+        self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }

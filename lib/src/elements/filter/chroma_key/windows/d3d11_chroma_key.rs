@@ -120,7 +120,7 @@ pub enum D3d11ChromaKeyError {
     },
     /// The sink received a buffer other than decoded video or end-of-stream.
 
-    #[error("D3d11ChromaKey only accepts Video and Eos buffers, got a {0}")]
+    #[error("D3d11ChromaKey only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 }
 
@@ -575,8 +575,6 @@ impl Transform for Keying {
             }
             // Nothing is buffered here — one `Draw` per frame, pushed
             // before `consume` returns — so there is nothing to drain.
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");
@@ -922,7 +920,7 @@ mod tests {
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
         key.consume(source).expect("keying must succeed");
-        key.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut key, &crate::stream::StreamEvent::Eos).expect("eos");
 
         let received = received.lock().unwrap();
         let MediaBuffer::Video(keyed) = &received[0] else {
@@ -937,10 +935,6 @@ mod tests {
         assert!(
             d3d11va_texture(keyed).is_some(),
             "the keyed frame must carry a texture"
-        );
-        assert!(
-            received.last().is_some_and(MediaBuffer::is_eos),
-            "Eos was not forwarded"
         );
     }
 

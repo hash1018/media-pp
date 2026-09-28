@@ -35,7 +35,7 @@ const RTMP_SCHEMES: [&str; 6] = ["rtmp", "rtmps", "rtmpt", "rtmpe", "rtmpte", "r
 #[derive(Debug, ThisError)]
 pub enum RtmpMuxerError {
     /// A stream sink received a buffer other than a packet or end-of-stream.
-    #[error("RtmpMuxer stream sinks only accept Packet or Eos buffers, got {0}")]
+    #[error("RtmpMuxer stream sinks only accept Packet buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// FFmpeg rejected the connection, the FLV header, packet writing, or

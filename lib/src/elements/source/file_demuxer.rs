@@ -1709,7 +1709,7 @@ mod tests {
         let track = muxer.add_stream("video", &encoder).unwrap();
         let mut sinks = muxer.open().unwrap();
         let mut sink = sinks.take(track).unwrap();
-        sink.consume(MediaBuffer::Eos).unwrap();
+        sink.stream_event(&crate::stream::StreamEvent::Eos).unwrap();
         drop(sink);
         drop(sinks);
 
@@ -1753,16 +1753,19 @@ mod tests {
     }
 
     impl crate::element::Sink for CountingSink {
+        fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
+            if let crate::stream::StreamEvent::Eos = event {
+                self.saw_eos.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            match buf {
-                MediaBuffer::Eos => self.saw_eos.store(true, Ordering::SeqCst),
-                MediaBuffer::Packet(packet) => {
-                    if packet.time_base() != self.expected_time_base {
-                        self.time_base_matches.store(false, Ordering::SeqCst);
-                    }
-                    self.count.fetch_add(1, Ordering::SeqCst);
+            if let MediaBuffer::Packet(packet) = buf {
+                if packet.time_base() != self.expected_time_base {
+                    self.time_base_matches.store(false, Ordering::SeqCst);
                 }
-                _ => {}
+                self.count.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
         }
@@ -1816,24 +1819,27 @@ mod tests {
     }
 
     impl crate::element::Sink for LoopSink {
+        fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
+            if let crate::stream::StreamEvent::Eos = event {
+                self.saw_eos.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            match buf {
-                MediaBuffer::Eos => self.saw_eos.store(true, Ordering::SeqCst),
-                MediaBuffer::Packet(packet) => {
-                    if let Some(dts) = packet.dts().or_else(|| packet.pts()) {
-                        let mut last = self.last_dts.lock().unwrap();
-                        if last.is_some_and(|last| dts < last) {
-                            self.climbing.store(false, Ordering::SeqCst);
-                        }
-                        *last = Some(dts);
+            if let MediaBuffer::Packet(packet) = buf {
+                if let Some(dts) = packet.dts().or_else(|| packet.pts()) {
+                    let mut last = self.last_dts.lock().unwrap();
+                    if last.is_some_and(|last| dts < last) {
+                        self.climbing.store(false, Ordering::SeqCst);
                     }
-                    // Past a whole pass of the file: the source is into its
-                    // second lap, so let that one play out and then end.
-                    if self.count.fetch_add(1, Ordering::SeqCst) + 1 > self.lap {
-                        self.handle.set_looping(false);
-                    }
+                    *last = Some(dts);
                 }
-                _ => {}
+                // Past a whole pass of the file: the source is into its
+                // second lap, so let that one play out and then end.
+                if self.count.fetch_add(1, Ordering::SeqCst) + 1 > self.lap {
+                    self.handle.set_looping(false);
+                }
             }
             Ok(())
         }
@@ -2745,11 +2751,13 @@ mod tests {
         fn ready_consume(&mut self) -> bool {
             self.open.load(Ordering::SeqCst)
         }
-        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            if buf.is_eos() {
+        fn consume(&mut self, _buf: MediaBuffer) -> crate::error::Result<()> {
+            self.packets.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
+            if let crate::stream::StreamEvent::Eos = event {
                 self.ended.store(true, Ordering::SeqCst);
-            } else {
-                self.packets.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
         }

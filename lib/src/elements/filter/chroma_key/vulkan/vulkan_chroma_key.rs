@@ -229,8 +229,6 @@ impl Transform for Keying {
                 out.push(MediaBuffer::Video(keyed));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => {
                 let kind = other.kind();
                 pp_error!(self, "unsupported buffer: {kind}");

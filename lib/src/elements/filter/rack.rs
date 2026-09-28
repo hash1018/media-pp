@@ -12,7 +12,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     stash::OutputStash,
-    stream::Event,
+    stream::StreamEvent,
 };
 
 /// Errors produced while filling a [`Rack`].
@@ -216,13 +216,8 @@ impl Rack {
         (rack, RackHandle { control })
     }
 
-    /// Hands `buf` on through the stash — or, the end of the stream, after
-    /// everything kept, whatever the pad says: nothing would take it after.
+    /// Hands `buf` on through the stash.
     fn hand_on(&mut self, buf: MediaBuffer) -> Result<()> {
-        if buf.is_eos() {
-            let kept = self.stash.release_all(&mut self.pad);
-            return kept.and(self.pad.push(buf));
-        }
         self.stash.push(&mut self.pad, buf)
     }
 
@@ -324,11 +319,11 @@ impl Sink for Rack {
 
     /// Into the rack here, what it answers pushed ahead of it, and past it
     /// once this returns — as control goes.
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         // What is kept came before the event, and goes before what the line
         // answers it with.
         let mut first = self.stash.release_all(&mut self.pad);
-        for buf in self.line.stream_event(event.0)? {
+        for buf in self.line.stream_event(event)? {
             if let Err(error) = self.pad.push(buf) {
                 first = first.and(Err(error));
             }

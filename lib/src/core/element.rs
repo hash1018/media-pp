@@ -32,6 +32,7 @@ use crate::{
     pad::SrcPad,
     playback_clock::PlaybackClock,
     stats::{ElementCounters, TickCounters},
+    stream::StreamEvent,
 };
 
 pub use crate::produce::{
@@ -491,8 +492,7 @@ pub trait Sink: Element {
     /// An error is returned directly to upstream until the call crosses a
     /// [`crate::queue::Queue`] boundary. A queue instead reports the error on
     /// its [`crate::bus::Bus`], drops that buffer, and keeps its worker alive.
-    /// Implementations must forward [`MediaBuffer::Eos`] after flushing any
-    /// delayed state they own.
+    /// Never handed the end of the stream: that is [`Self::stream_event`]'s.
     ///
     /// For a terminal sink, returning `Ok(())` means the buffer has been
     /// accepted into that sink's output path. Pipeline preroll uses precisely
@@ -570,13 +570,17 @@ pub trait Sink: Element {
     }
 
     /// Reacts to an event carried in the stream, in order with the buffers
-    /// around it — only the reaction, as with [`Self::control`]: the graph
-    /// passes the event on through a filter's pads once this returns. Not
-    /// for elements outside this crate yet, which is why its argument is a
-    /// type nothing outside can name; the graph passes every event on
-    /// around such an element.
-    #[doc(hidden)]
-    fn stream_event(&mut self, _event: crate::stream::Event<'_>) -> Result<()> {
+    /// around it — a [`Segment`](crate::stream::Segment) beginning a run of
+    /// them, a flushed one after a seek, the end of the stream — see
+    /// [`crate::stream`].
+    ///
+    /// Only the reaction, as with [`Self::control`]: a filter pushes what it
+    /// answers the event with from here — a decoder what it still holds at
+    /// the end — and the graph passes the event on through its pads once
+    /// this returns, whatever it returns. A terminal's reaction to the end
+    /// is where it finishes: a muxer its file, a renderer what it still has
+    /// to play.
+    fn stream_event(&mut self, _event: &StreamEvent) -> Result<()> {
         Ok(())
     }
 }
@@ -875,7 +879,7 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
         (**self).control(msg)
     }
 
-    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> Result<()> {
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         (**self).stream_event(event)
     }
 }
@@ -928,7 +932,7 @@ mod tests {
             Err(crate::error::Error::Other("opinionated".into()))
         }
 
-        fn stream_event(&mut self, _event: crate::stream::Event<'_>) -> Result<()> {
+        fn stream_event(&mut self, _event: &StreamEvent) -> Result<()> {
             Err(crate::error::Error::Other("opinionated".into()))
         }
     }
@@ -954,7 +958,7 @@ mod tests {
                 InputContract::Fixed(PortContract::packet(MediaKind::AudioPacket)),
                 "not the default of Unknown"
             );
-            sink.consume(MediaBuffer::Eos).unwrap();
+            sink.consume(packet()).unwrap();
             assert!(
                 sink.control(&ControlMsg::Pause).is_err(),
                 "not the default of doing nothing"
@@ -968,7 +972,7 @@ mod tests {
                 backwards: false,
             }));
             assert!(
-                sink.stream_event(crate::stream::Event(&segment)).is_err(),
+                sink.stream_event(&segment).is_err(),
                 "nor for an event in the stream"
             );
         }
@@ -977,8 +981,12 @@ mod tests {
         check(Box::new(Box::new(opinionated()) as Box<dyn Sink>));
 
         let mut boxed: Box<dyn Sink> = Box::new(opinionated());
-        boxed.consume(MediaBuffer::Eos).unwrap();
+        boxed.consume(packet()).unwrap();
         let mut twice = Box::new(boxed);
-        twice.consume(MediaBuffer::Eos).unwrap();
+        twice.consume(packet()).unwrap();
+    }
+
+    fn packet() -> MediaBuffer {
+        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
     }
 }

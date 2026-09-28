@@ -308,8 +308,6 @@ impl Transform for Uploading {
                 out.push(MediaBuffer::Video(uploaded));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => Err(VulkanUploadError::UnsupportedBuffer(other.kind()).into()),
         }
     }

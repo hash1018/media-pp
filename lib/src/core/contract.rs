@@ -49,9 +49,9 @@ use ffmpeg_next as ffmpeg;
 /// stream parameters it was opened with, or from being an audio encoder
 /// rather than a video one — so the distinction costs nothing to state.
 ///
-/// [`MediaBuffer::Eos`](crate::buffer::MediaBuffer::Eos) is deliberately
-/// absent: every sink must accept EOS, so it is never part of what a
-/// contract can rule out.
+/// The end of the stream is not a buffer at all — see
+/// [`StreamEvent::Eos`](crate::stream::StreamEvent::Eos) — so it is never
+/// part of what a contract can rule out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
     /// Encoded video, as [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet).

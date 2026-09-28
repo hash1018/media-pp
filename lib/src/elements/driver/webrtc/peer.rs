@@ -421,7 +421,7 @@ impl WebRtcPeer {
             return Ok(());
         };
         let MediaBuffer::Packet(packet) = buf else {
-            return Ok(()); // Eos: nothing to write, nothing to flush
+            return Ok(()); // a frame: refused by the track, never reaches here
         };
         let Some(writer) = self.rtc.writer(*mid) else {
             return Ok(());

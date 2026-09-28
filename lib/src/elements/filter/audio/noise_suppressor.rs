@@ -298,8 +298,6 @@ impl Transform for Suppressing {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => self.process(frame, out),
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(NoiseSuppressorError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(NoiseSuppressorError::UnsupportedBuffer("Video").into()),
         }
@@ -349,7 +347,7 @@ mod tests {
                 .consume(MediaBuffer::Audio(Arc::new(frame)))
                 .unwrap();
         }
-        suppressor.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(suppressor, &crate::stream::StreamEvent::Eos).unwrap();
     }
 
     /// Every audio frame that came out, as (pts, first channel).
@@ -468,17 +466,13 @@ mod tests {
             // Held back until RNNoise has given back what they need.
             assert!(received.lock().unwrap().len() <= index);
         }
-        suppressor.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut suppressor, &crate::stream::StreamEvent::Eos).unwrap();
 
         let out: Vec<_> = frames_out(&received)
             .into_iter()
             .map(|(pts, samples)| (pts, samples.len()))
             .collect();
         assert_eq!(out, expected);
-        assert!(matches!(
-            received.lock().unwrap().last(),
-            Some(MediaBuffer::Eos)
-        ));
     }
 
     /// A different channel count is a different signal: what the old one
@@ -519,11 +513,11 @@ mod tests {
             )))
             .unwrap();
         suppressor.control(&ControlMsg::Flush).unwrap();
-        suppressor.consume(MediaBuffer::Eos).unwrap();
-        assert!(matches!(
-            received.lock().unwrap().as_slice(),
-            [MediaBuffer::Eos]
-        ));
+        crate::stream::deliver(&mut suppressor, &crate::stream::StreamEvent::Eos).unwrap();
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "what the flush dropped never comes out"
+        );
     }
 
     #[test]
@@ -553,10 +547,10 @@ mod tests {
             error,
             crate::Error::NoiseSuppressorError(NoiseSuppressorError::UnsupportedSampleFormat(_))
         ));
-        suppressor.consume(MediaBuffer::Eos).unwrap();
-        assert!(matches!(
-            received.lock().unwrap().as_slice(),
-            [MediaBuffer::Eos]
-        ));
+        crate::stream::deliver(&mut suppressor, &crate::stream::StreamEvent::Eos).unwrap();
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "nothing refused was held"
+        );
     }
 }

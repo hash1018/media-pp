@@ -320,11 +320,11 @@ impl D3d11SharedTextureHandle {
             .map_err(|_| D3d11SharedTextureSourceError::Closed)
     }
 
-    /// Ends the stream, the same as pushing `Eos` into an [`AppSource`] —
-    /// or drop every clone of this, which does the same thing.
+    /// Ends the stream, as [`AppSourceHandle::finish`] does — or drop every
+    /// clone of this, which does the same thing.
     pub fn finish(&self) -> std::result::Result<(), D3d11SharedTextureSourceError> {
         self.pusher
-            .push(MediaBuffer::Eos)
+            .finish()
             .map_err(|_| D3d11SharedTextureSourceError::Closed)
     }
 }
@@ -802,10 +802,8 @@ mod tests {
         let (pipeline, ()) = Pipeline::new("shared-texture", source, move |source, ctx| {
             let branch = ctx.branch().to(crate::elements::AppSink::new(
                 "count",
-                move |buf: MediaBuffer| {
-                    if !buf.is_eos() {
-                        counted.fetch_add(1, Ordering::SeqCst);
-                    }
+                move |_buf: MediaBuffer| {
+                    counted.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 },
             ))?;

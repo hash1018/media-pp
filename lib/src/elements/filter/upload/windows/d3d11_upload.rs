@@ -337,8 +337,6 @@ impl Transform for Uploading {
                 out.push(MediaBuffer::Video(uploaded));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
                 Err(D3d11UploadError::UnsupportedBuffer("Packet").into())

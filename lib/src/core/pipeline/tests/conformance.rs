@@ -214,7 +214,6 @@ impl Sink for Recorder {
             MediaBuffer::Audio(frame) => Entry::Data {
                 pts: self.pts(frame),
             },
-            MediaBuffer::Eos => Entry::Eos,
             _ => Entry::Data { pts: None },
         };
         self.log.lock().unwrap().push(entry);
@@ -232,9 +231,23 @@ impl Sink for Recorder {
 
     /// A flushed segment on a later timeline than the one before it — a
     /// seek's — and one not flushed on the same timeline: a lap of a looping
-    /// file, which no seek began. The stream's first is not flushed.
-    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> Result<()> {
-        let crate::stream::StreamEvent::Segment(segment) = event.0;
+    /// file, which no seek began. The stream's first is not flushed. The
+    /// end, like a buffer, only inside a segment.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        let segment = match event {
+            StreamEvent::Segment(segment) => segment,
+            StreamEvent::Eos => {
+                if self.segment.is_none() {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(Entry::Outside("eos before any segment".into()));
+                }
+                thread::sleep(self.delay);
+                self.log.lock().unwrap().push(Entry::Eos);
+                return Ok(());
+            }
+        };
         let mut log = self.log.lock().unwrap();
         if let Some(before) = self.segment
             && (if segment.flushed {

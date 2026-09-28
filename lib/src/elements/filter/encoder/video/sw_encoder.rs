@@ -32,7 +32,7 @@ pub enum SwEncoderError {
     CodecNotFound(String),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("SwEncoder only accepts Video or Eos buffers, got {0}")]
+    #[error("SwEncoder only accepts Video buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// A frame arrived with a `pts` but no unit to read it in, so there is
@@ -529,8 +529,6 @@ impl Transform for Encoding {
                     .map_err(SwEncoderError::from)?;
                 self.receive_packets(out)
             }
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             other => Err(SwEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -696,7 +694,7 @@ mod tests {
             frame.data_mut(plane).fill(128);
         }
         encoder.consume(MediaBuffer::video(frame)).unwrap();
-        encoder.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
 
         let packets = packets.lock().unwrap();
         assert!(!packets.is_empty(), "expected at least one packet");
@@ -762,7 +760,7 @@ mod tests {
         encoder
             .consume(grey(200, Some(ffmpeg::Rational::new(1, 1000))))
             .unwrap();
-        encoder.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
 
         let tick = |seconds: f64| (seconds * f64::from(encoder.time_base().denominator())) as i64;
         let pts: Vec<_> = packets.lock().unwrap().iter().map(|p| p.pts()).collect();
@@ -781,7 +779,7 @@ mod tests {
             error,
             crate::Error::SwEncoderError(SwEncoderError::NoTimeBase)
         ));
-        encoder.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
         assert!(packets.lock().unwrap().is_empty());
     }
 
@@ -908,7 +906,7 @@ mod tests {
                 .consume(picture(format, 64, 64))
                 .expect("a frame in the opened layout encodes");
         }
-        encoder.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
         assert!(!packets.lock().unwrap().is_empty());
     }
 
@@ -1002,7 +1000,7 @@ mod tests {
         encoder
             .consume(picture(Pixel::NV12, 64, 64))
             .expect("NV12 encodes");
-        encoder.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
         assert!(!packets.lock().unwrap().is_empty());
     }
 }

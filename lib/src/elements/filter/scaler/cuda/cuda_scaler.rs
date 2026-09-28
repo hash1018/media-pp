@@ -39,7 +39,7 @@ pub enum CudaScalerError {
     FilterNotFound(&'static str),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("CudaScaler only accepts Video and Eos buffers, got a {0}")]
+    #[error("CudaScaler only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
     /// The frame is not a surface `scale_cuda` resizes, on this element's
@@ -391,8 +391,6 @@ impl Transform for Scaling {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.scale(&frame, out),
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             other => Err(CudaScalerError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -665,7 +663,7 @@ mod tests {
         scaler.src_pads()[0].link(Box::new(download));
 
         scaler.consume(frame).expect("scale");
-        scaler.consume(MediaBuffer::Eos).expect("eos");
+        crate::stream::deliver(&mut scaler, &crate::stream::StreamEvent::Eos).expect("eos");
 
         let received = received.lock().unwrap();
         let MediaBuffer::Video(scaled) = &received[0] else {
@@ -684,10 +682,6 @@ mod tests {
                 );
             }
         }
-        assert!(
-            received.last().is_some_and(MediaBuffer::is_eos),
-            "Eos was not forwarded"
-        );
     }
 
     /// The point of the element: real NVDEC output is resized without ever
@@ -816,7 +810,7 @@ mod tests {
                 .consume(MediaBuffer::Packet(Arc::new(packet)))
                 .expect("decode");
         }
-        decoder.consume(MediaBuffer::Eos).expect("drain");
+        crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos).expect("drain");
         let decoded = std::mem::take(&mut *decoded.lock().unwrap());
         let mut sent = Vec::new();
         for buffer in decoded {

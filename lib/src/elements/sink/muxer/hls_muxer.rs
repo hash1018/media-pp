@@ -260,7 +260,7 @@ fn has_integer_conversion(pattern: &str) -> bool {
 #[derive(Debug, ThisError)]
 pub enum HlsMuxerError {
     /// A stream sink received a buffer other than a packet or end-of-stream.
-    #[error("HlsMuxer stream sinks only accept Packet or Eos buffers, got {0}")]
+    #[error("HlsMuxer stream sinks only accept Packet buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// [`HlsOptions::segment_duration`] is zero.
@@ -478,8 +478,7 @@ mod tests {
                 ))))
                 .expect("encoding and muxing must succeed");
         }
-        encoder
-            .consume(MediaBuffer::Eos)
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
             .expect("EOS must finalize the HLS playlist");
     }
 
@@ -671,7 +670,7 @@ mod tests {
                 .unwrap();
         }
 
-        encoder_a.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder_a, &crate::stream::StreamEvent::Eos).unwrap();
         if let Ok(unfinished) = std::fs::read_to_string(&playlist_path) {
             assert!(
                 !unfinished.contains("#EXT-X-ENDLIST"),
@@ -689,7 +688,7 @@ mod tests {
                 ))))
                 .unwrap();
         }
-        encoder_b.consume(MediaBuffer::Eos).unwrap();
+        crate::stream::deliver(&mut encoder_b, &crate::stream::StreamEvent::Eos).unwrap();
         let finished = std::fs::read_to_string(&playlist_path).unwrap();
         assert!(finished.contains("#EXT-X-ENDLIST"));
 

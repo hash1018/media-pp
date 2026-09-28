@@ -32,6 +32,7 @@ use crate::{
         PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
     },
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
+    stream::StreamEvent,
 };
 
 /// How long [`PipeWireAudioRenderer::open`] waits for the stream to negotiate a
@@ -958,18 +959,22 @@ impl Sink for PipeWireAudioRenderer {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => self.render(&frame),
-            MediaBuffer::Eos => {
-                pp_trace!(self, "event=eos phase=received");
-                let outcome = self.drain();
-                pp_trace!(
-                    self,
-                    "event=eos phase=drained outcome={}",
-                    if outcome.is_ok() { "ok" } else { "error" }
-                );
-                outcome
-            }
             other => Err(PipeWireAudioRendererError::UnexpectedBuffer(other.kind()).into()),
         }
+    }
+
+    /// The end of the stream is played out before it is taken.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        let StreamEvent::Eos = event else {
+            return Ok(());
+        };
+        let outcome = self.drain();
+        pp_trace!(
+            self,
+            "event=eos phase=drained outcome={}",
+            if outcome.is_ok() { "ok" } else { "error" }
+        );
+        outcome
     }
 
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
@@ -1628,7 +1633,7 @@ mod tests {
 
         let started = Instant::now();
         renderer
-            .consume(MediaBuffer::Eos)
+            .stream_event(&StreamEvent::Eos)
             .expect("the end is taken");
         assert!(
             started.elapsed() < Duration::from_secs(1),

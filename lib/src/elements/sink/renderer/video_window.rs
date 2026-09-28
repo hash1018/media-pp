@@ -19,7 +19,7 @@ use crate::{
     elements::{WindowControl, WindowEvents, WindowOptions},
     error::Result,
     pp_log::PpLog,
-    stream::Event,
+    stream::StreamEvent,
 };
 
 /// Why a [`VideoWindow`] could not be opened.
@@ -216,7 +216,7 @@ impl Sink for VideoWindow {
         self.renderer.control(msg)
     }
 
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         self.renderer.stream_event(event)
     }
 }

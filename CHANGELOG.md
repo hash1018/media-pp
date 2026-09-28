@@ -12,6 +12,31 @@ compile error with no explanation.
 
 ### Breaking
 
+- **The end of a stream is `StreamEvent::Eos`, not a buffer.**
+  `MediaBuffer` is data only: `MediaBuffer::Eos` and `is_eos` are gone,
+  and the end travels as an event in the stream, in order with the
+  buffers, as a segment already did. The `stream` module is public, and a
+  `Sink` hears the end through `stream_event(&StreamEvent)` — a muxer
+  track, `FrameCounter` and a sink of your own alike — never through
+  `consume`. An element in the middle of a chain never passes the end on
+  itself: it reacts, pushing whatever it still holds, and the pipeline
+  passes the end on after it. So:
+  - `handle.push(MediaBuffer::Eos)` on an `AppSourceHandle` is
+    `handle.finish()`;
+  - `sink.consume(MediaBuffer::Eos)` on a sink driven by hand is
+    `sink.stream_event(&StreamEvent::Eos)`;
+  - a `consume` that matched `MediaBuffer::Eos` moves that arm into
+    `stream_event`, and a filter of your own that pushed `Eos` on after
+    draining now only drains.
+
+- **`AppSink::with_control` is `AppSink::with_events`**, whose closure is
+  handed each `&StreamEvent` — the end, and each segment, a seek's one
+  flushed — instead of each `ControlMsg`. A closure that finalized on
+  `MediaBuffer::Eos` in `consume` does it on `StreamEvent::Eos` there; one
+  that reset on `ControlMsg::Seek` resets on a flushed
+  `StreamEvent::Segment`. `AppSink::new` lets every event by, as it let
+  every control message by.
+
 - **`VideoCompositorOptions` has a `mode`.** Every video compositor —
   `SwVideoCompositor`, `D3d11VideoCompositor`, `CudaVideoCompositor` —
   takes it, and `RenderMode::Live` is what they all did before. A struct

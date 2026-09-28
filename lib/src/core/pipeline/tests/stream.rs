@@ -6,7 +6,7 @@
 use super::*;
 
 use crate::elements::{Rack, TeeHandle};
-use crate::stream::{Event, StreamEvent};
+use crate::stream::StreamEvent;
 
 /// What an element on the stream was handed, in the order it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,8 +75,10 @@ impl Sink for Watcher {
         self.pad.push(buf)
     }
 
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
-        let StreamEvent::Segment(segment) = event.0;
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        let StreamEvent::Segment(segment) = event else {
+            return Ok(());
+        };
         self.seen.lock().unwrap().push(Seen::Segment {
             id: segment.id,
             flushed: segment.flushed,

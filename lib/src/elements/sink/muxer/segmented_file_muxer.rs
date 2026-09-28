@@ -16,6 +16,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
+    stream::StreamEvent,
 };
 
 /// How a [`SegmentedFileMuxer`] decides a segment is done and it's time to
@@ -560,7 +561,7 @@ impl SegmentGroup {
     fn finish_eos(&self, track_index: usize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let released = self.release_ending(&mut state, track_index);
-        let ended = state.current_sinks[track_index].consume(MediaBuffer::Eos);
+        let ended = state.current_sinks[track_index].stream_event(&StreamEvent::Eos);
         released.and(ended)
     }
 
@@ -622,12 +623,20 @@ impl Sink for SegmentedTrackSink {
                 self.group
                     .consume_packet(self.track_index, packet, &self.pp_log)
             }
-            MediaBuffer::Eos => self.group.finish_eos(self.track_index),
             // The `FileMuxer` each rotated segment wraps already rejects
             // this — matching its own track sinks' `consume` here
             // instead of silently no-op'ing keeps that protection visible
             // through the rotation wrapper instead of swallowing it.
             other => Err(FileMuxerError::UnsupportedBuffer(other.kind()).into()),
+        }
+    }
+
+    /// A track's own end, into whatever file is current: ending is ending,
+    /// not a cut point.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        match event {
+            StreamEvent::Eos => self.group.finish_eos(self.track_index),
+            StreamEvent::Segment(_) => Ok(()),
         }
     }
 
@@ -1015,7 +1024,8 @@ mod tests {
                 .expect("a packet is written");
         }
         for sink in &mut sinks {
-            sink.consume(MediaBuffer::Eos).expect("a track ends");
+            sink.stream_event(&crate::stream::StreamEvent::Eos)
+                .expect("a track ends");
         }
         drop(sinks);
 

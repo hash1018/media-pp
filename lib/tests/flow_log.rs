@@ -4,7 +4,6 @@ use std::{
 };
 
 use media_pp::{
-    buffer::MediaBuffer,
     elements::{AppSink, AppSource},
     log::{self, Level},
     pipeline::Pipeline,
@@ -38,9 +37,7 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
     pipeline.run().unwrap();
     pipeline.pause();
     pipeline.resume();
-    handle
-        .push(MediaBuffer::Eos)
-        .expect("source must accept EOS");
+    handle.finish().expect("source must take the end");
     drop(handle);
     let _events: Vec<_> = pipeline.bus().iter().collect();
 

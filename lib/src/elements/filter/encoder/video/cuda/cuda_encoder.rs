@@ -105,7 +105,7 @@ pub enum CudaEncoderError {
     Frame(#[from] CudaFrameError),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("CudaEncoder only accepts Video and Eos buffers, got a {0}")]
+    #[error("CudaEncoder only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
     /// A frame arrived with a `pts` but no unit to read it in — see
@@ -463,8 +463,6 @@ impl Transform for Encoding {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.encode(&frame, out),
-            // The stage's, never handed here — see `drain`.
-            MediaBuffer::Eos => Ok(()),
             other => Err(CudaEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -577,7 +575,7 @@ mod tests {
             let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
             encoder.consume(frame).expect("encode failed");
         }
-        encoder.consume(MediaBuffer::Eos).expect("eos failed");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos failed");
 
         let received = received.lock().unwrap();
         let packets: Vec<_> = received
@@ -600,10 +598,6 @@ mod tests {
             );
             assert!(packet.duration() > 0, "packet has no duration");
         }
-        assert!(
-            received.last().is_some_and(MediaBuffer::is_eos),
-            "Eos was not forwarded after draining"
-        );
     }
 
     /// A CUDA frame that does not say what unit its `pts` is in is refused
@@ -645,7 +639,7 @@ mod tests {
             error,
             crate::Error::CudaEncoderError(CudaEncoderError::NoTimeBase)
         ));
-        encoder.consume(MediaBuffer::Eos).expect("eos failed");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos failed");
         assert!(
             !received
                 .lock()
@@ -718,7 +712,7 @@ mod tests {
             let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
             encoder.consume(frame).expect("encode failed");
         }
-        encoder.consume(MediaBuffer::Eos).expect("eos failed");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos failed");
 
         let received = received.lock().unwrap();
         let packets: Vec<_> = received
@@ -979,7 +973,7 @@ mod tests {
             let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
             encoder.consume(frame).expect("encode failed");
         }
-        encoder.consume(MediaBuffer::Eos).expect("eos failed");
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos failed");
 
         let received = received.lock().unwrap();
         let timestamps: Vec<(i64, i64)> = received

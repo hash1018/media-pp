@@ -38,7 +38,7 @@ pub mod queue;
 pub(crate) mod render;
 pub mod repeat;
 pub(crate) mod stash;
-pub(crate) mod stream;
+pub mod stream;
 pub mod subtitle;
 pub mod timing;
 #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]

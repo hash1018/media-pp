@@ -20,7 +20,7 @@ use crate::{
 #[derive(Debug, ThisError)]
 pub enum FileMuxerError {
     /// A stream sink received a buffer other than a packet or end-of-stream.
-    #[error("FileMuxer stream sinks only accept Packet or Eos buffers, got {0}")]
+    #[error("FileMuxer stream sinks only accept Packet buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// FFmpeg rejected packet writing or finalization.
@@ -381,8 +381,7 @@ mod tests {
                 ))))
                 .expect("consume must succeed");
         }
-        encoder
-            .consume(MediaBuffer::Eos)
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
             .expect("eos must flush cleanly");
         drop(encoder);
 
@@ -473,8 +472,7 @@ mod tests {
         }
         // Track `a` finishes here — well before track `b` has written
         // anything at all.
-        encoder_a
-            .consume(MediaBuffer::Eos)
+        crate::stream::deliver(&mut encoder_a, &crate::stream::StreamEvent::Eos)
             .expect("eos must flush cleanly");
 
         for tick in 0..10i64 {
@@ -487,8 +485,7 @@ mod tests {
                 ))))
                 .expect("consume must succeed");
         }
-        encoder_b
-            .consume(MediaBuffer::Eos)
+        crate::stream::deliver(&mut encoder_b, &crate::stream::StreamEvent::Eos)
             .expect("eos must flush cleanly");
 
         drop(encoder_a);
@@ -553,8 +550,7 @@ mod tests {
                 ))))
                 .expect("consume must succeed");
         }
-        encoder
-            .consume(MediaBuffer::Eos)
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
             .expect("eos must flush cleanly");
         drop(encoder);
 
@@ -673,8 +669,7 @@ mod tests {
                 ))))
                 .expect("consume must succeed");
         }
-        encoder
-            .consume(MediaBuffer::Eos)
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
             .expect("eos must flush cleanly");
         drop(encoder);
 
@@ -1067,8 +1062,12 @@ mod tests {
                 audio_sink.consume(buffer).expect("audio packet");
             }
         }
-        video_sink.consume(MediaBuffer::Eos).expect("video eos");
-        audio_sink.consume(MediaBuffer::Eos).expect("audio eos");
+        video_sink
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("video eos");
+        audio_sink
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("audio eos");
 
         // Only now, with the rest of the file already written.
         text_sink
@@ -1077,7 +1076,9 @@ mod tests {
         text_sink
             .consume(crate::subtitle::Codec::MovText.packet("second line", 2_500, 1_500))
             .expect("second line");
-        text_sink.consume(MediaBuffer::Eos).expect("text eos");
+        text_sink
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("text eos");
 
         let written = ffmpeg::format::input(&path).expect("the file must be readable");
         let kinds: Vec<_> = written

@@ -331,8 +331,6 @@ impl Transform for Drawing {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => self.take(&frame, out),
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => Err(AudioWaveformError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioWaveformError::UnsupportedBuffer("Video").into()),
         }

@@ -48,7 +48,7 @@ use crate::{
     pad::SrcPad,
     pp_log::{PpLog, pp_info, pp_warn},
     stash::OutputStash,
-    stream::Event,
+    stream::StreamEvent,
 };
 
 /// Errors specific to [`VideoDecodeBin`]. Converts into the crate-wide
@@ -521,13 +521,8 @@ impl VideoDecodeBin {
         Ok(())
     }
 
-    /// Hands `buf` on through the stash — or, the end of the stream, after
-    /// everything kept, whatever the pad says: nothing would take it after.
+    /// Hands `buf` on through the stash.
     fn hand_on(&mut self, buf: MediaBuffer) -> Result<()> {
-        if buf.is_eos() {
-            let kept = self.stash.release_all(&mut self.pad);
-            return kept.and(self.pad.push(buf));
-        }
         self.stash.push(&mut self.pad, buf)
     }
 
@@ -667,7 +662,6 @@ impl Sink for VideoDecodeBin {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.install();
-        let eos = buf.is_eos();
         if let (Some(fallback), MediaBuffer::Packet(packet)) = (&mut self.fallback, &buf) {
             if packet.is_key() {
                 fallback.since_keyframe.clear();
@@ -676,16 +670,7 @@ impl Sink for VideoDecodeBin {
         }
         match self.line.consume(buf) {
             Ok(made) => self.push(made),
-            Err(error) if self.fallback.is_some() && refused(&error) => {
-                self.fall_back(&error)?;
-                // An end of stream is not kept with the packets: it goes to
-                // the new line after them, as it went to the old one.
-                if eos {
-                    let made = self.line.consume(MediaBuffer::Eos)?;
-                    self.push(made)?;
-                }
-                Ok(())
-            }
+            Err(error) if self.fallback.is_some() && refused(&error) => self.fall_back(&error),
             Err(error) => Err(error),
         }
     }
@@ -713,17 +698,29 @@ impl Sink for VideoDecodeBin {
     /// Down the line and then the tail, as a buffer goes, what either answers
     /// it with pushed ahead of it — the graph passes the event on through
     /// this bin's pad once this returns. Both, whatever the first answers.
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
+    ///
+    /// At the end, what the line and the tail still hold goes on ahead of
+    /// it, and everything kept after that whatever the pad says: nothing
+    /// would take it after the end.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         self.install();
+        let ends = matches!(event, StreamEvent::Eos);
         // What is kept came before the event, and goes before what the line
         // answers it with.
         let kept = self.stash.release_all(&mut self.pad);
-        let line = self
-            .line
-            .stream_event(event.0)
-            .and_then(|made| self.push(made));
+        let line = match self.line.stream_event(event) {
+            Ok(made) => self.push(made),
+            // A decoder that refuses the stream only at its end is replaced
+            // as one refusing a packet is; the end goes to the new line
+            // after the packets it is handed again, as it went to the old.
+            Err(error) if ends && self.fallback.is_some() && refused(&error) => self
+                .fall_back(&error)
+                .and_then(|()| self.line.stream_event(event))
+                .and_then(|made| self.push(made)),
+            Err(error) => Err(error),
+        };
         let mut tail = Ok(());
-        match self.tail.stream_event(event.0) {
+        match self.tail.stream_event(event) {
             Ok(made) => {
                 for buf in made {
                     if let Err(error) = self.pad.push(buf) {
@@ -733,7 +730,12 @@ impl Sink for VideoDecodeBin {
             }
             Err(error) => tail = Err(error),
         }
-        kept.and(line).and(tail)
+        let released = if ends {
+            self.stash.release_all(&mut self.pad)
+        } else {
+            Ok(())
+        };
+        kept.and(line).and(tail).and(released)
     }
 }
 
@@ -1406,7 +1408,7 @@ mod tests {
         for packet in packets {
             bin.consume(MediaBuffer::Packet(Arc::new(packet)))?;
         }
-        bin.consume(MediaBuffer::Eos)?;
+        crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos)?;
         drop(bin);
         Ok(std::mem::take(&mut *frames.lock().unwrap()))
     }
@@ -1504,7 +1506,7 @@ mod tests {
 
         context.state.observe(&ControlMsg::Pause);
         context.state.observe(&ControlMsg::Resume);
-        bin.consume(MediaBuffer::Eos).expect("the end");
+        crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos).expect("the end");
         let taken = taken.lock().unwrap();
         assert!(taken.len() > 1, "what was kept went on");
         assert!(
@@ -1574,7 +1576,7 @@ mod tests {
                 bin.consume(MediaBuffer::Packet(Arc::new(packet))).unwrap();
             }
             let before = frames.lock().unwrap().len();
-            bin.consume(MediaBuffer::Eos).unwrap();
+            crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos).unwrap();
             assert_eq!(
                 frames.lock().unwrap().len(),
                 sent,
@@ -2190,14 +2192,14 @@ mod tests {
                 show_from: Some(at),
                 backwards: false,
             }));
-            bin.stream_event(crate::stream::Event(&segment)).unwrap();
+            bin.stream_event(&segment).unwrap();
             let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::new([])));
             context.state.observe(&preroll);
             bin.control(&preroll).unwrap();
             for packet in packets {
                 bin.consume(MediaBuffer::Packet(Arc::new(packet))).unwrap();
             }
-            bin.consume(MediaBuffer::Eos).unwrap();
+            crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos).unwrap();
             assert_eq!(
                 bin.path(),
                 DecodePath::Software(SoftwareReason::HardwareRefused)

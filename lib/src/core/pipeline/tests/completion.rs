@@ -66,7 +66,7 @@ impl SourceElement for EndingSource {
                     self.pad
                         .push(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))?;
                 }
-                self.pad.push(MediaBuffer::Eos)?;
+                self.pad.push_eos(&self.pp_log)?;
             }
             thread::sleep(Duration::from_millis(1));
         }
@@ -122,12 +122,71 @@ impl Element for EndingSink {
 }
 
 impl Sink for EndingSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        if buf.is_eos() {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        Ok(())
+    }
+
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let StreamEvent::Eos = event {
             thread::sleep(self.eos_delay);
             if self.fail_eos {
                 return Err(crate::error::Error::Other("trailer failed".into()));
             }
+        }
+        Ok(())
+    }
+}
+
+/// A terminal that counts what it is shown and says whether its stream
+/// ended.
+struct Screen {
+    pp_log: PpLog,
+    name: Arc<str>,
+    pictures: Arc<AtomicUsize>,
+    ended: Arc<AtomicBool>,
+}
+
+impl Screen {
+    fn new(name: &str) -> (Self, Arc<AtomicUsize>, Arc<AtomicBool>) {
+        let pictures = Arc::new(AtomicUsize::new(0));
+        let ended = Arc::new(AtomicBool::new(false));
+        let screen = Self {
+            pp_log: element_pp_log(ElementType::Other, name, None),
+            name: name.into(),
+            pictures: Arc::clone(&pictures),
+            ended: Arc::clone(&ended),
+        };
+        (screen, pictures, ended)
+    }
+}
+
+impl Element for Screen {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for Screen {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        self.pictures.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        if let StreamEvent::Eos = event {
+            self.ended.store(true, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -310,8 +369,6 @@ fn a_seek_after_the_end_finishes_again_at_the_new_end() {
 /// never wrote its trailer. Found by the conformance sequences.
 #[test]
 fn finishing_while_playing_delivers_eos_through_a_timed_branch() {
-    use crate::elements::AppSink;
-
     for synchronized in [false, true] {
         let Some(path) = try_test_video() else { return };
         let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
@@ -320,21 +377,7 @@ fn finishing_while_playing_delivers_eos_through_a_timed_branch() {
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .expect("the fixture has a picture")
             .clone();
-        let pictures = Arc::new(AtomicUsize::new(0));
-        let ended = Arc::new(AtomicBool::new(false));
-        let screen = {
-            let pictures = Arc::clone(&pictures);
-            let ended = Arc::clone(&ended);
-            AppSink::new("screen", move |buffer| {
-                match buffer {
-                    MediaBuffer::Eos => ended.store(true, Ordering::SeqCst),
-                    _ => {
-                        pictures.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-                Ok(())
-            })
-        };
+        let (screen, pictures, ended) = Screen::new("screen");
         let (pipeline, ()) = Pipeline::new("finish-while-timed", source, |source, ctx| {
             let decoded = ctx
                 .branch()
@@ -381,8 +424,6 @@ fn finishing_while_playing_delivers_eos_through_a_timed_branch() {
 /// sequences.
 #[test]
 fn a_seek_past_the_end_through_a_tee_ends_every_branch() {
-    use crate::elements::AppSink;
-
     let Some(path) = try_test_video() else { return };
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
     let duration = source.duration().expect("the fixture says how long it is");
@@ -391,20 +432,12 @@ fn a_seek_past_the_end_through_a_tee_ends_every_branch() {
         .find(|stream| stream.kind == ffmpeg::media::Type::Video)
         .expect("the fixture has a picture")
         .clone();
-    let ended: Vec<Arc<AtomicBool>> = (0..2).map(|_| Arc::new(AtomicBool::new(false))).collect();
-    let sinks: Vec<_> = ended
-        .iter()
-        .enumerate()
-        .map(|(index, ended)| {
-            let ended = Arc::clone(ended);
-            AppSink::new(format!("screen-{index}"), move |buffer| {
-                if buffer.is_eos() {
-                    ended.store(true, Ordering::SeqCst);
-                }
-                Ok(())
-            })
+    let (sinks, ended): (Vec<_>, Vec<_>) = (0..2)
+        .map(|index| {
+            let (screen, _, ended) = Screen::new(&format!("screen-{index}"));
+            (screen, ended)
         })
-        .collect();
+        .unzip();
     let (pipeline, ()) = Pipeline::new("seek-past-end-tee", source, |source, ctx| {
         let mut tee = ctx.tee("tee");
         for (index, sink) in sinks.into_iter().enumerate() {

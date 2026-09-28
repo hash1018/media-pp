@@ -38,7 +38,7 @@ use crate::{
     error::{Result, ThreadSpawnError},
     playback_state::{Bell, PlaybackState},
     stats::ElementCounters,
-    stream::{Event, Item, StreamEvent},
+    stream::{Item, StreamEvent},
 };
 
 /// Errors specific to `Queue`. Converts into the crate-wide `Error` via
@@ -118,7 +118,7 @@ pub enum OverflowPolicy {
     /// isn't an expected, routine condition.
     ///
     /// This timeout applies to ordinary data buffers only. `Queue` sends
-    /// `MediaBuffer::Eos` with an unbounded `send` under every policy so a
+    /// the end of the stream with an unbounded `send` under every policy so a
     /// natural end-of-stream marker is never discarded; if downstream has
     /// stopped consuming entirely, an EOS push can therefore still block.
     Block(Duration),
@@ -180,7 +180,7 @@ impl Default for OverflowPolicy {
 /// [`crate::pipeline::Pipeline::stop`] yourself if a particular error
 /// means the whole pipeline should end.
 ///
-/// Nor does `MediaBuffer::Eos`. The worker forwards it behind everything
+/// Nor does the end of the stream. The worker forwards it behind everything
 /// queued before it, posts [`BusEvent::Eos`] once downstream has accepted
 /// it, and goes back to waiting: the end of a stream is not the end of the
 /// pipeline. A source that parks at its end — [`crate::elements::FileDemuxer`]
@@ -435,38 +435,38 @@ impl Element for Queue {
 }
 
 impl Queue {
+    /// The end of the stream, handed over behind everything before it. It
+    /// must never be dropped, regardless of policy: unlike an explicit Stop
+    /// or Queue::drop's private stop flag, this is the natural-completion
+    /// signal, and it reaches downstream only after everything queued
+    /// before it has. The policy timeout intentionally does not apply to
+    /// this send, and unlike a segment it waits for room.
+    fn take_end(&mut self) -> Result<()> {
+        // Counted before it can be taken, so the worker never counts out
+        // one that was not yet counted in.
+        self.ends_owed.fetch_add(1, Ordering::AcqRel);
+        let result = self
+            .hand_over(Item::Event(StreamEvent::Eos), Duration::MAX)
+            .map_err(|_| QueueError::ChannelClosed.into());
+        if result.is_err() {
+            self.ends_owed.fetch_sub(1, Ordering::AcqRel);
+        }
+        match &result {
+            Ok(()) => pp_trace!(
+                pp_log: &self.pp_log,
+                "event=eos phase=queued outcome=ok"
+            ),
+            Err(error) => pp_trace!(
+                pp_log: &self.pp_log,
+                "event=eos phase=queued outcome=error error={error}"
+            ),
+        }
+        result
+    }
+
     /// Hands `buf` over, as [`Sink::consume`] does — which answers what
     /// this says, but for a handover a stop cut short.
     fn take(&mut self, buf: MediaBuffer) -> Result<()> {
-        // EOS must never be dropped, regardless of policy: unlike an
-        // explicit Stop or Queue::drop's private stop flag, this is the
-        // natural-completion signal, and it reaches downstream only after
-        // everything queued before it has. The policy timeout intentionally
-        // does not apply to this send.
-        if buf.is_eos() {
-            pp_trace!(pp_log: &self.pp_log, "event=eos phase=received");
-            // Counted before it can be taken, so the worker never counts out
-            // one that was not yet counted in.
-            self.ends_owed.fetch_add(1, Ordering::AcqRel);
-            let result = self
-                .hand_over(Item::Buffer(buf), Duration::MAX)
-                .map_err(|_| QueueError::ChannelClosed.into());
-            if result.is_err() {
-                self.ends_owed.fetch_sub(1, Ordering::AcqRel);
-            }
-            match &result {
-                Ok(()) => pp_trace!(
-                    pp_log: &self.pp_log,
-                    "event=eos phase=queued outcome=ok"
-                ),
-                Err(error) => pp_trace!(
-                    pp_log: &self.pp_log,
-                    "event=eos phase=queued outcome=error error={error}"
-                ),
-            }
-            return result;
-        }
-
         let counters = self.counters.as_deref();
         if let Some(counters) = counters {
             counters.arrived();
@@ -592,13 +592,23 @@ impl Sink for Queue {
     /// for: it goes in past the capacity at once. Waiting could not be made
     /// safe for it: a source begins its stream with one before it looks at
     /// its control, so it would wait on a queue a pause had already stopped.
-    fn stream_event(&mut self, event: Event<'_>) -> Result<()> {
-        let Event(carried) = event;
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         pp_trace!(
             pp_log: &self.pp_log,
-            "event={carried} phase=received"
+            "event={event} phase=received"
         );
-        let item = Item::Event(carried.clone());
+        if matches!(event, StreamEvent::Eos) {
+            return match self.take_end() {
+                // Abandoned, as `consume` abandons a buffer once stopped.
+                Err(crate::error::Error::QueueError(QueueError::ChannelClosed))
+                    if self.state.as_deref().is_some_and(PlaybackState::is_stopped) =>
+                {
+                    Ok(())
+                }
+                taken => taken,
+            };
+        }
+        let item = Item::Event(event.clone());
         let result = if self.worker_gone() {
             Err(())
         } else {
@@ -613,11 +623,11 @@ impl Sink for Queue {
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: &self.pp_log,
-                "event={carried} phase=queued outcome=ok"
+                "event={event} phase=queued outcome=ok"
             ),
             Err(error) => pp_trace!(
                 pp_log: &self.pp_log,
-                "event={carried} phase=queued outcome=error error={error}"
+                "event={event} phase=queued outcome=error error={error}"
             ),
         }
         result
@@ -1006,7 +1016,7 @@ fn forward(downstream: &mut Box<dyn Sink>, item: Item, worker: &Worker<'_>) {
             // From the position the seek left — what the `Flush` discarded
             // the rest of, and a thread still handing it over let past it.
             _ => {
-                if matches!(item, Item::Buffer(MediaBuffer::Eos)) {
+                if matches!(item, Item::Event(StreamEvent::Eos)) {
                     worker.inbox.discarded(1);
                 }
                 return;
@@ -1015,51 +1025,59 @@ fn forward(downstream: &mut Box<dyn Sink>, item: Item, worker: &Worker<'_>) {
     }
     let buf = match item {
         Item::Buffer(buf) => buf,
+        Item::Event(StreamEvent::Eos) => return forward_end(downstream, worker),
         Item::Event(event) => return forward_event(downstream, &event, worker),
     };
-    let is_eos = buf.is_eos();
     let call = worker
         .counters
-        .map(|counters| counters.begin_forwarding(is_eos));
+        .map(|counters| counters.begin_forwarding(false));
     let result = downstream.consume(buf);
     if let Some(call) = call {
         call.end(result.is_ok());
     }
-    if is_eos {
-        // Handed on, taken or refused: either way it is no longer here.
-        worker.inbox.discarded(1);
+    if let Err(error) = result {
+        // Report and move on to the next buffer — this one's dropped, but
+        // nothing else dies over it. Whoever's watching the bus decides
+        // whether the error is fatal enough to call `Pipeline::stop`.
+        worker.errors.post(error);
     }
+}
+
+/// Hands the end of the stream to `downstream`, and says so on the bus
+/// once it is taken.
+fn forward_end(downstream: &mut Box<dyn Sink>, worker: &Worker<'_>) {
+    let call = worker
+        .counters
+        .map(|counters| counters.begin_forwarding(true));
+    let result = downstream.stream_event(&StreamEvent::Eos);
+    if let Some(call) = call {
+        call.end(result.is_ok());
+    }
+    // Handed on, taken or refused: either way it is no longer here.
+    worker.inbox.discarded(1);
     match result {
         Ok(()) => {
-            if is_eos {
-                pp_trace!(
-                    pp_log: worker.pp_log,
-                    "event=eos phase=completed outcome=ok"
-                );
-                worker.bus.post(
-                    worker.pp_log,
-                    BusEvent::Eos {
-                        element_type: ElementType::Queue,
-                        name: worker.name.clone(),
-                    },
-                );
-                // Not a return: `Eos` ends a stream, not this queue. A
-                // source that parks at its end can still be sought, and the
-                // `Flush`/`Seek`/`Preroll` that follow need a worker here to
-                // carry them and the new stream — see the type docs.
-            }
+            pp_trace!(
+                pp_log: worker.pp_log,
+                "event=eos phase=completed outcome=ok"
+            );
+            worker.bus.post(
+                worker.pp_log,
+                BusEvent::Eos {
+                    element_type: ElementType::Queue,
+                    name: worker.name.clone(),
+                },
+            );
+            // Not a return: `Eos` ends a stream, not this queue. A source
+            // that parks at its end can still be sought, and the
+            // `Flush`/`Seek`/`Preroll` that follow need a worker here to
+            // carry them and the new stream — see the type docs.
         }
         Err(error) => {
-            if is_eos {
-                pp_trace!(
-                    pp_log: worker.pp_log,
-                    "event=eos phase=completed outcome=error error={error}"
-                );
-            }
-            // Report and move on to the next buffer — this one's dropped,
-            // but nothing else dies over it. Whoever's watching the bus
-            // decides whether the error is fatal enough to call
-            // `Pipeline::stop`.
+            pp_trace!(
+                pp_log: worker.pp_log,
+                "event=eos phase=completed outcome=error error={error}"
+            );
             worker.errors.post(error);
         }
     }
@@ -1072,7 +1090,7 @@ fn forward_event(downstream: &mut Box<dyn Sink>, event: &StreamEvent, worker: &W
         pp_log: worker.pp_log,
         "event={event} phase=forwarding"
     );
-    if let Err(error) = downstream.stream_event(Event(event)) {
+    if let Err(error) = downstream.stream_event(event) {
         worker.errors.post(error);
     }
 }
@@ -1266,7 +1284,7 @@ fn discard_stale_data(data_rx: &Receiver<Item>, msg: &ControlMsg) -> usize {
     let mut ends = 0;
     if *msg == ControlMsg::Flush {
         while let Ok(held) = data_rx.try_recv() {
-            ends += usize::from(matches!(held, Item::Buffer(MediaBuffer::Eos)));
+            ends += usize::from(matches!(held, Item::Event(StreamEvent::Eos)));
         }
     }
     ends
@@ -1442,7 +1460,7 @@ mod tests {
         for _ in 0..10 {
             queue.consume(packet()).unwrap();
         }
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         drop(queue); // blocks until the worker drains everything and joins
 
         assert_eq!(count.load(Ordering::SeqCst), 10);
@@ -1483,12 +1501,14 @@ mod tests {
             self.open.load(Ordering::SeqCst)
         }
 
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            match buf {
-                MediaBuffer::Eos => self.ended.store(true, Ordering::SeqCst),
-                _ => {
-                    self.count.fetch_add(1, Ordering::SeqCst);
-                }
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            if let StreamEvent::Eos = event {
+                self.ended.store(true, Ordering::SeqCst);
             }
             Ok(())
         }
@@ -1528,7 +1548,7 @@ mod tests {
         for _ in 0..5 {
             queue.consume(packet()).unwrap();
         }
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         // Busy for longer than the worker's idle wait, so it has seen the
         // drop before anything can go.
         let opener = {
@@ -1617,7 +1637,7 @@ mod tests {
         )
         .unwrap();
         queue.consume(packet()).unwrap();
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         state.observe(&ControlMsg::Stop);
 
         let (dropped, done) = std::sync::mpsc::channel();
@@ -1663,7 +1683,7 @@ mod tests {
         // Eos isn't subject to the timeout (see `Sink::consume`'s own
         // special-casing) — always goes through even after some sends
         // above timed out.
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         drop(queue); // blocks until the worker drains everything and joins
 
         assert!(
@@ -1699,7 +1719,7 @@ mod tests {
             );
             queue.consume(packet()).unwrap();
         }
-        queue.consume(MediaBuffer::Eos).unwrap(); // never dropped, even under this policy
+        queue.stream_event(&StreamEvent::Eos).unwrap(); // never dropped, even under this policy
         drop(queue);
 
         let processed = count.load(Ordering::SeqCst);
@@ -1745,7 +1765,7 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
 
         queue.control(&ControlMsg::Resume).unwrap();
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         drop(queue);
 
         assert_eq!(count.load(Ordering::SeqCst), 3);
@@ -1786,7 +1806,7 @@ mod tests {
 
     /// Regression test: before `Queue::drop` set its own `stop` flag,
     /// dropping a `Queue` that was never fed a `Stop` control message or
-    /// an `Eos` buffer left its worker thread parked on `recv()` with
+    /// its end left its worker thread parked on `recv()` with
     /// nothing left to wake it — `drop()`'s own `handle.join()` then hung
     /// forever. This mirrors what happens to a `.queue()`-containing
     /// `Pipeline` that's dropped without ever being `run()`, so if this
@@ -1966,7 +1986,7 @@ mod tests {
         for _ in 0..3 {
             queue.consume(packet()).unwrap();
         }
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         drop(queue); // blocks until the worker drains everything and joins
 
         // First packet failed (and was dropped); the other two still went
@@ -2011,7 +2031,7 @@ mod tests {
         )
         .unwrap();
         queue.consume(packet()).unwrap();
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         drop(queue);
 
         let reported: Vec<_> = bus_rx
@@ -2096,12 +2116,18 @@ mod tests {
     }
 
     impl Sink for RefuseEos {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            if buf.is_eos() {
-                return Err(crate::error::Error::Other("simulated drain failure".into()));
-            }
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            match event {
+                StreamEvent::Eos => {
+                    Err(crate::error::Error::Other("simulated drain failure".into()))
+                }
+                _ => Ok(()),
+            }
         }
     }
 
@@ -2142,7 +2168,7 @@ mod tests {
         for _ in 0..3 {
             queue.consume(packet()).unwrap();
         }
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         // Dropping is what ends the worker here: it sets the stop flag and
         // joins. Without it the thread would still be waiting.
         drop(queue);
@@ -2194,9 +2220,15 @@ mod tests {
     }
 
     impl Sink for Recorder {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            let label = if buf.is_eos() { "eos" } else { "packet" };
-            self.seen.lock().unwrap().push(label);
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.seen.lock().unwrap().push("packet");
+            Ok(())
+        }
+
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            if let StreamEvent::Eos = event {
+                self.seen.lock().unwrap().push("eos");
+            }
             Ok(())
         }
 
@@ -2247,13 +2279,13 @@ mod tests {
         let mut queue = Queue::spawn("test", 8, Box::new(sink), bus, None).unwrap();
 
         queue.consume(packet()).unwrap();
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         expect_eos(&bus_rx);
 
         queue.control(&ControlMsg::Flush).unwrap();
         queue.control(&ControlMsg::Seek(Duration::ZERO)).unwrap();
         queue.consume(packet()).unwrap();
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         expect_eos(&bus_rx);
 
         queue.control(&ControlMsg::Stop).unwrap();
@@ -2277,7 +2309,7 @@ mod tests {
         let (bus, bus_rx) = Bus::new();
         let mut queue = Queue::spawn("test", 8, Box::new(sink), bus, None).unwrap();
         queue.consume(packet()).unwrap();
-        queue.consume(MediaBuffer::Eos).unwrap();
+        queue.stream_event(&StreamEvent::Eos).unwrap();
         expect_eos(&bus_rx);
 
         let started = std::time::Instant::now();
@@ -2357,6 +2389,34 @@ mod tests {
         (queue, seen)
     }
 
+    /// A stop reaches a queue's worker directly, so the worker can end before
+    /// the thread handing it the end of the stream has heard of the stop:
+    /// that end is abandoned, as a buffer is, rather than reported as a
+    /// closed channel. It was reported once the end became an event, which
+    /// took it past what `consume` does about a stop — found by the
+    /// conformance sequences, a `Stop` landing while a `Resume` was under way.
+    #[test]
+    fn the_end_handed_to_a_queue_a_stop_ended_is_abandoned() {
+        let state = PlaybackState::new();
+        let (mut queue, seen) = recording_queue(4, &state);
+        state.observe(&ControlMsg::Stop);
+        queue.control(&ControlMsg::Stop).expect("stop");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !queue.worker_gone() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never ended"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        queue.consume(packet_at(1)).expect("a buffer is abandoned");
+        queue
+            .stream_event(&StreamEvent::Eos)
+            .expect("and so is the end");
+        assert!(seen.lock().unwrap().is_empty(), "nothing went on");
+    }
+
     /// While an interrupt is out the worker takes nothing, and a full queue
     /// does not block the thread handing buffers over — they go in past its
     /// capacity instead, so that thread can go and take the request behind
@@ -2373,7 +2433,7 @@ mod tests {
             queue.consume(packet_at(pts)).expect("handed over");
         }
         queue
-            .consume(MediaBuffer::Eos)
+            .stream_event(&StreamEvent::Eos)
             .expect("even Eos goes in past capacity");
         assert!(
             started.elapsed() < Duration::from_secs(1),

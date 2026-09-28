@@ -538,15 +538,6 @@ impl Sink for D3d11Decoder {
                     .map_err(|error| self.decode_error(error))?;
                 self.drain()
             }
-            MediaBuffer::Eos => {
-                self.decoder
-                    .send_eof()
-                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(|error| self.decode_error(error))?;
-                self.drain()?;
-                self.preroll_gate.push_eos_candidate(&mut self.pad)?;
-                self.pad.push(MediaBuffer::Eos)
-            }
             other => {
                 let _ = other;
                 Ok(())
@@ -555,10 +546,22 @@ impl Sink for D3d11Decoder {
     }
 
     /// The segment the stream is in, which the preroll gate puts a seek's
-    /// target on the samples' timeline by.
-    fn stream_event(&mut self, event: crate::stream::Event<'_>) -> crate::error::Result<()> {
-        let crate::stream::StreamEvent::Segment(segment) = event.0;
-        self.preroll_gate.begin_segment(segment, &mut self.pad)
+    /// target on the samples' timeline by; and at the end, what the codec
+    /// still holds, ahead of the end the graph passes on after it.
+    fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
+        match event {
+            crate::stream::StreamEvent::Segment(segment) => {
+                self.preroll_gate.begin_segment(segment, &mut self.pad)
+            }
+            crate::stream::StreamEvent::Eos => {
+                self.decoder
+                    .send_eof()
+                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+                    .map_err(|error| self.decode_error(error))?;
+                self.drain()?;
+                self.preroll_gate.push_eos_candidate(&mut self.pad)
+            }
+        }
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
@@ -721,9 +724,8 @@ mod tests {
                 .consume(MediaBuffer::Packet(Arc::new(packet)))
                 .expect("consume(Packet) failed");
         }
-        decoder
-            .consume(MediaBuffer::Eos)
-            .expect("consume(Eos) failed");
+        crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos)
+            .expect("the end failed");
 
         // The crash this test guards against only ever showed up here,
         // on this final drop — see this test's own docs.
@@ -832,7 +834,7 @@ mod tests {
             for packet in packets {
                 decoder.consume(MediaBuffer::Packet(Arc::new(packet)))?;
             }
-            decoder.consume(MediaBuffer::Eos)
+            crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos)
         })();
         if let Err(crate::error::Error::D3d11DecoderError(D3d11DecoderError::HwAccelUnavailable)) =
             decoded

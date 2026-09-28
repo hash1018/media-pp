@@ -18,6 +18,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     queue::OverflowPolicy,
+    stream::StreamEvent,
 };
 
 /// How long [`PipelineBridge::run`] waits for a buffer before looking at its
@@ -397,15 +398,6 @@ impl Sink for PipelineBridgeSink {
             if state.connection != Some(self.id) {
                 return Err(PipelineBridgeError::Superseded.into());
             }
-            if let MediaBuffer::Eos = buf {
-                // The input's end, not the bridge's — see the type docs.
-                state.input_ended = true;
-                state.connection = None;
-                drop(state);
-                shared.changed.notify_all();
-                pp_info!(self, "input ended");
-                return Ok(());
-            }
             if state.buffers.len() < shared.options.depth {
                 state.buffers.push_back((self.id, buf));
                 drop(state);
@@ -451,6 +443,27 @@ impl Sink for PipelineBridgeSink {
     /// actually read — keeps running. Two authorities over one timeline is
     /// the defect, not the missing feature; the downstream pipeline has its
     /// own `pause`, `finish` and `stop` for what its owner wants of it.
+    /// The input's end, not the bridge's — see the type docs. The input's
+    /// segments stop here: the bridge begins its own.
+    fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+        let StreamEvent::Eos = event else {
+            return Ok(());
+        };
+        let Some(shared) = self.shared.upgrade() else {
+            return Err(PipelineBridgeError::Disconnected.into());
+        };
+        let mut state = shared.state.lock().unwrap();
+        if state.connection != Some(self.id) {
+            return Err(PipelineBridgeError::Superseded.into());
+        }
+        state.input_ended = true;
+        state.connection = None;
+        drop(state);
+        shared.changed.notify_all();
+        pp_info!(self, "input ended");
+        Ok(())
+    }
+
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         let Some(shared) = self.shared.upgrade() else {
             return Ok(());
@@ -564,7 +577,7 @@ impl SourceElement for PipelineBridge {
                 if state.finished {
                     drop(state);
                     pp_info!(self, "finished");
-                    if let Err(error) = self.pad.push(MediaBuffer::Eos) {
+                    if let Err(error) = self.pad.push_eos(&self.pp_log) {
                         pp_warn!(self, "end of stream was not delivered: {error}");
                     }
                     return Ok(());
@@ -622,20 +635,27 @@ mod tests {
     fn watched() -> Watched {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let ends = Arc::new(AtomicUsize::new(0));
-        let sink = AppSink::new("watcher", {
-            let seen = Arc::clone(&seen);
-            let ends = Arc::clone(&ends);
-            move |buffer| {
-                match &buffer {
-                    MediaBuffer::Packet(packet) => seen.lock().unwrap().push(packet.pts()),
-                    MediaBuffer::Eos => {
+        let sink = AppSink::with_events(
+            "watcher",
+            {
+                let seen = Arc::clone(&seen);
+                move |buffer| {
+                    if let MediaBuffer::Packet(packet) = &buffer {
+                        seen.lock().unwrap().push(packet.pts());
+                    }
+                    Ok(())
+                }
+            },
+            {
+                let ends = Arc::clone(&ends);
+                move |event: &StreamEvent| {
+                    if let StreamEvent::Eos = event {
                         ends.fetch_add(1, Ordering::Relaxed);
                     }
-                    _ => {}
+                    Ok(())
                 }
-                Ok(())
-            }
-        });
+            },
+        );
         (Box::new(sink), seen, ends)
     }
 
@@ -743,7 +763,9 @@ mod tests {
 
         let mut first = handle.connect().expect("the bridge is running");
         first.consume(packet(1)).expect("hand it over");
-        first.consume(MediaBuffer::Eos).expect("end the input");
+        first
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("end the input");
         wait_until(|| handle.input_ended());
 
         assert!(handle.input_ended(), "the handle reports the input's end");
@@ -916,8 +938,10 @@ mod tests {
             Ok(())
         }
 
-        fn stream_event(&mut self, event: crate::stream::Event<'_>) -> Result<()> {
-            let crate::stream::StreamEvent::Segment(segment) = event.0;
+        fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
+            let StreamEvent::Segment(segment) = event else {
+                return Ok(());
+            };
             self.crossed.lock().unwrap().push(Crossed::Segment {
                 flushed: segment.flushed,
             });

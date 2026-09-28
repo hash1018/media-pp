@@ -12,6 +12,7 @@ use crate::{
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
     playback_state::PlaybackState,
+    stream::StreamEvent,
     time::{MediaTimestamp, TimeBase},
 };
 
@@ -304,48 +305,20 @@ impl Sink for VideoSynchronizer {
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match &buf {
-            MediaBuffer::Video(_) | MediaBuffer::Eos => {}
+            MediaBuffer::Video(_) => {}
             other => return Err(VideoSynchronizerError::UnsupportedBuffer(other.kind()).into()),
         }
-
         self.pending.push_back(buf);
-        let mut handed_on = false;
-        while let Some(buf) = self.pending.pop_front() {
-            // What was kept goes first, and what came with it waits while
-            // the terminal has stopped taking — see `Pacer::consume`.
-            let ends = buf.is_eos() || self.pending.iter().any(MediaBuffer::is_eos);
-            if handed_on && !ends && !self.pad.ready_consume() {
-                self.pending.push_front(buf);
-                return Ok(());
-            }
-            let outcome = match &buf {
-                MediaBuffer::Video(frame) => {
-                    let frame_ns = Self::frame_ns(frame)?;
-                    self.wait_for(frame_ns)
-                }
-                MediaBuffer::Eos => WaitOutcome::Render,
-                _ => unreachable!("buffer kind validated before queueing"),
-            };
-            match outcome {
-                WaitOutcome::Render => {
-                    self.pad.push(buf)?;
-                    handed_on = true;
-                }
-                WaitOutcome::Drop => pp_debug!(self, "dropping late video frame"),
-                // Kept only while there will be a next call — see
-                // `Pacer::consume`: with the end of the stream behind it,
-                // nothing will make one.
-                WaitOutcome::Interrupted if ends => {
-                    self.pad.push(buf)?;
-                    handed_on = true;
-                }
-                WaitOutcome::Interrupted => {
-                    self.pending.push_front(buf);
-                    return Ok(());
-                }
-            }
+        self.hand_on_pending(false)
+    }
+
+    /// What was kept goes on ahead of the end of the stream, which came
+    /// after it — see `hand_on_pending`.
+    fn stream_event(&mut self, event: &StreamEvent) -> crate::error::Result<()> {
+        match event {
+            StreamEvent::Eos => self.hand_on_pending(true),
+            StreamEvent::Segment(_) => Ok(()),
         }
-        Ok(())
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
@@ -356,6 +329,48 @@ impl Sink for VideoSynchronizer {
             self.pending.clear();
             self.last_ns = None;
             self.frame_duration = FALLBACK_FRAME_DURATION;
+        }
+        Ok(())
+    }
+}
+
+impl VideoSynchronizer {
+    /// Hands on what is pending, each when the playback clock says it is
+    /// due, keeping what cannot go yet for the next call — unless `ends`,
+    /// when the stream is over and there will be none: see `Pacer`'s own.
+    fn hand_on_pending(&mut self, ends: bool) -> crate::error::Result<()> {
+        let mut handed_on = false;
+        while let Some(buf) = self.pending.pop_front() {
+            // What was kept goes first, and what came with it waits while
+            // the terminal has stopped taking — see `Pacer`'s own.
+            if handed_on && !ends && !self.pad.ready_consume() {
+                self.pending.push_front(buf);
+                return Ok(());
+            }
+            let outcome = match &buf {
+                MediaBuffer::Video(frame) => {
+                    let frame_ns = Self::frame_ns(frame)?;
+                    self.wait_for(frame_ns)
+                }
+                _ => unreachable!("buffer kind validated before queueing"),
+            };
+            match outcome {
+                WaitOutcome::Render => {
+                    self.pad.push(buf)?;
+                    handed_on = true;
+                }
+                WaitOutcome::Drop => pp_debug!(self, "dropping late video frame"),
+                // Kept only while there will be a next call: with the end
+                // of the stream behind it, nothing will make one.
+                WaitOutcome::Interrupted if ends => {
+                    self.pad.push(buf)?;
+                    handed_on = true;
+                }
+                WaitOutcome::Interrupted => {
+                    self.pending.push_front(buf);
+                    return Ok(());
+                }
+            }
         }
         Ok(())
     }
@@ -591,7 +606,7 @@ mod tests {
         );
         assert_eq!(sync.pending.len(), 1, "the next waits its turn");
 
-        sync.consume(MediaBuffer::Eos).expect("the end");
+        crate::stream::deliver(&mut sync, &crate::stream::StreamEvent::Eos).expect("the end");
         assert_eq!(
             *taken.lock().unwrap(),
             [Some(0), Some(60_000), Some(60_033), None],

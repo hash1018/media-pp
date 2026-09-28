@@ -426,8 +426,6 @@ impl Transform for Converting {
                 out.push(MediaBuffer::Video(converted));
                 Ok(())
             }
-            // The stage's, never handed here.
-            MediaBuffer::Eos => Ok(()),
             other => Err(CudaConverterError::UnsupportedBuffer(other.kind()).into()),
         }
     }
@@ -1014,20 +1012,5 @@ mod tests {
             .sink
             .consume(nv12)
             .expect("the compositor accepts a converted surface");
-    }
-
-    #[test]
-    fn eos_is_forwarded() {
-        let Some((device, _cuda_lock)) = try_cuda_device() else {
-            return;
-        };
-        let Some(mut converter) = converter(&device) else {
-            return;
-        };
-        let received = capture(&mut converter);
-
-        converter.consume(MediaBuffer::Eos).expect("eos");
-
-        assert!(received.lock().unwrap()[0].is_eos());
     }
 }
