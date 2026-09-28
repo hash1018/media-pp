@@ -28,6 +28,9 @@
 //! - played to the end, the pipeline says [`BusEvent::Finished`], unless it
 //!   loops, when it goes on into the next lap instead;
 //! - finished, every terminal's last word is an `Eos`;
+//! - paced, a terminal is handed nothing before the playback clock reaches
+//!   it, and after a seek nothing before the clock begins again but the
+//!   sample the preroll asks for;
 //! - no terminal is handed a buffer before a segment, and each segment
 //!   after the stream's first opens a later timeline and follows a flush —
 //!   see [`crate::stream`];
@@ -55,9 +58,10 @@
 //! announced does, and the promises stay as they are — which is what lets
 //! these tests stand behind a change to how control travels.
 //!
-//! Nothing here times a picture against a clock, so a slow machine makes a
-//! run slower rather than wrong — which matters, because a slow machine is
-//! what these are for.
+//! The one promise read against a clock is that a paced sample is never
+//! early: late has no bound, so a slow machine makes a run slower rather
+//! than wrong — which matters, because a slow machine is what these are
+//! for.
 //!
 //! # Running them harder
 //!
@@ -72,6 +76,8 @@
 //! cores, so CI runs them pinned to two: `taskset -c 0,1` on Linux, a
 //! two-core affinity mask on Windows. That is how the seek-at-the-end
 //! deadlock of 208af56 was reproduced, where a free machine never showed it.
+//! `MEDIA_PP_CONTROL_LOAD=<threads>` adds threads that only take those
+//! cores, for what shows only with other work beside it.
 
 use std::collections::HashSet;
 
@@ -83,11 +89,21 @@ use crate::elements::{
     AudioFormat, AudioResampler, AudioTempo, ColorCorrection, DecodeTarget, FileDemuxerHandle,
     Rack, SwScaler, SwVideoEffect, VideoDecodeBin, VideoEffect,
 };
+use crate::playback_clock::PlaybackClock;
 
 /// How long any one control call may take before the sequence is failed as
 /// hung. Generous, so a loaded two-core runner is never mistaken for a
 /// deadlock: a real one does not return at all.
 const OP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How far ahead of the playback clock a paced sample may reach a terminal:
+/// a frame that a pause kept, handed on as it ends, and the time between
+/// the clock read by what paces and by the terminal after it. Late has no
+/// bound — a slow machine is late — but ahead is what a burst is: pictures
+/// kept by a fan-out while a preroll held it, handed on all at once past
+/// the pacer in front of it, which showed a playing seek two seconds past
+/// where it landed (d1533fe).
+const EARLY: Duration = Duration::from_millis(250);
 
 /// How far before a seek's target a sample may start and still be the one
 /// covering it: a frame or an audio packet's worth, and some.
@@ -114,6 +130,10 @@ const LAP_JOIN: Duration = Duration::from_millis(300);
 enum Entry {
     Data {
         pts: Option<Duration>,
+        /// How far the sample stood ahead of the playback clock as it came,
+        /// in nanoseconds, the way playback goes — `None` where the clock
+        /// had not begun since the last seek.
+        ahead: Option<i64>,
     },
     Eos,
     /// The stream moved to a new timeline, beginning at this position.
@@ -146,6 +166,8 @@ struct Recorder {
     delay: Duration,
     /// The timeline of the segment it was handed last.
     segment: Option<u64>,
+    /// The pipeline's playback clock, read as each sample comes.
+    clock: Option<Arc<PlaybackClock>>,
 }
 
 impl Recorder {
@@ -159,6 +181,7 @@ impl Recorder {
                 log: Arc::clone(&log),
                 delay: Duration::ZERO,
                 segment: None,
+                clock: None,
             },
             log,
         )
@@ -195,6 +218,10 @@ impl Element for Recorder {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        self.clock = Some(Arc::clone(&context.playback_clock));
+    }
 }
 
 impl Sink for Recorder {
@@ -206,17 +233,23 @@ impl Sink for Recorder {
                 .unwrap()
                 .push(Entry::Outside(format!("{} before any segment", buf.kind())));
         }
-        thread::sleep(self.delay);
-        let entry = match &buf {
-            MediaBuffer::Video(frame) => Entry::Data {
-                pts: self.pts(frame),
-            },
-            MediaBuffer::Audio(frame) => Entry::Data {
-                pts: self.pts(frame),
-            },
-            _ => Entry::Data { pts: None },
+        let pts = match &buf {
+            MediaBuffer::Video(frame) => self.pts(frame),
+            MediaBuffer::Audio(frame) => self.pts(frame),
+            MediaBuffer::Packet(_) => None,
         };
-        self.log.lock().unwrap().push(entry);
+        // Read as it comes, before this terminal takes its time over it.
+        let ahead = self.clock.as_ref().zip(pts).and_then(|(clock, pts)| {
+            let position = clock.position_ns()?;
+            let pts = pts.as_nanos() as i64;
+            Some(if clock.rate() < 0.0 {
+                position - pts
+            } else {
+                pts - position
+            })
+        });
+        thread::sleep(self.delay);
+        self.log.lock().unwrap().push(Entry::Data { pts, ahead });
         Ok(())
     }
 
@@ -315,9 +348,10 @@ enum Pacing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sound {
     None,
-    /// Paced, then stretched to the rate — how a mixer input is fed.
+    /// Paced as the picture is, then stretched to the rate — how a mixer
+    /// input is fed.
     Stretched,
-    /// Paced, then resampled to another rate and layout.
+    /// Paced as the picture is, then resampled to another rate and layout.
     Resampled,
 }
 
@@ -561,6 +595,13 @@ impl Shape {
             Shape::Live => false,
             Shape::Offline | Shape::OfflineMix => true,
         }
+    }
+
+    /// Whether what a terminal is handed is paced against the playback
+    /// clock: a file's, picture and sound alike, unless nothing paces it.
+    /// An offline render's is not paced at all.
+    fn paces(self) -> bool {
+        matches!(self, Shape::File(shape) if shape.pacing != Pacing::Unpaced)
     }
 
     fn label(self) -> String {
@@ -936,7 +977,7 @@ impl Rig {
                     .unwrap()
                     .iter()
                     .filter_map(|entry| match entry {
-                        Entry::Data { pts } => *pts,
+                        Entry::Data { pts, .. } => *pts,
                         _ => None,
                     })
                     .max()
@@ -1753,6 +1794,7 @@ fn run_sequence_turning(
                 lap,
                 lossless: shape.lossless(),
                 shows_pictures: *name != "speakers",
+                paced: shape.paces(),
             },
         ) {
             let handed = sketch(&log, &calls.made);
@@ -1773,8 +1815,8 @@ fn sketch(log: &[Entry], calls: &[Call]) -> String {
     let words: Vec<String> = log
         .iter()
         .map(|entry| match entry {
-            Entry::Data { pts: Some(pts) } => pts.as_millis().to_string(),
-            Entry::Data { pts: None } => "?".into(),
+            Entry::Data { pts: Some(pts), .. } => pts.as_millis().to_string(),
+            Entry::Data { pts: None, .. } => "?".into(),
             Entry::Eos => "Eos".into(),
             Entry::Timeline(target) => format!("Timeline({})", target.as_millis()),
             Entry::Segment { id, flushed } => {
@@ -1806,6 +1848,9 @@ struct Judged {
     lap: Option<Duration>,
     lossless: bool,
     shows_pictures: bool,
+    /// Whether what reaches this terminal is paced against the playback
+    /// clock — see [`EARLY`].
+    paced: bool,
 }
 
 /// Checks one terminal's record against the promises about data.
@@ -1821,7 +1866,14 @@ fn judge(
         lap,
         lossless,
         shows_pictures,
+        paced,
     } = judged;
+    // The first sample handed since the last seek while the playback clock
+    // had not begun again — see where it is read. What a preroll asks for
+    // is one, and what a transform or a fan-out kept behind it goes on as
+    // playing does, before what paces them has read the clock again: a few
+    // more, close behind it. A burst is seconds of them.
+    let mut unanchored: Option<Duration> = None;
     // The widest step allowed between two samples in a row: a few of the
     // stream's own, so a picture or a packet of sound gone missing shows,
     // and one a timestamp rounded differently does not.
@@ -1874,6 +1926,7 @@ fn judge(
             }
             Entry::Timeline(target) => {
                 last = None;
+                unanchored = None;
                 let (asked, mode, backwards) =
                     seeks
                         .get(seek)
@@ -1910,7 +1963,42 @@ fn judge(
             Entry::Segment { .. } => {}
             Entry::Outside(what) => return Err(format!("entry {at}: {what}")),
             Entry::Eos => {}
-            Entry::Data { pts } => {
+            Entry::Data { pts, ahead } => {
+                // Paced, a sample goes on no sooner than the playback clock
+                // reaches it — late is a slow machine's, and allowed — and
+                // after a seek the clock begins again with what plays on,
+                // so before it only the sample a preroll asks for comes. Not
+                // for a step, which moves the picture past a paused clock,
+                // nor for a finish, which plays out at once what was kept.
+                let exempt = under_way
+                    .is_some_and(|(index, _)| calls[index].step || calls[index].name == "finish");
+                let playing = match under_way {
+                    Some((index, _)) => !calls[index].ends_paused,
+                    None => !paused,
+                };
+                if paced && !exempt {
+                    match ahead {
+                        Some(ahead) if playing && *ahead > EARLY.as_nanos() as i64 => {
+                            return Err(format!(
+                                "entry {at}: {pts:?} handed {:?} ahead of the playback clock",
+                                Duration::from_nanos(*ahead as u64)
+                            ));
+                        }
+                        None => {
+                            if let Some(pts) = *pts {
+                                let first = *unanchored.get_or_insert(pts);
+                                if pts.abs_diff(first) > EARLY {
+                                    return Err(format!(
+                                        "entry {at}: {pts:?}, handed before the playback clock \
+                                         began again, {:?} on from the first so handed, {first:?}",
+                                        pts.abs_diff(first)
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 match &mut under_way {
                     Some((index, Some(left))) => {
                         if *left == 0 && !ends_the_stream(&log[at..]) {
@@ -2042,7 +2130,7 @@ fn typical_spacing(log: &[Entry]) -> Option<Duration> {
     for entry in log {
         match entry {
             Entry::Timeline(_) => last = None,
-            Entry::Data { pts: Some(pts) } => {
+            Entry::Data { pts: Some(pts), .. } => {
                 if let Some(last) = last
                     && *pts != last
                 {
@@ -2067,6 +2155,34 @@ fn trace_if_asked() {
     GUARD.get_or_init(|| {
         let directory = std::env::var("MEDIA_PP_CONTROL_TRACE").ok()?;
         crate::log::init("conformance", directory, crate::log::Level::Trace, 7).ok()
+    });
+}
+
+/// Threads that only take the cores, as many as `MEDIA_PP_CONTROL_LOAD`
+/// asks for, for the rest of the test binary's life — started once,
+/// however many shapes run. The races these look for show where threads
+/// are short of time, and a machine to itself is not short of it even on
+/// two pinned cores: the bursts d1533fe and fbacfdf fixed showed only with
+/// other work beside them.
+fn load_if_asked() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let threads: usize = std::env::var("MEDIA_PP_CONTROL_LOAD")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        for index in 0..threads {
+            let _ = thread::Builder::new()
+                .name(format!("control-load-{index}"))
+                .spawn(|| {
+                    loop {
+                        for _ in 0..100_000 {
+                            std::hint::spin_loop();
+                        }
+                        thread::yield_now();
+                    }
+                });
+        }
     });
 }
 
@@ -2102,6 +2218,7 @@ fn conform(shape: Shape, key: u64) {
         return;
     }
     trace_if_asked();
+    load_if_asked();
     let steps = std::env::var("MEDIA_PP_CONTROL_STEPS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -2200,7 +2317,7 @@ fn an_accurate_seek_on_a_later_lap_shows_its_target() {
         .iter()
         .rev()
         .find_map(|entry| match entry {
-            Entry::Data { pts } => *pts,
+            Entry::Data { pts, .. } => *pts,
             _ => None,
         })
         .expect("the seek showed a picture");
