@@ -1073,11 +1073,20 @@ fn op(rng: &mut Rng, duration: Option<Duration>, turns: bool) -> Op {
 /// it: a call that never returns is the failure this is looking for, and it
 /// cannot be interrupted, only abandoned.
 fn within<T: Send + 'static>(call: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    within_for(OP_TIMEOUT, call)
+}
+
+/// [`within`], for a call whose own work can take longer than
+/// [`OP_TIMEOUT`] allows, and waiting that much longer.
+fn within_for<T: Send + 'static>(
+    timeout: Duration,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
     let (done, finished) = mpsc::channel();
     thread::spawn(move || {
         let _ = done.send(call());
     });
-    finished.recv_timeout(OP_TIMEOUT).ok()
+    finished.recv_timeout(timeout).ok()
 }
 
 /// Everything the bus says while a sequence runs, collected off it as it
@@ -1602,7 +1611,21 @@ fn run_sequence_turning(
             history.push("Finish".into());
             let index = calls.begin(Call::new("finish", None, false));
             let pipeline = Arc::clone(&rig.pipeline);
-            if within(move || pipeline.finish()).is_none() {
+            // A finish plays out what was already made. Backwards that is
+            // the stretch each decoder is on, which the decoder hands on
+            // only once it has all of it — and a stretch is as long as the
+            // group of pictures it begins at, up to the whole file: played
+            // at the rate, however slow. A finish at half speed backwards
+            // took more than 20 s over an eight-second file, and was not
+            // stuck.
+            let stretch = model
+                .backwards()
+                .then_some(rig.duration)
+                .flatten()
+                .map_or(Duration::ZERO, |duration| {
+                    duration.div_f64(model.rate.abs().max(0.1))
+                });
+            if within_for(OP_TIMEOUT + stretch, move || pipeline.finish()).is_none() {
                 return fail(&history, "finish did not return".into());
             }
             calls.returned(index, false);
