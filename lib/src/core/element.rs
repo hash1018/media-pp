@@ -740,15 +740,25 @@ pub trait SourceElement: Source {
     /// message by the time downstream elements see it.
     ///
     /// The source-side counterpart of a sink's hidden hook, for a source
-    /// that holds state of its own. `FileDemuxer` uses it for both messages
-    /// that touch its read-ahead: `Flush` discards packets belonging to the
-    /// timeline being left, and `Preroll` is what makes it hold a blocked
-    /// pad's packets instead of waiting on that pad.
+    /// that holds state of its own. The framework running a [`Produce`]
+    /// uses it for what it holds back for an output: `Flush` discards what
+    /// belongs to the timeline being left.
     ///
     /// The default is a no-op. A source that hands every packet straight to a
     /// pad has nothing of its own to keep in step.
     #[doc(hidden)]
     fn on_control(&mut self, _msg: &ControlMsg) {}
+
+    /// What the source still owes before its end goes out, for a finish:
+    /// called on its thread as the finish arrives, before the end is handed
+    /// on through every pad — what it held back, and, playing `backwards`,
+    /// the rest of the stretch under way (see [`ReversibleSource`]). An
+    /// error is reported, and the stream ends all the same. Nothing by
+    /// default.
+    #[doc(hidden)]
+    fn finishing(&mut self, _backwards: bool, _bus: &Bus) -> Result<()> {
+        Ok(())
+    }
 
     /// Called as a `Pause` arrives, before it is passed downstream: what the
     /// source does to stop producing — a capture device stopped. The time
@@ -780,7 +790,11 @@ pub trait SourceElement: Source {
 /// This is only the source's side. A seekable source does not mean every
 /// branch after it can follow a seek; that is asked of the whole graph as
 /// it is wired — see [`Sink::accepts_seek`].
-pub trait SeekableSource: SourceElement {
+///
+/// A [`Produce`] says it is one through [`Produce::as_seekable`]; the
+/// framework takes each seek on the source's thread, between one thing made
+/// and the next.
+pub trait SeekableSource: Element {
     /// Repositions this source to `target`, an absolute position from the
     /// start of the media (e.g. `av_seek_frame` for
     /// [`crate::elements::FileDemuxer`]). Called on the source's own thread
@@ -815,11 +829,12 @@ pub trait SeekableSource: SourceElement {
 /// A source that can read its media backwards — what
 /// [`crate::pipeline::Pipeline::set_rate`] asks of every source for
 /// [`crate::pipeline::Pipeline::REVERSE_RATE`]. It says it is one through
-/// [`SourceElement::as_reversible`].
+/// [`SourceElement::as_reversible`], or a [`Produce`] through
+/// [`Produce::as_reversible`].
 ///
-/// Backwards is what the source reads and in what order; its
-/// [`SourceElement::run`] is the same loop. From a [`Self::seek_backwards`]
-/// on it hands the picture on in *stretches*. A stretch is a span of the
+/// Backwards is what the source reads and in what order; what makes the
+/// next thing is the same. From a [`Self::seek_backwards`] on it hands the
+/// picture on in *stretches*. A stretch is a span of the
 /// media read in the order it decodes in: from the keyframe at or before
 /// the span's start, with each packet that is there only to decode the span
 /// from marked `AV_PKT_FLAG_DISCARD`, so that it is decoded and not shown.
@@ -837,12 +852,12 @@ pub trait ReversibleSource: SeekableSource {
     /// answers where it landed as that does.
     fn seek_backwards(&mut self, target: Duration) -> Result<Duration>;
 
-    /// Reads the stretch under way to its end, as a `Finish` arrives while
-    /// the pipeline plays backwards and before the `Eos` it places behind
-    /// what was read: a stretch is played from its end, and one cut short
-    /// would lose its later pictures. The pipeline plays meanwhile. An
-    /// error is reported on `bus`, and the stream ends all the same.
-    fn finish_stretch(&mut self, bus: &Bus) -> Result<()>;
+    /// Whether the stretch under way has been read to its end — asked as a
+    /// `Finish` arrives while the pipeline plays backwards, and until it
+    /// says so the source is asked for more before the `Eos` goes out
+    /// behind what it read: a stretch is played from its end, and one cut
+    /// short would lose its later pictures. The pipeline plays meanwhile.
+    fn stretch_complete(&self) -> bool;
 }
 
 /// A decoder, an element that turns a picture's packets into pictures,

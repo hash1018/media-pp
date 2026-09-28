@@ -16,12 +16,12 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
-    control::{ControlReceiver, RequestKind, drain_control, handle_request},
     element::{
-        Element, ElementType, ReversibleSource, SeekableSource, Source, SourceElement,
-        element_pp_log,
+        Element, ElementType, Produce, Produced, ProducingSource, ReversibleSource, SeekableSource,
+        Wait, element_pp_log,
     },
     pad::SrcPad,
+    produce::produce_source,
 };
 
 /// Errors specific to `FileDemuxer`. Converts into the crate-wide `Error`
@@ -223,7 +223,9 @@ impl FileDemuxerHandle {
 ///
 /// Fan-out (e.g. routing video and audio to separate branches) needs no
 /// separate "Tee" element here — it's just a matter of linking more than
-/// one of these pads.
+/// one of these pads. A pad that cannot take a packet yet has what is read
+/// for it held back while the others go on being fed, within bounds — see
+/// the framework's handling of a source with several outputs.
 ///
 /// Set to loop through [`FileDemuxer::looping_handle`] and the end of the
 /// file rewinds to the start instead of ending the stream. Timestamps then
@@ -246,42 +248,28 @@ impl FileDemuxerHandle {
 /// point only once its control sender is gone.
 ///
 /// [`FileDemuxer::seek`]: crate::element::SeekableSource::seek
-pub struct FileDemuxer {
+pub struct FileDemuxer(ProducingSource<Demuxing>);
+
+produce_source!(FileDemuxer);
+
+/// What a [`FileDemuxer`] reads, a packet at a time: all of its work, which
+/// the framework makes the source.
+struct Demuxing {
     pp_log: PpLog,
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
-    pads: Vec<SrcPad>,
-    /// Packets read but not yet delivered, in file order.
-    ///
-    /// `seek` puts one here: peeking a packet right after `Input::seek` is how
-    /// it learns where playback actually landed (see `seek`'s docs), and that
-    /// packet is real data that still has to be delivered.
-    ///
-    /// `run` also parks a packet here when its own pad cannot accept one yet.
-    /// A container interleaves every stream into one read cursor, so refusing
-    /// to read at all while a single pad is blocked stalls the streams that
-    /// *are* ready — during preroll that starves whichever branch has not yet
-    /// taken its sample, and the seek times out waiting for it. Holding the
-    /// blocked pad's packets keeps the cursor moving; per-pad order is what
-    /// matters and each pad's packets stay in the order they were read.
-    pending: VecDeque<(usize, ffmpeg::Rational, ffmpeg::Packet)>,
-    /// Total payload parked in `pending`.
-    pending_bytes: usize,
-    /// How many parked packets each pad owes, so a freshly read one never
-    /// overtakes them.
-    parked_per_pad: Vec<usize>,
-    /// When the oldest packet each pad owes is due, in nanoseconds of file
-    /// time — how far behind the read cursor that pad has been left. See
-    /// [`MAX_INTERLEAVE`].
-    parked_since_ns: Vec<Option<i64>>,
-    /// When the packet last read is due, in nanoseconds of file time.
-    read_ns: Option<i64>,
-    /// The pipeline's playback state, which says whether a preroll is
-    /// running — see [`FileDemuxer::prerolling`].
-    state: Option<std::sync::Arc<crate::playback_state::PlaybackState>>,
-    /// Whether a `Seek` has repositioned it since [`Self::linger`] began
-    /// waiting at the end of the file.
-    sought: bool,
+    /// What each stream's output declares, by stream index.
+    contracts: Vec<OutputContract>,
+    /// Packets read but not yet handed on, in file order: what a seek read
+    /// to learn where it landed — see [`Demuxing::read_to_landing`] — which
+    /// is real data that still has to go on.
+    ahead: VecDeque<(usize, ffmpeg::Rational, ffmpeg::Packet)>,
+    /// Which streams something reads, as the framework first says; every
+    /// one until then.
+    linked: Option<Vec<bool>>,
+    /// Its pipeline's, for what goes wrong that is not the source's end —
+    /// `None` driven by hand.
+    bus: Option<Bus>,
     /// Set through [`FileDemuxerHandle::set_looping`], read only where the
     /// container runs out.
     looping: Arc<AtomicBool>,
@@ -318,23 +306,11 @@ pub struct FileDemuxer {
     /// `lap_end` the last wrap stepped over. Zero until the first wrap.
     ///
     /// What puts a position on the timeline back into its lap — see
-    /// [`FileDemuxer::locate_in_lap`] — and what reading backwards steps the
+    /// [`Demuxing::locate_in_lap`] — and what reading backwards steps the
     /// offset down by, back over the start of a lap into the one before.
     lap_length: i64,
-    /// The pipeline's playback clock, whose rate says which way to read —
-    /// see [`Backwards`].
     /// Where reading backwards has got to, while it is.
     backwards: Option<Backwards>,
-}
-
-/// How handing every pad its end went — see [`FileDemuxer::end_every_pad`].
-enum Ending {
-    /// Every pad has its `Eos`.
-    Ended,
-    /// Stopped, or finished, on the way.
-    Stopped,
-    /// A seek moved the source back into the file first.
-    Sought,
 }
 
 /// Reading the picture backwards: a stretch at a time from the end, each
@@ -365,9 +341,6 @@ struct Backwards {
     end: i64,
     /// Whether this stretch has still to be sought to.
     unread: bool,
-    /// A packet read and ready to go, waiting for its pad to take it — see
-    /// [`FileDemuxer::hand_on_backwards`].
-    held: Option<ffmpeg::Packet>,
 }
 
 /// How much a decoder may hold of a stretch read backwards — see
@@ -389,13 +362,6 @@ const BACKWARDS_STRETCH_LIMITS: (Duration, Duration) =
 /// A stretch's length where the stream does not say its size or rate.
 const BACKWARDS_STRETCH_UNKNOWN: Duration = Duration::from_secs(1);
 
-/// How far the read cursor may run ahead of what a blocked pad still owes,
-/// in file time, to keep another branch fed — see
-/// [`FileDemuxer::may_park`]. Covers how far apart a container's streams are
-/// muxed in practice, typically a second or less, with room to spare; past
-/// it, the blocked pad is waited on.
-const MAX_INTERLEAVE: Duration = Duration::from_secs(5);
-
 /// When `packet` is due, in nanoseconds of file time — its decode time, which
 /// only moves forward in file order, else its presentation time.
 fn packet_ns(packet: &ffmpeg::Packet, time_base: ffmpeg::Rational) -> Option<i64> {
@@ -409,18 +375,6 @@ fn duration_ns(duration: Duration) -> i64 {
 }
 
 impl FileDemuxer {
-    /// Whether a preroll is running. Any blocked pad is parked for then;
-    /// outside one, only while another branch is waiting on the read cursor
-    /// — see [`FileDemuxer::may_park`]. Never, for a demuxer no pipeline
-    /// has wired.
-    fn prerolling(&self) -> bool {
-        // Including the pause that ends one, until it reaches this source:
-        // what it parked stays parked — see `crate::playback_state`.
-        self.state
-            .as_ref()
-            .is_some_and(|state| state.preroll().is_some())
-    }
-
     /// Opens the file and returns it alongside every stream it contains,
     /// so the caller can inspect them (count, media type, ...) before
     /// deciding which to use — each at its own `index`, which is the pad
@@ -442,21 +396,16 @@ impl FileDemuxer {
             });
         }
 
-        let pads: Vec<SrcPad> = streams
+        // Per stream, from the medium the container announced: every output
+        // hands on `MediaBuffer::Packet`, so only this tells an audio stream
+        // apart from a video one. A medium this crate does not model
+        // (subtitles, data) declares nothing and is left to the runtime
+        // check.
+        let contracts = streams
             .iter()
-            .map(|s| {
-                // Per stream, from the medium the container announced:
-                // both pads emit `MediaBuffer::Packet`, so only this tells
-                // an audio stream apart from a video one. A medium this
-                // crate does not model (subtitles, data) declares nothing
-                // and is left to the runtime check.
-                match MediaKind::packet_for(s.kind) {
-                    Some(kind) => SrcPad::with_contract(
-                        format!("src_{}", s.index),
-                        OutputContract::Fixed(PortContract::packet(kind)),
-                    ),
-                    None => SrcPad::new(format!("src_{}", s.index)),
-                }
+            .map(|s| match MediaKind::packet_for(s.kind) {
+                Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
+                None => OutputContract::Unknown,
             })
             .collect();
 
@@ -469,18 +418,14 @@ impl FileDemuxer {
             streams.len()
         );
         Ok((
-            Self {
+            Self(ProducingSource::new(Demuxing {
                 name,
                 pp_log,
                 input,
-                parked_per_pad: vec![0; pads.len()],
-                parked_since_ns: vec![None; pads.len()],
-                read_ns: None,
-                state: None,
-                sought: false,
-                pads,
-                pending: VecDeque::new(),
-                pending_bytes: 0,
+                contracts,
+                ahead: VecDeque::new(),
+                linked: None,
+                bus: None,
                 looping: Arc::new(AtomicBool::new(false)),
                 backwards: None,
                 published_offset: Arc::new(AtomicI64::new(0)),
@@ -488,7 +433,7 @@ impl FileDemuxer {
                 loop_offset: 0,
                 lap_end: 0,
                 lap_length: 0,
-            },
+            })),
             streams,
         ))
     }
@@ -498,10 +443,11 @@ impl FileDemuxer {
     /// pipeline, and keep it for as long as the loop is meant to be
     /// switchable. See [`FileDemuxerHandle::set_looping`].
     pub fn looping_handle(&self) -> FileDemuxerHandle {
+        let demuxing = self.0.inner();
         FileDemuxerHandle {
-            looping: self.looping.clone(),
-            published_offset: self.published_offset.clone(),
-            published_lap: self.published_lap.clone(),
+            looping: demuxing.looping.clone(),
+            published_offset: demuxing.published_offset.clone(),
+            published_lap: demuxing.published_lap.clone(),
         }
     }
 
@@ -521,7 +467,9 @@ impl FileDemuxer {
     /// FFmpeg's own choice (`av_find_best_stream`) passes over a stream marked
     /// as an attached picture and prefers one with more than a single frame.
     pub fn best(&self, kind: ffmpeg::media::Type) -> Result<StreamInfo, FileDemuxerError> {
-        self.input
+        self.0
+            .inner()
+            .input
             .streams()
             .best(kind)
             .map(|stream| StreamInfo::of(&stream))
@@ -531,25 +479,208 @@ impl FileDemuxer {
     /// How long the file plays, as its container says — `None` where it
     /// says nothing, as a live capture or a truncated recording may not.
     pub fn duration(&self) -> Option<Duration> {
-        let micros = self.input.duration();
+        let micros = self.0.inner().input.duration();
         (micros > 0).then(|| Duration::from_micros(micros as u64))
     }
+}
 
+impl Element for Demuxing {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::FileDemuxer
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+
+    fn attach_context(&mut self, context: &std::sync::Arc<crate::element::Context>) {
+        self.bus = Some(context.bus.for_element(context.source_id));
+    }
+}
+
+impl Produce for Demuxing {
+    fn is_live(&self) -> bool {
+        false
+    }
+
+    /// One per stream in the file, at the stream's own index.
+    fn outputs(&self) -> Vec<SrcPad> {
+        self.contracts
+            .iter()
+            .enumerate()
+            .map(|(index, contract)| SrcPad::with_contract(format!("src_{index}"), *contract))
+            .collect()
+    }
+
+    /// The next packet of the file, on its stream's output — read forwards,
+    /// or a stretch at a time backwards (see [`Backwards`]). At the end of
+    /// the file a looping one begins its next lap, as a segment of its own;
+    /// one that does not ends its stream.
+    fn produce(&mut self, wait: &mut Wait<'_>) -> crate::error::Result<Produced> {
+        if self.linked.is_none() && !wait.linked().is_empty() {
+            self.linked = Some(wait.linked().to_vec());
+        }
+        if self.backwards.is_some() {
+            return self.read_backwards();
+        }
+        let next = self.ahead.pop_front().or_else(|| {
+            let (index, time_base, mut packet) = self
+                .input
+                .packets()
+                .next()
+                .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))?;
+            self.stamp_lap(index, time_base, &mut packet);
+            Some((index, time_base, packet))
+        });
+        if let Some(item) = next {
+            return Ok(Self::on_its_output(item));
+        }
+        // The end of the file, and the one place the loop flag is read: a
+        // change made mid-file lands here, at the end the source was
+        // already heading for.
+        if self.looping.load(Ordering::Relaxed) {
+            match self.wrap() {
+                // The lap just wrapped to begins as a segment of its own:
+                // on the same timeline — no seek began it, and nothing is
+                // flushed — but starting a lap further on, at the start of
+                // the file. What is shown and what a caller seeks in are a
+                // lap apart across the join, and the segment is where
+                // downstream can tell which lap it has; see
+                // `crate::stream`. It goes out behind what the lap before
+                // still has held back.
+                Ok(()) => {
+                    return Ok(Produced::Segment {
+                        flushed: false,
+                        position: Duration::ZERO,
+                        start: Duration::from_micros(self.loop_offset.max(0).unsigned_abs()),
+                    });
+                }
+                // A file that cannot be rewound cannot be looped, but it has
+                // been fully read — so report why the loop stopped and end
+                // the stream properly, rather than failing a source that
+                // delivered everything it was asked for.
+                Err(error) => {
+                    pp_error!(self, "could not start the file again: {error}");
+                    if let Some(bus) = &self.bus {
+                        bus.post(
+                            &self.pp_log,
+                            BusEvent::Error {
+                                element_type: ElementType::FileDemuxer,
+                                name: self.name.clone(),
+                                error,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        Ok(Produced::End)
+    }
+
+    fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
+        Some(self)
+    }
+
+    /// A file with a picture: that is what is read backwards.
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSource> {
+        if self.picture_stream().is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
+impl SeekableSource for Demuxing {
+    fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
+        self.backwards = None;
+        let target = self.locate_in_lap(target);
+        self.reposition(target)
+    }
+
+    /// On the lap the seek left the timeline on — see
+    /// [`Demuxing::locate_in_lap`]: a position in the file a lap further on
+    /// for every lap played, and one already past a lap's end where it is.
+    fn on_timeline(&self, position: crate::stream::Position) -> Duration {
+        let lap = self.lap_length.saturating_mul(1000);
+        if lap > 0 && duration_ns(position.0) > lap {
+            return position.0;
+        }
+        position.0 + Duration::from_micros(self.loop_offset.max(0).unsigned_abs())
+    }
+}
+
+/// The picture's stream, read back a stretch at a time. What nothing is
+/// wired to is read all the same and handed to no one, down to the start
+/// of the file, where the stream ends.
+impl ReversibleSource for Demuxing {
+    fn seek_backwards(&mut self, target: Duration) -> crate::error::Result<Duration> {
+        let stream = self
+            .picture_stream()
+            .ok_or(FileDemuxerError::NoStream(ffmpeg::media::Type::Video))?;
+        let target = self.locate_in_lap(target);
+        // The picture at `target` is the last of the first stretch.
+        let end = duration_ns(target).saturating_add(1);
+        let longest = duration_ns(self.stretch_limit(stream));
+        self.backwards = Some(Backwards {
+            stream,
+            longest,
+            start: end,
+            end,
+            unread: true,
+        });
+        self.start_stretch()?;
+        Ok(target)
+    }
+
+    /// Once the next stretch is marked to be sought to: the one just read
+    /// was the last of its own.
+    fn stretch_complete(&self) -> bool {
+        self.backwards
+            .as_ref()
+            .is_none_or(|backwards| backwards.unread)
+    }
+}
+
+impl Demuxing {
     #[cfg(test)]
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
+    }
+
+    /// A packet read, stamped with its stream's time base, on its stream's
+    /// output.
+    ///
+    /// `AVCodecParameters` does not carry the container stream's timestamp
+    /// unit, and FFmpeg does not guarantee that demuxers populate
+    /// `AVPacket::time_base`. Stamping it here — the one place every packet
+    /// leaves this source through, read ahead or not — means a packet held
+    /// back for a blocked output arrives downstream describing itself the
+    /// same way an immediately delivered one does.
+    fn on_its_output(
+        (index, time_base, mut packet): (usize, ffmpeg::Rational, ffmpeg::Packet),
+    ) -> Produced {
+        packet.set_time_base(time_base);
+        Produced::On(index, MediaBuffer::Packet(Arc::new(packet)))
     }
 
     /// Puts a freshly read packet on this source's output timeline, and
     /// records how far into the file this lap has now reached.
     ///
     /// Called at each of the two places a packet is read out of the
-    /// container — `run`'s cursor and `seek`'s read-ahead — rather than
-    /// where they are delivered. Stamping a time base is idempotent and
-    /// `deliver_or_park` can do it to the same packet twice; shifting a
-    /// timestamp is not.
+    /// container — `produce`'s cursor and `seek`'s read-ahead — rather than
+    /// where they are handed on. Stamping a time base is idempotent;
+    /// shifting a timestamp is not.
     ///
-    /// Only a linked pad's stream counts towards the lap's length. An
+    /// Only a linked output's stream counts towards the lap's length. An
     /// unlinked one is dropped rather than delivered, so letting a longer
     /// audio track nobody selected decide where the video restarts would
     /// only open a gap at every join.
@@ -559,8 +690,12 @@ impl FileDemuxer {
         time_base: ffmpeg::Rational,
         packet: &mut ffmpeg::Packet,
     ) {
+        let linked = self
+            .linked
+            .as_ref()
+            .is_none_or(|linked| linked.get(index).copied().unwrap_or(false));
         if let Some(start) = packet.pts().or_else(|| packet.dts())
-            && self.pads.get(index).is_some_and(SrcPad::is_linked)
+            && linked
         {
             // A packet carrying no duration of its own still ends after it
             // starts, and one tick is the least that keeps the next lap's
@@ -622,8 +757,8 @@ impl FileDemuxer {
     /// just ended, then rewinds the container.
     ///
     /// Ordering matters. The offset moves first so that the read-ahead
-    /// packet `seek` parks — the new lap's first — is stamped onto the new
-    /// timeline like every packet after it.
+    /// packets `seek` keeps — the new lap's first — are stamped onto the new
+    /// timeline like every packet after them.
     fn wrap(&mut self) -> crate::error::Result<()> {
         self.lap_length = self.lap_end;
         self.published_lap.store(self.lap_length, Ordering::Relaxed);
@@ -640,305 +775,6 @@ impl FileDemuxer {
         Ok(())
     }
 
-    /// Pushes `item` if its pad can take one now, otherwise parks it.
-    ///
-    /// A downstream failure drops just that one packet — the same
-    /// "report, don't die" contract `Queue`'s worker gives a failing `Sink` —
-    /// rather than ending this whole source thread over it. `Pipeline::stop`
-    /// is how a caller who decides an error is fatal actually ends things.
-    fn deliver_or_park(
-        &mut self,
-        item: (usize, ffmpeg::Rational, ffmpeg::Packet),
-        bus: &Bus,
-    ) -> crate::error::Result<()> {
-        let (index, time_base, mut packet) = item;
-        // `AVCodecParameters` does not carry the container stream's timestamp
-        // unit, and FFmpeg does not guarantee that demuxers populate
-        // `AVPacket::time_base`. Stamping it here — the one place every packet
-        // leaves this source through, parked or not — means a packet held for
-        // a blocked pad arrives downstream describing itself the same way an
-        // immediately delivered one does.
-        packet.set_time_base(time_base);
-        if self.pads.get(index).is_none() {
-            // No pad for this stream: nobody selected it, so it is dropped
-            // rather than parked. Parking it would grow without bound.
-            return Ok(());
-        }
-        // Anything already parked for this pad was read first and must stay
-        // first. Overtaking it would hand a decoder its stream out of decode
-        // order.
-        let blocked = self.parked_per_pad[index] > 0 || !self.pads[index].ready_consume();
-        if blocked && self.may_park(index) {
-            self.park((index, time_base, packet));
-            return Ok(());
-        }
-        // Otherwise the pad is past the interleave bound and is waited on:
-        // the push below blocks until the downstream `Queue` has room. What
-        // it already owes goes first, having been read before this.
-        if self.parked_per_pad[index] > 0 {
-            self.deliver_parked(index, bus);
-        }
-        self.push_to_pad(index, packet, bus);
-        Ok(())
-    }
-
-    /// Delivers every packet pad `index` owes, oldest first, waiting on the
-    /// pad as any push does.
-    fn deliver_parked(&mut self, index: usize, bus: &Bus) {
-        let mut rest = VecDeque::with_capacity(self.pending.len());
-        while let Some((owner, time_base, packet)) = self.pending.pop_front() {
-            if owner != index {
-                rest.push_back((owner, time_base, packet));
-                continue;
-            }
-            self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
-            self.parked_per_pad[index] -= 1;
-            self.push_to_pad(index, packet, bus);
-        }
-        self.pending = rest;
-        self.parked_since_ns[index] = None;
-    }
-
-    /// Whether a packet for blocked pad `index` may be held back so the read
-    /// cursor can move on, rather than waited on.
-    ///
-    /// Always during a preroll, which needs every branch's first sample.
-    /// Otherwise within [`MAX_INTERLEAVE`] of what the pads already owe.
-    ///
-    /// That second case is a file whose picture is muxed ahead of its sound.
-    /// The video queue fills with frames the audio has not reached; waiting
-    /// on it stops this thread before the audio packets that would let the
-    /// audio reach them, and the video waits on the audio for good. Holding
-    /// the video packets back keeps both fed.
-    ///
-    /// Whether anything else can take the cursor now is not asked here: it is
-    /// what `pending_blocked` asks before each read, which is what keeps this
-    /// source from running away from playback — holding without any bound
-    /// once buffered 67 MB within 1.5 s. Asked here, it held the video back
-    /// only while the sound's own queue had room at that very moment; a
-    /// packet read while both were full was pushed into the video's and
-    /// waited on there, and once the sound drained this thread was still
-    /// waiting on the video that waited on the sound — a player froze a
-    /// few seconds into a file whose picture was muxed a second ahead.
-    fn may_park(&mut self, _index: usize) -> bool {
-        self.prerolling() || !self.interleave_exceeded()
-    }
-
-    /// Whether the read cursor has got [`MAX_INTERLEAVE`] ahead of the oldest
-    /// packet any pad still owes.
-    fn interleave_exceeded(&self) -> bool {
-        let Some(read_ns) = self.read_ns else {
-            return false;
-        };
-        self.parked_since_ns
-            .iter()
-            .flatten()
-            .any(|&since| read_ns.saturating_sub(since) > duration_ns(MAX_INTERLEAVE))
-    }
-
-    /// Begins the lap just wrapped to as a segment of its own: on the same
-    /// timeline — no seek began it, and nothing is flushed — but starting a
-    /// lap further on, at the start of the file. What is shown and what a
-    /// caller seeks in are a lap apart across the join, and the segment is
-    /// where downstream can tell which lap it has; see `crate::stream`.
-    ///
-    /// Sent as the wrap leaves it: nothing is parked but the new lap's
-    /// first packet, which the segment goes ahead of. Only in a pipeline,
-    /// whose count its timelines are: a demuxer driven by hand begins no
-    /// segment at all.
-    fn begin_lap(&mut self, bus: &Bus) {
-        let Some(state) = &self.state else {
-            return;
-        };
-        let segment = crate::stream::Segment {
-            id: state.timeline(),
-            flushed: false,
-            position: Duration::ZERO,
-            start: Duration::from_micros(self.loop_offset.max(0).unsigned_abs()),
-            show_from: None,
-            backwards: state.backwards(),
-        };
-        if let Err(error) = crate::stream::begin_segment(&mut self.pads, segment, &self.pp_log) {
-            bus.post_downstream_error(
-                &self.pp_log,
-                ElementType::FileDemuxer,
-                self.name.clone(),
-                error,
-            );
-        }
-    }
-
-    fn push_to_pad(&mut self, index: usize, packet: ffmpeg::Packet, bus: &Bus) {
-        if let Err(error) = self.pads[index].push(MediaBuffer::Packet(Arc::new(packet))) {
-            bus.post_downstream_error(
-                &self.pp_log,
-                ElementType::FileDemuxer,
-                self.name.clone(),
-                error,
-            );
-        }
-    }
-
-    /// Holds one packet back, keeping the totals that bound the backlog in
-    /// step with the queue. The one place anything enters `pending`, so it is
-    /// also where the stream time base is guaranteed onto a packet that will
-    /// be delivered later — `seek` parks its read-ahead packet directly.
-    fn park(&mut self, item: (usize, ffmpeg::Rational, ffmpeg::Packet)) {
-        let (index, time_base, mut packet) = item;
-        packet.set_time_base(time_base);
-        self.pending_bytes = self.pending_bytes.saturating_add(packet.size());
-        if self.parked_per_pad[index] == 0 {
-            self.parked_since_ns[index] = packet_ns(&packet, time_base).or(self.read_ns);
-        }
-        self.parked_per_pad[index] += 1;
-        self.pending.push_back((index, time_base, packet));
-    }
-
-    /// Delivers every parked packet whose pad can take one, oldest first,
-    /// leaving the rest in place.
-    ///
-    /// Once a pad has held one packet back, every later packet of *that* pad
-    /// is held too, even if the pad reports itself ready again a moment later.
-    /// Readiness here is a `Queue`'s "not full", which its worker changes on
-    /// another thread while this loop runs — so re-asking per packet would let
-    /// the second overtake the first the instant a slot opened, and a decoder
-    /// handed its stream out of order produces garbage and a flood of
-    /// `co located POCs unavailable`. Other pads are unaffected: keeping the
-    /// read cursor moving for them is the whole reason parking exists.
-    fn drain_pending(&mut self, bus: &Bus) -> crate::error::Result<()> {
-        // The ordinary case — nothing is held back: this runs once per
-        // packet read, so it must not allocate to find nothing.
-        if self.pending.is_empty() {
-            return Ok(());
-        }
-        let mut deferred = VecDeque::with_capacity(self.pending.len());
-        let mut blocked = vec![false; self.pads.len()];
-        while let Some((index, time_base, packet)) = self.pending.pop_front() {
-            // Still held while its pad cannot take it: pushing would block
-            // this thread on that pad, which is what parking is there to
-            // avoid. When reading has to stop instead, `pending_blocked` says
-            // so, and this delivers as the pad frees up.
-            let hold = blocked[index] || !self.pads[index].ready_consume();
-            if hold {
-                blocked[index] = true;
-                deferred.push_back((index, time_base, packet));
-                continue;
-            }
-            self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
-            self.parked_per_pad[index] -= 1;
-            // The next it owes, if any, is the one that bounds it now.
-            self.parked_since_ns[index] = None;
-            self.push_to_pad(index, packet, bus);
-        }
-        for (index, time_base, packet) in &deferred {
-            if self.parked_since_ns[*index].is_none() {
-                self.parked_since_ns[*index] = packet_ns(packet, *time_base).or(self.read_ns);
-            }
-        }
-        self.pending = deferred;
-        Ok(())
-    }
-
-    /// Hands every pad its `Eos`, each as soon as it can take one, answering
-    /// control between tries — and says how it ended: every pad ended, the
-    /// source stopped, or a seek moved it back into the file first.
-    ///
-    /// Not each in turn with a push that waits for room. In a preroll a
-    /// branch that has its sample takes nothing more, so the queue in front
-    /// of it stays full; the pad after it, whose branch may need its `Eos`
-    /// to preroll at all — a seek past the last of the sound is answered by
-    /// the sample before it, handed on at the end of the stream — waited
-    /// behind that push on this one thread until the preroll timed out.
-    /// Packets were parked per pad for exactly this; the end was not. Found
-    /// by the conformance matrix, with one-deep queues and sound.
-    ///
-    /// What is still parked goes out from here too, each pad's in its order
-    /// and its end after the last of it — but a pad that owes nothing parked
-    /// has its end as soon as it can take it, whatever another still owes.
-    /// Waited for until every pad's parked packets had gone, the end was
-    /// kept from a branch that needed it to preroll, behind a sibling that
-    /// had its sample and took nothing more: a seek to the last picture,
-    /// past the last of the sound, timed out once in a few hundred of the
-    /// matrix's sequences.
-    ///
-    /// A `Finish` that arrives meanwhile ends in order: what is parked and
-    /// the ends still owed go out, waited for, since a finish plays on to
-    /// them — and no pad is handed a second end.
-    fn end_every_pad(
-        &mut self,
-        control: &ControlReceiver,
-        bus: &Bus,
-    ) -> crate::error::Result<Ending> {
-        self.sought = false;
-        let mut owed = vec![true; self.pads.len()];
-        loop {
-            self.drain_pending(bus)?;
-            for (index, pad) in self.pads.iter_mut().enumerate() {
-                if owed[index]
-                    && self.parked_per_pad[index] == 0
-                    && (!pad.is_linked() || pad.ready_consume())
-                {
-                    pad.push_eos(&self.pp_log)?;
-                    owed[index] = false;
-                }
-            }
-            if !owed.contains(&true) {
-                return Ok(Ending::Ended);
-            }
-            while let Some((request, ack)) = control.try_recv() {
-                if matches!(request, RequestKind::Finish) {
-                    for (index, _, packet) in std::mem::take(&mut self.pending) {
-                        self.push_to_pad(index, packet, bus);
-                    }
-                    self.forget_parked();
-                    for (index, pad) in self.pads.iter_mut().enumerate() {
-                        if owed[index] {
-                            pad.push_eos(&self.pp_log)?;
-                        }
-                    }
-                    let _ = ack.send(());
-                    return Ok(Ending::Stopped);
-                }
-                if handle_request(control, self, bus, request, ack)?.stopped {
-                    return Ok(Ending::Stopped);
-                }
-                if self.sought {
-                    return Ok(Ending::Sought);
-                }
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    /// Waits at the end of the file, passing every control request on to
-    /// the branches — pausing and resuming them as the pipeline does — until
-    /// it is stopped or finished, `Ok(false)`, or a seek moves it back into
-    /// the file, `Ok(true)`, to read on from there.
-    fn linger(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<bool> {
-        self.sought = false;
-        loop {
-            let Some((request, ack)) = control.recv() else {
-                return Ok(false);
-            };
-            if matches!(request, RequestKind::Finish) {
-                // A graceful finish: the `Eos` it would push is already out.
-                let _ = ack.send(());
-                return Ok(false);
-            }
-            // Handled as a source handles one anywhere, a `Pause` included:
-            // nothing is read until a `Resume`, or a seek's `Preroll` asking
-            // for its picture. Passed on without pausing, as it once was
-            // here, a seek from the end read on into the paused queue after
-            // this and never took the `Preroll` it then waited on.
-            if handle_request(control, self, bus, request, ack)?.stopped {
-                return Ok(false);
-            }
-            if self.sought {
-                return Ok(true);
-            }
-        }
-    }
-
     /// The stream FFmpeg seeks the file by — its default one, the picture
     /// where there is one — and that stream's time base. `None` where it
     /// has none with a time base to read.
@@ -953,13 +789,13 @@ impl FileDemuxer {
     }
 
     /// Reads on from where a seek left the file up to the first packet of
-    /// the stream it seeks by, parking all of it for `run`, and answers
-    /// where the first packet of all starts and when that stream's first
-    /// starts and is decoded — `None` for either past the end.
+    /// the stream it seeks by, keeping all of it to be handed on, and
+    /// answers where the first packet of all starts and when that stream's
+    /// first starts and is decoded — `None` for either past the end.
     ///
     /// Where a seek landed is only known by reading: `avformat_seek_file`
     /// says nothing but whether it failed. What is read is real data, not a
-    /// probe to throw away, which is why it is parked rather than dropped.
+    /// probe to throw away, which is why it is kept rather than dropped.
     fn read_to_landing(
         &mut self,
         by: Option<(usize, ffmpeg::Rational)>,
@@ -995,29 +831,19 @@ impl FileDemuxer {
             let seeking_by = by.is_none_or(|(by, _)| by == index);
             let landing = at(packet.pts().or_else(|| packet.dts()))
                 .zip(at(packet.dts().or_else(|| packet.pts())));
-            // Backwards, what is parked is read back as it is read from the
+            // Backwards, what is kept is read back as it is read from the
             // file, and carried onto the lap only as it is handed on — see
             // `read_backwards`, which compares it with the stretch in the
             // file's own time first.
             if self.backwards.is_none() {
                 self.stamp_lap(index, time_base, &mut packet);
             }
-            self.park((index, time_base, packet));
+            self.ahead.push_back((index, time_base, packet));
             if seeking_by {
                 return (first, landing);
             }
         }
         (first, None)
-    }
-
-    /// Forgets every packet read and parked, for a new position to be read
-    /// from — a `Flush`'s, or a seek's that landed too late.
-    fn forget_parked(&mut self) {
-        self.pending.clear();
-        self.pending_bytes = 0;
-        self.parked_per_pad.fill(0);
-        self.parked_since_ns.fill(None);
-        self.read_ns = None;
     }
 
     /// `target` as the microseconds to hand `Input::seek`, such that the seek
@@ -1045,265 +871,6 @@ impl FileDemuxer {
         i64::try_from(micros).unwrap_or(whole).min(whole)
     }
 
-    /// Whether reading another packet would only deepen the parked backlog.
-    ///
-    /// Not a tuning knob: a branch that is briefly behind parks a handful of
-    /// packets and clears them within milliseconds. These ceilings only bound
-    /// a pad that has stopped accepting altogether, so the read cursor cannot
-    /// pull an arbitrary amount of the file into memory waiting for it. Both
-    /// are needed — a few large keyframes reach the byte limit at a packet
-    /// count that would never trip on its own.
-    fn pending_blocked(&mut self) -> bool {
-        if self.pending.is_empty() {
-            return false;
-        }
-        // Outside a preroll, a pad held back past the interleave bound is
-        // waited on: reading on would only park more for it.
-        if !self.prerolling() && self.interleave_exceeded() {
-            return true;
-        }
-        const MAX_PENDING_PACKETS: usize = 4_096;
-        const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
-
-        self.pending.len() >= MAX_PENDING_PACKETS
-            || self.pending_bytes >= MAX_PENDING_BYTES
-            || !self
-                .pads
-                .iter_mut()
-                .any(|pad| pad.is_linked() && pad.ready_consume())
-    }
-}
-
-impl Element for FileDemuxer {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::FileDemuxer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &std::sync::Arc<crate::element::Context>) {
-        self.state = Some(std::sync::Arc::clone(&context.state));
-    }
-}
-
-impl Source for FileDemuxer {
-    fn src_pads(&mut self) -> &mut [SrcPad] {
-        &mut self.pads
-    }
-}
-
-impl SourceElement for FileDemuxer {
-    fn is_live(&self) -> bool {
-        false
-    }
-
-    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
-        pp_info!(self, "started");
-        // Deliberately re-creates `self.input.packets()` fresh every
-        // iteration (cheap — it's just a short-lived wrapper, not a
-        // stateful cursor of its own) instead of holding one `for` loop's
-        // iterator across the whole function, the way this used to read.
-        // That iterator borrows `input` for as long as it's alive; `Seek`
-        // needs `drain_control` to be able to call `self.seek()` — a
-        // *second* mutable borrow of `input` — in between reads, which a
-        // single loop-spanning iterator would rule out.
-        loop {
-            loop {
-                if drain_control(control, self, bus)?.stopped {
-                    // Stop: abandon in place, no final Eos.
-                    pp_info!(self, "stopped");
-                    return Ok(());
-                }
-                if self.backwards.is_some() {
-                    if self.read_backwards(bus, true)? {
-                        continue;
-                    }
-                    // The start of the file: the end of the stream, backwards.
-                    break;
-                }
-                // Deliver whatever is parked and now accepted, oldest first.
-                // Skipping a still-blocked pad's entry to reach a later one is
-                // safe: only each pad's own order has to hold, and this preserves
-                // it because entries for one pad are never reordered against each
-                // other.
-                self.drain_pending(bus)?;
-                // Read on unless everything is blocked, or the parked backlog has
-                // grown past what one branch briefly falling behind can explain.
-                // Sleeping is the only option then: the container cannot hand out
-                // a different stream's packet without reading this one.
-                if self.pending_blocked() {
-                    std::thread::sleep(Duration::from_millis(1));
-                    continue;
-                }
-                let next = self
-                    .input
-                    .packets()
-                    .next()
-                    .map(|(s, p)| (s.index(), s.time_base(), p));
-                let Some((index, time_base, mut packet)) = next else {
-                    // The end of the file, and the one place the loop flag is
-                    // read: a change made mid-file lands here, at the end the
-                    // source was already heading for.
-                    if self.looping.load(Ordering::Relaxed) {
-                        if !self.pending.is_empty() {
-                            // The next lap waits for what this one parked.
-                            std::thread::sleep(Duration::from_millis(1));
-                            continue;
-                        }
-                        match self.wrap() {
-                            Ok(()) => {
-                                self.begin_lap(bus);
-                                continue;
-                            }
-                            // A file that cannot be rewound cannot be looped,
-                            // but it has been fully read — so report why the
-                            // loop stopped and end the stream properly, rather
-                            // than failing a source that delivered everything
-                            // it was asked for.
-                            Err(error) => bus.post(
-                                &self.pp_log,
-                                BusEvent::Error {
-                                    element_type: ElementType::FileDemuxer,
-                                    name: self.name.clone(),
-                                    error,
-                                },
-                            ),
-                        }
-                    }
-                    // What is still parked goes out with the ends — see
-                    // `end_every_pad`.
-                    break;
-                };
-                self.stamp_lap(index, time_base, &mut packet);
-                if let Some(ns) = packet_ns(&packet, time_base) {
-                    self.read_ns = Some(ns);
-                }
-                // `deliver_or_park` stamps the stream time base; every packet
-                // leaves this source through it, parked or not.
-                self.deliver_or_park((index, time_base, packet), bus)?;
-            }
-            match self.end_every_pad(control, bus)? {
-                Ending::Ended => {}
-                Ending::Stopped => {
-                    pp_info!(self, "stopped");
-                    return Ok(());
-                }
-                // Back into the file before every pad had its end: what is
-                // still owed belongs to the timeline just left.
-                Ending::Sought => continue,
-            }
-            pp_info!(self, "event=eos phase=source_completed outcome=ok");
-            // The end of the file is not the end of playback: the queues after
-            // this still hold what was read, a second of it or more, and they
-            // belong to this thread — ending it would drop them with it, and a
-            // `Pause` or `Resume` sent from then on would reach nothing. In a
-            // paused seek's preroll that is the `Eos` itself, held in a paused
-            // queue, and the file would never finish. So it stays, passing
-            // control on, until it is stopped — or sought back into the file.
-            if !self.linger(control, bus)? {
-                return Ok(());
-            }
-        }
-    }
-
-    fn on_control(&mut self, msg: &crate::control::ControlMsg) {
-        use crate::control::ControlMsg;
-        match msg {
-            // Those packets were read from the timeline being left behind,
-            // and this source is the only place they exist — every downstream
-            // stage discards its own on the same `Flush`, so releasing these
-            // afterwards would be the one way old media could reach a decoder
-            // that had already reset for the new position.
-            ControlMsg::Flush => self.forget_parked(),
-            ControlMsg::Seek(_) => self.sought = true,
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Preroll(_) | ControlMsg::Stop => {}
-        }
-    }
-
-    /// A file with a picture: that is what is read backwards.
-    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSource> {
-        if self.picture_stream().is_some() {
-            Some(self)
-        } else {
-            None
-        }
-    }
-
-    fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
-        Some(self)
-    }
-}
-
-impl SeekableSource for FileDemuxer {
-    fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
-        self.backwards = None;
-        let target = self.locate_in_lap(target);
-        self.reposition(target)
-    }
-
-    /// On the lap the seek left the timeline on — see
-    /// [`FileDemuxer::locate_in_lap`]: a position in the file a lap further
-    /// on for every lap played, and one already past a lap's end where it
-    /// is.
-    fn on_timeline(&self, position: crate::stream::Position) -> Duration {
-        let lap = self.lap_length.saturating_mul(1000);
-        if lap > 0 && duration_ns(position.0) > lap {
-            return position.0;
-        }
-        position.0 + Duration::from_micros(self.loop_offset.max(0).unsigned_abs())
-    }
-}
-
-/// The picture's stream, read back a second at a time. What
-/// nothing is wired to is read all the same and handed to no one, down to
-/// the start of the file, where the stream ends.
-impl ReversibleSource for FileDemuxer {
-    fn seek_backwards(&mut self, target: Duration) -> crate::error::Result<Duration> {
-        let stream = self
-            .picture_stream()
-            .ok_or(FileDemuxerError::NoStream(ffmpeg::media::Type::Video))?;
-        let target = self.locate_in_lap(target);
-        // The picture at `target` is the last of the first stretch.
-        let end = duration_ns(target).saturating_add(1);
-        let longest = duration_ns(self.stretch_limit(stream));
-        self.backwards = Some(Backwards {
-            stream,
-            longest,
-            start: end,
-            end,
-            unread: true,
-            held: None,
-        });
-        self.start_stretch()?;
-        Ok(target)
-    }
-
-    /// Not the one after: `unread` marks the one just read as the last.
-    fn finish_stretch(&mut self, bus: &Bus) -> crate::error::Result<()> {
-        while self
-            .backwards
-            .as_ref()
-            .is_some_and(|backwards| !backwards.unread)
-        {
-            if !self.read_backwards(bus, false)? {
-                break;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl FileDemuxer {
     /// The picture's stream, where the file has one to play backwards.
     fn picture_stream(&self) -> Option<usize> {
         self.input
@@ -1319,7 +886,7 @@ impl FileDemuxer {
         };
         backwards.unread = false;
         let (end, longest) = (backwards.end, backwards.longest);
-        self.forget_parked();
+        self.ahead.clear();
         // The keyframe the last picture before `end` is decoded from: a
         // seek to just before `end` lands on it, and it is where this
         // stretch is read from whatever its length.
@@ -1376,42 +943,35 @@ impl FileDemuxer {
         Duration::from_secs_f64(seconds).clamp(shortest, longest)
     }
 
-    /// Reads one packet backwards — see [`Backwards`] — and answers
-    /// whether there is more to read: `false` once the stretch that begins
-    /// the file has been read. `may_hold`: whether a packet its pad cannot
-    /// take yet may be held for the next call — see
-    /// [`Self::hand_on_backwards`].
-    fn read_backwards(&mut self, bus: &Bus, may_hold: bool) -> crate::error::Result<bool> {
+    /// Reads one step backwards — see [`Backwards`]: the next packet of the
+    /// stretch under way, on the picture's output; nothing, where the step
+    /// sought to a stretch or passed over a packet it does not hand on; or
+    /// the end of the stream, once the stretch that begins the file has
+    /// been read.
+    fn read_backwards(&mut self) -> crate::error::Result<Produced> {
         if self
             .backwards
             .as_ref()
             .is_some_and(|backwards| backwards.unread)
         {
             self.start_stretch()?;
-            return Ok(true);
+            return Ok(Produced::Nothing);
         }
-        if let Some(backwards) = self.backwards.as_mut()
-            && let Some(packet) = backwards.held.take()
-        {
-            let index = backwards.stream;
-            self.hand_on_backwards(index, packet, bus, may_hold);
-            return Ok(true);
-        }
-        let next = self.take_parked().or_else(|| {
+        let next = self.ahead.pop_front().or_else(|| {
             self.input
                 .packets()
                 .next()
                 .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))
         });
         let Some(backwards) = self.backwards.as_mut() else {
-            return Ok(false);
+            return Ok(Produced::End);
         };
         let Some((index, time_base, mut packet)) = next else {
             // The file ran out inside the stretch: it is read.
             return Ok(self.stretch_read());
         };
         if index != backwards.stream {
-            return Ok(true);
+            return Ok(Produced::Nothing);
         }
         let nanos = ffmpeg::Rational::new(1, 1_000_000_000);
         let decoded = packet_ns(&packet, time_base).unwrap_or(i64::MIN);
@@ -1431,62 +991,24 @@ impl FileDemuxer {
             }
         }
         self.shift_to_lap(time_base, &mut packet);
-        packet.set_time_base(time_base);
-        self.hand_on_backwards(index, packet, bus, may_hold);
-        Ok(true)
-    }
-
-    /// Pushes a packet read backwards once its pad can take it, and until
-    /// then holds it, reading nothing more — as forwards a packet is parked
-    /// for a pad that cannot take it yet.
-    ///
-    /// Not waited on inside the push: there, nothing a preroll does can let
-    /// it go. A `Tee` keeps what comes for a branch that has its sample,
-    /// rather than handing it on, but a push it is already waiting in stays
-    /// waiting — for a branch whose terminal has its sample and takes
-    /// nothing more. Its sibling, still decoding the stretch this is
-    /// reading, never had the rest of it, and a step waited on it for good.
-    /// Asked first, the `Tee` answers ready as soon as the branch has its
-    /// sample, and this goes on.
-    ///
-    /// Only between requests, though — `may_hold` — where the loop that
-    /// asks again looks at its control in between. Inside one, reading a
-    /// stretch to its end for a `Finish`, the pipeline's interrupt is out
-    /// and no queue takes anything until the request is answered: the pad
-    /// would never be ready, so the packet is pushed, which an interrupt
-    /// lets past a full queue.
-    fn hand_on_backwards(
-        &mut self,
-        index: usize,
-        packet: ffmpeg::Packet,
-        bus: &Bus,
-        may_hold: bool,
-    ) {
-        if !may_hold || self.pads[index].ready_consume() {
-            self.push_to_pad(index, packet, bus);
-            return;
-        }
-        if let Some(backwards) = self.backwards.as_mut() {
-            backwards.held = Some(packet);
-        }
-        std::thread::sleep(Duration::from_millis(1));
+        Ok(Self::on_its_output((index, time_base, packet)))
     }
 
     /// The stretch just read is done: on to the one before — the end of the
     /// lap before, where this one began the file and looping put a lap
-    /// before it — unless it began the timeline.
+    /// before it — unless it began the timeline, which ends the stream.
     ///
     /// Back into a lap that was played, whether or not the file still
     /// loops: that lap is on the timeline either way. Only the first lap's
     /// start ends the stream, as the start of a file that never looped does.
-    fn stretch_read(&mut self) -> bool {
+    fn stretch_read(&mut self) -> Produced {
         let (offset, lap) = (self.loop_offset, self.lap_length);
         let Some(backwards) = self.backwards.as_mut() else {
-            return false;
+            return Produced::End;
         };
         if backwards.start <= 0 {
             if offset <= 0 || lap <= 0 {
-                return false;
+                return Produced::End;
             }
             backwards.start = lap.saturating_mul(1000);
             backwards.end = backwards.start;
@@ -1497,28 +1019,15 @@ impl FileDemuxer {
                 "back over the start of a lap: timeline now {}us past the file's own",
                 self.loop_offset
             );
-            return true;
+            return Produced::Nothing;
         }
         backwards.end = backwards.start;
         backwards.unread = true;
-        true
-    }
-
-    /// The oldest parked packet, taken out of the parked accounts.
-    fn take_parked(&mut self) -> Option<(usize, ffmpeg::Rational, ffmpeg::Packet)> {
-        let (index, time_base, packet) = self.pending.pop_front()?;
-        self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
-        if let Some(parked) = self.parked_per_pad.get_mut(index) {
-            *parked = parked.saturating_sub(1);
-            if *parked == 0 {
-                self.parked_since_ns[index] = None;
-            }
-        }
-        Some((index, time_base, packet))
+        Produced::Nothing
     }
 
     /// Moves the read cursor to `target`, forwards — see
-    /// [`SourceElement::seek`].
+    /// [`SeekableSource::seek`].
     fn reposition(&mut self, target: Duration) -> crate::error::Result<Duration> {
         self.reposition_landing(target).map(|(landed, _)| landed)
     }
@@ -1555,6 +1064,9 @@ impl FileDemuxer {
         let mut aim = target;
         let mut landed = None;
         let mut last_picture = None;
+        // What an earlier seek read ahead is from where it left the file,
+        // which this one is leaving.
+        self.ahead.clear();
         for _ in 0..ATTEMPTS {
             let ts = Self::seek_micros(aim, by);
             self.input.seek(ts, ..).inspect_err(|error| {
@@ -1586,7 +1098,7 @@ impl FileDemuxer {
                 "seek to {target:?} landed on a picture at {starts:?}; seeking again from {earlier:?}"
             );
             aim = earlier;
-            self.forget_parked();
+            self.ahead.clear();
         }
         // Nothing left to read (`target` at/past EOF): no packet to learn a
         // real position from, so the request is reported back as it is.
@@ -1722,6 +1234,7 @@ mod tests {
 
     use super::*;
     use crate::control;
+    use crate::element::{Source, SourceElement};
     use crate::test_support::try_test_video;
 
     struct CountingSink {
@@ -1774,9 +1287,9 @@ mod tests {
     #[test]
     fn open_lists_every_stream_at_its_own_index() {
         let Some(path) = try_test_video() else { return };
-        let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
 
-        assert_eq!(streams.len(), demuxer.pads.len());
+        assert_eq!(streams.len(), demuxer.src_pads().len());
         for (position, stream) in streams.iter().enumerate() {
             assert_eq!(stream.index, position);
             assert!(stream.time_base.numerator() > 0 && stream.time_base.denominator() > 0);
@@ -2032,18 +1545,22 @@ mod tests {
         }
 
         demuxer
+            .0
+            .inner_mut()
             .seek(Duration::ZERO)
             .expect("seek to the start of the test video");
-        let at_start = demuxer.lap_end;
+        let at_start = demuxer.0.inner().lap_end;
 
         // Half way in, so the keyframe this lands on is somewhere past the
         // first one for any file that has more than one — which is what the
         // guard below checks rather than assumes.
-        let half = Duration::from_micros((demuxer.input.duration().max(0) / 2) as u64);
+        let half = Duration::from_micros((demuxer.0.inner().input.duration().max(0) / 2) as u64);
         demuxer
+            .0
+            .inner_mut()
             .seek(half)
             .expect("seek half way into the test video");
-        let reached = demuxer.lap_end;
+        let reached = demuxer.0.inner().lap_end;
         if reached <= at_start {
             // Nothing in this fixture is reachable past its own start, so
             // there is no reach for a seek back to lose.
@@ -2051,11 +1568,14 @@ mod tests {
         }
 
         demuxer
+            .0
+            .inner_mut()
             .seek(Duration::ZERO)
             .expect("seek back to the start of the test video");
 
         assert_eq!(
-            demuxer.lap_end, reached,
+            demuxer.0.inner().lap_end,
+            reached,
             "going back must not shorten the lap the next wrap steps over"
         );
     }
@@ -2069,26 +1589,31 @@ mod tests {
         let Some(path) = try_test_video() else { return };
         let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
         let lap = 8_000_000;
-        demuxer.lap_length = lap;
+        demuxer.0.inner_mut().lap_length = lap;
         // Reading the fourth lap, as a demuxer ahead of what is shown is.
-        demuxer.move_to_lap(3 * lap);
+        demuxer.0.inner_mut().move_to_lap(3 * lap);
 
         let seconds = |s: u64| Duration::from_secs(s);
         assert_eq!(
-            demuxer.locate_in_lap(seconds(3)),
+            demuxer.0.inner_mut().locate_in_lap(seconds(3)),
             seconds(3),
             "a seek in the file"
         );
-        assert_eq!(demuxer.loop_offset, 3 * lap, "and the lap left alone");
+        assert_eq!(
+            demuxer.0.inner().loop_offset,
+            3 * lap,
+            "and the lap left alone"
+        );
 
         assert_eq!(
-            demuxer.locate_in_lap(seconds(10)),
+            demuxer.0.inner_mut().locate_in_lap(seconds(10)),
             seconds(2),
             "two seconds into the second lap"
         );
-        assert_eq!(demuxer.loop_offset, lap);
+        assert_eq!(demuxer.0.inner().loop_offset, lap);
         assert_eq!(
-            demuxer.lap_end, lap,
+            demuxer.0.inner().lap_end,
+            lap,
             "a whole lap for the next wrap to step over"
         );
         assert_eq!(
@@ -2097,11 +1622,11 @@ mod tests {
         );
 
         assert_eq!(
-            demuxer.locate_in_lap(seconds(16)),
+            demuxer.0.inner_mut().locate_in_lap(seconds(16)),
             seconds(8),
             "the end of the second lap is the end of the file, not the start of the third"
         );
-        assert_eq!(demuxer.loop_offset, lap);
+        assert_eq!(demuxer.0.inner().loop_offset, lap);
     }
 
     /// Read backwards on a lap after the first, what comes out is stamped on
@@ -2115,21 +1640,22 @@ mod tests {
     fn reading_backwards_goes_back_over_the_start_of_a_lap_that_was_played() {
         let Some(path) = try_test_video() else { return };
         let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
-        let (index, time_base) = video_stream(&demuxer);
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        demuxer.src_pads()[index].link(Box::new(StampSink {
-            seen: seen.clone(),
-            pp_log: element_pp_log(ElementType::Other, "stamp-sink", None),
-        }));
+        let (_, time_base) = video_stream(&demuxer);
         // As one wrap leaves it.
-        let lap = demuxer.input.duration().max(0);
+        let lap = demuxer.0.inner().input.duration().max(0);
         assert!(lap > 0, "the fixture says how long it is");
-        demuxer.lap_length = lap;
-        demuxer.published_lap.store(lap, Ordering::Relaxed);
-        demuxer.move_to_lap(lap);
+        demuxer.0.inner_mut().lap_length = lap;
+        demuxer
+            .0
+            .inner()
+            .published_lap
+            .store(lap, Ordering::Relaxed);
+        demuxer.0.inner_mut().move_to_lap(lap);
 
         let quarter = lap / 4;
         let landed = demuxer
+            .0
+            .inner_mut()
             .seek_backwards(Duration::from_micros((lap + quarter) as u64))
             .expect("turn round in the second lap");
         assert_eq!(
@@ -2137,11 +1663,24 @@ mod tests {
             Duration::from_micros(quarter as u64),
             "a quarter into the file"
         );
-        let (bus, _bus_rx) = Bus::new();
-        while demuxer.read_backwards(&bus, true).expect("read backwards") {}
+        let mut seen = Vec::new();
+        loop {
+            match demuxer
+                .0
+                .inner_mut()
+                .read_backwards()
+                .expect("read backwards")
+            {
+                Produced::On(_, MediaBuffer::Packet(packet)) => {
+                    seen.extend(packet.pts().or_else(|| packet.dts()));
+                }
+                Produced::End => break,
+                _ => {}
+            }
+        }
 
         let micros = |ts: i64| ts.rescale(time_base, microseconds());
-        let seen: Vec<i64> = seen.lock().unwrap().iter().map(|&ts| micros(ts)).collect();
+        let seen: Vec<i64> = seen.into_iter().map(micros).collect();
         assert!(
             seen.iter().any(|&at| (lap..=lap + quarter).contains(&at)),
             "the second lap, where it turned: {seen:?}"
@@ -2155,7 +1694,8 @@ mod tests {
             "{seen:?}"
         );
         assert_eq!(
-            demuxer.loop_offset, 0,
+            demuxer.0.inner().loop_offset,
+            0,
             "down to the first lap, where it ended"
         );
         let handle = demuxer.looping_handle();
@@ -2183,10 +1723,14 @@ mod tests {
         );
 
         let lap = 8_000_000;
-        demuxer.lap_length = lap;
-        demuxer.published_lap.store(lap, Ordering::Relaxed);
+        demuxer.0.inner_mut().lap_length = lap;
+        demuxer
+            .0
+            .inner()
+            .published_lap
+            .store(lap, Ordering::Relaxed);
         // Already reading the third lap.
-        demuxer.move_to_lap(2 * lap);
+        demuxer.0.inner_mut().move_to_lap(2 * lap);
         assert_eq!(
             handle.in_lap(seconds(15.5)),
             seconds(7.5),
@@ -2198,38 +1742,6 @@ mod tests {
             Duration::ZERO,
             "the start of a lap is the start of the file"
         );
-    }
-
-    /// Records the timestamp of every packet it is handed.
-    struct StampSink {
-        seen: Arc<Mutex<Vec<i64>>>,
-        pp_log: PpLog,
-    }
-
-    impl Element for StampSink {
-        fn name(&self) -> Arc<str> {
-            Arc::from("stamp-sink")
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl crate::element::Sink for StampSink {
-        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            if let MediaBuffer::Packet(packet) = buf
-                && let Some(ts) = packet.pts().or_else(|| packet.dts())
-            {
-                self.seen.lock().unwrap().push(ts);
-            }
-            Ok(())
-        }
     }
 
     /// Drives `FileDemuxer::run` directly (no `Pipeline`) to prove the
@@ -2288,10 +1800,14 @@ mod tests {
         let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
 
         demuxer
+            .0
+            .inner_mut()
             .seek(Duration::from_secs(1))
             .expect("seek within the test video");
         let (pending_index, expected_time_base, _) = demuxer
-            .pending
+            .0
+            .inner()
+            .ahead
             .front()
             .expect("seek must retain the first packet at or after the target");
         let pending_index = *pending_index;
@@ -2324,380 +1840,46 @@ mod tests {
         );
     }
 
-    /// A seek starts a new timeline. Anything the demuxer had already read and
-    /// parked for a blocked pad belongs to the old one, so delivering it after the
-    /// reposition feeds pre-seek packets to a decoder whose reference state was
-    /// just flushed — corrupt output, and a stream of `co located POCs
-    /// unavailable` from libavcodec.
+    /// A seek starts a new timeline. What an earlier seek read ahead belongs
+    /// to the old one, so handing it on after the reposition feeds pre-seek
+    /// packets to a decoder whose reference state was just flushed —
+    /// corrupt output, and a stream of `co located POCs unavailable` from
+    /// libavcodec. What was held back for a blocked output goes with the
+    /// `Flush` before the seek; see the framework's parking.
     #[test]
-    fn seeking_discards_packets_parked_before_the_jump() {
+    fn a_seek_keeps_only_what_it_read_from_where_it_landed() {
         let Some(path) = try_test_video() else { return };
         let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
         let video = streams
             .iter()
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .expect("test video has a video stream");
-        let time_base = video.time_base;
 
-        // Read a little of the start into the parked queue by hand, the way `run`
-        // does when a pad cannot accept a packet yet.
-        let mut input = ffmpeg::format::input(&path).expect("second handle");
-        let mut parked = 0usize;
-        for (stream, packet) in input.packets() {
-            if stream.index() != video.index {
-                continue;
-            }
-            demuxer.park((stream.index(), time_base, packet));
-            parked += 1;
-            if parked == 4 {
-                break;
-            }
-        }
-        assert_eq!(parked, 4, "the fixture must have packets to park");
-
-        // The order a pipeline uses: Flush marks the timeline boundary, Seek
-        // then moves the cursor and reads ahead, up to its first picture, to
-        // learn where it landed. Three seconds in lands well past the four
-        // parked, which are the file's first.
-        demuxer.on_control(&crate::control::ControlMsg::Flush);
-        let landed = demuxer
+        let demuxing = demuxer.0.inner_mut();
+        demuxing
+            .seek(Duration::ZERO)
+            .expect("seek to the start of the test video");
+        assert!(!demuxing.ahead.is_empty(), "the first seek's read-ahead");
+        // Three seconds in lands well past what the first read, which is
+        // the file's start.
+        let landed = demuxing
             .seek(Duration::from_secs(3))
             .expect("seek within the test video");
         assert!(landed > Duration::from_secs(1), "landed at {landed:?}");
 
-        assert!(!demuxer.pending.is_empty(), "the seek's own read-ahead");
-        for (_, time_base, packet) in &demuxer.pending {
+        assert!(!demuxing.ahead.is_empty(), "the seek's own read-ahead");
+        for (_, time_base, packet) in &demuxing.ahead {
             let at = ts_to_duration(packet.pts().or(packet.dts()).unwrap_or(0), *time_base);
             assert!(
                 at > Duration::from_secs(1),
-                "a packet from before the seek survived the flush: {at:?}"
+                "a packet from before the seek survived it: {at:?}"
             );
         }
         assert_eq!(
-            demuxer.pending.back().map(|(index, _, _)| *index),
+            demuxing.ahead.back().map(|(index, _, _)| *index),
             Some(video.index),
             "read ahead as far as the first picture, and no further"
         );
-        let counted: usize = demuxer
-            .pending
-            .iter()
-            .map(|(_, _, packet)| packet.size())
-            .sum();
-        assert_eq!(
-            demuxer.pending_bytes, counted,
-            "the parked byte total must stay in step with the queue"
-        );
-    }
-
-    /// Reports "full" until asked a given number of times, then reports room
-    /// again — a `Queue` whose worker frees a slot partway through a drain.
-    /// Readiness flipping *during* the loop is the real behaviour: the worker
-    /// runs on its own thread, so the answer is not stable across the packets
-    /// of one pass.
-    struct FlipToReadySink {
-        refusals_left: Arc<AtomicUsize>,
-        seen: Arc<Mutex<Vec<i64>>>,
-        pp_log: PpLog,
-    }
-
-    impl Element for FlipToReadySink {
-        fn name(&self) -> Arc<str> {
-            "flip-to-ready".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl crate::element::Sink for FlipToReadySink {
-        fn ready_consume(&mut self) -> bool {
-            let left = self.refusals_left.load(Ordering::SeqCst);
-            if left > 0 {
-                self.refusals_left.store(left - 1, Ordering::SeqCst);
-                return false;
-            }
-            true
-        }
-
-        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            if let MediaBuffer::Packet(packet) = &buf
-                && let Some(pts) = packet.pts()
-            {
-                self.seen.lock().unwrap().push(pts);
-            }
-            Ok(())
-        }
-    }
-
-    /// A pad that says "full" for the first packet of a drain and "ready" for
-    /// the next must not let the second overtake the first.
-    ///
-    /// This is what a `Queue` does: its worker frees a slot on another thread
-    /// while the drain loop is running, so asking again per packet gives a
-    /// different answer mid-pass. Re-asking let the later packet through
-    /// first, handing the decoder its stream out of decode order — libavcodec
-    /// answers with a flood of `co located POCs unavailable`, and the picture
-    /// is wrong. Reproduced by launching `av_playback` with no seek at all:
-    /// 45 warnings against 0 before this branch.
-    #[test]
-    fn a_pad_that_becomes_ready_mid_drain_does_not_reorder_its_stream() {
-        let Some(path) = try_test_video() else { return };
-        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
-        let video = streams
-            .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
-            .expect("video stream");
-        let time_base = video.time_base;
-
-        // Refuse once: the first packet of the drain is held back, and every
-        // later one finds the pad ready again.
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        demuxer.pads[video.index].link(Box::new(FlipToReadySink {
-            refusals_left: Arc::new(AtomicUsize::new(1)),
-            seen: Arc::clone(&seen),
-            pp_log: element_pp_log(ElementType::Other, "flip-to-ready", None),
-        }));
-
-        let mut input = ffmpeg::format::input(&path).expect("second handle");
-        let mut order = Vec::new();
-        for (stream, packet) in input.packets() {
-            if stream.index() != video.index {
-                continue;
-            }
-            order.push(packet.pts().expect("fixture packets carry a pts"));
-            demuxer.park((stream.index(), time_base, packet));
-            if order.len() == 4 {
-                break;
-            }
-        }
-
-        let (bus, _bus_rx) = Bus::new();
-        demuxer.drain_pending(&bus).expect("first drain");
-        demuxer.drain_pending(&bus).expect("second drain");
-
-        assert_eq!(
-            *seen.lock().unwrap(),
-            order,
-            "a packet overtook one still parked for the same pad"
-        );
-    }
-
-    /// Accepts a bounded number of buffers, then blocks — the shape of a
-    /// `Queue` filling up mid-drain.
-    struct BoundedSink {
-        remaining: Arc<AtomicUsize>,
-        seen: Arc<Mutex<Vec<i64>>>,
-        pp_log: PpLog,
-    }
-
-    impl Element for BoundedSink {
-        fn name(&self) -> Arc<str> {
-            "bounded".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl crate::element::Sink for BoundedSink {
-        fn ready_consume(&mut self) -> bool {
-            self.remaining.load(Ordering::SeqCst) > 0
-        }
-
-        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            if let MediaBuffer::Packet(packet) = &buf
-                && let Some(pts) = packet.pts()
-            {
-                self.seen.lock().unwrap().push(pts);
-            }
-            self.remaining.fetch_sub(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    /// A stream's packets must reach its pad in the order they were read.
-    /// Parking exists so a blocked pad does not stall the read cursor; it must
-    /// not reorder that pad's own packets, or the decoder is handed frames out
-    /// of decode order and produces `co located POCs unavailable` and garbage.
-    #[test]
-    fn parked_packets_keep_their_per_pad_order_when_the_pad_blocks_mid_drain() {
-        let Some(path) = try_test_video() else { return };
-        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
-        let video = streams
-            .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
-            .expect("video stream");
-        let time_base = video.time_base;
-
-        // Room for one buffer only, so the pad blocks partway through the
-        // drain and the rest have to be parked again.
-        let remaining = Arc::new(AtomicUsize::new(1));
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        demuxer.pads[video.index].link(Box::new(BoundedSink {
-            remaining: Arc::clone(&remaining),
-            seen: Arc::clone(&seen),
-            pp_log: element_pp_log(ElementType::Other, "bounded", None),
-        }));
-
-        let mut input = ffmpeg::format::input(&path).expect("second handle");
-        let mut order = Vec::new();
-        for (stream, packet) in input.packets() {
-            if stream.index() != video.index {
-                continue;
-            }
-            order.push(packet.pts().expect("fixture packets carry a pts"));
-            demuxer.park((stream.index(), time_base, packet));
-            if order.len() == 5 {
-                break;
-            }
-        }
-
-        let (bus, _bus_rx) = Bus::new();
-        // Drain repeatedly, opening one slot at a time, until everything has
-        // been delivered.
-        for _ in 0..order.len() {
-            demuxer.drain_pending(&bus).expect("drain");
-            remaining.fetch_add(1, Ordering::SeqCst);
-        }
-        demuxer.drain_pending(&bus).expect("final drain");
-
-        assert_eq!(
-            *seen.lock().unwrap(),
-            order,
-            "packets reached the pad out of the order they were read"
-        );
-    }
-
-    /// Has room only while its gate is open, but accepts whatever is pushed —
-    /// a pad reporting backpressure without a `Queue`'s blocking behind it,
-    /// so a test sees what the source would have waited on.
-    struct GatedRecorder {
-        seen: Arc<AtomicUsize>,
-        open: Arc<AtomicBool>,
-        pp_log: PpLog,
-    }
-
-    impl GatedRecorder {
-        fn link(pad: &mut SrcPad, name: &str, open: bool) -> (Arc<AtomicUsize>, Arc<AtomicBool>) {
-            let seen = Arc::new(AtomicUsize::new(0));
-            let gate = Arc::new(AtomicBool::new(open));
-            pad.link(Box::new(GatedRecorder {
-                seen: Arc::clone(&seen),
-                open: Arc::clone(&gate),
-                pp_log: element_pp_log(ElementType::Other, name, None),
-            }));
-            (seen, gate)
-        }
-    }
-
-    impl Element for GatedRecorder {
-        fn name(&self) -> Arc<str> {
-            "gated".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl crate::element::Sink for GatedRecorder {
-        fn ready_consume(&mut self) -> bool {
-            self.open.load(Ordering::SeqCst)
-        }
-        fn consume(&mut self, _buf: MediaBuffer) -> crate::error::Result<()> {
-            self.seen.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    /// A packet for `index` due at `ms`, in milliseconds.
-    fn packet_at(index: usize, ms: i64) -> (usize, ffmpeg::Rational, ffmpeg::Packet) {
-        let mut packet = ffmpeg::Packet::empty();
-        packet.set_pts(Some(ms));
-        packet.set_dts(Some(ms));
-        (index, ffmpeg::Rational::new(1, 1000), packet)
-    }
-
-    /// With nothing else to take the read cursor, a blocked pad is waited
-    /// on: its packet is held for it and reading stops, rather than
-    /// buffering behind it — or pushing into a pad that cannot take it,
-    /// where nothing could come back for another pad that drains meanwhile.
-    /// A preroll holds its packet back too. And once the preroll is over,
-    /// what it held waits for its pad, in order — reading stops meanwhile,
-    /// since nothing else needs it.
-    #[test]
-    fn a_lone_blocked_pad_is_waited_on_outside_a_preroll() {
-        let Some(path) = try_test_video() else { return };
-        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
-        let index = streams.first().expect("at least one stream").index;
-        let (seen, gate) = GatedRecorder::link(&mut demuxer.pads[index], "blocked", false);
-        let (bus, _bus_rx) = Bus::new();
-
-        demuxer
-            .deliver_or_park(packet_at(index, 0), &bus)
-            .expect("playback delivery");
-        assert_eq!(demuxer.pending.len(), 1, "held for the pad");
-        assert_eq!(seen.load(Ordering::SeqCst), 0, "not pushed into it");
-        assert!(
-            demuxer.pending_blocked(),
-            "and reading waits for it, rather than buffering behind it"
-        );
-        gate.store(true, Ordering::SeqCst);
-        demuxer.drain_pending(&bus).expect("drain once it has room");
-        assert_eq!(seen.load(Ordering::SeqCst), 1);
-        gate.store(false, Ordering::SeqCst);
-
-        // As a pipeline does it: its playback state first, then the message.
-        let context = Arc::new(crate::element::Context::for_test_with_clock(
-            Bus::new().0,
-            "test",
-            crate::graph::PipelineGraph::new(),
-            crate::graph::ElementId::for_test(1),
-            Arc::new(crate::clock::Clock::new()),
-        ));
-        demuxer.attach_context(&context);
-        let preroll =
-            crate::control::ControlMsg::Preroll(Arc::new(crate::control::PrerollContext::new([])));
-        context.state.observe(&preroll);
-        demuxer.on_control(&preroll);
-        demuxer
-            .deliver_or_park(packet_at(index, 40), &bus)
-            .expect("preroll delivery");
-        assert_eq!(
-            demuxer.pending.len(),
-            1,
-            "preroll must hold a blocked pad's packet so its siblings keep flowing"
-        );
-
-        context.state.observe(&crate::control::ControlMsg::Resume);
-        demuxer.on_control(&crate::control::ControlMsg::Resume);
-        demuxer.drain_pending(&bus).expect("drain while blocked");
-        assert_eq!(demuxer.pending.len(), 1, "still owed to a pad that is full");
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "nothing pushed into it");
-        assert!(demuxer.pending_blocked(), "and reading waits for it");
-
-        gate.store(true, Ordering::SeqCst);
-        demuxer.drain_pending(&bus).expect("drain once it has room");
-        assert!(demuxer.pending.is_empty());
-        assert_eq!(seen.load(Ordering::SeqCst), 2);
-        assert!(!demuxer.pending_blocked());
     }
 
     /// Records what reaches a pad — how many packets, and whether its end
@@ -2784,8 +1966,8 @@ mod tests {
                 .index
         });
         let (room, held_packets, held_ended) =
-            EndRecorder::link(&mut demuxer.pads[held], "held", false);
-        let (_, _, sound_ended) = EndRecorder::link(&mut demuxer.pads[ended], "ended", true);
+            EndRecorder::link(&mut demuxer.src_pads()[held], "held", false);
+        let (_, _, sound_ended) = EndRecorder::link(&mut demuxer.src_pads()[ended], "ended", true);
         // In a preroll, as a seek's: a pad that takes nothing more has its
         // packets parked, and reading goes on for the other.
         let context = Arc::new(crate::element::Context::for_test_with_clock(
@@ -2842,123 +2024,6 @@ mod tests {
             "the picture's packets and end did not follow"
         );
         assert!(packets_first, "its packets went ahead of its end");
-    }
-
-    /// A file whose picture is muxed ahead of its sound: the video pad's queue
-    /// is full of frames the audio has not reached, and the audio packets
-    /// that would let it reach them lie further on in the file. Waiting on
-    /// the video there stopped this thread before them, and the video waited
-    /// on the audio for good. The video packets are held back instead while
-    /// the audio is taking its own — up to `MAX_INTERLEAVE` of file time,
-    /// past which the video is waited on after all — and go out in order
-    /// once it has room.
-    #[test]
-    fn a_blocked_pad_is_held_back_while_another_branch_waits_on_the_cursor() {
-        let Some(path) = try_test_video() else { return };
-        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
-        let find = |kind| {
-            streams
-                .iter()
-                .find(|stream| stream.kind == kind)
-                .map(|stream| stream.index)
-        };
-        let (Some(video), Some(audio)) = (
-            find(ffmpeg::media::Type::Video),
-            find(ffmpeg::media::Type::Audio),
-        ) else {
-            eprintln!("skipping: the fixture has no audio stream");
-            return;
-        };
-        let (video_seen, video_gate) =
-            GatedRecorder::link(&mut demuxer.pads[video], "video", false);
-        let (audio_seen, _) = GatedRecorder::link(&mut demuxer.pads[audio], "audio", true);
-        let (bus, _bus_rx) = Bus::new();
-        let read = |demuxer: &mut FileDemuxer, index: usize, ms: i64| {
-            demuxer.read_ns = Some(ms * 1_000_000);
-            demuxer
-                .deliver_or_park(packet_at(index, ms), &bus)
-                .expect("delivery");
-        };
-
-        // The picture a second ahead: video at 1 s, then audio from 0 on.
-        read(&mut demuxer, video, 1_000);
-        for ms in (0..=4_000).step_by(100) {
-            read(&mut demuxer, audio, ms);
-        }
-        assert_eq!(
-            video_seen.load(Ordering::SeqCst),
-            0,
-            "the full pad is not pushed into"
-        );
-        assert_eq!(demuxer.pending.len(), 1, "its packet is held back instead");
-        assert_eq!(
-            audio_seen.load(Ordering::SeqCst),
-            41,
-            "while the sound keeps flowing"
-        );
-        assert!(
-            !demuxer.pending_blocked(),
-            "within the interleave bound, reading goes on"
-        );
-
-        // More picture than any file interleaves: past the bound, the video
-        // is waited on rather than held back without end.
-        read(&mut demuxer, video, 1_040);
-        demuxer.read_ns = Some(7_000 * 1_000_000);
-        assert!(
-            demuxer.pending_blocked(),
-            "past the bound, reading waits for it"
-        );
-
-        video_gate.store(true, Ordering::SeqCst);
-        demuxer.drain_pending(&bus).expect("drain once it has room");
-        assert!(demuxer.pending.is_empty());
-        assert_eq!(video_seen.load(Ordering::SeqCst), 2, "both, in order");
-        assert!(!demuxer.pending_blocked());
-    }
-
-    /// The picture muxed ahead and both branches full at once: the picture's
-    /// packet is held back all the same, and reading waits while neither can
-    /// take anything; once the sound drains, the cursor goes on to its
-    /// packets. Pushed into the full picture instead — as when a packet was
-    /// held back only while the sound had room at that moment — this thread
-    /// waited there, and the picture waited on sound nothing was reading.
-    #[test]
-    fn a_blocked_pad_is_held_back_while_the_other_is_full_too() {
-        let Some(path) = try_test_video() else { return };
-        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
-        let find = |kind| {
-            streams
-                .iter()
-                .find(|stream| stream.kind == kind)
-                .map(|stream| stream.index)
-        };
-        let (Some(video), Some(audio)) = (
-            find(ffmpeg::media::Type::Video),
-            find(ffmpeg::media::Type::Audio),
-        ) else {
-            eprintln!("skipping: the fixture has no audio stream");
-            return;
-        };
-        let (video_seen, _) = GatedRecorder::link(&mut demuxer.pads[video], "video", false);
-        let (audio_seen, audio_gate) =
-            GatedRecorder::link(&mut demuxer.pads[audio], "audio", false);
-        let (bus, _bus_rx) = Bus::new();
-
-        demuxer.read_ns = Some(1_000_000_000);
-        demuxer
-            .deliver_or_park(packet_at(video, 1_000), &bus)
-            .expect("delivery");
-        assert_eq!(video_seen.load(Ordering::SeqCst), 0, "not pushed into");
-        assert_eq!(demuxer.pending.len(), 1, "held back");
-        assert!(demuxer.pending_blocked(), "neither can take anything");
-
-        audio_gate.store(true, Ordering::SeqCst);
-        assert!(!demuxer.pending_blocked(), "the sound can: read on");
-        demuxer
-            .deliver_or_park(packet_at(audio, 0), &bus)
-            .expect("delivery");
-        assert_eq!(audio_seen.load(Ordering::SeqCst), 1);
     }
 
     /// Writes a Matroska file whose first stream is one still picture and
@@ -3046,7 +2111,11 @@ mod tests {
         let (demuxer, streams) = FileDemuxer::open("info", &path).unwrap();
         assert!(!streams.is_empty());
         for info in &streams {
-            let stream = demuxer.stream(info.index).expect("a listed stream");
+            let stream = demuxer
+                .0
+                .inner()
+                .stream(info.index)
+                .expect("a listed stream");
             let asked = stream.parameters();
             assert_eq!(info.parameters.id(), asked.id());
             assert_eq!(info.parameters.medium(), info.kind);

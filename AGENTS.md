@@ -191,19 +191,27 @@ final source of truth when documentation and implementation differ.
 
 ## Control, lifetime, and concurrency
 
-- A source that makes one thing at a time on one output is a `Produce`: the
-  framework runs its loop — takes each request the one way every source
-  does, keeps a pause out of the clock `Wait::now` reads, and ends the
-  stream after `Produced::End` — and it waits only through its `Wait`,
-  which lets go the moment the pipeline has something for the thread. What
+- A source that makes one thing at a time is a `Produce`: the framework
+  runs its loop — takes each request the one way every source does, keeps
+  a pause out of the clock `Wait::now` reads, and ends the stream after
+  `Produced::End` — and it waits only through its `Wait`, which lets go the
+  moment the pipeline has something for the thread. With several outputs
+  (`Produce::outputs`, `Produced::On`) the framework holds back what an
+  output cannot take yet, within bounds, so the one read cursor keeps the
+  others fed (`crate::parking`), and ends each output as soon as it owes
+  nothing; a source that can be sought (`Produce::as_seekable`) has its
+  seeks taken between one thing made and the next and stays at its end
+  until stopped or sought; a segment of its own — a lap, another input —
+  is `Produced::Segment`. What
   a device sets up on the source's own thread — an apartment joined, a
   capture started — goes in `Produce::starting` and is let go of in
   `stopping`, which the framework calls there however the loop ended;
   stopping and restarting its input for a pause goes in `pausing` and
   `resuming`. An element of this crate moved onto one keeps its public
   name as a newtype over `ProducingSource` (`produce_source!`).
-- Every `SourceElement` loop must remain responsive to Pause, Resume, Stop, and
-  Seek. It drains its channel with `drain_control`, or, where it selects on the
+- Every `SourceElement` loop still written by hand — the Linux captures,
+  until they are `Produce`s — must remain responsive to Pause, Resume, Stop,
+  and Seek. It drains its channel with `drain_control`, or, where it selects on the
   channel beside its data, hands each request it takes to
   `control::handle_request` — never applies one itself: a source that passed a
   `Pause` on without pausing deadlocked a seek (208af56). What it has to do to

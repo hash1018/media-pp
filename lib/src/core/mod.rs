@@ -30,6 +30,7 @@ pub mod element;
 pub(crate) mod frame_size;
 pub mod graph;
 pub mod pad;
+pub(crate) mod parking;
 pub mod pipeline;
 pub(crate) mod playback_state;
 pub mod pool;

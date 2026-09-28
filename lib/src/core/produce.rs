@@ -16,11 +16,14 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::OutputContract,
-    control::{ChannelGone, ControlMsg, ControlReceiver, handle_request},
-    element::{Context, Element, ElementType, Source, SourceElement},
+    control::{ChannelGone, ControlMsg, ControlReceiver, RequestKind, handle_request},
+    element::{
+        Context, Element, ElementType, ReversibleSource, SeekableSource, Source, SourceElement,
+    },
     error::Result,
     graph::ElementId,
     pad::SrcPad,
+    parking::Parking,
     playback_state::PlaybackState,
     pp_log::{PpLog, pp_info},
 };
@@ -88,6 +91,22 @@ pub trait Produce: Element {
         Ok(())
     }
 
+    /// This source as a [`SeekableSource`], where it is one — asked as it is
+    /// wired, and for each seek, which the framework takes on the source's
+    /// thread between one thing made and the next; see
+    /// [`SourceElement::as_seekable`]. A source that can be sought also stays
+    /// at its end, rather than ending its thread, until it is stopped or
+    /// sought back into what it reads. `None` by default.
+    fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
+        None
+    }
+
+    /// This source as a [`ReversibleSource`], where it is one — see
+    /// [`SourceElement::as_reversible`]. `None` by default.
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSource> {
+        None
+    }
+
     /// Sets up what has to live on the source's own thread — an apartment
     /// joined, a device started — there, before it is asked for anything.
     /// An `Err` ends the source before it began, and [`Self::stopping`] is
@@ -149,9 +168,19 @@ pub struct Wait<'a> {
     /// which a wait then no longer lets go for.
     control: Option<&'a ControlReceiver>,
     paused: Duration,
+    /// Which of the source's outputs something is wired to.
+    linked: &'a [bool],
 }
 
 impl Wait<'_> {
+    /// Which of the source's outputs something is wired to, by number —
+    /// for a source of this crate that leaves out of its own reckoning what
+    /// nothing reads. Empty for a source driven by hand, which has not
+    /// been run.
+    pub(crate) fn linked(&self) -> &[bool] {
+        self.linked
+    }
+
     /// Now, on a clock that stands still while the pipeline is paused.
     pub fn now(&self) -> Instant {
         let now = Instant::now();
@@ -278,19 +307,49 @@ pub struct ProducingSource<P> {
     pads: Vec<SrcPad>,
     /// Time spent paused so far, which [`Wait::now`] leaves out.
     paused: Duration,
-    /// Its pipeline's, for the timeline a segment it begins is on — `None`
-    /// driven by hand.
+    /// Its pipeline's, for the timeline a segment it begins is on and
+    /// whether a preroll runs — `None` driven by hand.
     state: Option<Arc<PlaybackState>>,
+    /// Which outputs something is wired to, as its thread starts.
+    linked: Vec<bool>,
+    /// What was made for an output that could not take it yet, with
+    /// several outputs — see [`Parking`].
+    parking: Parking,
+    /// A segment the source began while what it made before was still held
+    /// back, to go out behind it: `(position, start)`.
+    owed_segment: Option<(Duration, Duration)>,
+    /// Whether a `Seek` has repositioned the source since it last ended its
+    /// outputs — which sends it back to making things.
+    sought: bool,
 }
+
+/// How handing every output its end went.
+enum Ending {
+    /// Every output has its end.
+    Ended,
+    /// Stopped, or finished, on the way.
+    Stopped,
+    /// A seek moved the source back into what it reads first.
+    Sought,
+}
+
+/// How long a source whose outputs cannot take what it holds for them
+/// waits before looking again — for an output that frees up without saying
+/// so. A request from the pipeline ends the wait at once.
+const HELD_POLL: Duration = Duration::from_millis(1);
 
 impl<P: Produce> ProducingSource<P> {
     pub(crate) fn new(inner: P) -> Self {
         let pads = inner.outputs();
         Self {
+            parking: Parking::new(pads.len()),
             inner,
             pads,
             paused: Duration::ZERO,
             state: None,
+            linked: Vec::new(),
+            owed_segment: None,
+            sought: false,
         }
     }
 
@@ -307,12 +366,24 @@ impl<P: Produce> ProducingSource<P> {
         &mut self.inner
     }
 
-    fn report(&self, bus: &Bus, error: crate::error::Error) {
+    /// Whether a preroll is running — including the pause that ends one,
+    /// until it reaches this source: what was held back for it stays held
+    /// (see `crate::playback_state`). Never, driven by hand.
+    fn prerolling(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.preroll().is_some())
+    }
+}
+
+/// Reports what went wrong downstream of `inner` on `bus`, as its own.
+fn reporter<'a, P: Produce>(inner: &'a P, bus: &'a Bus) -> impl FnMut(crate::error::Error) + 'a {
+    move |error| {
         bus.post(
-            self.inner.pp_log(),
+            inner.pp_log(),
             BusEvent::Error {
-                element_type: self.inner.element_type(),
-                name: self.inner.name(),
+                element_type: inner.element_type(),
+                name: inner.name(),
                 error,
             },
         );
@@ -357,15 +428,26 @@ impl<P: Produce> SourceElement for ProducingSource<P> {
         self.inner.is_live()
     }
 
+    fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
+        self.inner.as_seekable()
+    }
+
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSource> {
+        self.inner.as_reversible()
+    }
+
     /// Asks for the next thing, and hands on what it is, until the stream
     /// ends or the pipeline stops it — taking what the pipeline asks
     /// between one and the next, the one way every source does
-    /// (`handle_request`). A buffer the pad refuses is reported, and the
-    /// source goes on; a failure to make one ends it. What it sets up on
-    /// this thread first it lets go of here last, however the loop ended
-    /// ([`Produce::starting`], [`Produce::stopping`]).
+    /// (`handle_request`). A buffer a pad refuses is reported, and the
+    /// source goes on; a failure to make one ends it. A source that can be
+    /// sought stays at its end until it is stopped, or sought back into
+    /// what it reads. What it sets up on this thread first it lets go of
+    /// here last, however the loop ended ([`Produce::starting`],
+    /// [`Produce::stopping`]).
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(pp_log: self.inner.pp_log(), "started");
+        self.linked = self.pads.iter().map(SrcPad::is_linked).collect();
         self.inner.starting()?;
         let ended = self.ask(control, bus);
         self.inner.stopping();
@@ -378,6 +460,58 @@ impl<P: Produce> SourceElement for ProducingSource<P> {
 
     fn resuming(&mut self) -> Result<()> {
         self.inner.resuming()
+    }
+
+    fn on_control(&mut self, msg: &ControlMsg) {
+        match msg {
+            // What is held back was made from the timeline being left — see
+            // `Parking::forget` — and so is a segment still owed behind it.
+            ControlMsg::Flush => {
+                self.parking.forget();
+                self.owed_segment = None;
+            }
+            ControlMsg::Seek(_) => self.sought = true,
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Preroll(_) | ControlMsg::Stop => {}
+        }
+    }
+
+    /// Hands on everything held back, which a finish plays on to — and,
+    /// playing backwards, the rest of the stretch under way, which is
+    /// played from its end: one cut short would lose its later pictures.
+    /// Pushed without waiting for room, which the pipeline's interrupt
+    /// makes where a queue is full.
+    fn finishing(&mut self, backwards: bool, bus: &Bus) -> Result<()> {
+        self.parking
+            .deliver_all(&mut self.pads, &mut reporter(&self.inner, bus));
+        if !backwards {
+            return Ok(());
+        }
+        let mut wait = Wait {
+            control: None,
+            paused: self.paused,
+            linked: &self.linked,
+        };
+        while self
+            .inner
+            .as_reversible()
+            .is_some_and(|source| !source.stretch_complete())
+        {
+            let (index, buf) = match self.inner.produce(&mut wait)? {
+                Produced::Buffer(buf) => (0, buf),
+                Produced::On(index, buf) => (index, buf),
+                Produced::Segment { .. } | Produced::Nothing => continue,
+                Produced::End => break,
+            };
+            let outputs = self.pads.len();
+            let pad = self
+                .pads
+                .get_mut(index)
+                .ok_or(ProduceError::NoOutput { index, outputs })?;
+            if let Err(error) = pad.push(buf) {
+                reporter(&self.inner, bus)(error);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -407,49 +541,226 @@ impl<P: Produce> ProducingSource<P> {
                     return Ok(());
                 }
             }
+            let control = (!gone).then_some(control);
+            let prerolling = self.prerolling();
+            // What is held back goes on first, as its outputs take it; a
+            // segment begun behind it goes once all of it has.
+            self.parking
+                .drain(&mut self.pads, &mut reporter(&self.inner, bus));
+            if let Some((position, start)) = self.owed_segment {
+                if !self.parking.is_empty() {
+                    self.wait_a_moment(control);
+                    continue;
+                }
+                self.owed_segment = None;
+                self.begin_segment(false, position, start, bus);
+            }
+            // Made more of, what is held back would only grow: reading
+            // waits for an output to take it.
+            if self.parking.blocked(&mut self.pads, prerolling) {
+                self.wait_a_moment(control);
+                continue;
+            }
             let mut wait = Wait {
-                control: (!gone).then_some(control),
+                control,
                 paused: self.paused,
+                linked: &self.linked,
             };
             match self.inner.produce(&mut wait)? {
-                Produced::Buffer(buf) => self.hand_on(0, buf, bus)?,
-                Produced::On(index, buf) => self.hand_on(index, buf, bus)?,
+                Produced::Buffer(buf) => self.hand_on(0, buf, prerolling, bus)?,
+                Produced::On(index, buf) => self.hand_on(index, buf, prerolling, bus)?,
                 Produced::Segment {
-                    flushed,
+                    flushed: true,
                     position,
                     start,
-                } => self.begin_segment(flushed, position, start, bus),
+                } => {
+                    self.parking.forget();
+                    self.begin_segment(true, position, start, bus);
+                }
+                Produced::Segment {
+                    flushed: false,
+                    position,
+                    start,
+                } => {
+                    if self.parking.is_empty() {
+                        self.begin_segment(false, position, start, bus);
+                    } else {
+                        self.owed_segment = Some((position, start));
+                    }
+                }
                 Produced::Nothing => {}
-                Produced::End => {
-                    pp_info!(
-                        pp_log: self.inner.pp_log(),
-                        "event=eos phase=source_completed outcome=ok"
-                    );
-                    let pp_log = self.inner.pp_log().clone();
-                    for index in 0..self.pads.len() {
-                        if let Err(error) = self.pads[index].push_eos(&pp_log) {
-                            self.report(bus, error);
+                Produced::End => match self.end_every_output(control, bus)? {
+                    Ending::Stopped => return Ok(()),
+                    // Back into what it reads before every output had its
+                    // end: what is still owed belongs to the timeline just
+                    // left.
+                    Ending::Sought => {}
+                    Ending::Ended => {
+                        pp_info!(
+                            pp_log: self.inner.pp_log(),
+                            "event=eos phase=source_completed outcome=ok"
+                        );
+                        // The end of what it reads is not the end of
+                        // playback for a source that can be sought: a seek
+                        // from there reads on from where it lands. So it
+                        // stays, passing control on, until it is stopped.
+                        let lingers = self.inner.as_seekable().is_some();
+                        match control {
+                            Some(control) if lingers => {
+                                if !self.linger(control, bus)? {
+                                    return Ok(());
+                                }
+                            }
+                            _ => return Ok(()),
                         }
                     }
-                    return Ok(());
-                }
+                },
             }
         }
     }
 
-    /// Pushes `buf` through output `index`, reporting what refuses it: one
-    /// buffer's failure after this is not the source's end. An output it
-    /// does not have is the source's own mistake, and ends it.
-    fn hand_on(&mut self, index: usize, buf: MediaBuffer, bus: &Bus) -> Result<()> {
+    /// Waits [`HELD_POLL`] on the clock a pause does not move, letting go
+    /// as soon as the pipeline asks something.
+    fn wait_a_moment(&self, control: Option<&ControlReceiver>) {
+        let mut wait = Wait {
+            control,
+            paused: self.paused,
+            linked: &[],
+        };
+        let at = wait.now() + HELD_POLL;
+        wait.until(at);
+    }
+
+    /// Hands `buf` on through output `index` — held back for it, with
+    /// several outputs, where it cannot take it yet (see [`Parking`]) —
+    /// reporting what refuses it: one buffer's failure after this is not
+    /// the source's end. An output it does not have is the source's own
+    /// mistake, and ends it.
+    fn hand_on(
+        &mut self,
+        index: usize,
+        buf: MediaBuffer,
+        prerolling: bool,
+        bus: &Bus,
+    ) -> Result<()> {
         let outputs = self.pads.len();
-        let pad = self
-            .pads
-            .get_mut(index)
-            .ok_or(ProduceError::NoOutput { index, outputs })?;
-        if let Err(error) = pad.push(buf) {
-            self.report(bus, error);
+        if index >= outputs {
+            return Err(ProduceError::NoOutput { index, outputs }.into());
+        }
+        let mut report = reporter(&self.inner, bus);
+        if outputs > 1 {
+            self.parking
+                .hand_on(&mut self.pads, index, buf, prerolling, &mut report);
+        } else if let Err(error) = self.pads[index].push(buf) {
+            report(error);
         }
         Ok(())
+    }
+
+    /// Hands every output its end, each as soon as it owes nothing held
+    /// back and can take one, answering the pipeline between tries — and
+    /// says how it ended: every output ended, the source stopped, or a
+    /// seek moved it back into what it reads first.
+    ///
+    /// Not each in turn with a push that waits. In a preroll a branch that
+    /// has its sample takes nothing more, so the queue in front of it stays
+    /// full; the output after it, whose branch may need its end to preroll
+    /// at all — a seek past the last of the sound is answered by the sample
+    /// before it, handed on at the end of the stream — waited behind that
+    /// push on this one thread until the preroll timed out. Found by the
+    /// conformance matrix, with one-deep queues and sound.
+    ///
+    /// An output that owes nothing has its end as soon as it can take it,
+    /// whatever another still owes. Waited for until every output's held
+    /// buffers had gone, the end was kept from a branch that needed it to
+    /// preroll, behind a sibling that had its sample and took nothing more:
+    /// a seek to the last picture, past the last of the sound, timed out
+    /// once in a few hundred of the matrix's sequences.
+    ///
+    /// A finish that arrives meanwhile ends in order: what is held back
+    /// and the ends still owed go out, waited for, since a finish plays on
+    /// to them — and no output is handed a second end.
+    fn end_every_output(&mut self, control: Option<&ControlReceiver>, bus: &Bus) -> Result<Ending> {
+        self.sought = false;
+        let pp_log = self.inner.pp_log().clone();
+        let mut owed = vec![true; self.pads.len()];
+        loop {
+            {
+                let mut report = reporter(&self.inner, bus);
+                self.parking.drain(&mut self.pads, &mut report);
+                for (index, pad) in self.pads.iter_mut().enumerate() {
+                    if owed[index]
+                        && !self.parking.owes(index)
+                        && (!pad.is_linked() || pad.ready_consume())
+                    {
+                        if let Err(error) = pad.push_eos(&pp_log) {
+                            report(error);
+                        }
+                        owed[index] = false;
+                    }
+                }
+            }
+            if !owed.contains(&true) {
+                return Ok(Ending::Ended);
+            }
+            if let Some(control) = control {
+                while let Ok(Some((request, ack))) = control.try_take() {
+                    if matches!(request, RequestKind::Finish) {
+                        let mut report = reporter(&self.inner, bus);
+                        self.parking.deliver_all(&mut self.pads, &mut report);
+                        for (index, pad) in self.pads.iter_mut().enumerate() {
+                            if owed[index]
+                                && let Err(error) = pad.push_eos(&pp_log)
+                            {
+                                report(error);
+                            }
+                        }
+                        let _ = ack.send(());
+                        return Ok(Ending::Stopped);
+                    }
+                    let outcome = handle_request(control, self, bus, request, ack)?;
+                    self.paused += outcome.paused_for;
+                    if outcome.stopped {
+                        return Ok(Ending::Stopped);
+                    }
+                    if self.sought {
+                        return Ok(Ending::Sought);
+                    }
+                }
+            }
+            std::thread::sleep(HELD_POLL);
+        }
+    }
+
+    /// Waits at the end of what it reads, passing every request on to the
+    /// branches — pausing and resuming them as the pipeline does — until it
+    /// is stopped or finished, `Ok(false)`, or a seek moves it back into
+    /// what it reads, `Ok(true)`, to read on from there.
+    fn linger(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<bool> {
+        self.sought = false;
+        loop {
+            let Some((request, ack)) = control.recv() else {
+                return Ok(false);
+            };
+            if matches!(request, RequestKind::Finish) {
+                // A graceful finish: the end it would hand on is already out.
+                let _ = ack.send(());
+                return Ok(false);
+            }
+            // Handled as a source handles one anywhere, a `Pause` included:
+            // nothing is read until a `Resume`, or a seek's `Preroll` asking
+            // for its picture. Passed on without pausing, as it once was at
+            // a demuxer's end, a seek from the end read on into the paused
+            // queue after it and never took the `Preroll` it then waited on.
+            let outcome = handle_request(control, self, bus, request, ack)?;
+            self.paused += outcome.paused_for;
+            if outcome.stopped {
+                return Ok(false);
+            }
+            if self.sought {
+                return Ok(true);
+            }
+        }
     }
 
     /// Begins a segment through every output — see [`Produced::Segment`] —
@@ -467,16 +778,17 @@ impl<P: Produce> ProducingSource<P> {
             show_from: None,
             backwards: state.backwards(),
         };
+        let mut report = reporter(&self.inner, bus);
         if flushed {
-            for index in 0..self.pads.len() {
-                if let Err(error) = self.pads[index].control(&ControlMsg::Flush) {
-                    self.report(bus, error);
+            for pad in &mut self.pads {
+                if let Err(error) = pad.control(&ControlMsg::Flush) {
+                    report(error);
                 }
             }
         }
         let pp_log = self.inner.pp_log().clone();
         if let Err(error) = crate::stream::begin_segment(&mut self.pads, segment, &pp_log) {
-            self.report(bus, error);
+            report(error);
         }
     }
 }
@@ -582,6 +894,22 @@ macro_rules! produce_source {
             }
             fn resuming(&mut self) -> $crate::error::Result<()> {
                 self.0.resuming()
+            }
+            fn as_seekable(&mut self) -> Option<&mut dyn $crate::element::SeekableSource> {
+                self.0.as_seekable()
+            }
+            fn as_reversible(&mut self) -> Option<&mut dyn $crate::element::ReversibleSource> {
+                self.0.as_reversible()
+            }
+            fn on_control(&mut self, msg: &$crate::control::ControlMsg) {
+                self.0.on_control(msg)
+            }
+            fn finishing(
+                &mut self,
+                backwards: bool,
+                bus: &$crate::bus::Bus,
+            ) -> $crate::error::Result<()> {
+                self.0.finishing(backwards, bus)
             }
         }
     };
@@ -1109,6 +1437,7 @@ mod tests {
         let mut wait = Wait {
             control: Some(&control),
             paused: Duration::ZERO,
+            linked: &[],
         };
 
         let asked = Instant::now();

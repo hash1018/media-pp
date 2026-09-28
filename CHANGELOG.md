@@ -95,6 +95,13 @@ compile error with no explanation.
   several outputs and one that begins a segment of its own — see Added.
   A `match` on `Produced` needs arms for them.
 
+- **`ReversibleSource::finish_stretch(bus)` is
+  `ReversibleSource::stretch_complete()`**: a source says whether the
+  stretch under way has been read to its end, and the framework asks it
+  for more until it has, as a `Finish` arrives while playing backwards.
+  `SeekableSource` asks only `Element` of what implements it now, so a
+  `Produce` can — see Added.
+
 - **`RackError` has a `Waits` variant**: a `Rack` refuses a `Pacer` or a
   `VideoSynchronizer`, which it could only run on the thread feeding it —
   see Added. A `match` on `RackError` needs an arm for it.
@@ -108,8 +115,15 @@ compile error with no explanation.
   of what it makes through every output, on the timeline its pipeline is
   on — another input's stream, another lap — behind a flush where it is
   `flushed`. A buffer for an output it does not have ends the source with
-  `ProduceError::NoOutput`. `RtspSource`, `PipelineBridge` and
-  `WebRtcTrackSource` are written on it now, their API unchanged.
+  `ProduceError::NoOutput`. With several outputs, what one cannot take
+  yet is held back, within bounds, so the one read cursor keeps the others
+  fed — what `FileDemuxer` did for itself, now any such source's — and
+  each output has its end as soon as it owes nothing. A `Produce` that can
+  be sought says so through `Produce::as_seekable` and `as_reversible`:
+  its seeks are taken between one thing made and the next, and it stays
+  at its end until stopped or sought back into what it reads.
+  `RtspSource`, `PipelineBridge`, `WebRtcTrackSource` and `FileDemuxer`
+  are written on it now, their API unchanged.
 - **A `Pacer` or `VideoSynchronizer` always runs behind a queue.** Each
   waits on the clock inside `consume`, and in a chain with nothing queued
   straight in front of it, those waits held up the demuxer or decoder

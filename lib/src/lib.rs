@@ -256,9 +256,10 @@
 //! framework calls there. [`Pipeline::new`](pipeline::Pipeline::new)
 //! takes one as it takes any [`SourceElement`](element::SourceElement), and
 //! one with several outputs says what they are in its `outputs` and which
-//! each buffer is for. A source that can be sought is one of this crate's
-//! own for now — `FileDemuxer` — since answering a seek is still such a
-//! source's own loop, which only this crate writes.
+//! each buffer is for. One that can be sought says so in its
+//! `as_seekable`: the framework takes each seek between one thing made and
+//! the next, and keeps the source at its end until it is stopped or sought
+//! back into what it reads.
 //!
 //! # Writing a terminal
 //!
@@ -359,6 +360,7 @@ pub mod control {
 // `crate::schedule`/`crate::time` paths working for every internal caller
 // without also making them part of this crate's external API surface.
 pub(crate) use core::frame_size;
+pub(crate) use core::parking;
 pub(crate) use core::playback_state;
 pub(crate) use core::produce;
 pub(crate) use core::render;

@@ -680,6 +680,8 @@ impl ControlSender {
 pub(crate) struct ChannelGone;
 
 impl ControlReceiver {
+    // Only `drain_control`'s, which only the Linux captures still call.
+    #[allow(dead_code)]
     pub(crate) fn try_recv(&self) -> Option<(RequestKind, Sender<()>)> {
         self.rx.try_recv().ok().map(|r| (r.kind, r.ack))
     }
@@ -746,18 +748,13 @@ pub struct ControlOutcome {
 /// Drains every pending message (see `apply_one` for what "handling
 /// one" means, including `Pause`'s blocking wait). Non-blocking if
 /// nothing's pending — a [`SourceElement::run`] whose own "next unit of
-/// work" can't be waited on via `control`'s own channel (e.g.
-/// [`crate::elements::FileDemuxer`]'s blocking file read) calls this once
-/// before that blocking step; one that *can* (e.g.
-/// [`crate::elements::AppSource`]'s channel receive) selects on both
-/// instead, calling `apply_one`/`wait_out_pause` directly so a
-/// pending `Stop`/`Finish` is never left waiting behind a slow/absent producer —
-/// same reason `WasapiCaptureSource` also drives the
-/// raw receiver directly, to bracket the wait with resetting/restarting
-/// its capture device rather than leaving it running unread through the
-/// whole pause.
+/// work" can't be waited on via `control`'s own channel (a Linux capture's
+/// blocking read) calls this once before that blocking step. A
+/// [`crate::element::Produce`] never does: the framework runs its loop.
 ///
 /// See [`ControlOutcome`] for what the return value means.
+// Only the Linux captures, not yet written as a `Produce`, call it now.
+#[allow(dead_code)]
 pub fn drain_control<S: SourceElement>(
     control: &ControlReceiver,
     source: &mut S,
@@ -830,8 +827,9 @@ pub(crate) fn handle_request<S: SourceElement>(
 /// Applies one source-only graceful completion request. Unlike
 /// [`apply_one`], this never calls `Sink::flow`: EOS has to sit behind every
 /// already-produced buffer in each data path so queues and stateful elements
-/// drain in order. Playing backwards, a [`crate::element::ReversibleSource`] first reads the
-/// stretch under way to its end — see [`crate::element::ReversibleSource::finish_stretch`].
+/// drain in order. What the source still owes goes first — what it held
+/// back, and playing backwards the rest of the stretch under way; see
+/// [`crate::element::SourceElement::finishing`].
 pub(crate) fn apply_finish<S: SourceElement>(
     source: &mut S,
     bus: &Bus,
@@ -845,10 +843,7 @@ pub(crate) fn apply_finish<S: SourceElement>(
     let pp_log = source.pp_log().clone();
     let element_type = source.element_type();
     let name = source.name();
-    let finished = match source.as_reversible() {
-        Some(source) if backwards => source.finish_stretch(bus),
-        _ => Ok(()),
-    };
+    let finished = source.finishing(backwards, bus);
     if let Err(error) = finished {
         bus.post(
             &pp_log,
@@ -1198,8 +1193,8 @@ mod tests {
             Ok(target)
         }
 
-        fn finish_stretch(&mut self, _bus: &Bus) -> Result<()> {
-            Ok(())
+        fn stretch_complete(&self) -> bool {
+            true
         }
     }
 
