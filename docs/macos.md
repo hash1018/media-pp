@@ -1,9 +1,10 @@
 # Porting media-pp to macOS
 
 Where macOS stands, what a port has to add, and how to set a Mac up to do
-it. Written from a read of the tree at `f420607` on a Linux machine: nothing
-here has been built on a Mac yet, so the first build is where this document
-starts being checked against reality. Correct it as you go.
+it. First written from a read of the tree on a Linux machine; the build and
+setup below were then checked on an Apple silicon Mac (macOS 26.5) at
+`4de589d`. The backend half is still a reading of the code. Correct it as
+you go.
 
 obs-rs has a companion document, `docs/macos.md` in that repository, for the
 application's half. The machine setup below serves both.
@@ -21,38 +22,39 @@ platform backend:
 - the software video elements — `SwDecoder`, `SwEncoder`, `SwScaler`,
   `SwVideoCompositor`, `SwChromaKey`, `SwVideoEffect` — and `VideoDecodeBin`
   / `VideoEncodeBin` with their `System` target only;
-- the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort` (the
-  last two build native code; not yet tried on a Mac).
+- the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
 It gets no capture of any kind, no audio output, no window or `VideoWindow`,
 no `Player`, and no GPU backend that works: `cuda` compiles but finds no
 driver, and `vulkan` is discussed below.
 
-By reading, `cargo build -p media-pp` with no features should build on a Mac
-with FFmpeg 8 found through pkg-config: every ungated `cfg` has a non-Windows
-branch. Three things are known not to:
+On the Mac, `cargo build -p media-pp` builds with no features and without a
+warning, `cargo test -p media-pp` passes, and `cargo build --workspace`
+builds every example — the ones with a backend say which platforms they
+support and exit. `render_common` has only `Shutdown` there:
+`stop_on_close` needs the library's window types, which exist only beside a
+window renderer, so it opens to macOS with the Metal one. What remains:
 
-- **`cargo build --workspace`.** `examples/render/render_common` uses
-  `media_pp` unconditionally but only depends on it under Linux and Windows
-  target tables, and `av_playback` and `gpu_video_compositor` depend on
-  `render_common` unconditionally. Build `-p media-pp` and single examples
-  until that is fixed.
-- **The test fixture without OpenH264.** `test_support::try_test_video`
+- **The test fixture needs OpenH264.** `test_support::try_test_video`
   encodes its eight-second fixture with `VideoCodec::OpenH264`; a skip where
   it cannot, but `synthesize`, `synthesize_reordered`, `try_encoded_packets`
   and `try_tagged_packets` `expect()` it and panic. The FFmpeg the tests run
   against needs `libopenh264` — see the setup.
-- **Text tests skip.** The font lists in `sw_video_compositor.rs`
-  (`system_font`) and the CUDA and Vulkan compositor tests (`try_font`) hold
-  only Windows and Linux paths. `/System/Library/Fonts/Helvetica.ttc` or
-  `/System/Library/Fonts/AppleSDGothicNeo.ttc` (which obs-rs already uses)
-  would do.
+- **`lib/tests/common/mod.rs` `private_bytes`** reads `/proc/self/statm` off
+  Windows and would panic on a Mac, and multiplies by a 4 KiB page where
+  Apple silicon has 16 KiB. Only the `#[ignore]`d soak scenarios use it.
 
-`lib/tests/common/mod.rs` `private_bytes` reads `/proc/self/statm` off
-Windows and would panic on a Mac, but only the `#[ignore]`d soak scenarios
-use it.
+The text tests draw with `/System/Library/Fonts/Supplemental/Arial.ttf`,
+the same face they use on Windows.
 
 ## Setting up the Mac
+
+Everything below installs under `~/.local` and needs no `sudo`, so no
+Homebrew either. The prefixes are baked into the libraries' install names
+(below), so choose them once: renaming the home directory later leaves
+every binary looking for its libraries under the old path, which
+`install_name_tool -id`/`-change`/`-rpath` and an ad-hoc `codesign -f -s -`
+can repair, and a rebuild is simpler.
 
 ### Tools
 
@@ -60,64 +62,89 @@ use it.
    compiler, the SDK, and the libclang that bindgen needs — `ffmpeg-sys-next`
    runs bindgen on every build. Full Xcode is only needed later, for
    Instruments and for signing.
-2. **Homebrew** (<https://brew.sh>), then `brew install pkgconf`.
-3. **Rust**: `rustup` stable, plus the toolchain CI lints with. CI installs
+2. **pkg-config**, which FFmpeg's `configure` finds OpenH264 with: pkgconf
+   from its release tarball (2.5.1 was used), `./configure
+   --prefix=$HOME/.local && make install`, and a `pkg-config` symlink to
+   `pkgconf` beside it.
+3. **CMake**, for `whisper`'s whisper.cpp — the `transcribe` example, and so
+   `cargo build --workspace`: Kitware's `cmake-<version>-macos-universal`
+   release unpacked under `~/.local/opt`, with `cmake` linked into
+   `~/.local/bin` from `CMake.app/Contents/bin`.
+4. **Rust**: `rustup` stable, plus the toolchain CI lints with. CI installs
    whatever stable is current, which has been newer than a local default
    before and failed lints nobody saw locally; check `rustup check` and
-   install that version beside it (`rustup toolchain install 1.98.1` at the
-   time of writing), then lint with `cargo +1.98.1 clippy …`.
-4. The two repositories side by side, as the Linux and Windows machines have
-   them: `~/work/media-pp` and `~/work/obs-rs`.
+   install that version beside it, then lint with `cargo +<version> clippy …`.
+5. The two repositories side by side, as the Linux and Windows machines have
+   them.
 
 ### FFmpeg
 
-media-pp needs FFmpeg 8.0 or newer (libavcodec 62.8+); `lib/build.rs` says
-so and stops on anything older. Two ways to get one:
+media-pp needs FFmpeg 8.0 (libavcodec 62.8+); `lib/build.rs` stops on
+anything older, and `ffmpeg-next` 8.1 does not build against 8.1's headers
+(see `.github/actions/setup-ffmpeg`). So it is 8.0.1, the version CI pins,
+built from source: LGPL, with VideoToolbox and AudioToolbox for hardware
+coding, and OpenH264 for the test fixture — BSD-licensed, so the build stays
+LGPL, and the one software video encoder in it. No x264 or x265, and no
+Vulkan: MoltenVK has no Vulkan Video to give it.
 
-- **Homebrew, to start**: `brew install ffmpeg`, then check
-  `ffmpeg -version` says 8.x. Homebrew's build is GPL (it enables x264 and
-  others). That is fine for development and never for a release archive.
-  Check what it has:
+OpenH264 first, into the prefix FFmpeg will have:
 
-  ```sh
-  ffmpeg -hide_banner -hwaccels                   # videotoolbox
-  ffmpeg -hide_banner -encoders | grep -E 'videotoolbox|openh264|x264'
-  ffmpeg -hide_banner -buildconf | grep -E 'vulkan|openh264'
-  ```
+```sh
+prefix=$HOME/.local/ffmpeg-8.0
+# github.com/cisco/openh264, tag v2.6.0
+make -j OS=darwin ARCH=arm64 PREFIX=$prefix
+make OS=darwin ARCH=arm64 PREFIX=$prefix install-shared
+```
 
-  If `libopenh264` is missing, the test fixture is (see above); build the
-  vcpkg one instead, or add OpenH264 some other way before running the
-  suite.
-- **vcpkg, as CI builds it**: the pinned tree CI and the release use, which
-  is what makes a Mac build comparable with the other two. The
-  `.github/actions/setup-ffmpeg` action pins vcpkg `2026.01.16` and installs
-  `ffmpeg[openh264,vulkan]` for `x64-windows` and `x64-linux-dynamic`; the
-  Mac's triplet is `arm64-osx-dynamic`:
+Then FFmpeg, from `ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz`:
 
-  ```sh
-  git clone https://github.com/microsoft/vcpkg ~/vcpkg
-  git -C ~/vcpkg checkout 2026.01.16
-  ~/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-  ~/vcpkg/vcpkg install "ffmpeg[openh264]:arm64-osx-dynamic"
-  export FFMPEG_DIR=~/vcpkg/installed/arm64-osx-dynamic
-  export DYLD_LIBRARY_PATH=$FFMPEG_DIR/lib   # for the tests to load it
-  ```
+```sh
+PKG_CONFIG_PATH=$prefix/lib/pkgconfig ./configure --prefix=$prefix \
+  --enable-shared --disable-static --disable-gpl --disable-nonfree \
+  --enable-videotoolbox --enable-audiotoolbox --enable-libopenh264 \
+  --disable-doc --disable-ffplay --extra-ldflags="-Wl,-rpath,$prefix/lib"
+make -j && make install
+```
 
-  `FFMPEG_DIR` is read before any pkg-config discovery, so it wins over a
-  Homebrew FFmpeg that is also installed. Nothing on the Mac has been built
-  this way yet; the triplet and the features are the first things to check.
+`configure` should report `License: LGPL version 2.1 or later`, and
+`videotoolbox` and `audiotoolbox` under hardware acceleration. It also
+picks up `avfoundation` (the camera input device), `appkit`, `coreimage`
+and `securetransport` on its own. Check what it made:
+
+```sh
+$prefix/bin/ffmpeg -hide_banner -hwaccels      # videotoolbox
+$prefix/bin/ffmpeg -hide_banner -encoders | grep -E 'videotoolbox|openh264'
+```
+
+FFmpeg's dylibs carry their absolute install names, so a binary linked
+against them finds them without `DYLD_LIBRARY_PATH`. Point the build at the
+prefix — in `~/.zshenv`, so every shell has it:
+
+```sh
+export PATH="$HOME/.local/bin:$HOME/.local/ffmpeg-8.0/bin:$PATH"
+export FFMPEG_DIR="$HOME/.local/ffmpeg-8.0"
+export PKG_CONFIG_PATH="$HOME/.local/ffmpeg-8.0/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+```
+
+`FFMPEG_DIR` is read before any pkg-config discovery, so it wins over any
+other FFmpeg on the machine.
+
+Two other routes, neither tried: Homebrew's `ffmpeg` is GPL and follows
+FFmpeg's latest release, which may be past 8.0; vcpkg's `ffmpeg[openh264]:arm64-osx-dynamic` at the tag CI pins
+(`2026.01.16`) would match CI's tree, if its port enables VideoToolbox.
 
 ### First build
 
 ```sh
-cd ~/work/media-pp
 cargo build -p media-pp
 cargo test -p media-pp
-cargo build -p app_sink -p decode -p transcode   # examples with no backend
+cargo build --workspace
 ```
 
 Then the features that are platform-neutral: `--features rnnoise`,
-`--features webrtc`, and later `whisper` and `ort`, which build native code.
+`--features webrtc`, `whisper` and `ort`. The workspace build compiles the
+examples that turn on `whisper`, `ort` and `webrtc`; their tests are not yet
+run on a Mac.
 
 ### Before calling anything done
 
@@ -255,9 +282,9 @@ a breaking change: `MemoryDomain` and `ElementType` are not
 
 ## A suggested order
 
-1. Build `-p media-pp` and run its tests on the Mac; fix what the first
+1. ~~Build `-p media-pp` and run its tests on the Mac; fix what the first
    build finds (and this document). Fix `render_common` so the workspace
-   builds.
+   builds.~~ Done.
 2. Audio first: a Core Audio renderer and capture source. They are the
    smallest backend pieces, need no GPU, and make `Player` possible.
 3. Capture in system memory: ScreenCaptureKit and the camera, feeding the
