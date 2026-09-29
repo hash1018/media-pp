@@ -49,11 +49,31 @@ pub fn private_bytes() -> u64 {
     counters.PrivateUsage as u64
 }
 
+/// This process's physical footprint — what Activity Monitor calls its
+/// memory: the pages it has dirtied and not shared, compressed ones
+/// included, which is the macOS counterpart of the Windows counter above.
+#[cfg(target_os = "macos")]
+pub fn private_bytes() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: `usage` is a writable `rusage_info_v2`, the structure the
+    // `RUSAGE_INFO_V2` flavor fills, for this live process.
+    let code = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            usage.as_mut_ptr().cast(),
+        )
+    };
+    assert_eq!(code, 0, "proc_pid_rusage failed");
+    // SAFETY: filled by the call above, which succeeded.
+    unsafe { usage.assume_init() }.ri_phys_footprint
+}
+
 /// Resident set size from `/proc/self/statm`, the closest Linux equivalent
-/// of the Windows counter above. The page size is the 4 KiB every target
-/// this crate builds for uses; nothing measured here is precise enough for
-/// that to matter beyond scaling the reported numbers.
-#[cfg(not(windows))]
+/// of the Windows counter above. The page size is the 4 KiB every Linux
+/// target this crate builds for uses; nothing measured here is precise
+/// enough for that to matter beyond scaling the reported numbers.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn private_bytes() -> u64 {
     let statm = std::fs::read_to_string("/proc/self/statm").expect("read /proc/self/statm");
     let resident: u64 = statm

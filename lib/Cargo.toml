@@ -567,3 +567,7 @@ windows = { version = "0.62", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
+
+# The same gauge on macOS: `proc_pid_rusage`'s physical footprint.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = "0.2"
