@@ -129,7 +129,10 @@ compile error with no explanation.
   run on macOS**: the desktop and the output device's sound through
   `ScreenCaptureKitSource` and `CoreAudioCaptureSource`; ScreenCaptureKit's
   own pixel buffers encoded by `VideoToolboxEncoder` with nothing copied;
-  and those under a live text layer of `MetalVideoCompositor`.
+  and those under a live text layer of `MetalVideoCompositor`. The new
+  **`metal_window_render`** example draws into a `winit` window of its own
+  through `MetalWindowRenderer::for_window`, following it as it resizes; the
+  renderer logs the size it draws at, at `Debug`, whenever that changes.
 
 - **`MetalScaler`, `MetalConverter`, `MetalChromaKey`, `MetalVideoEffect`**:
   the rest of the GPU filters on macOS, behind `metal`, each the Metal

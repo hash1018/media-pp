@@ -36,7 +36,7 @@ use crate::{
         videotoolbox::{NotVideoToolbox, sw_format_of},
         window::{MetalLayer, OwnedWindow, WindowError},
     },
-    pp_log::{PpLog, pp_error, pp_info},
+    pp_log::{PpLog, pp_debug, pp_error, pp_info},
 };
 
 /// The renderer's kernels, compiled from this one source.
@@ -286,6 +286,9 @@ impl Sink for MetalWindowRenderer {
         self.presenter
             .draw(&frame)
             .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
+        if let Some((width, height)) = self.presenter.resized.take() {
+            pp_debug!(self, "drawing at {width}x{height}");
+        }
         if let Some((delay, source)) = self.presenter.delay.take_change() {
             let source = source.to_owned();
             pp_info!(
@@ -388,6 +391,9 @@ struct Presenter {
     measured: Arc<Mutex<Option<Duration>>>,
     /// Whether anything has been published, measured or estimated.
     estimated: bool,
+    /// The drawable's new size, where it changed with the last draw — for
+    /// the renderer's log.
+    resized: Option<(u32, u32)>,
     /// Last, so the layer above is let go of before the window goes.
     _keep: Keep,
 }
@@ -433,6 +439,7 @@ impl Presenter {
             delay: PresentationDelay::default(),
             measured: Arc::default(),
             estimated: false,
+            resized: None,
             _keep: keep,
         })
     }
@@ -475,6 +482,7 @@ impl Presenter {
         let size = CGSize::new(f64::from(width), f64::from(height));
         if layer.drawableSize() != size {
             layer.setDrawableSize(size);
+            self.resized = Some((width, height));
         }
         // Waits for one of the layer's drawables to be free, which is where
         // presenting at the display's refresh holds a fast producer back.
