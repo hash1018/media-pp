@@ -27,8 +27,12 @@ mod cuda;
 
 #[cfg(feature = "cuda")]
 pub use cuda::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+mod macos;
 #[cfg(feature = "vulkan")]
 mod vulkan;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use macos::*;
 pub use text_layer::TextLayer;
 pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect};
 #[cfg(feature = "vulkan")]

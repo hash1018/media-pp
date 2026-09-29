@@ -1,0 +1,1026 @@
+use std::sync::{Arc, Mutex};
+
+use super::super::super::text_layer::TextLayer;
+use super::super::super::video_layer::{VideoFit, VideoSourceRect};
+use super::*;
+use crate::{
+    bus::BusEvent,
+    color::Color,
+    element::Source,
+    elements::{VideoToolboxDownload, VideoToolboxUpload},
+    test_support::{CapturingSink, try_videotoolbox_device},
+};
+
+fn options(width: u32, height: u32) -> VideoCompositorOptions {
+    VideoCompositorOptions {
+        width,
+        height,
+        frame_rate: ffmpeg::Rational::new(30, 1),
+        background_alpha: 255,
+        mode: crate::elements::RenderMode::Live,
+        background: Color::BLACK,
+    }
+}
+
+type Received = Arc<Mutex<Vec<MediaBuffer>>>;
+
+fn capture(source: &mut dyn Source) -> Received {
+    let received = Arc::new(Mutex::new(Vec::new()));
+    source.src_pads()[0].link(Box::new(CapturingSink {
+        received: received.clone(),
+        pp_log: element_pp_log(ElementType::Other, "capture", None),
+    }));
+    received
+}
+
+/// `frame` uploaded to `device`.
+fn upload(device: &VideoToolboxDevice, frame: ffmpeg::frame::Video) -> MediaBuffer {
+    let mut upload = VideoToolboxUpload::new("upload", device);
+    let uploaded = capture(&mut upload);
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
+    uploaded.lock().unwrap().remove(0)
+}
+
+/// A VideoToolbox NV12 frame of one flat luma value, grey, which is what makes a
+/// composed output checkable pixel by pixel.
+fn nv12_frame(device: &VideoToolboxDevice, width: u32, height: u32, luma: u8) -> MediaBuffer {
+    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
+    frame.set_pts(Some(0));
+    frame.data_mut(0).fill(luma);
+    frame.data_mut(1).fill(128);
+    upload(device, frame)
+}
+
+/// A VideoToolbox BGRA frame, which is how an overlay arrives.
+fn bgra_frame(
+    device: &VideoToolboxDevice,
+    width: u32,
+    height: u32,
+    pixel: impl Fn(u32, u32) -> [u8; 4],
+) -> MediaBuffer {
+    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+    frame.set_pts(Some(0));
+    let stride = frame.stride(0);
+    for y in 0..height {
+        let row = &mut frame.data_mut(0)[y as usize * stride..];
+        for x in 0..width {
+            row[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&pixel(x, y));
+        }
+    }
+    upload(device, frame)
+}
+
+/// One composed frame brought back to system memory.
+fn download(
+    frame: UnboundObjectPoolRef<ffmpeg::frame::Video>,
+) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+    let mut download = VideoToolboxDownload::new("download");
+    let received = capture(&mut download);
+    download
+        .consume(MediaBuffer::Video(Arc::new(frame)))
+        .expect("download");
+    match received.lock().unwrap().remove(0) {
+        MediaBuffer::Video(frame) => frame,
+        other => panic!("expected a Video buffer, got {}", other.kind()),
+    }
+}
+
+fn luma_at(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> u8 {
+    frame.data(0)[y * frame.stride(0) + x]
+}
+
+fn bgra_at(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> [u8; 4] {
+    let at = y * frame.stride(0) + x * 4;
+    frame.data(0)[at..at + 4].try_into().unwrap()
+}
+
+/// Within one step of `expected` — a sample that went through a canvas of
+/// eight bits a channel, in RGB, and back.
+fn near(got: u8, expected: u8, what: &str) {
+    assert!(
+        got.abs_diff(expected) <= 1,
+        "{what}: got {got}, expected {expected}"
+    );
+}
+
+fn nv12_compositor(
+    device: &VideoToolboxDevice,
+    width: u32,
+    height: u32,
+) -> (MetalVideoCompositor, MetalVideoCompositorHandle) {
+    MetalVideoCompositor::with_format(
+        "compositor",
+        device,
+        options(width, height),
+        VideoToolboxFrameFormat::Nv12,
+    )
+    .expect("an NV12 Metal compositor")
+}
+
+/// The composition contract: layers land where their rectangles say, the
+/// higher `z_index` wins where they overlap, and everything else is the
+/// background.
+#[test]
+fn composes_layers_in_z_order_at_their_rectangles() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (mut compositor, handle) = nv12_compositor(&device, 128, 128);
+    let mut back = handle
+        .add_source(
+            "back",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+            },
+        )
+        .unwrap();
+    let mut front = handle
+        .add_source(
+            "front",
+            VideoLayer {
+                z_index: 1,
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(32, 32, 64, 64))
+            },
+        )
+        .unwrap();
+    back.sink.consume(nv12_frame(&device, 32, 32, 100)).unwrap();
+    front
+        .sink
+        .consume(nv12_frame(&device, 32, 32, 200))
+        .unwrap();
+
+    let composed = compositor.compositing().compose_frame().expect("compose");
+    assert_eq!(composed.format(), ffmpeg::format::Pixel::VIDEOTOOLBOX);
+    assert_eq!(composed.pts(), Some(0));
+    let out = download(composed);
+    assert_eq!(out.format(), ffmpeg::format::Pixel::NV12);
+    near(luma_at(&out, 10, 10), 100, "the back layer");
+    near(luma_at(&out, 80, 80), 200, "the front layer");
+    near(
+        luma_at(&out, 40, 40),
+        200,
+        "the higher z_index where they overlap",
+    );
+    near(
+        luma_at(&out, 120, 10),
+        16,
+        "the background outside every layer",
+    );
+    // Grey in, grey out: the chroma is neutral.
+    let chroma = &out.data(1)[..2];
+    assert!(
+        chroma.iter().all(|&sample| sample.abs_diff(128) <= 1),
+        "{chroma:?}"
+    );
+}
+
+/// On a BGRA canvas an overlay's alpha leaves what is under it showing, a
+/// translucent background stays translucent where no layer drew, and a
+/// grey NV12 layer is the grey its luma says.
+#[test]
+fn a_bgra_canvas_blends_by_alpha_and_keeps_its_transparency() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (mut compositor, handle) = MetalVideoCompositor::new(
+        "compositor",
+        &device,
+        VideoCompositorOptions {
+            background_alpha: 0,
+            ..options(128, 64)
+        },
+    )
+    .expect("a BGRA Metal compositor");
+    let mut back = handle
+        .add_source(
+            "back",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+            },
+        )
+        .unwrap();
+    let mut overlay = handle
+        .add_source(
+            "overlay",
+            VideoLayer {
+                z_index: 1,
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+            },
+        )
+        .unwrap();
+    // Luma 126 at limited range is grey 128.
+    back.sink.consume(nv12_frame(&device, 32, 32, 126)).unwrap();
+    // Opaque red at the top, half-transparent blue below.
+    overlay
+        .sink
+        .consume(bgra_frame(&device, 32, 32, |_, y| {
+            if y < 16 {
+                [0, 0, 255, 255]
+            } else {
+                [255, 0, 0, 128]
+            }
+        }))
+        .unwrap();
+
+    let composed = compositor.compositing().compose_frame().expect("compose");
+    let out = download(composed);
+    assert_eq!(out.format(), ffmpeg::format::Pixel::BGRA);
+    assert_eq!(bgra_at(&out, 10, 10), [0, 0, 255, 255], "opaque red covers");
+    let [b, g, r, a] = bgra_at(&out, 10, 50);
+    near(b, 192, "half of blue over grey");
+    near(g, 64, "half of grey's green");
+    near(r, 64, "half of grey's red");
+    assert_eq!(a, 255, "over an opaque layer");
+    assert_eq!(
+        bgra_at(&out, 100, 30)[3],
+        0,
+        "where nothing drew, the background's own alpha"
+    );
+}
+
+/// A layer's picture fits its rectangle as its `fit` says: `Contain`
+/// letterboxes a wide picture in a square, `Cover` fills it, cropping.
+#[test]
+fn cover_fills_its_rectangle_where_contain_letterboxes() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    for (fit, corner) in [(VideoFit::Contain, 16), (VideoFit::Cover, 200)] {
+        let (mut compositor, handle) = nv12_compositor(&device, 64, 64);
+        let mut input = handle
+            .add_source(
+                "wide",
+                VideoLayer {
+                    fit,
+                    ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+                },
+            )
+            .unwrap();
+        input
+            .sink
+            .consume(nv12_frame(&device, 64, 32, 200))
+            .unwrap();
+        let out = download(compositor.compositing().compose_frame().unwrap());
+        near(luma_at(&out, 32, 32), 200, "the middle is the picture");
+        near(
+            luma_at(&out, 32, 2),
+            corner,
+            &format!("the top edge, {fit:?}"),
+        );
+    }
+}
+
+/// A source region draws that part of the picture alone, stretched over
+/// the rectangle.
+#[test]
+fn a_layer_draws_only_its_source_region() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (mut compositor, handle) = nv12_compositor(&device, 64, 64);
+    let mut input = handle
+        .add_source(
+            "quadrants",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                source: Some(VideoSourceRect::new(32, 32, 32, 32)),
+                ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+            },
+        )
+        .unwrap();
+    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
+    frame.set_pts(Some(0));
+    let stride = frame.stride(0);
+    for y in 0..64 {
+        for x in 0..64 {
+            frame.data_mut(0)[y * stride + x] = if x >= 32 && y >= 32 { 220 } else { 40 };
+        }
+    }
+    frame.data_mut(1).fill(128);
+    input.sink.consume(upload(&device, frame)).unwrap();
+    let out = download(compositor.compositing().compose_frame().unwrap());
+    for (x, y) in [(4, 4), (60, 4), (4, 60), (32, 32)] {
+        near(
+            luma_at(&out, x, y),
+            220,
+            &format!("({x}, {y}) is the bottom-right quadrant"),
+        );
+    }
+}
+
+/// A translucent layer is mixed with what is under it by its opacity.
+#[test]
+fn a_translucent_layer_is_blended_with_the_background() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (mut compositor, handle) = nv12_compositor(&device, 64, 64);
+    let mut input = handle
+        .add_source(
+            "half",
+            VideoLayer {
+                opacity: 0.5,
+                ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+            },
+        )
+        .unwrap();
+    input
+        .sink
+        .consume(nv12_frame(&device, 32, 32, 235))
+        .unwrap();
+    let out = download(compositor.compositing().compose_frame().unwrap());
+    // Half of white over black is grey 128 in RGB, luma 126.
+    near(luma_at(&out, 32, 32), 126, "half of white over black");
+}
+
+/// A tick that finds nothing changed hands out the frame it composed last,
+/// under its own timestamp, and a moved layer puts it back to work.
+#[test]
+fn an_unchanged_scene_is_composed_once() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (mut compositor, handle) = nv12_compositor(&device, 64, 64);
+    let mut input = handle
+        .add_source("only", VideoLayer::new(VideoRect::new(0, 0, 32, 32)))
+        .unwrap();
+    input
+        .sink
+        .consume(nv12_frame(&device, 32, 32, 100))
+        .unwrap();
+    let composed = compositor.compositing().compose_frame().unwrap();
+    let picture = picture_id(&composed);
+    let repeated = compositor.compositing().compose_frame().unwrap();
+    assert_eq!(
+        picture_id(&repeated),
+        picture,
+        "the picture already composed"
+    );
+    assert_eq!(repeated.pts(), Some(1), "under this tick's timestamp");
+    input
+        .layer
+        .set_rect(VideoRect::new(16, 16, 32, 32))
+        .unwrap();
+    let moved = compositor.compositing().compose_frame().unwrap();
+    assert_ne!(
+        picture_id(&moved),
+        picture,
+        "a moved layer is composed again"
+    );
+}
+
+fn try_font() -> Option<Vec<u8>> {
+    [
+        "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ]
+    .iter()
+    .find_map(|path| std::fs::read(path).ok())
+    .or_else(|| {
+        eprintln!("skipping: no system font to draw text with");
+        None
+    })
+}
+
+/// A text layer draws in its colour once it has text, stacks by its
+/// `z_index` among the video layers, and clears when emptied.
+#[test]
+fn a_text_layer_draws_and_stacks_by_its_z_index() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let Some(font) = try_font() else {
+        return;
+    };
+    let (mut compositor, handle) =
+        MetalVideoCompositor::new("compositor", &device, options(256, 128)).unwrap();
+    let text = handle
+        .add_text_layer(
+            "caption",
+            TextLayer {
+                font_size: 96.0,
+                color: Color::new(255, 0, 0),
+                ..TextLayer::new(font)
+            },
+        )
+        .unwrap();
+    text.set_text("MMMM").unwrap();
+    let red = |frame: &ffmpeg::frame::Video| {
+        (0..frame.height() as usize)
+            .flat_map(|y| (0..frame.width() as usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let [b, g, r, _] = bgra_at(frame, x, y);
+                r > 200 && g < 40 && b < 40
+            })
+            .count()
+    };
+    let drawn = red(&download(compositor.compositing().compose_frame().unwrap()));
+    assert!(
+        drawn > 500,
+        "the text is drawn in its colour: {drawn} red pixels"
+    );
+
+    // A video layer over it at a higher z_index hides it.
+    let mut cover = handle
+        .add_source(
+            "cover",
+            VideoLayer {
+                z_index: 1,
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, 256, 128))
+            },
+        )
+        .unwrap();
+    cover
+        .sink
+        .consume(nv12_frame(&device, 32, 32, 126))
+        .unwrap();
+    let covered = red(&download(compositor.compositing().compose_frame().unwrap()));
+    assert_eq!(covered, 0, "under a video layer of a higher z_index");
+    text.set_z_index(2);
+    let raised = red(&download(compositor.compositing().compose_frame().unwrap()));
+    assert!(raised > 500, "raised over it again: {raised}");
+
+    text.set_text("").unwrap();
+    let cleared = red(&download(compositor.compositing().compose_frame().unwrap()));
+    assert_eq!(cleared, 0, "empty text draws nothing");
+}
+
+/// A frame in system memory and a VideoToolbox frame of a layout this
+/// does not draw are refused by the sink, naming why, and the input keeps
+/// what it had. A frame from another `VideoToolboxDevice` is not refused:
+/// a pixel buffer belongs to none.
+#[test]
+fn a_cpu_frame_and_another_layout_are_typed_errors() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (mut compositor, handle) = nv12_compositor(&device, 64, 64);
+    let mut input = handle
+        .add_source("strict", VideoLayer::new(VideoRect::new(0, 0, 64, 64)))
+        .unwrap();
+    let cpu = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 32, 32);
+    let error = input.sink.consume(MediaBuffer::video(cpu)).unwrap_err();
+    assert!(error.to_string().contains("upload it first"), "{error}");
+
+    let mut p010 = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::P010LE, 32, 32);
+    p010.set_pts(Some(0));
+    let error = input.sink.consume(upload(&device, p010)).unwrap_err();
+    assert!(error.to_string().contains("got P010"), "{error}");
+    assert!(input.layer.latest_frame().is_none(), "nothing was taken");
+
+    let other = VideoToolboxDevice::new().expect("a second device");
+    input
+        .sink
+        .consume(nv12_frame(&other, 32, 32, 100))
+        .expect("a frame made on another device");
+    let out = download(compositor.compositing().compose_frame().unwrap());
+    near(luma_at(&out, 32, 32), 100, "drawn as any other");
+}
+
+/// An NV12 canvas refuses a translucent background, which it has nowhere
+/// to keep.
+#[test]
+fn an_nv12_canvas_refuses_a_translucent_background() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let refused = MetalVideoCompositor::with_format(
+        "compositor",
+        &device,
+        VideoCompositorOptions {
+            background_alpha: 128,
+            ..options(64, 64)
+        },
+        VideoToolboxFrameFormat::Nv12,
+    );
+    assert!(matches!(
+        refused,
+        Err(MetalVideoCompositorError::TranslucentBackground(128))
+    ));
+}
+
+/// Pictures a VideoToolbox decoder made — pixel buffers of the media
+/// engine's own — are drawn as decoded: what comes out is the picture it was
+/// handed, not the one before it.
+#[test]
+fn decoded_pictures_are_composited() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let mut input = ffmpeg::format::input(&path).expect("open the test video");
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .expect("a picture");
+    let (index, params) = (stream.index(), stream.parameters());
+    if !crate::elements::VideoToolboxDecoder::supports(params.id()) {
+        return;
+    }
+    let mut decoder =
+        crate::elements::VideoToolboxDecoder::new("decoder", params, &device).unwrap();
+    let decoded = capture(&mut decoder);
+    for (stream, packet) in input.packets() {
+        if stream.index() != index {
+            continue;
+        }
+        match decoder.consume(MediaBuffer::Packet(Arc::new(packet))) {
+            Err(crate::error::Error::VideoToolboxDecoderError(
+                crate::elements::VideoToolboxDecoderError::HwAccelUnavailable,
+            )) => return,
+            result => result.unwrap(),
+        }
+        if decoded.lock().unwrap().len() >= 30 {
+            break;
+        }
+    }
+    let pictures: Vec<_> = decoded
+        .lock()
+        .unwrap()
+        .drain(..)
+        .filter_map(|buffer| match buffer {
+            MediaBuffer::Video(frame) => Some(frame),
+            _ => None,
+        })
+        .collect();
+    let (earlier, picture) = (&pictures[0], &pictures[pictures.len() - 1]);
+    let (width, height) = (picture.width(), picture.height());
+    let read_back = |frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>| {
+        let mut download = VideoToolboxDownload::new("download");
+        let received = capture(&mut download);
+        download.consume(MediaBuffer::Video(frame.clone())).unwrap();
+        match received.lock().unwrap().remove(0) {
+            MediaBuffer::Video(frame) => frame,
+            _ => panic!("a picture"),
+        }
+    };
+    let (reference, before) = (read_back(picture), read_back(earlier));
+
+    let (mut compositor, handle) = nv12_compositor(&device, width, height);
+    let mut layer = handle
+        .add_source(
+            "decoded",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, width, height))
+            },
+        )
+        .unwrap();
+    layer
+        .sink
+        .consume(MediaBuffer::Video(picture.clone()))
+        .unwrap();
+    let out = download(compositor.compositing().compose_frame().unwrap());
+    let mean = |other: &ffmpeg::frame::Video| {
+        let total: u64 = (0..height as usize)
+            .flat_map(|y| (0..width as usize).map(move |x| (x, y)))
+            .map(|(x, y)| u64::from(luma_at(&out, x, y).abs_diff(luma_at(other, x, y))))
+            .sum();
+        total as f64 / f64::from(width * height)
+    };
+    let (own, other) = (mean(&reference), mean(&before));
+    // Drawn one to one, the picture comes back as decoded but for what the
+    // round trip changes: an 8-bit RGB canvas, and a BT.601 picture made
+    // into BT.709 NV12, which moves the luma of anything coloured.
+    assert!(own < 2.0, "{own} from the picture it was handed");
+    assert!(
+        own < other,
+        "{own} from its own picture, {other} from an earlier one"
+    );
+}
+
+/// The backend-independent traits drive this compositor as its own
+/// handles do.
+#[test]
+fn the_backend_independent_traits_drive_it() {
+    use crate::elements::VideoLayerControl;
+
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (mut compositor, handle) = nv12_compositor(&device, 64, 64);
+    let still = super::super::super::control::arrange(&handle, 64, 64);
+    let MediaBuffer::Video(frame) = nv12_frame(&device, 32, 32, 200) else {
+        panic!("a frame");
+    };
+    VideoLayerControl::set_frame(&still, frame).unwrap();
+    let out = download(compositor.compositing().compose_frame().unwrap());
+    near(
+        luma_at(&out, 32, 32),
+        200,
+        "the picture set through the trait",
+    );
+}
+
+/// Offline, each output frame shows what each input says at that frame's
+/// time — two inputs in different time bases, one starting late — and the
+/// render ends once both have, as the other compositors' do.
+#[test]
+fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
+    use crate::pipeline::Pipeline;
+    use std::time::{Duration, Instant};
+
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        frame_rate: ffmpeg::Rational::new(10, 1),
+        mode: RenderMode::Offline { end: None },
+        ..options(64, 64)
+    };
+    let (compositor, handle) = MetalVideoCompositor::with_format(
+        "offline",
+        &device,
+        options,
+        VideoToolboxFrameFormat::Nv12,
+    )
+    .unwrap();
+
+    let timed = |luma: u8, pts: i64, base: ffmpeg::Rational, duration: i64| {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
+        frame.data_mut(0).fill(luma);
+        frame.data_mut(1).fill(128);
+        frame.set_pts(Some(pts));
+        crate::buffer::set_time_base(&mut frame, base);
+        // SAFETY: a plain field of a frame this test owns outright.
+        unsafe { (*frame.as_mut_ptr()).duration = duration };
+        upload(&device, frame)
+    };
+    let feed = |name: &str, z_index: i32, frames: Vec<MediaBuffer>| {
+        let layer = VideoLayer {
+            z_index,
+            fit: VideoFit::Stretch,
+            ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+        };
+        let sink = handle.add_source(name, layer).unwrap().sink;
+        let (source, pusher) = crate::elements::AppSource::new(name, 64);
+        let (pipeline, ()) = Pipeline::new(format!("{name}-feed"), source, |source, ctx| {
+            let branch = ctx.branch().queue(format!("{name}-queue"), 2).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        for frame in frames {
+            pusher.push(frame).unwrap();
+        }
+        pipeline
+    };
+    let ms = ffmpeg::Rational::new(1, 1000);
+    let khz90 = ffmpeg::Rational::new(1, 90_000);
+    let low: Vec<_> = [0, 250, 500, 750]
+        .into_iter()
+        .map(|start| timed(100, start, ms, 250))
+        .collect();
+    let high: Vec<_> = [45_000, 63_000]
+        .into_iter()
+        .map(|start| timed(200, start, khz90, 18_000))
+        .collect();
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = CapturingSink {
+        received: received.clone(),
+        pp_log: element_pp_log(ElementType::Other, "capture", None),
+    };
+    let (render, ()) = Pipeline::new("render", compositor, |source, ctx| {
+        let branch = ctx.branch().to(sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    render.run().unwrap();
+    // Each feed's pusher is dropped as the closure returns, which ends it.
+    let _low = feed("low", 0, low);
+    let _high = feed("high", 1, high);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut finished = false;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        if let Ok(BusEvent::Finished) = render.bus().recv_timeout(left) {
+            finished = true;
+            break;
+        }
+    }
+    render.stop();
+    assert!(finished, "the render ends once its inputs have");
+
+    let composed: Vec<_> = received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|buffer| match buffer {
+            MediaBuffer::Video(frame) => Some(Arc::clone(frame)),
+            _ => None,
+        })
+        .collect();
+    let shown: Vec<_> = composed
+        .into_iter()
+        .map(|frame| {
+            let pts = frame.pts().unwrap();
+            let mut download = VideoToolboxDownload::new("download");
+            let back = capture(&mut download);
+            download.consume(MediaBuffer::Video(frame)).unwrap();
+            let MediaBuffer::Video(frame) = back.lock().unwrap().remove(0) else {
+                panic!("a picture");
+            };
+            let luma = luma_at(&frame, 0, 0);
+            // Within the canvas's rounding of the two values used.
+            (
+                pts,
+                if luma.abs_diff(200) <= 1 {
+                    200
+                } else if luma.abs_diff(100) <= 1 {
+                    100
+                } else {
+                    luma
+                },
+            )
+        })
+        .collect();
+    let expected: Vec<_> = (0..10)
+        .map(|index| (index, if (5..9).contains(&index) { 200 } else { 100 }))
+        .collect();
+    assert_eq!(shown, expected);
+}
+
+/// What a compositor makes goes straight into a VideoToolbox encoder — NV12
+/// as it is, BGRA converted by the media engine — and decodes back to the
+/// picture composed.
+#[test]
+fn a_composition_encodes_without_leaving_the_gpu() {
+    use crate::elements::{
+        SwDecoder, VideoToolboxCodec, VideoToolboxEncoder, VideoToolboxEncoderOptions,
+    };
+
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let _session = crate::test_support::encoder_session();
+    let (width, height) = (256u32, 128u32);
+    for format in [VideoToolboxFrameFormat::Nv12, VideoToolboxFrameFormat::Bgra] {
+        let mut encoder = match VideoToolboxEncoder::new(
+            "encoder",
+            &device,
+            VideoToolboxEncoderOptions {
+                codec: VideoToolboxCodec::H264,
+                format,
+                width,
+                height,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 4_000_000,
+                gop_size: 30,
+                max_b_frames: None,
+            },
+        ) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: no VideoToolbox H.264 encoder here ({error})");
+                return;
+            }
+        };
+        let packets = capture(&mut encoder);
+        let (mut compositor, handle) = MetalVideoCompositor::with_format(
+            "compositor",
+            &device,
+            options(width, height),
+            format,
+        )
+        .unwrap();
+        let mut layer = handle
+            .add_source(
+                "grey",
+                VideoLayer {
+                    fit: VideoFit::Stretch,
+                    ..VideoLayer::new(VideoRect::new(0, 0, width / 2, height))
+                },
+            )
+            .unwrap();
+        layer
+            .sink
+            .consume(nv12_frame(&device, 32, 32, 180))
+            .unwrap();
+        for index in 0..10 {
+            // Moved a pixel each frame, so each is composed afresh.
+            layer
+                .layer
+                .set_rect(VideoRect::new(index % 2, 0, width / 2, height))
+                .unwrap();
+            let composed = compositor.compositing().compose_frame().expect("compose");
+            encoder
+                .consume(MediaBuffer::Video(Arc::new(composed)))
+                .expect("the composition encodes");
+        }
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
+
+        let mut decoder = SwDecoder::new("check", encoder.parameters()).unwrap();
+        let decoded = capture(&mut decoder);
+        for packet in packets.lock().unwrap().drain(..) {
+            decoder.consume(packet).unwrap();
+        }
+        decoder
+            .stream_event(&crate::stream::StreamEvent::Eos)
+            .unwrap();
+        let decoded = decoded.lock().unwrap();
+        let pictures: Vec<_> = decoded
+            .iter()
+            .filter_map(|buffer| match buffer {
+                MediaBuffer::Video(frame) => Some(frame),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pictures.len(),
+            10,
+            "{format:?}: every composition came back"
+        );
+        let last = pictures[9];
+        // Grey is grey whichever matrix made it YUV; within the encoder's own
+        // loss.
+        assert!(
+            luma_at(last, 60, 64).abs_diff(180) <= 2,
+            "{format:?}: the layer, {}",
+            luma_at(last, 60, 64)
+        );
+        assert!(
+            luma_at(last, 200, 64).abs_diff(16) <= 2,
+            "{format:?}: the background, {}",
+            luma_at(last, 200, 64)
+        );
+    }
+}
+
+/// An export as it would run: a file decoded with VideoToolbox, composed
+/// offline by its timestamps and encoded with VideoToolbox into an MP4 —
+/// three pipelines' worth of elements, none of them bringing a picture to
+/// the CPU — ends by itself at `end`, with every frame in the file.
+#[test]
+fn a_file_is_decoded_composed_and_encoded_on_the_gpu() {
+    use crate::elements::{
+        FileDemuxer, FileMuxer, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxEncoder,
+        VideoToolboxEncoderOptions,
+    };
+    use crate::pipeline::Pipeline;
+    use std::time::{Duration, Instant};
+
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let _session = crate::test_support::encoder_session();
+    let (width, height) = (640u32, 360u32);
+    let encoder = match VideoToolboxEncoder::new(
+        "encoder",
+        &device,
+        VideoToolboxEncoderOptions {
+            codec: VideoToolboxCodec::H264,
+            format: VideoToolboxFrameFormat::Nv12,
+            width,
+            height,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 2_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    ) {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            eprintln!("skipping: no VideoToolbox H.264 encoder here ({error})");
+            return;
+        }
+    };
+    let (source, streams) = FileDemuxer::open("file", &path).unwrap();
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("the fixture has a picture")
+        .clone();
+    if !VideoToolboxDecoder::supports(video.parameters.id()) {
+        return;
+    }
+    let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device).unwrap();
+
+    let (compositor, handle) = MetalVideoCompositor::with_format(
+        "export",
+        &device,
+        VideoCompositorOptions {
+            width,
+            height,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            mode: RenderMode::Offline {
+                end: Some(Duration::from_secs(2)),
+            },
+            ..VideoCompositorOptions::default()
+        },
+        VideoToolboxFrameFormat::Nv12,
+    )
+    .unwrap();
+    // The picture, scaled up to the frame and letterboxed into it.
+    let whole = handle
+        .add_source(
+            "whole",
+            VideoLayer::new(VideoRect::new(0, 0, width, height)),
+        )
+        .unwrap();
+    let file = std::env::temp_dir().join(format!(
+        "metal_export_{}_{:?}.mp4",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let mut muxer = FileMuxer::create(&file).unwrap();
+    let track = muxer.add_stream("video", &encoder).unwrap();
+    let mut sinks = muxer.open().unwrap();
+    let track_sink = sinks.take(track).unwrap();
+
+    let (render, ()) = Pipeline::new("render", compositor, |source, ctx| {
+        let branch = ctx.branch().pipe(encoder).to(track_sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    let (feed, ()) = Pipeline::new("feed", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .queue("packets", 8)
+            .pipe(decoder)
+            .queue("frames", 2)
+            .to(whole.sink)?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    render.run().unwrap();
+    feed.run().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut finished = false;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match render.bus().recv_timeout(left) {
+            Ok(BusEvent::Finished) => {
+                finished = true;
+                break;
+            }
+            Ok(BusEvent::Error { error, .. }) => panic!("the export failed: {error}"),
+            _ => {}
+        }
+    }
+    feed.stop();
+    render.stop();
+    drop(render);
+    assert!(finished, "the export ends by itself at its end");
+
+    let mut input = ffmpeg::format::input(&file).expect("the file reads back");
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .expect("a picture");
+    let (index, parameters) = (stream.index(), stream.parameters());
+    let mut decoder = ffmpeg::codec::context::Context::from_parameters(parameters)
+        .and_then(|context| context.decoder().video())
+        .unwrap();
+    let mut frames = 0;
+    let mut last = None;
+    let mut picture = ffmpeg::frame::Video::empty();
+    let mut take = |decoder: &mut ffmpeg::decoder::Video| {
+        while decoder.receive_frame(&mut picture).is_ok() {
+            frames += 1;
+            last = Some((picture.width(), picture.height(), picture.data(0).to_vec()));
+        }
+    };
+    for (stream, packet) in input.packets() {
+        if stream.index() == index {
+            decoder.send_packet(&packet).unwrap();
+            take(&mut decoder);
+        }
+    }
+    decoder.send_eof().unwrap();
+    take(&mut decoder);
+    let (last_width, last_height, luma) = last.expect("a picture decoded");
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(frames, 60, "two seconds at thirty frames a second");
+    assert_eq!((last_width, last_height), (width, height));
+    // Not the background: the picture is in it.
+    let distinct: std::collections::HashSet<u8> = luma.iter().step_by(97).copied().collect();
+    assert!(distinct.len() > 8, "a picture, not a flat field");
+}
+
+#[test]
+fn an_input_that_ends_is_shown_again() {
+    let Some(device) = try_videotoolbox_device() else {
+        return;
+    };
+    let (_compositor, handle) = nv12_compositor(&device, 64, 64);
+    super::super::super::control::an_input_that_ends_is_shown_again(&handle, || {
+        nv12_frame(&device, 32, 32, 200)
+    });
+}

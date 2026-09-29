@@ -7,16 +7,20 @@
 use ffmpeg_next as ffmpeg;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane,
-    CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
-    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
-    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
-    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    CVPixelBufferGetPlaneCount, CVPixelBufferGetWidth,
+};
+#[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
+use objc2_core_video::{
+    CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 
 /// Why a pixel buffer could not be made a frame.
+#[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PixelBufferError {
     /// It holds a layout other than the one asked for — its four-character
@@ -29,6 +33,7 @@ pub(crate) enum PixelBufferError {
 }
 
 /// What a pixel buffer holds, of the layouts this crate reads.
+#[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
     /// NV12, `420v` or `420f`: the range it is in.
@@ -37,6 +42,7 @@ enum Layout {
     Bgra,
 }
 
+#[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
 impl Layout {
     fn pixel(self) -> ffmpeg::format::Pixel {
         match self {
@@ -67,8 +73,45 @@ pub(crate) struct PixelBuffer(CFRetained<CVPixelBuffer>);
 unsafe impl Send for PixelBuffer {}
 
 impl PixelBuffer {
+    #[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
     pub(crate) fn new(buffer: CFRetained<CVPixelBuffer>) -> Self {
         Self(buffer)
+    }
+
+    /// The pixel buffer a VideoToolbox frame holds, held again — `None` for
+    /// any other frame.
+    #[cfg(feature = "metal")]
+    pub(crate) fn of_frame(frame: &ffmpeg::frame::Video) -> Option<Self> {
+        if frame.format() != ffmpeg::format::Pixel::VIDEOTOOLBOX {
+            return None;
+        }
+        // SAFETY: a live VideoToolbox frame keeps its pixel buffer in
+        // `data[3]` for as long as it lives; the buffer is retained here to
+        // outlive it.
+        unsafe {
+            let buffer = std::ptr::NonNull::new((*frame.as_ptr()).data[3])?;
+            Some(Self(CFRetained::retain(buffer.cast::<CVPixelBuffer>())))
+        }
+    }
+
+    /// The `IOSurface` it is backed by, where it is — which a Metal texture
+    /// is made over.
+    #[cfg(feature = "metal")]
+    pub(crate) fn io_surface(&self) -> Option<CFRetained<objc2_io_surface::IOSurfaceRef>> {
+        objc2_core_video::CVPixelBufferGetIOSurface(Some(&self.0))
+    }
+
+    /// The size of plane `plane` in pixels — the whole buffer's where it has
+    /// one plane only.
+    #[cfg(feature = "metal")]
+    pub(crate) fn plane_size(&self, plane: usize) -> (u32, u32) {
+        if CVPixelBufferGetPlaneCount(&self.0) == 0 {
+            return self.size();
+        }
+        (
+            objc2_core_video::CVPixelBufferGetWidthOfPlane(&self.0, plane) as u32,
+            CVPixelBufferGetHeightOfPlane(&self.0, plane) as u32,
+        )
     }
 
     pub(crate) fn size(&self) -> (u32, u32) {
@@ -78,6 +121,7 @@ impl PixelBuffer {
         )
     }
 
+    #[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
     /// What it holds, where it is `want` — NV12 or BGRA, as FFmpeg names
     /// them.
     fn layout(&self, want: ffmpeg::format::Pixel) -> Result<Layout, PixelBufferError> {
@@ -96,6 +140,7 @@ impl PixelBuffer {
             .ok_or(PixelBufferError::Unexpected(format))
     }
 
+    #[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
     /// Copies the picture, which must be `want`, into `frame`, which is made
     /// `want` of its size where it is not already, and says what its samples
     /// mean.
@@ -127,6 +172,7 @@ impl PixelBuffer {
         Ok(())
     }
 
+    #[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
     /// Both NV12 planes, a row at a time: luma `width` bytes a row, and
     /// chroma as many, its Cb and Cr interleaved at half the rows. Called
     /// locked.
@@ -147,6 +193,7 @@ impl PixelBuffer {
         Ok(())
     }
 
+    #[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
     /// The one plane of a packed layout, `row_bytes` a row. Called locked.
     fn copy_packed(
         &self,
@@ -163,7 +210,10 @@ impl PixelBuffer {
     /// of its layout and size — as the context it says it came from: what a
     /// VideoToolbox decoder hands on, and what a VideoToolbox encoder or
     /// download reads. The frame holds the buffer until it is freed.
-    #[cfg(feature = "videotoolbox")]
+    #[cfg(all(
+        feature = "videotoolbox",
+        any(feature = "avfoundation-capture", feature = "screencapturekit-capture")
+    ))]
     pub(crate) fn into_videotoolbox_frame(
         self,
         frames_ctx: &crate::platform::ffmpeg::AvBufferRef,
@@ -222,6 +272,7 @@ impl PixelBuffer {
     }
 }
 
+#[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
 /// `rows_needed` of `frame`'s plane `plane`, `row_bytes` each, from `rows`
 /// rows of `source_stride` bytes at `source`, where there are that many.
 fn copy_rows(
@@ -249,7 +300,10 @@ fn copy_rows(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(feature = "avfoundation-capture", feature = "screencapturekit-capture")
+))]
 pub(crate) mod tests {
     use super::*;
     use objc2_core_foundation::CFDictionary;

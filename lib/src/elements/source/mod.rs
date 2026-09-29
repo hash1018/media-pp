@@ -95,6 +95,12 @@ pub use compositor::{
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,
 };
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use compositor::{
+    MetalTextLayerHandle, MetalVideoCompositor, MetalVideoCompositorError,
+    MetalVideoCompositorHandle, MetalVideoCompositorInput, MetalVideoCompositorInputSink,
+    MetalVideoLayerHandle,
+};
 #[cfg(feature = "vulkan")]
 pub use compositor::{
     VulkanFrameFormat, VulkanTextLayerHandle, VulkanVideoCompositor, VulkanVideoCompositorError,

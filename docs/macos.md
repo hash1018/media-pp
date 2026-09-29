@@ -16,9 +16,10 @@ The macOS backend so far is audio — `CoreAudioRenderer` behind
 sharing their device listing and AUHAL unit in `platform/macos/coreaudio/` —
 VideoToolbox frames behind `videotoolbox`: decode, encode, upload and
 download, in `MemoryDomain::VideoToolbox`, and the bins' VideoToolbox arms —
-the camera, `AvFoundationCaptureSource` behind `avfoundation-capture` — and
+the camera, `AvFoundationCaptureSource` behind `avfoundation-capture` —
 displays and windows, `ScreenCaptureKitSource` behind
-`screencapturekit-capture`.
+`screencapturekit-capture` — and compositing on the GPU,
+`MetalVideoCompositor` behind `metal`.
 Beside them a macOS build gets everything that is not a platform backend:
 
 - the pipeline core, `FileDemuxer`, `RtspSource`, `AppSource`/`AppSink`, the
@@ -31,8 +32,8 @@ Beside them a macOS build gets everything that is not a platform backend:
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
 It gets no window or `VideoWindow`,
-no `Player`, and no GPU compositing: `cuda` compiles but finds no driver,
-and `vulkan` is discussed below.
+no `Player`, and no Metal scaler, converter or effects yet: `cuda` compiles
+but finds no driver, and `vulkan` is discussed below.
 
 On the Mac, `cargo build -p media-pp` builds with no features and without a
 warning, `cargo test -p media-pp` passes, and `cargo build --workspace`
@@ -225,11 +226,15 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   its `for_decoded` mapping, an `EncodePath` (`:201`, `is_hardware`), an arm
   in `open_passing_over`, and a path function beside `d3d11`, `cuda` and
   `vulkan`, falling back to software through a download.
-- **Compositor** — a compositor implementing `VideoCompositorControl`,
-  `VideoLayerControl` and `TextLayerControl`
-  (`elements/source/compositor/control.rs`) through the `compositor_control!`
-  macro, as the software, D3D11, CUDA and Vulkan compositors do, including
-  `RenderMode::Offline` through `timed_inputs.rs`.
+- **Compositor** — done, `MetalVideoCompositor`, the Vulkan compositor's
+  structure with Metal compute kernels (`shaders/metal/composite.metal`,
+  compiled by Metal at run time, so no naga and no toolchain). It needed
+  no memory domain of its own: its frames are VideoToolbox frames, in and
+  out, read and written through textures made over their `IOSurface`s
+  (`platform/macos/metal.rs`), so decode, capture and encode connect to it
+  unchanged. Nor a shared Metal device: a pixel buffer belongs to no
+  device, and each Metal element makes its own `MetalGpu` on the system's
+  GPU.
 - **Upload, download, conversion, effects** — the same set the other
   backends have: upload from system memory (NV12, BGRA, YUV420P as NV12),
   download, NV12 to BGRA, chroma key, video effect. The Vulkan elements
@@ -332,7 +337,10 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    `VideoToolboxDecoder`, `VideoToolboxEncoder`, `VideoToolboxUpload`,
    `VideoToolboxDownload`, `MemoryDomain::VideoToolbox`, and the
    `DecodeTarget` / `EncodeInput` arms — `transcode` runs on the media
-   engine end to end. The Metal device comes with the compositor.
+   engine end to end.
 5. The Metal compositor and effects, then capture straight onto the device.
+   The compositor is done — `MetalVideoCompositor`, on VideoToolbox frames,
+   which capture already delivers; scaling, conversion, chroma key and
+   effects on Metal remain.
 6. The window renderer and `Player`.
 7. A macOS job in CI (`macos-latest` runners are Apple silicon).

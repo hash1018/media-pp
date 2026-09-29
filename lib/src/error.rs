@@ -360,6 +360,11 @@ pub enum Error {
     #[error(transparent)]
     VulkanDownloadError(#[from] crate::elements::VulkanDownloadError),
 
+    /// A Metal video compositor operation failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalVideoCompositorError(#[from] crate::elements::MetalVideoCompositorError),
+
     /// A Vulkan video compositor operation failed.
     #[cfg(feature = "vulkan")]
     #[error(transparent)]

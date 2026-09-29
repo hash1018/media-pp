@@ -91,6 +91,8 @@ pub enum ElementType {
     CudaVideoCompositor,
     /// Vulkan video compositor source.
     VulkanVideoCompositor,
+    /// Metal video compositor source, on macOS.
+    MetalVideoCompositor,
     /// D3D11 video compositor source.
     D3d11VideoCompositor,
     /// WebRTC connection driver.

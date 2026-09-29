@@ -7,9 +7,17 @@ pub(crate) mod avfoundation;
 /// record through.
 #[cfg(any(feature = "coreaudio-renderer", feature = "coreaudio-capture"))]
 pub(crate) mod coreaudio;
+/// Metal, for `MetalVideoCompositor`: the device, its kernels, and textures
+/// over the pixel buffers VideoToolbox frames hold.
+#[cfg(feature = "metal")]
+pub(crate) mod metal;
 /// Core Video pixel buffers as frames — what a camera and a screen hand
-/// over.
-#[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
+/// over — and the pixel buffers VideoToolbox frames hold, for Metal.
+#[cfg(any(
+    feature = "avfoundation-capture",
+    feature = "screencapturekit-capture",
+    feature = "metal"
+))]
 pub(crate) mod pixel_buffer;
 /// ScreenCaptureKit, for `ScreenCaptureKitSource`: the displays and windows
 /// there are, and whether this program may record them.

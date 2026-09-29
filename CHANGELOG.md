@@ -109,7 +109,8 @@ compile error with no explanation.
 - **`ElementType` has `CoreAudioRenderer` and `CoreAudioCaptureSource`
   variants**, for the macOS audio elements, `VideoToolboxDecoder`,
   `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload`,
-  `AvFoundationCaptureSource` and `ScreenCaptureKitSource` — see Added. A `match` on
+  `AvFoundationCaptureSource`, `ScreenCaptureKitSource` and
+  `MetalVideoCompositor` — see Added. A `match` on
   `ElementType` needs an arm for each.
 
 - **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
@@ -122,6 +123,24 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`MetalVideoCompositor`: compositing on the GPU on macOS**, behind the
+  new `metal` feature (which enables `videotoolbox`), the Metal sibling of
+  the D3D11, CUDA and Vulkan compositors with their API —
+  `MetalVideoCompositorHandle`, `MetalVideoLayerHandle`,
+  `MetalTextLayerHandle`, `VideoCompositorControl`, live or
+  `RenderMode::Offline`. It composes VideoToolbox frames, NV12 or BGRA,
+  into VideoToolbox frames, BGRA or NV12 (`VideoToolboxFrameFormat`), so a
+  decoder's, an upload's, a camera's or a screen's pictures go in and a
+  `VideoToolboxEncoder` takes what comes out, with no new memory domain
+  and no copy: each picture is read, and each output written, through a
+  Metal texture made over the `IOSurface` its pixel buffer is in. Its
+  kernels are Metal Shading Language, compiled by Metal when it is made,
+  so the build needs no shader toolchain; they draw as the Vulkan
+  compositor's do — each layer's own colour description, alpha straight or
+  premultiplied, text from coverage masks, NV12 out at BT.709 limited
+  range. A pixel buffer belongs to no device, so it takes frames from any
+  `VideoToolboxDevice`. `MetalError` says what Metal refused.
 
 - **`ScreenCaptureKitSource`: display and window capture on macOS**,
   behind the new `screencapturekit-capture` feature (macOS 12.3+), in the

@@ -82,6 +82,8 @@ pub use crate::platform::linux::pipewire::{
 };
 #[cfg(all(target_os = "macos", feature = "avfoundation-capture"))]
 pub use crate::platform::macos::avfoundation::{AvFoundationCaptureFormat, AvFoundationDevice};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use crate::platform::macos::metal::MetalError;
 #[cfg(all(target_os = "macos", feature = "screencapturekit-capture"))]
 pub use crate::platform::macos::screencapturekit::{
     ScreenCaptureKitDisplay, ScreenCaptureKitWindow,
@@ -234,6 +236,12 @@ pub use source::{
     D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,
+};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use source::{
+    MetalTextLayerHandle, MetalVideoCompositor, MetalVideoCompositorError,
+    MetalVideoCompositorHandle, MetalVideoCompositorInput, MetalVideoCompositorInputSink,
+    MetalVideoLayerHandle,
 };
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
 pub use source::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};

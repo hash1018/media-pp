@@ -97,16 +97,16 @@ versions, and what to write instead, is in [`CHANGELOG.md`].
 
 ## What is in it
 
-| | Software | D3D11 | D3D12 | CUDA | Vulkan |
-|---|---|---|---|---|---|
-| Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` | `VulkanDecoder` |
-| Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` | `VulkanEncoder` |
-| Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` | `VulkanScaler`, `VulkanConverter` |
-| HDR to SDR | | `D3d11ToneMap` | | `CudaConverter` | |
-| Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` |
-| Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | `VulkanChromaKey`, `VulkanVideoEffect` |
-| Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` |
-| Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) |
+| | Software | D3D11 | D3D12 | CUDA | Vulkan | VideoToolbox, Metal |
+|---|---|---|---|---|---|---|
+| Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` | `VulkanDecoder` | `VideoToolboxDecoder` |
+| Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` | `VulkanEncoder` | `VideoToolboxEncoder` |
+| Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` | `VulkanScaler`, `VulkanConverter` | |
+| HDR to SDR | | `D3d11ToneMap` | | `CudaConverter` | | |
+| Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` | `MetalVideoCompositor` |
+| Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | `VulkanChromaKey`, `VulkanVideoEffect` | |
+| Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` | `VideoToolboxUpload`, `VideoToolboxDownload` |
+| Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | |
 
 Every compositor has text layers, runs live by default, and renders an export
 frame-exact with `RenderMode::Offline`; `VideoCompositorControl` lets one piece
@@ -145,6 +145,7 @@ exist only where their feature is enabled.
 | `d3d12` | D3D12VA decode, scaling, upload/download and rendering | Windows |
 | `vulkan` | Vulkan Video decode and encode, compositing, upload/download; `VulkanWindowRenderer` on Linux | Linux, Windows |
 | `videotoolbox` | VideoToolbox decode and encode, upload/download | macOS |
+| `metal` | Compositing VideoToolbox frames on the GPU with Metal; enables `videotoolbox` | macOS |
 | `dxgi-capture` | Desktop capture; enables `d3d11` | Windows |
 | `wgc-capture` | Window capture through Windows Graphics Capture; enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |
@@ -197,8 +198,8 @@ index of the windowed ones.
 macOS has audio output (`coreaudio-renderer`) and capture
 (`coreaudio-capture`), screen and window capture
 (`screencapturekit-capture`), camera capture (`avfoundation-capture`) and
-VideoToolbox decode and encode (`videotoolbox`), and no window or GPU
-compositing yet — see
+VideoToolbox decode and encode (`videotoolbox`) with a Metal compositor on
+their frames (`metal`), and no window yet — see
 [`docs/macos.md`](docs/macos.md). Building and testing are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
