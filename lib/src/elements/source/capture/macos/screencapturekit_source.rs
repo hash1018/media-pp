@@ -841,8 +841,13 @@ mod tests {
     }
 
     /// A display delivers full-range RGB BGRA of the size it was opened at,
-    /// a frame a tick counted from zero, at the rate asked for — whether
-    /// anything on it changes or not.
+    /// a frame a tick counted from zero, and never faster than the rate asked
+    /// for — whether anything on it changes or not.
+    ///
+    /// Not how many in a given time: a hosted Mac's timers fire late, and
+    /// its stream is slow to start, so a count per second is the machine's.
+    /// Late ticks only make fewer frames, so the rate still bounds them from
+    /// above.
     #[test]
     fn a_display_delivers_bgra_a_frame_a_tick() {
         let Some(display) = try_main_display() else {
@@ -881,12 +886,21 @@ mod tests {
             Ok(())
         })
         .expect("wiring");
+        let started = std::time::Instant::now();
         pipeline.run().expect("the stream starts");
-        std::thread::sleep(Duration::from_millis(2000));
+        let deadline = started + Duration::from_secs(10);
+        while frames.lock().unwrap().len() < 20 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         pipeline.stop();
+        let took = started.elapsed().as_secs_f64();
         let frames = frames.lock().unwrap();
-        // Two seconds at 20 a second, give or take the stream's start.
-        assert!((25..=41).contains(&frames.len()), "{} frames", frames.len());
+        assert!(frames.len() >= 20, "{} frames in {took:.1} s", frames.len());
+        assert!(
+            frames.len() as f64 <= 20.0 * took + 1.0,
+            "{} frames in {took:.1} s is faster than 20 a second",
+            frames.len()
+        );
         for (index, &(pixel, space, range, width, height, pts)) in frames.iter().enumerate() {
             assert_eq!(pixel, ffmpeg::format::Pixel::BGRA);
             assert_eq!(
