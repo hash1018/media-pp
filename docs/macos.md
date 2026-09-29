@@ -32,8 +32,7 @@ Beside them a macOS build gets everything that is not a platform backend:
   / `VideoEncodeBin` with their `System` target only;
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
-It gets no Metal scaler, converter or effects yet: `cuda` compiles but
-finds no driver, and `vulkan` is discussed below.
+`cuda` compiles but finds no driver, and `vulkan` is discussed below.
 
 On the Mac, `cargo build -p media-pp` builds with no features and without a
 warning, `cargo test -p media-pp` passes, and `cargo build --workspace`
@@ -234,12 +233,13 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   unchanged. Nor a shared Metal device: a pixel buffer belongs to no
   device, and each Metal element makes its own `MetalGpu` on the system's
   GPU.
-- **Upload, download, conversion, effects** — the same set the other
-  backends have: upload from system memory (NV12, BGRA, YUV420P as NV12),
-  download, NV12 to BGRA, chroma key, video effect. The Vulkan elements
-  compile WGSL with naga at construction; naga also writes Metal Shading
-  Language (its `msl-out` feature), so the existing shaders may carry over
-  without a shader toolchain.
+- **Upload, download, conversion, effects** — done, the same set the
+  other backends have: `VideoToolboxUpload` and `VideoToolboxDownload`
+  through FFmpeg, and `MetalScaler`, `MetalConverter` (NV12 to BGRA),
+  `MetalChromaKey` and `MetalVideoEffect`, each the Vulkan element's
+  kernel written again in Metal Shading Language — which Metal compiles at
+  run time, so neither naga nor a shader toolchain is needed — sharing
+  `platform/macos/metal_pass.rs` as the Vulkan ones share `bgra_pass.rs`.
 - **Capture** — `Produce`s that say they are live (`is_live`), with
   `time_base()` and a `FrameRateHandle`, setting the device up in `starting`
   and letting it go in `stopping`, on the source's own thread, and stopping
@@ -348,9 +348,9 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    `DecodeTarget` / `EncodeInput` arms — `transcode` runs on the media
    engine end to end.
 5. The Metal compositor and effects, then capture straight onto the device.
-   The compositor is done — `MetalVideoCompositor`, on VideoToolbox frames,
-   which capture already delivers; scaling, conversion, chroma key and
-   effects on Metal remain.
+   Done: `MetalVideoCompositor`, `MetalScaler`, `MetalConverter`,
+   `MetalChromaKey` and `MetalVideoEffect`, all on VideoToolbox frames,
+   which capture already delivers.
 6. The window renderer and `Player`. Done — `MetalWindowRenderer`,
    `VideoWindow`, `Player`, and the windowed examples.
 7. A macOS job in CI (`macos-latest` runners are Apple silicon).

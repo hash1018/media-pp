@@ -363,6 +363,26 @@ pub enum Error {
     #[error(transparent)]
     VulkanDownloadError(#[from] crate::elements::VulkanDownloadError),
 
+    /// A Metal video effect failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalVideoEffectError(#[from] crate::elements::MetalVideoEffectError),
+
+    /// A Metal conversion failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalConverterError(#[from] crate::elements::MetalConverterError),
+
+    /// A Metal resize failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalScalerError(#[from] crate::elements::MetalScalerError),
+
+    /// A Metal chroma key failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalChromaKeyError(#[from] crate::elements::MetalChromaKeyError),
+
     /// A Metal window renderer could not be set up, or could not draw.
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[error(transparent)]

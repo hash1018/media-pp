@@ -49,7 +49,8 @@ impl ChromaKeyMethod {
 #[cfg(any(
     feature = "cuda",
     feature = "vulkan",
-    all(target_os = "windows", feature = "d3d11")
+    all(target_os = "windows", feature = "d3d11"),
+    all(target_os = "macos", feature = "metal")
 ))]
 pub(crate) fn feather_band(threshold: f32, smoothing: f32) -> (f32, f32) {
     let smoothing = smoothing.max(0.0);

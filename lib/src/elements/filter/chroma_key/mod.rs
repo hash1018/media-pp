@@ -8,6 +8,8 @@
 #[cfg(feature = "cuda")]
 mod cuda;
 mod handle;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+mod metal;
 mod options;
 mod sw_chroma_key;
 #[cfg(feature = "vulkan")]
@@ -18,6 +20,8 @@ mod windows;
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaChromaKey, CudaChromaKeyError};
 pub use handle::ChromaKeyHandle;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use metal::{MetalChromaKey, MetalChromaKeyError};
 pub use options::{ChromaKeyMethod, ChromaKeyOptions};
 pub use sw_chroma_key::{SwChromaKey, SwChromaKeyError};
 #[cfg(feature = "vulkan")]

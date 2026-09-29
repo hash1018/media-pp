@@ -4,10 +4,14 @@
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+mod metal;
 #[cfg(feature = "vulkan")]
 mod vulkan;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaConverter, CudaConverterError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use metal::{MetalConverter, MetalConverterError};
 #[cfg(feature = "vulkan")]
 pub use vulkan::{VulkanConverter, VulkanConverterError};

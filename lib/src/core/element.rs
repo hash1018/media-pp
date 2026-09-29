@@ -93,6 +93,14 @@ pub enum ElementType {
     VulkanVideoCompositor,
     /// Metal video compositor source, on macOS.
     MetalVideoCompositor,
+    /// Metal colour correction and luma key filter, on macOS.
+    MetalVideoEffect,
+    /// Metal chroma key filter, on macOS.
+    MetalChromaKey,
+    /// Metal NV12-to-BGRA converter filter, on macOS.
+    MetalConverter,
+    /// Metal scaler filter on VideoToolbox frames, on macOS.
+    MetalScaler,
     /// D3D11 video compositor source.
     D3d11VideoCompositor,
     /// WebRTC connection driver.

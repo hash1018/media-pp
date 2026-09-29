@@ -110,8 +110,9 @@ compile error with no explanation.
   variants**, for the macOS audio elements, `VideoToolboxDecoder`,
   `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload`,
   `AvFoundationCaptureSource`, `ScreenCaptureKitSource`,
-  `MetalVideoCompositor` and `MetalWindowRenderer` — see Added. A `match` on
-  `ElementType` needs an arm for each.
+  `MetalVideoCompositor`, `MetalWindowRenderer`, `MetalScaler`,
+  `MetalConverter`, `MetalChromaKey` and `MetalVideoEffect` — see Added. A
+  `match` on `ElementType` needs an arm for each.
 
 - **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
   pixel buffers — see Added. A `match` on `MemoryDomain` needs an arm for
@@ -123,6 +124,20 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`MetalScaler`, `MetalConverter`, `MetalChromaKey`, `MetalVideoEffect`**:
+  the rest of the GPU filters on macOS, behind `metal`, each the Metal
+  sibling of its Vulkan counterpart with its API and contract, on
+  VideoToolbox frames read and written through their `IOSurface`s. The
+  scaler resizes NV12 and BGRA with the same four kernels
+  (`MetalScalerInterp`), averaging what it covers when it shrinks; the
+  converter brings NV12 to BGRA by each frame's own colour description; the
+  key and the effect take BGRA and a `ChromaKeyHandle` or
+  `VideoEffectHandle`, computing what the software ones compute, which
+  their tests check against. Their kernels are Metal Shading Language
+  compiled at run time, one kernel serving every plane of the scaler since
+  a texture view of a plane's own format puts its channels where the plane
+  keeps them.
 
 - **`MetalWindowRenderer`, and `VideoWindow` and `Player` on macOS**,
   behind `metal` (`Player` with `coreaudio-renderer` too). The renderer is

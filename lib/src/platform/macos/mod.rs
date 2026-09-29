@@ -12,6 +12,10 @@ pub(crate) mod coreaudio;
 /// hold.
 #[cfg(feature = "metal")]
 pub(crate) mod metal;
+/// One Metal kernel from a VideoToolbox frame into a BGRA one — the
+/// per-pixel Metal filters.
+#[cfg(feature = "metal")]
+pub(crate) mod metal_pass;
 /// Core Video pixel buffers as frames — what a camera and a screen hand
 /// over — and the pixel buffers VideoToolbox frames hold, for Metal.
 #[cfg(any(

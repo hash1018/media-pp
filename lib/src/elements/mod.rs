@@ -140,6 +140,11 @@ pub use filter::{
 pub use filter::{
     EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
 };
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use filter::{
+    MetalChromaKey, MetalChromaKeyError, MetalConverter, MetalConverterError, MetalScaler,
+    MetalScalerError, MetalScalerInterp, MetalVideoEffect, MetalVideoEffectError,
+};
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]

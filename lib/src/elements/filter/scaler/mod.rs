@@ -5,6 +5,8 @@
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+mod metal;
 mod sw_scaler;
 #[cfg(feature = "vulkan")]
 mod vulkan;
@@ -13,6 +15,8 @@ mod windows;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaScaler, CudaScalerError, CudaScalerInterp};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use metal::{MetalScaler, MetalScalerError, MetalScalerInterp};
 pub use sw_scaler::{SwScaler, SwScalerError};
 #[cfg(feature = "vulkan")]
 pub use vulkan::{VulkanScaler, VulkanScalerError, VulkanScalerInterp};

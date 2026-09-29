@@ -96,7 +96,8 @@ impl<T> ForSize<T> {
     #[cfg(any(
         feature = "cuda",
         feature = "vulkan",
-        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+        all(target_os = "macos", feature = "metal")
     ))]
     pub(crate) fn try_get<E>(
         &mut self,

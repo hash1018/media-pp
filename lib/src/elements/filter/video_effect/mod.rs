@@ -18,6 +18,8 @@
 #[cfg(feature = "cuda")]
 mod cuda;
 mod handle;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+mod metal;
 mod options;
 mod sw_video_effect;
 #[cfg(feature = "vulkan")]
@@ -28,6 +30,8 @@ mod windows;
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaVideoEffect, CudaVideoEffectError};
 pub use handle::VideoEffectHandle;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use metal::{MetalVideoEffect, MetalVideoEffectError};
 pub use options::{ColorCorrection, LumaKey, VideoEffect};
 pub use sw_video_effect::{SwVideoEffect, SwVideoEffectError};
 #[cfg(feature = "vulkan")]

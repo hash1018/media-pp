@@ -56,10 +56,14 @@ pub use chroma_key::{
 pub use chroma_key::{CudaChromaKey, CudaChromaKeyError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use chroma_key::{D3d11ChromaKey, D3d11ChromaKeyError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use chroma_key::{MetalChromaKey, MetalChromaKeyError};
 #[cfg(feature = "vulkan")]
 pub use chroma_key::{VulkanChromaKey, VulkanChromaKeyError};
 #[cfg(feature = "cuda")]
 pub use convert::{CudaConverter, CudaConverterError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use convert::{MetalConverter, MetalConverterError};
 #[cfg(feature = "vulkan")]
 pub use convert::{VulkanConverter, VulkanConverterError};
 #[cfg(feature = "cuda")]
@@ -115,6 +119,8 @@ pub use scaler::{CudaScaler, CudaScalerError, CudaScalerInterp};
 pub use scaler::{D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use scaler::{D3d12Scaler, D3d12ScalerError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use scaler::{MetalScaler, MetalScalerError, MetalScalerInterp};
 pub use scaler::{SwScaler, SwScalerError};
 #[cfg(feature = "vulkan")]
 pub use scaler::{VulkanScaler, VulkanScalerError, VulkanScalerInterp};
@@ -140,6 +146,8 @@ pub use video_effect::{
 pub use video_effect::{CudaVideoEffect, CudaVideoEffectError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use video_effect::{D3d11VideoEffect, D3d11VideoEffectError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use video_effect::{MetalVideoEffect, MetalVideoEffectError};
 #[cfg(feature = "vulkan")]
 pub use video_effect::{VulkanVideoEffect, VulkanVideoEffectError};
 pub use video_synchronizer::{VideoSynchronizer, VideoSynchronizerError};
