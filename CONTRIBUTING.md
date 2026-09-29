@@ -11,8 +11,55 @@ cargo test -p media-pp
 
 Tests need no media: they synthesize their fixture from the crate's own
 sources and encoders, so every machine tests the same file. A backend's tests
-run under its feature (`--features d3d11,d3d12,cuda`, or the Linux ones) and
-skip, saying why, on a machine without the hardware.
+run under its feature (`--features d3d11,d3d12,cuda`, or the Linux or macOS
+ones) and skip, saying why, on a machine without the hardware.
+
+On a Mac, the camera and screen tests also skip unless the program running
+them has been allowed the camera or screen recording, which a terminal asks
+for once and keeps. `tests/metal_window.rs` opens real windows and has a
+`main` of its own, since AppKit serves windows only from the main thread;
+built with `screencapturekit-capture` and run with `MEDIA_PP_SCREEN_CHECK=1`
+it also captures each window and checks its colours.
+
+## Setting up a Mac
+
+FFmpeg 8.0 is what the crate builds against — `lib/build.rs` stops on
+anything older, and `ffmpeg-next` 8.1 does not build against FFmpeg 8.1's
+headers — so it is 8.0.1, as CI pins, with VideoToolbox and AudioToolbox,
+and OpenH264 for the test fixture. Beside it, the Xcode Command Line Tools
+(the SDK, and the libclang `ffmpeg-sys-next`'s bindgen needs), pkg-config,
+and CMake for `whisper`.
+
+The quickest way to it is vcpkg at the tag CI pins, which enables
+VideoToolbox on macOS by itself:
+
+```sh
+git clone --branch 2026.01.16 https://github.com/microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+./vcpkg/vcpkg install "ffmpeg[openh264]:arm64-osx-dynamic"
+export FFMPEG_DIR=$PWD/vcpkg/installed/arm64-osx-dynamic
+```
+
+Its dylibs are named `@rpath/...`, so a test binary needs an rpath to find
+them — `RUSTFLAGS` and `RUSTDOCFLAGS` set to
+`-C link-arg=-Wl,-rpath,$FFMPEG_DIR/lib`, as CI sets them. Built from
+source instead, with `--prefix` where it will stay, FFmpeg's dylibs carry
+their absolute paths and need nothing:
+
+```sh
+prefix=$HOME/.local/ffmpeg-8.0
+# OpenH264 v2.6.0 into the same prefix first:
+#   make OS=darwin ARCH=arm64 PREFIX=$prefix install-shared
+PKG_CONFIG_PATH=$prefix/lib/pkgconfig ./configure --prefix=$prefix \
+  --enable-shared --disable-static --disable-gpl --disable-nonfree \
+  --enable-videotoolbox --enable-audiotoolbox --enable-libopenh264 \
+  --disable-doc --disable-ffplay --extra-ldflags="-Wl,-rpath,$prefix/lib"
+make -j && make install
+```
+
+`FFMPEG_DIR` is read before any pkg-config discovery, so it wins over any
+other FFmpeg on the machine. Homebrew's `ffmpeg` follows FFmpeg's latest
+release, which is past 8.0.
 
 ## Control sequences
 
@@ -66,12 +113,17 @@ token to reuse.
 
 ## Documentation
 
-[docs.rs] builds for Linux and so omits the Windows-only API. To build the
-complete documentation locally, labelled by feature:
+[docs.rs] builds for Linux and so omits the Windows-only and macOS-only
+API, which the API documentation workflow builds on runners of their own.
+To build either locally, labelled by feature:
 
 ```powershell
 $env:RUSTDOCFLAGS = "--cfg docsrs"
 cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc
+```
+
+```sh
+RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc -p media-pp --open --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,webrtc
 ```
 
 CI builds the documentation with `-D warnings` for every feature set, so a

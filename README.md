@@ -203,8 +203,9 @@ macOS has audio output (`coreaudio-renderer`) and capture
 (`screencapturekit-capture`), camera capture (`avfoundation-capture`) and
 VideoToolbox decode and encode (`videotoolbox`), and Metal on their frames
 — a scaler, a converter, a chroma key, effects, a compositor, a window
-renderer, `VideoWindow` and `Player` (`metal`) — see
-[`docs/macos.md`](docs/macos.md). Building and testing are in
+renderer, `VideoWindow`, `Player`, a renderer for an application's own
+Metal drawing and a source for another producer's `IOSurface`s (`metal`).
+Building and testing, and setting up a Mac for it, are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
