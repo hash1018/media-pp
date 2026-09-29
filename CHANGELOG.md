@@ -107,9 +107,9 @@ compile error with no explanation.
   see Added. A `match` on `RackError` needs an arm for it.
 
 - **`ElementType` has `CoreAudioRenderer` and `CoreAudioCaptureSource`
-  variants**, for the macOS audio elements, and `VideoToolboxDecoder`,
-  `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload` —
-  see Added. A `match` on
+  variants**, for the macOS audio elements, `VideoToolboxDecoder`,
+  `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload`,
+  and `AvFoundationCaptureSource` — see Added. A `match` on
   `ElementType` needs an arm for each.
 
 - **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
@@ -122,6 +122,27 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`AvFoundationCaptureSource`: camera capture on macOS**, behind the new
+  `avfoundation-capture` feature, on AVFoundation directly and in the shape
+  `MfCaptureSource` and `V4l2CaptureSource` have: `list_devices` lists
+  built-in, external, Continuity and Desk View cameras as
+  `AvFoundationDevice`s, `list_formats` their modes as
+  `AvFoundationCaptureFormat`s, and `open` answers with the source and the
+  geometry the camera delivers — NV12 in system memory, or with
+  `videotoolbox` `open_videotoolbox` hands on the pixel buffers the camera
+  filled as VideoToolbox frames, which `VideoToolboxEncoder` takes with
+  nothing copied. With no mode asked for, the camera stays in the one it is
+  in — the system's default, 1080p on a MacBook, for a camera this process
+  has not configured. Whatever the mode, the source holds it: a macOS
+  capture session puts a camera in its preset's format each time it
+  starts, so the camera is locked for configuration across every start,
+  and its frame rate is fixed. `pts` counts the host clock in microseconds
+  from zero, a pause collapsing to one frame interval. The camera needs the
+  user's permission, which `open` asks for and waits on, and which macOS
+  asks only for a program whose `Info.plist` has
+  `NSCameraUsageDescription` (`PermissionDenied` where it is refused); a
+  camera unplugged ends the source with `DeviceGone`.
 
 - **VideoToolbox frames on macOS: `VideoToolboxDevice`,
   `VideoToolboxDecoder`, `VideoToolboxUpload`, `VideoToolboxDownload`**,

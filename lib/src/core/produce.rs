@@ -225,7 +225,10 @@ impl Wait<'_> {
     /// The same, giving up at `at` on [`Self::now`]'s clock: `None` once
     /// it is there with nothing received. A message already waiting when
     /// it comes is still received.
-    #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
+    #[cfg(any(
+        all(target_os = "windows", feature = "wgc-capture"),
+        all(target_os = "macos", feature = "avfoundation-capture")
+    ))]
     pub(crate) fn recv_until<T>(
         &mut self,
         rx: &crossbeam_channel::Receiver<T>,

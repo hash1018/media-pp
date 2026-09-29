@@ -14,8 +14,9 @@ application's half. The machine setup below serves both.
 The macOS backend so far is audio — `CoreAudioRenderer` behind
 `coreaudio-renderer` and `CoreAudioCaptureSource` behind `coreaudio-capture`,
 sharing their device listing and AUHAL unit in `platform/macos/coreaudio/` —
-and VideoToolbox frames behind `videotoolbox`: decode, encode, upload and
-download, in `MemoryDomain::VideoToolbox`, and the bins' VideoToolbox arms.
+VideoToolbox frames behind `videotoolbox`: decode, encode, upload and
+download, in `MemoryDomain::VideoToolbox`, and the bins' VideoToolbox arms —
+and the camera, `AvFoundationCaptureSource` behind `avfoundation-capture`.
 Beside them a macOS build gets everything that is not a platform backend:
 
 - the pipeline core, `FileDemuxer`, `RtspSource`, `AppSource`/`AppSink`, the
@@ -27,7 +28,7 @@ Beside them a macOS build gets everything that is not a platform backend:
   / `VideoEncodeBin` with their `System` target only;
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
-It gets no screen or camera capture, no window or `VideoWindow`,
+It gets no screen capture, no window or `VideoWindow`,
 no `Player`, and no GPU compositing: `cuda` compiles but finds no driver,
 and `vulkan` is discussed below.
 
@@ -242,8 +243,19 @@ a breaking change: `MemoryDomain` and `ElementType` are not
     `SCContentFilter` for a display or a window), in system memory and as
     `IOSurface` frames on the device, as `PipeWireScreenCaptureSource` has
     `open` and `open_gpu`;
-  - camera: FFmpeg's `avfoundation` input device, the way
-    `V4l2CaptureSource` wraps `video4linux2` — or AVFoundation directly;
+  - camera: done, `AvFoundationCaptureSource` — AVFoundation directly, an
+    `AVCaptureVideoDataOutput` asking for NV12 (`420v`), in system memory
+    or, with `videotoolbox`, the camera's own pixel buffers as VideoToolbox
+    frames. `platform/macos/pixel_buffer.rs` does both for any
+    `CVPixelBuffer`, for ScreenCaptureKit to reuse. Two things only a real
+    camera showed: a session puts its camera back in its preset's format at
+    every `startRunning` — `AVCaptureSessionPresetInputPriority` is refused
+    on macOS — so the source holds the camera locked for configuration
+    across each start; and the permission, like a tap's, is asked only for
+    an application whose `Info.plist` has `NSCameraUsageDescription`, which
+    Claude Code's lacks — macOS ends a program asking without it, so the
+    library's camera tests skip unless already allowed, and a check against
+    the camera runs as a bundled application;
   - audio: done, `CoreAudioCaptureSource` — devices directly, and what the
     system or one application plays through a Core Audio process tap
     (macOS 14.2+) with a private aggregate device, recorded through the same
@@ -301,7 +313,8 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    Audio process tap (macOS 14.2+).
 3. Capture in system memory: ScreenCaptureKit and the camera, feeding the
    software compositor. That is enough for obs-rs to show and record a
-   screen, slowly.
+   screen, slowly. The camera is done, `AvFoundationCaptureSource`, and
+   already delivers VideoToolbox frames as well.
 4. The Metal device, VideoToolbox decode and encode, upload and download.
    Done without Metal, all through FFmpeg: `VideoToolboxDevice`,
    `VideoToolboxDecoder`, `VideoToolboxEncoder`, `VideoToolboxUpload`,

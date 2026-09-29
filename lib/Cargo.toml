@@ -167,6 +167,41 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
     "CFDictionary",
     "CFString",
 ] }
+# A camera, through AVFoundation: its devices and formats, the capture
+# session, and the Core Video pixel buffers each picture arrives in, handed
+# over on a dispatch queue to a delegate.
+objc2-av-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "objc2-core-media",
+    "objc2-core-video",
+    "AVCaptureDevice",
+    "AVCaptureInput",
+    "AVCaptureOutputBase",
+    "AVCaptureSession",
+    "AVCaptureSessionPreset",
+    "AVCaptureVideoDataOutput",
+    "AVMediaFormat",
+] }
+objc2-core-media = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-video",
+    "CMBase",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMTime",
+] }
+objc2-core-video = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+dispatch2 = { version = "0.3", optional = true }
+block2 = { version = "0.6", optional = true }
 # A process tap is described by `CATapDescription`, an Objective-C class,
 # and its aggregate device by a dictionary made with Foundation's.
 objc2 = { version = "0.6", optional = true }
@@ -174,6 +209,8 @@ objc2-foundation = { version = "0.3", optional = true, default-features = false,
     "std",
     "NSArray",
     "NSDictionary",
+    "NSEnumerator",
+    "NSError",
     "NSObject",
     "NSString",
     "NSUUID",
@@ -287,6 +324,17 @@ mf-capture = [
     "windows/Win32_System_Com_StructuredStorage",
 ]
 v4l2-capture = ["dep:libc"]
+# A camera on macOS, through AVFoundation.
+avfoundation-capture = [
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-foundation",
+]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
 # VideoToolbox, on macOS: `VideoToolboxDevice`, the context FFmpeg decodes,

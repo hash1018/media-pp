@@ -720,6 +720,11 @@ pub enum Error {
     #[error(transparent)]
     WasapiRendererError(#[from] WasapiRendererError),
 
+    /// Camera capture through AVFoundation failed.
+    #[cfg(all(target_os = "macos", feature = "avfoundation-capture"))]
+    #[error(transparent)]
+    AvFoundationCaptureSourceError(#[from] crate::elements::AvFoundationCaptureSourceError),
+
     /// Core Audio capture failed.
     #[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
     #[error(transparent)]

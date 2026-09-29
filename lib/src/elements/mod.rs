@@ -80,6 +80,8 @@ pub use crate::platform::linux::dmabuf_cuda::DmaBufCudaError;
 pub use crate::platform::linux::pipewire::{
     PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
 };
+#[cfg(all(target_os = "macos", feature = "avfoundation-capture"))]
+pub use crate::platform::macos::avfoundation::{AvFoundationCaptureFormat, AvFoundationDevice};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use crate::platform::macos::videotoolbox::{
     VideoToolboxDevice, VideoToolboxDeviceError, VideoToolboxFrameFormat,
@@ -200,6 +202,10 @@ pub use source::{
     TestAudioSource, TestVideoOptions, TestVideoSource, TextLayer, TextLayerControl,
     VideoCompositorControl, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
     VideoLayerControl, VideoRect, VideoSourceRect,
+};
+#[cfg(all(target_os = "macos", feature = "avfoundation-capture"))]
+pub use source::{
+    AvFoundationCaptureOptions, AvFoundationCaptureSource, AvFoundationCaptureSourceError,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{

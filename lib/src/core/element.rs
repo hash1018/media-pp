@@ -233,6 +233,8 @@ pub enum ElementType {
     CoreAudioRenderer,
     /// macOS Core Audio input device capture source.
     CoreAudioCaptureSource,
+    /// macOS AVFoundation camera capture source.
+    AvFoundationCaptureSource,
     /// RTSP publishing muxer sink, one or more tracks to an external
     /// server.
     RtspMuxer,

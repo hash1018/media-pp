@@ -44,6 +44,10 @@ pub use app_source::{AppSource, AppSourceError, AppSourceHandle};
 pub use audio_mixer::{
     AudioMixer, AudioMixerError, AudioMixerOptions, MixFormat, MixerHandle, MixerInputSink,
 };
+#[cfg(all(target_os = "macos", feature = "avfoundation-capture"))]
+pub use capture::{
+    AvFoundationCaptureOptions, AvFoundationCaptureSource, AvFoundationCaptureSourceError,
+};
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use capture::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
