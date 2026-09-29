@@ -49,10 +49,9 @@ pub enum VideoWindowError {
 /// `D3d12WindowRenderer` in a build with only `d3d12`), `VulkanWindowRenderer`
 /// on Linux, `MetalWindowRenderer` on macOS — with a GPU of its own to draw
 /// it with. On macOS a program that opens one runs inside
-/// [`crate::elements::run_with_windows`], as every window there is the main
-/// thread's. The GStreamer
-/// `autovideosink` of this crate: the one video sink a program can name
-/// without a `#[cfg]`.
+/// `run_with_windows`, as every window there is the main thread's. The
+/// GStreamer `autovideosink` of this crate: the one video sink a program can
+/// name without a `#[cfg]`.
 ///
 /// What it takes is what every one of those takes: frames in system memory,
 /// NV12, YUV420P or BGRA, uploaded and drawn each in its own colours — what a
