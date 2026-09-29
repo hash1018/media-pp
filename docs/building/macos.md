@@ -78,6 +78,8 @@ cargo clippy -p media-pp --all-targets --features metal -- -D warnings
 cargo test -p media-pp --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
 ```
 
-and the documentation with `-D warnings` added to `RUSTDOCFLAGS`. macOS has
-no way to pin a process to two cores, so the control conformance runs are
-the other platforms'.
+and the documentation with `-D warnings` added to `RUSTDOCFLAGS`. CI runs
+only the macOS backends' tests: a hosted Mac's timers are too late for the
+platform-independent ones that measure the wall clock, which the other
+platforms' jobs run — as are the control conformance runs, since macOS has
+no way to pin a process to two cores.

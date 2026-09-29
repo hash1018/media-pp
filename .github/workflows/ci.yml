@@ -403,14 +403,24 @@ jobs:
           cargo doc -p media-pp --no-deps
           cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
 
-      # The control conformance runs are the other two jobs': macOS has no
-      # way to pin a process to two cores.
-      - name: Test (no features)
-        run: cargo test -p media-pp
-
-      # A hosted Mac grants no camera, screen or audio-tap permission, so
-      # those tests skip, saying why; what needs only Metal and VideoToolbox
-      # runs. `tests/metal_window.rs` opens real windows on the runner's
+      # Only what macOS alone can run: the tests of its backends, and of the
+      # code only they compile. The platform-independent suite is the other
+      # two jobs', and it measures the wall clock — pacing, mixing, a
+      # rate — which a hosted Mac cannot keep to: its timers fired a
+      # `sleep(200 ms)` at 340 ms and a 10 ms tick a few times a third of a
+      # second, and under a background task policy (`taskpolicy -b`) a Mac
+      # of one's own fails the same tests, and a different few each run.
+      # For the same reason the Core Audio captures that measure a device's
+      # pace against the clock are skipped. A hosted Mac grants no camera,
+      # screen or audio-tap permission either, so those tests skip, saying
+      # why. `tests/metal_window.rs` opens real windows on the runner's
       # session.
       - name: Test (macOS backends)
-        run: cargo test -p media-pp --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
+        run: >-
+          cargo test -p media-pp
+          --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
+          --
+          macos videotoolbox metal app::player upload::nv12 presentation_delay appkit platform::ffmpeg
+          --skip a_capture_is_continuous_at_the_device_rate_and_a_pause_costs_nothing
+          --skip an_output_capture_keeps_up_with_the_clock_and_a_pause_costs_nothing
+          --skip a_process_capture_keeps_a_timeline_of_its_own
