@@ -4,6 +4,8 @@
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+mod videotoolbox;
 #[cfg(feature = "vulkan")]
 mod vulkan;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
@@ -11,6 +13,8 @@ mod windows;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaDownload, CudaDownloadError};
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use videotoolbox::{VideoToolboxDownload, VideoToolboxDownloadError};
 #[cfg(feature = "vulkan")]
 pub use vulkan::{VulkanDownload, VulkanDownloadError};
 

@@ -504,6 +504,23 @@ pub(crate) fn try_vulkan_device() -> Option<crate::elements::VulkanDevice> {
     }
 }
 
+/// The process's VideoToolbox context, opened once and shared by every test
+/// that needs one, or `None` after saying why there is none.
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub(crate) fn try_videotoolbox_device() -> Option<crate::elements::VideoToolboxDevice> {
+    static DEVICE: std::sync::OnceLock<Result<crate::elements::VideoToolboxDevice, String>> =
+        std::sync::OnceLock::new();
+    match DEVICE.get_or_init(|| {
+        crate::elements::VideoToolboxDevice::new().map_err(|error| error.to_string())
+    }) {
+        Ok(device) => Some(device.clone()),
+        Err(error) => {
+            eprintln!("skipping: no VideoToolbox on this machine ({error})");
+            None
+        }
+    }
+}
+
 /// A media file this crate builds for itself, rather than one a test has to
 /// find.
 ///

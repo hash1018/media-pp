@@ -200,6 +200,8 @@
 //! D3D11 / D3D12 / CUDA          system memory           D3d11Download / D3d12Download / CudaDownload
 //! system memory                 Vulkan                  VulkanUpload
 //! Vulkan                        system memory           VulkanDownload
+//! system memory                 VideoToolbox            VideoToolboxUpload
+//! VideoToolbox                  system memory           VideoToolboxDownload
 //! D3D11                         CUDA, or back           system memory: download, then upload
 //! any layout, system memory     another                 SwScaler::to_format
 //! NV12, P010 or BGRA, D3D11     NV12 or BGRA            D3d11Scaler::to_format with a D3d11ScalerFormat
@@ -284,12 +286,13 @@
 //! # Features and platforms
 //!
 //! The crate has no default features. Hardware backends (`d3d11`, `d3d12`,
-//! `dxgi-capture`, `cuda`, `wasapi-*`, `pipewire-*`, `coreaudio-*`) and the
-//! optional `ort` and `webrtc` integrations are each behind their own Cargo
-//! feature, and backend-specific types carry the backend's prefix. [docs.rs]
-//! builds this crate for Linux and therefore omits the Windows-only and
-//! macOS-only API; the complete reference is published separately (see the
-//! repository README).
+//! `dxgi-capture`, `cuda`, `vulkan`, `videotoolbox`, `wasapi-*`,
+//! `pipewire-*`, `coreaudio-*`) and the optional `ort` and `webrtc`
+//! integrations are each behind their own Cargo feature, and
+//! backend-specific types carry the backend's prefix. [docs.rs] builds this
+//! crate for Linux and therefore omits the Windows-only and macOS-only API;
+//! the complete reference is published separately (see the repository
+//! README).
 //!
 //! # Logging
 //!

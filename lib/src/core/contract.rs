@@ -207,6 +207,9 @@ pub enum MemoryDomain {
     D3d12,
     /// A Vulkan image owned by a `VkDevice`, in FFmpeg's `AVVkFrame`.
     Vulkan,
+    /// A `CVPixelBuffer`, backed by an IOSurface, as FFmpeg's VideoToolbox
+    /// frames hold one.
+    VideoToolbox,
 }
 
 impl MemoryDomain {
@@ -217,15 +220,17 @@ impl MemoryDomain {
             MemoryDomain::D3d11 => 1 << 2,
             MemoryDomain::D3d12 => 1 << 3,
             MemoryDomain::Vulkan => 1 << 4,
+            MemoryDomain::VideoToolbox => 1 << 5,
         }
     }
 
-    const ALL: [MemoryDomain; 5] = [
+    const ALL: [MemoryDomain; 6] = [
         MemoryDomain::System,
         MemoryDomain::Cuda,
         MemoryDomain::D3d11,
         MemoryDomain::D3d12,
         MemoryDomain::Vulkan,
+        MemoryDomain::VideoToolbox,
     ];
 }
 
@@ -237,6 +242,7 @@ impl fmt::Display for MemoryDomain {
             MemoryDomain::D3d11 => "D3D11",
             MemoryDomain::D3d12 => "D3D12",
             MemoryDomain::Vulkan => "Vulkan",
+            MemoryDomain::VideoToolbox => "VideoToolbox",
         };
         f.write_str(name)
     }
@@ -752,7 +758,7 @@ impl fmt::Display for OutputContract {
 /// exactly that crossing; where it takes only some layouts, the sentence
 /// says what to put before it.
 pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'static str> {
-    use MemoryDomain::{Cuda, D3d11, D3d12, System, Vulkan};
+    use MemoryDomain::{Cuda, D3d11, D3d12, System, VideoToolbox, Vulkan};
     use PixelLayout::{Bgra, Nv12, P010};
 
     let (
@@ -814,6 +820,10 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
                 "upload it: a VulkanUpload, which takes NV12, P010, YUV420P or BGRA — a SwScaler::to_format to one of those first where the frames are in another layout",
             ),
             (Vulkan, System) => Some("download it: a VulkanDownload"),
+            (System, VideoToolbox) => Some(
+                "upload it: a VideoToolboxUpload, which takes NV12, P010, YUV420P or BGRA — a SwScaler::to_format to one of those first where the frames are in another layout",
+            ),
+            (VideoToolbox, System) => Some("download it: a VideoToolboxDownload"),
             _ => Some(
                 "no element here moves frames between two GPU backends directly: download them to system memory and upload them again",
             ),
@@ -847,6 +857,7 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
         Cuda if to_bgra => Some("convert it: a CudaConverter built for CudaFrameFormat::Bgra"),
         Cuda => None,
         Vulkan => None,
+        VideoToolbox => None,
     }
 }
 

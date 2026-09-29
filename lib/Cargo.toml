@@ -289,6 +289,11 @@ mf-capture = [
 v4l2-capture = ["dep:libc"]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
+# VideoToolbox, on macOS: `VideoToolboxDevice`, the context FFmpeg decodes,
+# encodes and keeps its VideoToolbox frames — `CVPixelBuffer`s — on. All
+# through FFmpeg, which has VideoToolbox wherever it was built for a Mac, so
+# nothing else is linked.
+videotoolbox = []
 # Audio playback on macOS, through a Core Audio output unit.
 coreaudio-renderer = [
     "dep:objc2-audio-toolbox",

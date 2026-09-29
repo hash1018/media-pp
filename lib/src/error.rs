@@ -320,6 +320,26 @@ pub enum Error {
     #[error(transparent)]
     VulkanChromaKeyError(#[from] crate::elements::VulkanChromaKeyError),
 
+    /// The VideoToolbox context could not be opened.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    #[error(transparent)]
+    VideoToolboxDeviceError(#[from] crate::elements::VideoToolboxDeviceError),
+
+    /// Decoding through VideoToolbox failed.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    #[error(transparent)]
+    VideoToolboxDecoderError(#[from] crate::elements::VideoToolboxDecoderError),
+
+    /// Uploading a frame to VideoToolbox failed.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    #[error(transparent)]
+    VideoToolboxUploadError(#[from] crate::elements::VideoToolboxUploadError),
+
+    /// Reading a VideoToolbox frame back failed.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    #[error(transparent)]
+    VideoToolboxDownloadError(#[from] crate::elements::VideoToolboxDownloadError),
+
     /// Decoding on Vulkan failed.
     #[cfg(feature = "vulkan")]
     #[error(transparent)]

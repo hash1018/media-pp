@@ -4,7 +4,8 @@ pub(crate) mod cuda;
     feature = "cuda",
     feature = "d3d11",
     feature = "d3d12",
-    feature = "vulkan"
+    feature = "vulkan",
+    all(target_os = "macos", feature = "videotoolbox")
 ))]
 pub(crate) mod ffmpeg;
 #[cfg(target_os = "linux")]

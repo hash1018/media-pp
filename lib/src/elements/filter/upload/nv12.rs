@@ -77,7 +77,11 @@ pub(crate) fn interleave_chroma_row(
 /// `source`, a YUV420P or YUVJ420P frame, as NV12 in a frame of its own —
 /// `reuse` where it is the same size, the staging frame an upload kept from
 /// the last one. For an upload whose device takes the NV12 in one transfer.
-#[cfg(any(feature = "cuda", feature = "vulkan"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "vulkan",
+    all(target_os = "macos", feature = "videotoolbox")
+))]
 pub(crate) fn staged(
     source: &ffmpeg::frame::Video,
     reuse: Option<ffmpeg::frame::Video>,

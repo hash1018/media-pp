@@ -80,6 +80,8 @@ pub use crate::platform::linux::dmabuf_cuda::DmaBufCudaError;
 pub use crate::platform::linux::pipewire::{
     PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
 };
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use crate::platform::macos::videotoolbox::{VideoToolboxDevice, VideoToolboxDeviceError};
 #[cfg(feature = "webrtc")]
 pub use driver::{
     AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
@@ -130,6 +132,11 @@ pub use filter::{
 };
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use filter::{
+    VideoToolboxDecoder, VideoToolboxDecoderError, VideoToolboxDownload, VideoToolboxDownloadError,
+    VideoToolboxUpload, VideoToolboxUploadError,
+};
 #[cfg(feature = "vulkan")]
 pub use filter::{
     VulkanChromaKey, VulkanChromaKeyError, VulkanCodec, VulkanConverter, VulkanConverterError,

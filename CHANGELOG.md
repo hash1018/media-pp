@@ -107,10 +107,33 @@ compile error with no explanation.
   see Added. A `match` on `RackError` needs an arm for it.
 
 - **`ElementType` has `CoreAudioRenderer` and `CoreAudioCaptureSource`
-  variants**, for the macOS audio elements — see Added. A `match` on
+  variants**, for the macOS audio elements, and `VideoToolboxDecoder`,
+  `VideoToolboxUpload` and `VideoToolboxDownload` — see Added. A `match` on
   `ElementType` needs an arm for each.
 
+- **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
+  pixel buffers — see Added. A `match` on `MemoryDomain` needs an arm for
+  it.
+
 ### Added
+
+- **VideoToolbox frames on macOS: `VideoToolboxDevice`,
+  `VideoToolboxDecoder`, `VideoToolboxUpload`, `VideoToolboxDownload`**,
+  behind the new `videotoolbox` feature — the first stage of a macOS video
+  backend, the way `vulkan` began. FFmpeg does all of it: its VideoToolbox
+  context (`VideoToolboxDevice`, shared by a pipeline's VideoToolbox
+  elements), its hwaccel, which `VideoToolboxDecoder` decodes through with
+  preroll, QoS and playing backwards, and its transfers, which
+  `VideoToolboxUpload` puts NV12, P010 and BGRA — and YUV420P as NV12 —
+  into pixel buffers with and `VideoToolboxDownload` brings any back with.
+  `MemoryDomain::VideoToolbox` says where such frames live, and the link
+  check names the upload or download that goes between. A pixel buffer
+  belongs to no context, so the download takes no device and refuses no
+  frame for having come from another; Core Video's pool grows, so the
+  decoder is given no budget of frames to hold. Frames whose picture is in
+  their fourth plane pointer, as a VideoToolbox frame's is, are now told
+  apart by it wherever an element recognises a repeated picture — before,
+  every one of them read as the first.
 
 - **`CoreAudioRenderer`: audio playback on macOS**, behind the new
   `coreaudio-renderer` feature. It is the Core Audio counterpart of

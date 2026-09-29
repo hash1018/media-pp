@@ -134,19 +134,25 @@ pub(crate) fn carry_timing(destination: &mut ffmpeg::Frame, source: &ffmpeg::Fra
 ///
 /// The first two planes are enough for every layout this crate carries:
 /// packed formats use one, and the semi-planar and planar ones this crate
-/// composites in differ in the first two whenever they differ at all.
+/// composites in differ in the first two whenever they differ at all. A
+/// hardware frame that keeps its picture in the fourth pointer instead —
+/// VideoToolbox's `CVPixelBuffer` — has nothing in the first two, and is
+/// told apart by that one.
 ///
 /// Only sound as an identity while the frame it came from is still
 /// referenced. A picture whose buffer has been released can be handed out
 /// again at the same address, so every caller here holds that reference for
 /// as long as it holds the identity.
 pub(crate) fn picture_id(frame: &ffmpeg::frame::Video) -> (usize, usize) {
-    // SAFETY: `as_ptr` is a live `AVFrame`. Only the values of the first two
-    // plane pointers are read; nothing dereferences them, which for GPU
-    // memory would not be valid from the host anyway.
+    // SAFETY: `as_ptr` is a live `AVFrame`. Only the values of its plane
+    // pointers are read; nothing dereferences them, which for GPU memory
+    // would not be valid from the host anyway.
     unsafe {
         let ptr = frame.as_ptr();
-        ((*ptr).data[0] as usize, (*ptr).data[1] as usize)
+        match ((*ptr).data[0] as usize, (*ptr).data[1] as usize) {
+            (0, 0) => ((*ptr).data[3] as usize, 0),
+            planes => planes,
+        }
     }
 }
 
@@ -196,6 +202,31 @@ pub(crate) fn picture_is_referenced(frame: &ffmpeg::frame::Video) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// Two frames whose picture is in the fourth pointer — VideoToolbox's —
+    /// are two pictures, not one because their first two are both empty.
+    /// Taken for one, every VideoToolbox frame after the first was answered
+    /// with the first's download.
+    #[test]
+    fn a_picture_in_the_fourth_pointer_is_told_apart() {
+        let mut first = ffmpeg::frame::Video::empty();
+        let mut second = ffmpeg::frame::Video::empty();
+        // SAFETY: only the pointer values are set, and nothing reads through
+        // them; both are cleared again before the frames are freed, which
+        // then frees no picture.
+        unsafe {
+            (*first.as_mut_ptr()).data[3] = 0x1000 as *mut u8;
+            (*second.as_mut_ptr()).data[3] = 0x2000 as *mut u8;
+        }
+        let ids = (picture_id(&first), picture_id(&second));
+        // SAFETY: as above.
+        unsafe {
+            (*first.as_mut_ptr()).data[3] = std::ptr::null_mut();
+            (*second.as_mut_ptr()).data[3] = std::ptr::null_mut();
+        }
+        assert_ne!(ids.0, ids.1);
+        assert_eq!(ids.0, (0x1000, 0));
+    }
     use super::*;
 
     /// A hand-made frame goes in as it is: the same picture and timing, as

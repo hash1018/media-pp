@@ -9,13 +9,16 @@ mod cuda;
 #[cfg(any(
     feature = "cuda",
     feature = "vulkan",
-    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "macos", feature = "videotoolbox")
 ))]
 mod hw_decoder;
 mod preroll_gate;
 mod qos;
 mod sw_decoder;
 mod video_decode_bin;
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+mod videotoolbox;
 #[cfg(feature = "vulkan")]
 mod vulkan;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
@@ -28,6 +31,8 @@ pub use video_decode_bin::{
     DecodePath, DecodeTarget, SoftwareReason, VideoDecodeBin, VideoDecodeBinError,
     VideoDecodeBinHandle,
 };
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use videotoolbox::{VideoToolboxDecoder, VideoToolboxDecoderError};
 #[cfg(feature = "vulkan")]
 pub use vulkan::{VulkanDecoder, VulkanDecoderError};
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
