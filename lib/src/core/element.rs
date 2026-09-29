@@ -247,6 +247,9 @@ pub enum ElementType {
     /// macOS Metal video renderer sink, drawing into a window of its own or
     /// one it was given.
     MetalWindowRenderer,
+    /// macOS sink handing VideoToolbox frames to an application's own
+    /// Metal drawing.
+    MetalRenderer,
     /// macOS Core Audio input device capture source.
     CoreAudioCaptureSource,
     /// macOS AVFoundation camera capture source.

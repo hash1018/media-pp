@@ -125,6 +125,21 @@ compile error with no explanation.
 
 ### Added
 
+- **`MetalRenderer`: VideoToolbox frames drawn by an application's own
+  Metal code** (macOS, `metal`), the sibling of `D3d11Renderer` and
+  `CudaRenderer`, for a UI's own layer or an offscreen target rather than
+  a window of this crate's. The application implements
+  `MetalFrameRenderer` — its `device`, `submit` and `resize` — and is
+  handed each picture as a `MetalFrame`: `MetalFramePlanes::Bgra` or
+  `Nv12 { luma, chroma }`, textures on its own device made over the
+  frame's `IOSurface` with nothing copied, the picture's size and its
+  colour. The `MetalFrame` holds the frame, so its pixel buffer is not
+  handed out again until the application lets go of it, once the GPU has
+  read it. A frame in system memory is refused when the branch is built;
+  `VideoToolboxUpload` is what brings one to it. New: `MetalTexture`,
+  `MetalRendererError`, `Error::MetalRendererError` and
+  `ElementType::MetalRenderer`.
+
 - **`MetalSharedTextureSource`: another producer's `IOSurface`s, as this
   pipeline's own frames** (macOS, `metal`), the sibling of
   `D3d11SharedTextureSource` with its shape:

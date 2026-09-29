@@ -388,6 +388,11 @@ pub enum Error {
     #[error(transparent)]
     MetalWindowRendererError(#[from] crate::elements::MetalWindowRendererError),
 
+    /// Handing a frame to an application's Metal drawing failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalRendererError(#[from] crate::elements::MetalRendererError),
+
     /// Copying a pushed `IOSurface` into a Metal shared-texture source
     /// failed.
     #[cfg(all(target_os = "macos", feature = "metal"))]

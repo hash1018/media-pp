@@ -642,6 +642,75 @@ fn a_d3d12_renderer_takes_device_resources_only() {
         .expect("a D3D12 resource is exactly what this renderer accepts");
 }
 
+/// `MetalRenderer` hands an application textures made over a frame's
+/// `IOSurface`, which a frame in system memory does not have: a software
+/// decode reaches it through `VideoToolboxUpload`, and never without.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[test]
+fn a_metal_renderer_takes_videotoolbox_frames_only() {
+    use objc2::{rc::Retained, runtime::ProtocolObject};
+    use objc2_metal::MTLDevice;
+
+    use crate::elements::{
+        MetalFrame, MetalFrameRenderer, MetalRenderer, SubmitError, VideoToolboxUpload,
+    };
+
+    /// Never submitted to: the link check runs when the branch is built,
+    /// so no buffer ever reaches it.
+    struct StubRenderer(Retained<ProtocolObject<dyn MTLDevice>>);
+
+    impl MetalFrameRenderer for StubRenderer {
+        fn device(&self) -> Retained<ProtocolObject<dyn MTLDevice>> {
+            self.0.clone()
+        }
+
+        fn submit(&self, _frame: MetalFrame) -> std::result::Result<(), SubmitError> {
+            unreachable!("the link check never pushes a buffer")
+        }
+
+        fn resize(&self, _width: u32, _height: u32) -> std::result::Result<(), SubmitError> {
+            unreachable!("the link check never resizes")
+        }
+    }
+
+    let Some(device) = crate::test_support::try_videotoolbox_device() else {
+        return;
+    };
+    let Some(metal) = objc2_metal::MTLCreateSystemDefaultDevice() else {
+        eprintln!("skipped: no Metal device");
+        return;
+    };
+
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .to(MetalRenderer::new(
+            "renderer",
+            Box::new(StubRenderer(metal.clone())),
+        ))
+    else {
+        panic!("a software decoder's frames have no surface to draw from");
+    };
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(&*producer, "decoder");
+    assert_eq!(&*consumer, "renderer");
+
+    contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(VideoToolboxUpload::new("upload", &device))
+        .to(MetalRenderer::new(
+            "renderer",
+            Box::new(StubRenderer(metal)),
+        ))
+        .expect("a VideoToolbox frame is exactly what this renderer accepts");
+}
+
 /// A passthrough element that declared nothing used to end the check at
 /// itself, because `Unknown` output means nothing is known to be flowing
 /// onward. `VideoSynchronizer` sits mid-branch in every A/V playback

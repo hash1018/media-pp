@@ -60,7 +60,10 @@ pub use renderer::{
     Key, MouseButton, WindowControl, WindowEvent, WindowEvents, WindowGone, WindowOptions,
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
-pub use renderer::{MetalWindowRenderer, MetalWindowRendererError, run_with_windows};
+pub use renderer::{
+    MetalFrame, MetalFramePlanes, MetalFrameRenderer, MetalRenderer, MetalRendererError,
+    MetalTexture, MetalWindowRenderer, MetalWindowRendererError, run_with_windows,
+};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use renderer::{
     PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions,

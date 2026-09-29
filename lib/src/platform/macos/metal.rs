@@ -163,17 +163,7 @@ impl MetalGpu {
         format: MTLPixelFormat,
         usage: MTLTextureUsage,
     ) -> Result<Texture, MetalError> {
-        let surface = buffer.io_surface().ok_or(MetalError::NotIoSurface)?;
-        let (width, height) = buffer.plane_size(plane);
-        let descriptor = descriptor(format, width, height, usage);
-        // A plane the buffer has, whose size the descriptor is made of.
-        self.device
-            .newTextureWithDescriptor_iosurface_plane(&descriptor, &surface, plane)
-            .ok_or(MetalError::Texture {
-                width,
-                height,
-                format,
-            })
+        plane_on(&self.device, buffer, plane, format, usage)
     }
 
     /// A texture over the whole of `surface`, a surface of one plane, seen
@@ -225,6 +215,27 @@ impl MetalGpu {
             .ok_or(MetalError::Unavailable("compute encoder"))?;
         Ok(Pass { commands, encoder })
     }
+}
+
+/// [`MetalGpu::plane`] on any device — one an application draws with.
+pub(crate) fn plane_on(
+    device: &ProtocolObject<dyn MTLDevice>,
+    buffer: &PixelBuffer,
+    plane: usize,
+    format: MTLPixelFormat,
+    usage: MTLTextureUsage,
+) -> Result<Texture, MetalError> {
+    let surface = buffer.io_surface().ok_or(MetalError::NotIoSurface)?;
+    let (width, height) = buffer.plane_size(plane);
+    let descriptor = descriptor(format, width, height, usage);
+    // A plane the buffer has, whose size the descriptor is made of.
+    device
+        .newTextureWithDescriptor_iosurface_plane(&descriptor, &surface, plane)
+        .ok_or(MetalError::Texture {
+            width,
+            height,
+            format,
+        })
 }
 
 fn descriptor(

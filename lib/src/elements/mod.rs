@@ -194,7 +194,10 @@ pub use sink::{
     Key, MouseButton, WindowControl, WindowEvent, WindowEvents, WindowGone, WindowOptions,
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
-pub use sink::{MetalWindowRenderer, MetalWindowRendererError, run_with_windows};
+pub use sink::{
+    MetalFrame, MetalFramePlanes, MetalFrameRenderer, MetalRenderer, MetalRendererError,
+    MetalTexture, MetalWindowRenderer, MetalWindowRendererError, run_with_windows,
+};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
 #[cfg(any(
