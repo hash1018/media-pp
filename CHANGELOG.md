@@ -542,6 +542,15 @@ compile error with no explanation.
   a progress bar gone blank at the end of every lap. `Player::position`
   reads its lap this way now.
 
+### Changed
+
+- **The macOS API is documented too, beside the Windows one.** docs.rs
+  builds on Linux only, so both are built on a runner of their own platform
+  and published together: the Windows documentation moved from
+  `hash1018.github.io/media-pp/media_pp/` to `.../windows/media_pp/` (the
+  old address sends a visitor on), and the macOS one is at
+  `.../macos/media_pp/`.
+
 ### Fixed
 
 - **A playing seek behind a `Tee` shows where it landed.** With every

@@ -16,7 +16,8 @@ categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 # Build docs.rs on its native Linux target. `ffmpeg-sys-next` generates FFI
 # bindings from the installed target headers, so using Linux headers while
 # cross-documenting a Windows target produces invalid ABI layout assertions.
-# Full Windows API docs are built separately on a Windows GitHub Actions runner.
+# Full Windows and macOS API docs are built separately, each on a GitHub Actions
+# runner of its own platform (`.github/workflows/api-docs.yml`).
 #
 # These are the optional features that build on Linux without network access:
 # `ort-sys`'s build script returns early when docs.rs sets `DOCS_RS`,

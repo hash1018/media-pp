@@ -93,9 +93,10 @@ fn main() -> media_pp::Result<()> {
 How a pipeline runs — buffers, threads, the end of a stream, seeking,
 changing a running graph, what a link refuses before it runs — is the crate
 documentation's first page; each type's page says what it accepts, owns and
-how it fails. Both are on [docs.rs] for the backend-independent API and in
-the [Windows API documentation] for everything. What changed between
-versions, and what to write instead, is in [`CHANGELOG.md`].
+how it fails. Both are on [docs.rs] for the backend-independent and Linux
+API, and in the [Windows API documentation] and the
+[macOS API documentation] for everything on those platforms. What changed
+between versions, and what to write instead, is in [`CHANGELOG.md`].
 
 ## What is in it
 
@@ -217,4 +218,5 @@ the license of their FFmpeg build and optional codecs.
 [`CHANGELOG.md`]: https://github.com/hash1018/media-pp/blob/main/CHANGELOG.md
 [`ffmpeg-next`]: https://github.com/zmwangx/rust-ffmpeg
 [docs.rs]: https://docs.rs/media-pp
-[Windows API documentation]: https://hash1018.github.io/media-pp/media_pp/
+[Windows API documentation]: https://hash1018.github.io/media-pp/windows/media_pp/
+[macOS API documentation]: https://hash1018.github.io/media-pp/macos/media_pp/
