@@ -205,8 +205,8 @@ VideoToolbox decode and encode (`videotoolbox`), and Metal on their frames
 — a scaler, a converter, a chroma key, effects, a compositor, a window
 renderer, `VideoWindow`, `Player`, a renderer for an application's own
 Metal drawing and a source for another producer's `IOSurface`s (`metal`).
-Building and testing, and setting up a Mac for it, are in
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+Building and testing are in [`CONTRIBUTING.md`](CONTRIBUTING.md), and
+setting up each platform for it in [`docs/building`](docs/building/).
 
 ## License
 
