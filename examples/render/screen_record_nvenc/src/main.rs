@@ -14,15 +14,19 @@
 //! `open_gpu` imports into a CUDA surface. Nothing in either branch copies a
 //! frame through system memory.
 //!
-//! Needs an NVIDIA GPU and an ffmpeg build with NVENC; both encoders report a
-//! typed error rather than panicking on anything else.
+//! macOS runs the same graph with the media engine in NVENC's place:
+//! ScreenCaptureKit's pixel buffers into `VideoToolboxEncoder`.
+//!
+//! Needs an NVIDIA GPU and an ffmpeg build with NVENC on Windows and Linux;
+//! every encoder reports a typed error rather than panicking on anything
+//! else.
 //!
 //!     cargo run -p screen_record_nvenc -- <output.mp4> [seconds]
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} supports Windows (DXGI) and Linux (PipeWire) only",
+        "{} supports Windows (DXGI), Linux (PipeWire) and macOS (ScreenCaptureKit) only",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -37,7 +41,12 @@ fn main() -> impl std::process::Termination {
     linux_example::run()
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    macos_example::run()
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod common;
 
 #[cfg(target_os = "windows")]
@@ -242,6 +251,114 @@ mod linux_example {
             ),
             None => println!("the compositor issued no restore token; the next run will prompt"),
         }
+        Ok(())
+    }
+}
+
+/// The macOS half: the media engine takes NVENC's place.
+/// `ScreenCaptureKitSource::open_videotoolbox` hands on ScreenCaptureKit's own
+/// `IOSurface` pixel buffers as BGRA VideoToolbox frames, and
+/// `VideoToolboxEncoder` converts them to YUV itself — BT.709 at limited
+/// range — as NVENC does, so again nothing converts on the CPU and no pixel
+/// passes through system memory.
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use media_pp::ffmpeg;
+    use media_pp::{
+        elements::{
+            FileMuxer, ScreenCaptureKitOptions, ScreenCaptureKitSource, ScreenCaptureKitTarget,
+            VideoToolboxCodec, VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
+            VideoToolboxFrameFormat,
+        },
+        pipeline::Pipeline,
+    };
+
+    use crate::common;
+
+    pub fn run() -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+        let recording = common::parse_args(" [monitor|window]")?;
+        let target = match std::env::args().nth(3).as_deref() {
+            Some("window") => {
+                // An application's untitled windows are toolbars and strips
+                // more often than documents.
+                let window = ScreenCaptureKitSource::list_windows()?
+                    .into_iter()
+                    .find(|window| !window.title.is_empty())
+                    .ok_or_else(|| {
+                        media_pp::Error::Other("there is no window to capture".into())
+                    })?;
+                println!("capturing {:?} of {}", window.title, window.application);
+                ScreenCaptureKitTarget::Window(window.id)
+            }
+            _ => {
+                let display = ScreenCaptureKitSource::list_displays()?
+                    .into_iter()
+                    .find(|display| display.is_main)
+                    .ok_or_else(|| media_pp::Error::Other("there is no main display".into()))?;
+                ScreenCaptureKitTarget::Display(display.id)
+            }
+        };
+
+        let device = VideoToolboxDevice::new()?;
+        let frame_rate = ffmpeg::Rational::new(30, 1);
+        let (source, format) = ScreenCaptureKitSource::open_videotoolbox(
+            "screen",
+            ScreenCaptureKitOptions {
+                frame_rate,
+                include_cursor: true,
+                ..ScreenCaptureKitOptions::new(target)
+            },
+            &device,
+        )?;
+
+        // The capture's own size: the encoder is fixed-size, and the media
+        // engine takes any even or odd one it offers — a size it refuses is
+        // a typed error at open rather than at the first frame.
+        let encoder = VideoToolboxEncoder::new(
+            "encoder",
+            &device,
+            VideoToolboxEncoderOptions {
+                codec: VideoToolboxCodec::H264,
+                // What the capture produces is what the media engine
+                // ingests, as on the other two platforms.
+                format: VideoToolboxFrameFormat::Bgra,
+                width: format.width,
+                height: format.height,
+                frame_rate,
+                bit_rate: 8_000_000,
+                gop_size: 60, // ~2s @ 30fps
+                max_b_frames: None,
+            },
+        )?;
+
+        let mut muxer = FileMuxer::create(&recording.path)?;
+        let track = muxer.add_stream("video", &encoder)?;
+        let muxer_sink = muxer.open()?.take(track)?;
+
+        let (width, height) = (format.width, format.height);
+        let (pipeline, ()) = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                // Thread boundary so the encode cannot stall capture.
+                .queue("captured", 4)
+                .pipe(encoder)
+                .to(muxer_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        println!(
+            "recording {}s of the screen at {width}x{height} (h264_videotoolbox) to {} ...",
+            recording.seconds, recording.path
+        );
+        common::record(&pipeline, recording.seconds)?;
+        println!("wrote {}", recording.path);
         Ok(())
     }
 }

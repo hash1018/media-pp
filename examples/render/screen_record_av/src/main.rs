@@ -1,18 +1,20 @@
 //! Records desktop video and system audio into one MP4 from two independent
 //! live capture sources sharing one `PipelineBuilder` pipeline.
 //! Windows uses DXGI + WASAPI; Linux uses PipeWire screen capture and a
-//! PipeWire sink monitor. Enter `q` in the terminal to stop both sources and
+//! PipeWire sink monitor; macOS uses ScreenCaptureKit and a Core Audio
+//! process tap on the default output device. Enter `q` in the terminal to stop both sources and
 //! finalize the file.
 //!
 //! ```text
 //! cargo run -p screen_record_av -- [output.mp4]
 //! cargo run -p screen_record_av -- [output.mp4] [monitor|window] [restore-token] # Linux
+//! cargo run -p screen_record_av -- [output.mp4] [monitor|window] # macOS
 //! ```
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} example supports Windows (DXGI + WASAPI) and Linux (PipeWire)",
+        "{} example supports Windows (DXGI + WASAPI), Linux (PipeWire) and macOS (ScreenCaptureKit + Core Audio)",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -25,6 +27,11 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    macos_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -377,6 +384,175 @@ mod linux_example {
             ),
             None => println!("the compositor issued no restore token; the next run will prompt"),
         }
+        Ok(())
+    }
+}
+
+/// The macOS half: `ScreenCaptureKitSource` for the picture — the main
+/// display, or with `window` the frontmost window with a title — and
+/// `CoreAudioCaptureSource` on the default output device, a Core Audio
+/// process tap of what the system plays, for the sound.
+///
+/// macOS asks for two permissions, each given in System Settings to the
+/// application this runs in: Screen & System Audio Recording for both, and
+/// the audio tap only for an application whose `Info.plist` declares
+/// `NSAudioCaptureUsageDescription` — without it the tap records silence.
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use std::{
+        io::{self, BufRead},
+        thread,
+    };
+
+    use media_pp::ffmpeg;
+    use media_pp::{
+        bus::BusEvent,
+        elements::{
+            AudioCodec, CoreAudioCaptureOptions, CoreAudioCaptureSource, CoreAudioDeviceKind,
+            FileMuxer, ScreenCaptureKitOptions, ScreenCaptureKitSource, ScreenCaptureKitTarget,
+            SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, SwScaler,
+            VideoCodec,
+        },
+        pipeline::PipelineBuilder,
+    };
+
+    ///     cargo run -p screen_record_av -- [output.mp4] [monitor|window]
+    ///     (then in the same terminal: `q` + Enter to stop and finalize)
+    pub(super) fn run() -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let path = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "screen_record_av.mp4".into());
+        let target = match std::env::args().nth(2).as_deref() {
+            Some("window") => {
+                // An application's untitled windows are toolbars and strips
+                // more often than documents.
+                let window = ScreenCaptureKitSource::list_windows()?
+                    .into_iter()
+                    .find(|window| !window.title.is_empty())
+                    .ok_or_else(|| {
+                        media_pp::Error::Other("there is no window to capture".into())
+                    })?;
+                println!("capturing {:?} of {}", window.title, window.application);
+                ScreenCaptureKitTarget::Window(window.id)
+            }
+            _ => {
+                let display = ScreenCaptureKitSource::list_displays()?
+                    .into_iter()
+                    .find(|display| display.is_main)
+                    .ok_or_else(|| media_pp::Error::Other("there is no main display".into()))?;
+                ScreenCaptureKitTarget::Display(display.id)
+            }
+        };
+        let frame_rate = ffmpeg::Rational::new(30, 1);
+        let (video_source, video_format) = ScreenCaptureKitSource::open(
+            "screen",
+            ScreenCaptureKitOptions {
+                frame_rate,
+                include_cursor: true,
+                ..ScreenCaptureKitOptions::new(target)
+            },
+        )?;
+        // H.264 needs even dimensions, and a window can be any size at all.
+        let (width, height) = (video_format.width & !1, video_format.height & !1);
+
+        let device = CoreAudioCaptureSource::list_devices()?
+            .into_iter()
+            .find(|device| device.kind == CoreAudioDeviceKind::Output && device.is_default)
+            .ok_or_else(|| media_pp::Error::Other("no default playback device found".into()))?;
+        println!("capturing system audio from: {}", device.name);
+        let (audio_source, audio_format) =
+            CoreAudioCaptureSource::open("system-audio", CoreAudioCaptureOptions { device })?;
+
+        let video_encoder = SwEncoder::new(
+            "video-encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width,
+                height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
+                frame_rate,
+                bit_rate: 4_000_000,
+                gop_size: 60, // ~2s @ 30fps
+                max_b_frames: None,
+            },
+        )?;
+        let audio_encoder = SwAudioEncoder::new(
+            "audio-encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Aac,
+                sample_rate: audio_format.sample_rate,
+                channels: audio_format.channels,
+                bit_rate: 128_000,
+            },
+        )?;
+
+        let mut muxer = FileMuxer::create(&path)?;
+        let video_track = muxer.add_stream("video", &video_encoder)?;
+        let audio_track = muxer.add_stream("audio", &audio_encoder)?;
+        let mut sinks = muxer.open()?;
+        let video_sink = sinks.take(video_track)?;
+        let audio_sink = sinks.take(audio_track)?;
+
+        let builder = PipelineBuilder::new("screen-record-av");
+        let (builder, ()) = builder.add_source(video_source, |source, ctx| {
+            let scaler = SwScaler::new(
+                "to-yuv",
+                ffmpeg::format::Pixel::YUV420P,
+                width,
+                height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let branch = ctx
+                .branch()
+                .queue("captured", 4) // thread boundary so scaling doesn't block capture
+                .pipe(scaler)
+                .queue("frames", 8) // thread boundary so encoding doesn't block scaling
+                .pipe(video_encoder)
+                .to(video_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let (builder, ()) = builder.add_source(audio_source, |source, ctx| {
+            let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let pipeline = builder.build();
+
+        println!("recording the screen + system audio to {path} — type `q` + Enter to stop");
+        pipeline.run()?;
+
+        {
+            let pipeline = pipeline.clone();
+            thread::spawn(move || {
+                for line in io::stdin().lock().lines() {
+                    let Ok(line) = line else { break };
+                    if line.trim().eq_ignore_ascii_case("q") {
+                        pipeline.finish();
+                        break;
+                    }
+                }
+            });
+        }
+
+        for event in pipeline.bus().iter() {
+            println!("{event}");
+            // A capture that failed will not come back, and recording audio
+            // against a frozen video track is not worth continuing — stop so
+            // the muxer finalizes what it has.
+            if matches!(event, BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
+
+        println!("wrote {path}");
         Ok(())
     }
 }

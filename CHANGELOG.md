@@ -125,6 +125,12 @@ compile error with no explanation.
 
 ### Added
 
+- **`screen_record_av`, `screen_record_nvenc` and `screen_record_overlay`
+  run on macOS**: the desktop and the output device's sound through
+  `ScreenCaptureKitSource` and `CoreAudioCaptureSource`; ScreenCaptureKit's
+  own pixel buffers encoded by `VideoToolboxEncoder` with nothing copied;
+  and those under a live text layer of `MetalVideoCompositor`.
+
 - **`MetalScaler`, `MetalConverter`, `MetalChromaKey`, `MetalVideoEffect`**:
   the rest of the GPU filters on macOS, behind `metal`, each the Metal
   sibling of its Vulkan counterpart with its API and contract, on

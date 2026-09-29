@@ -12,3 +12,9 @@ media-pp = { path = "../../../lib", features = [
     "pipewire-screen-capture",
     "pipewire-audio-capture",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = [
+    "screencapturekit-capture",
+    "coreaudio-capture",
+] }

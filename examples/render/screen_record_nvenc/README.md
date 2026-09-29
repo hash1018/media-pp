@@ -7,6 +7,12 @@ with no CPU color conversion anywhere in the graph.
   FileMuxer`
 - Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> Queue -> CudaEncoder ->
   FileMuxer`
+- macOS: `ScreenCaptureKitSource` (VideoToolbox frames) `-> Queue ->
+  VideoToolboxEncoder -> FileMuxer` — the media engine in NVENC's place,
+  converting the capture's BGRA itself (`VideoToolboxFrameFormat::Bgra`), so
+  here too there is no `SwScaler` and no copy through system memory. Four
+  seconds of a 2940x1912 display at 30fps cost about a quarter of a second
+  of CPU time.
 
 The contrast with `screen_record_software` is the whole point. That example runs
 `capture -> SwScaler -> SwEncoder`: every frame is converted BGRA->YUV420P by
@@ -23,7 +29,7 @@ DMA-BUF and imports each captured buffer into a CUDA BGRA surface, so the
 Linux branch needs no `CudaUpload` and the two graphs have the same elements.
 Nothing in either branch copies a frame through system memory.
 
-Needs an NVIDIA GPU and an ffmpeg build with NVENC. `Pipeline::finish` sends
+Needs an NVIDIA GPU and an ffmpeg build with NVENC on Windows and Linux. `Pipeline::finish` sends
 ordered EOS through the encoder and muxer so delayed frames are drained
 before the MP4 trailer is finalized.
 
@@ -37,4 +43,11 @@ the same arguments `screen_record_software` documents:
 
 ```sh
 cargo run -p screen_record_nvenc -- <output.mp4> [seconds] [monitor|window] [restore-token]
+```
+
+On macOS `window` captures the frontmost window with a title instead of the
+main display; macOS asks once for the permission to record the screen:
+
+```sh
+cargo run -p screen_record_nvenc -- <output.mp4> [seconds] [monitor|window]
 ```

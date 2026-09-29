@@ -19,12 +19,15 @@ overlay is live rather than a watermark baked in once. Any number of further
 layers attach the same way — `add_source` for a video layer, `add_text_layer`
 for another caption.
 
-Linux only: it is the GPU screen capture that is Linux-specific here, not the
-CUDA half. The Windows shape of the same graph is `DxgiCaptureSource` (GPU
-mode) `-> D3d11VideoCompositor -> D3d11VideoEncoder`, with no conversion in
-it, since D3D11 composites BGRA directly.
+On macOS the same graph is `ScreenCaptureKitSource` (VideoToolbox frames)
+`-> Queue ->` a `MetalVideoCompositor` input, and the compositor (with a
+`MetalTextLayerHandle`) `-> Queue -> VideoToolboxEncoder -> FileMuxer`, with
+no conversion in it, since Metal composites the capture's BGRA directly;
+nothing comes back to system memory there either. The Windows shape of the
+same graph is `DxgiCaptureSource` (GPU mode) `-> D3d11VideoCompositor ->
+D3d11VideoEncoder`, for the same reason.
 
-Needs an NVIDIA GPU and an ffmpeg build with NVENC.
+Needs an NVIDIA GPU and an ffmpeg build with NVENC on Linux.
 
 ```sh
 cargo run -p screen_record_overlay -- <output.mp4> [seconds]
@@ -36,4 +39,11 @@ arguments `screen_record_software` documents:
 
 ```sh
 cargo run -p screen_record_overlay -- <output.mp4> [seconds] [monitor|window] [restore-token]
+```
+
+On macOS `window` captures the frontmost window with a title instead of the
+main display; macOS asks once for the permission to record the screen:
+
+```sh
+cargo run -p screen_record_overlay -- <output.mp4> [seconds] [monitor|window]
 ```

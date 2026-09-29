@@ -20,7 +20,13 @@ Windows, video comes from `DxgiCaptureSource` and audio from
 comes from `PipeWireScreenCaptureSource` (through the portal, so the CLI takes
 a restore token) and audio from `PipeWireAudioCaptureSource` (a sink's
 monitor, selected programmatically — audio needs no portal on either
-platform).
+platform). On macOS, video comes from `ScreenCaptureKitSource` (the main
+display, or with `window` the frontmost titled window) and audio from
+`CoreAudioCaptureSource` on the default output device — a Core Audio process
+tap of what the system plays. macOS asks for the permission to record the
+screen and system audio, given in System Settings to the application this
+runs in; the tap needs that application's `Info.plist` to declare
+`NSAudioCaptureUsageDescription`, and records silence without it.
 
 ```sh
 # Windows
@@ -28,6 +34,9 @@ cargo run -p screen_record_av -- [output.mp4]
 
 # Linux
 cargo run -p screen_record_av -- [output.mp4] [monitor|window] [restore-token]
+
+# macOS
+cargo run -p screen_record_av -- [output.mp4] [monitor|window]
 
 # then in the same terminal: q + Enter to stop and finalize
 ```
