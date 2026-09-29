@@ -9,10 +9,10 @@ A device of kind `Render`/`Sink` is captured through loopback or monitor
 (system audio), and `Capture`/`Source` is a microphone. On Linux, where no
 node of the wanted kind is marked default, any node of that kind is taken.
 
-On macOS only input devices can be captured so far, so the default — the
-system's sound — says so and exits non-zero; use `mic` or a device's name.
-macOS asks, the first time, whether the terminal running this may use the
-microphone.
+On macOS an output device is captured through a Core Audio process tap,
+which needs macOS 14.2 and the "System Audio Recording" permission for the
+terminal running this — one whose `Info.plist` does not ask for it records
+silence. A microphone asks for its own permission the first time.
 
 ```sh
 cargo run -p audio_capture              # default render device (system audio / loopback)

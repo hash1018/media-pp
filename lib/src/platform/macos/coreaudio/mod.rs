@@ -31,21 +31,42 @@ use objc2_core_audio::{
 #[cfg(feature = "coreaudio-capture")]
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceIsAlive, kAudioHardwarePropertyDefaultInputDevice,
-    kAudioObjectPropertyScopeInput,
+    kAudioHardwarePropertyProcessObjectList, kAudioHardwarePropertyTranslatePIDToProcessObject,
+    kAudioProcessPropertyPID,
 };
 #[cfg(feature = "coreaudio-renderer")]
 use objc2_core_audio::{
-    kAudioDevicePropertyLatency, kAudioDevicePropertyStreams,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeOutput,
-    kAudioStreamPropertyLatency,
+    kAudioDevicePropertyLatency, kAudioDevicePropertyStreams, kAudioStreamPropertyLatency,
+};
+use objc2_core_audio::{
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeInput,
+    kAudioObjectPropertyScopeOutput,
 };
 use objc2_core_audio_types::AudioBuffer;
 use objc2_core_foundation::{CFRetained, CFString};
 
-/// One audio device, as `CoreAudioRenderer::list_devices` lists those it can
-/// play to and `CoreAudioCaptureSource::list_devices` those it can record
-/// from. A device that does both — a headset — is in both lists, as the
-/// same device.
+#[cfg(feature = "coreaudio-capture")]
+mod tap;
+
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) use tap::{ProcessTap, TapError};
+
+/// Which way a [`CoreAudioDevice`] entry goes — the same distinction
+/// `WasapiDeviceKind` and `PipeWireAudioDeviceKind` draw, and with the same
+/// consequence for capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreAudioDeviceKind {
+    /// Something to record from: a microphone, a line input.
+    Input,
+    /// Something to play to: speakers, headphones, an HDMI output. Captured,
+    /// it is what the system plays there, through a Core Audio process tap.
+    Output,
+}
+
+/// One direction of one audio device, as `CoreAudioRenderer::list_devices`
+/// lists those it can play to and `CoreAudioCaptureSource::list_devices`
+/// those it can record from or capture the playback of. A device that goes
+/// both ways — a headset — is two entries, one of each [`kind`](Self::kind).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreAudioDevice {
     /// The HAL's `AudioObjectID`. Good only while the device stays attached
@@ -58,9 +79,30 @@ pub struct CoreAudioDevice {
     pub uid: String,
     /// The name the system shows for the device.
     pub name: String,
-    /// Whether this was the system's default device for the list's
-    /// direction — output or input — when it was listed.
+    /// Which way this entry goes.
+    pub kind: CoreAudioDeviceKind,
+    /// Whether this was the system's default device for its [`kind`] when it
+    /// was listed.
+    ///
+    /// [`kind`]: Self::kind
     pub is_default: bool,
+}
+
+/// One process Core Audio knows as a client — one that has played or
+/// recorded sound since it started — as `CoreAudioCaptureSource::list_processes`
+/// lists it for `open_process`.
+#[cfg(feature = "coreaudio-capture")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreAudioProcess {
+    /// The process id, which is what a capture is opened against — and only
+    /// for as long as that process lives. A caller that wants the same
+    /// application again after it has been restarted remembers
+    /// [`Self::executable`] and looks the id up again.
+    pub id: u32,
+    /// The executable's own file name — `Safari`, `Google Chrome Helper`.
+    /// Empty where the process would not say, which a caller can still
+    /// capture by id.
+    pub executable: String,
 }
 
 /// A Core Audio call that did not return `noErr`, and which one it was.
@@ -95,28 +137,29 @@ pub(crate) fn four_char_code(status: &i32) -> String {
 
 /// Every device with at least one output channel, the system's default
 /// output marked.
-#[cfg(feature = "coreaudio-renderer")]
+#[cfg(any(feature = "coreaudio-renderer", feature = "coreaudio-capture"))]
 pub(crate) fn list_output_devices() -> Result<Vec<CoreAudioDevice>, OsStatusError> {
-    list_devices(
-        kAudioObjectPropertyScopeOutput,
-        default_output_device().ok(),
-    )
+    list_devices(CoreAudioDeviceKind::Output, default_output_device().ok())
 }
 
 /// Every device with at least one input channel, the system's default
 /// input marked.
 #[cfg(feature = "coreaudio-capture")]
 pub(crate) fn list_input_devices() -> Result<Vec<CoreAudioDevice>, OsStatusError> {
-    list_devices(kAudioObjectPropertyScopeInput, default_input_device().ok())
+    list_devices(CoreAudioDeviceKind::Input, default_input_device().ok())
 }
 
-/// Every device with channels in `scope`. One that fails to answer while
-/// being listed is left out rather than failing the whole list: it is most
-/// likely one unplugged between the two queries.
+/// Every device with channels going `kind`'s way. One that fails to answer
+/// while being listed is left out rather than failing the whole list: it is
+/// most likely one unplugged between the two queries.
 fn list_devices(
-    scope: AudioObjectPropertyScope,
+    kind: CoreAudioDeviceKind,
     default: Option<AudioObjectID>,
 ) -> Result<Vec<CoreAudioDevice>, OsStatusError> {
+    let scope = match kind {
+        CoreAudioDeviceKind::Input => kAudioObjectPropertyScopeInput,
+        CoreAudioDeviceKind::Output => kAudioObjectPropertyScopeOutput,
+    };
     let ids: Vec<AudioObjectID> = get_array(
         kAudioObjectSystemObject as AudioObjectID,
         kAudioHardwarePropertyDevices,
@@ -134,6 +177,7 @@ fn list_devices(
                 id,
                 uid,
                 name,
+                kind,
                 is_default: Some(id) == default,
             })
         })
@@ -141,7 +185,7 @@ fn list_devices(
 }
 
 /// The system's default output device.
-#[cfg(feature = "coreaudio-renderer")]
+#[cfg(any(feature = "coreaudio-renderer", feature = "coreaudio-capture"))]
 pub(crate) fn default_output_device() -> Result<AudioObjectID, OsStatusError> {
     get(
         kAudioObjectSystemObject as AudioObjectID,
@@ -160,6 +204,125 @@ pub(crate) fn default_input_device() -> Result<AudioObjectID, OsStatusError> {
         kAudioObjectPropertyScopeGlobal,
         "read the default input device",
     )
+}
+
+/// Every process Core Audio has as a client, but this one — capturing what
+/// it plays itself is not what a picker is for.
+///
+/// One that goes away while being listed is left out.
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) fn list_processes() -> Result<Vec<CoreAudioProcess>, OsStatusError> {
+    let objects: Vec<AudioObjectID> = get_array(
+        kAudioObjectSystemObject as AudioObjectID,
+        kAudioHardwarePropertyProcessObjectList,
+        kAudioObjectPropertyScopeGlobal,
+        "list Core Audio's client processes",
+    )?;
+    let own = std::process::id();
+    let mut processes: Vec<CoreAudioProcess> = objects
+        .into_iter()
+        .filter_map(|object| {
+            let pid = get::<i32>(
+                object,
+                kAudioProcessPropertyPID,
+                kAudioObjectPropertyScopeGlobal,
+                "read a client process's id",
+            )
+            .ok()?;
+            let id = u32::try_from(pid).ok().filter(|&id| id != own)?;
+            Some(CoreAudioProcess {
+                id,
+                executable: executable(pid),
+            })
+        })
+        .collect();
+    processes.sort_by_key(|process| process.id);
+    processes.dedup_by_key(|process| process.id);
+    Ok(processes)
+}
+
+#[cfg(feature = "coreaudio-capture")]
+unsafe extern "C" {
+    /// libproc's, in libSystem: the executable a process runs.
+    fn proc_pidpath(pid: i32, buffer: *mut c_void, size: u32) -> i32;
+    /// libproc's: the processes `ppid` started, as a count of ids.
+    fn proc_listchildpids(ppid: i32, buffer: *mut c_void, size: i32) -> i32;
+}
+
+/// The file name of what `pid` runs, empty where it will not say.
+#[cfg(feature = "coreaudio-capture")]
+fn executable(pid: i32) -> String {
+    // PROC_PIDPATHINFO_MAXSIZE.
+    let mut path = [0u8; 4 * 1024];
+    // SAFETY: `path` is writable for the size given, which is the largest
+    // path libproc writes.
+    let length = unsafe { proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    let Ok(length) = usize::try_from(length) else {
+        return String::new();
+    };
+    let path = String::from_utf8_lossy(&path[..length.min(path.len())]);
+    path.rsplit('/').next().unwrap_or_default().to_owned()
+}
+
+/// `pid` and every process it started, and they started, as far down as
+/// they go — what a capture of one application takes, since a browser
+/// plays from helpers it starts.
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) fn process_tree(pid: u32) -> Vec<u32> {
+    let mut tree = vec![pid];
+    let mut next = 0;
+    while next < tree.len() {
+        let mut children = [0i32; 1024];
+        let Ok(parent) = i32::try_from(tree[next]) else {
+            break;
+        };
+        // SAFETY: `children` is writable for the size given, in bytes, and
+        // libproc writes no more ids than fit.
+        let count = unsafe {
+            proc_listchildpids(
+                parent,
+                children.as_mut_ptr().cast(),
+                std::mem::size_of_val(&children) as i32,
+            )
+        };
+        let count = usize::try_from(count).unwrap_or(0).min(children.len());
+        for &child in &children[..count] {
+            if let Ok(child) = u32::try_from(child)
+                && child != 0
+                && !tree.contains(&child)
+            {
+                tree.push(child);
+            }
+        }
+        next += 1;
+    }
+    tree
+}
+
+/// The Core Audio process object of `pid`, where Core Audio has one — a
+/// process that has played or recorded sound since it started.
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) fn process_object(pid: u32) -> Option<AudioObjectID> {
+    let address = address(
+        kAudioHardwarePropertyTranslatePIDToProcessObject,
+        kAudioObjectPropertyScopeGlobal,
+    );
+    let pid = i32::try_from(pid).ok()?;
+    let mut object: AudioObjectID = 0;
+    let mut size = size_of::<AudioObjectID>() as u32;
+    // SAFETY: the pid is the qualifier, readable for its size; `object` is
+    // writable for `size` bytes; `address` and `size` are live for the call.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            kAudioObjectSystemObject as AudioObjectID,
+            NonNull::from(&address),
+            size_of::<i32>() as u32,
+            ptr::from_ref(&pid).cast::<c_void>(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut object).cast::<c_void>(),
+        )
+    };
+    (status == 0 && object != 0).then_some(object)
 }
 
 /// How many channels `device` plays, across all its output streams.
@@ -289,6 +452,7 @@ fn address(
 /// property read promises of what it writes.
 pub(crate) trait Plain: Copy {}
 impl Plain for u32 {}
+impl Plain for i32 {}
 impl Plain for f64 {}
 
 fn data_size(
@@ -599,7 +763,13 @@ mod tests {
             eprintln!("skipping: no Core Audio device in this direction");
             return;
         }
+        let kind = if scope == kAudioObjectPropertyScopeInput {
+            CoreAudioDeviceKind::Input
+        } else {
+            CoreAudioDeviceKind::Output
+        };
         for device in &devices {
+            assert_eq!(device.kind, kind, "{device:?} is listed its own way");
             assert!(!device.uid.is_empty(), "{device:?} has a UID");
             assert!(channels(device.id, scope).unwrap() > 0, "{device:?}");
             assert!(nominal_sample_rate(device.id).unwrap() > 0.0, "{device:?}");

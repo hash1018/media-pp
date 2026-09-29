@@ -35,11 +35,13 @@ pub use crate::platform::cuda::{
 pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub use crate::platform::linux::vulkan::{VulkanGpu, VulkanGpuError};
+#[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
+pub use crate::platform::macos::coreaudio::CoreAudioProcess;
 #[cfg(all(
     target_os = "macos",
     any(feature = "coreaudio-renderer", feature = "coreaudio-capture")
 ))]
-pub use crate::platform::macos::coreaudio::CoreAudioDevice;
+pub use crate::platform::macos::coreaudio::{CoreAudioDevice, CoreAudioDeviceKind};
 #[cfg(feature = "vulkan")]
 pub use crate::platform::vulkan::device::{VulkanDevice, VulkanDeviceError};
 #[cfg(feature = "vulkan")]

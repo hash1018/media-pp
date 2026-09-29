@@ -3,9 +3,9 @@
 //!
 //! - Windows: `WasapiCaptureSource -> FrameCounter`
 //! - Linux: `PipeWireAudioCaptureSource -> FrameCounter`
-//! - macOS: `CoreAudioCaptureSource -> FrameCounter`, input devices only —
-//!   there is no capture of what the system plays there yet, so `mic` or a
-//!   device name is needed
+//! - macOS: `CoreAudioCaptureSource -> FrameCounter` — an output device is
+//!   captured through a Core Audio process tap, which needs macOS 14.2 and a
+//!   terminal allowed to record system audio
 //!
 //! ```text
 //! cargo run -p audio_capture
@@ -236,11 +236,9 @@ mod linux_example {
     }
 }
 
-/// The macOS half of the same example, the same shape again — except that
-/// Core Audio has only input devices to capture so far: what the system
-/// plays needs a process tap, which is not here yet. So the default, which is
-/// the system's sound elsewhere, says so and stops, and `mic` or a device's
-/// name captures an input.
+/// The macOS half of the same example, the same shape again: an output
+/// device is captured through a Core Audio process tap, the part WASAPI's
+/// loopback and PipeWire's monitor play elsewhere, and an input directly.
 #[cfg(target_os = "macos")]
 mod macos_example {
     use std::{thread, time::Duration};
@@ -248,17 +246,20 @@ mod macos_example {
     use media_pp::{
         Result,
         bus::BusEvent,
-        elements::{CoreAudioCaptureOptions, CoreAudioCaptureSource, FrameCounter},
+        elements::{
+            CoreAudioCaptureOptions, CoreAudioCaptureSource, CoreAudioDeviceKind, FrameCounter,
+        },
         pipeline::Pipeline,
     };
 
-    /// Lists every input device, picks one, captures ~3 seconds from it and
+    /// Lists every device, picks one, captures ~3 seconds from it and
     /// reports how many buffers came through — a smoke test for
     /// `CoreAudioCaptureSource`'s list-then-pick device API.
     ///
+    ///     cargo run -p audio_capture              # default output (system audio, through a tap)
     ///     cargo run -p audio_capture -- mic        # default input (microphone)
-    ///     cargo run -p audio_capture -- list       # just print every input and exit
-    ///     cargo run -p audio_capture -- <name>     # first input whose name contains <name>
+    ///     cargo run -p audio_capture -- list       # just print every device and exit
+    ///     cargo run -p audio_capture -- <name>     # first device whose name contains <name>
     pub(super) fn run() -> Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
@@ -273,29 +274,31 @@ mod macos_example {
         if arg.as_deref() == Some("list") {
             for device in &devices {
                 println!(
-                    "Input {}{}",
+                    "{:?} {}{}",
+                    device.kind,
                     device.name,
                     if device.is_default { " (default)" } else { "" }
                 );
             }
             return Ok(());
         }
-        let Some(arg) = arg else {
-            return Err(media_pp::Error::Other(
-                "capturing what the system plays is not available on macOS yet; \
-                 pass `mic` or an input device's name"
-                    .into(),
-            ));
-        };
 
+        let wanted_kind = if arg.as_deref() == Some("mic") {
+            Some(CoreAudioDeviceKind::Input)
+        } else {
+            None
+        };
         let device = devices
             .into_iter()
-            .find(|d| match arg.as_str() {
-                "mic" => d.is_default,
-                name => d.name.contains(name),
+            .find(|d| match &wanted_kind {
+                Some(kind) => d.kind == *kind && d.is_default,
+                None => match &arg {
+                    Some(name) => d.name.contains(name.as_str()),
+                    None => d.kind == CoreAudioDeviceKind::Output && d.is_default,
+                },
             })
             .ok_or_else(|| media_pp::Error::Other("no matching device found".into()))?;
-        println!("selected: Input {}", device.name);
+        println!("selected: {:?} {}", device.kind, device.name);
 
         let (source, format) =
             CoreAudioCaptureSource::open("audio-capture", CoreAudioCaptureOptions { device })?;

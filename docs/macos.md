@@ -25,8 +25,7 @@ Beside them a macOS build gets everything that is not a platform backend:
   / `VideoEncodeBin` with their `System` target only;
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
-It gets no screen or camera capture, no capture of what the system plays, no
-window or `VideoWindow`,
+It gets no screen or camera capture, no window or `VideoWindow`,
 no `Player`, and no GPU backend that works: `cuda` compiles but finds no
 driver, and `vulkan` is discussed below.
 
@@ -243,11 +242,16 @@ a breaking change: `MemoryDomain` and `ElementType` are not
     `open` and `open_gpu`;
   - camera: FFmpeg's `avfoundation` input device, the way
     `V4l2CaptureSource` wraps `video4linux2` — or AVFoundation directly;
-  - audio: Core Audio for devices — done, `CoreAudioCaptureSource`, which
-    waits inside `open` while macOS asks about the microphone; ScreenCaptureKit
-    audio or Core Audio process taps (macOS 14.2+) for the system's or one
-    application's sound, as `list_applications` / `open_application` offer
-    on Linux.
+  - audio: done, `CoreAudioCaptureSource` — devices directly, and what the
+    system or one application plays through a Core Audio process tap
+    (macOS 14.2+) with a private aggregate device, recorded through the same
+    AUHAL input path. A tap needs the "System Audio Recording" permission,
+    which macOS asks for only on behalf of an application whose `Info.plist`
+    has `NSAudioCaptureUsageDescription`: a command-line program inherits
+    whatever its terminal declares, and Claude Code declares none, so its
+    taps record silence and a check that sound arrives has to run as a
+    bundled application of its own. Taps hand over nothing while nothing
+    plays; the source makes that silence up.
   - Device listing is what obs-rs calls: `list_devices`, `list_formats`,
     `list_applications`/`list_processes`, each with an `is_default` where
     there is one.
@@ -290,9 +294,9 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    build finds (and this document). Fix `render_common` so the workspace
    builds.~~ Done.
 2. Audio first: a Core Audio renderer and capture source. They are the
-   smallest backend pieces, need no GPU, and make `Player` possible. Both
-   are done for devices; capturing what the system or one application plays,
-   through a Core Audio process tap (macOS 14.2+), is still to come.
+   smallest backend pieces, need no GPU, and make `Player` possible. Done:
+   devices, and what the system or one application plays through a Core
+   Audio process tap (macOS 14.2+).
 3. Capture in system memory: ScreenCaptureKit and the camera, feeding the
    software compositor. That is enough for obs-rs to show and record a
    screen, slowly.

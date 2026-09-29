@@ -128,18 +128,27 @@ compile error with no explanation.
   timestamps and latency rather than from what was handed over.
   `audio_playback` plays on macOS with it.
 
-- **`CoreAudioCaptureSource`: audio input capture on macOS**, behind the
-  new `coreaudio-capture` feature — a microphone, a line input, an
-  interface. `CoreAudioCaptureSource::list_devices` lists the devices with
-  input channels as the same `CoreAudioDevice`s the renderer lists, a
-  headset in both; `open` returns the device's own rate and channels,
-  32-bit float interleaved. As `PipeWireAudioCaptureSource` does, `pts`
-  counts what the device captured, so a pause costs nothing and a packet
-  dropped because downstream fell behind leaves its gap where it happened,
-  reported as `BusEvent::Dropped`; a pause stops the device and playing on
-  lets go of what it held. An unplugged device ends the source with
-  `DeviceGone`. Capturing what the system plays is not here yet.
-  `audio_capture` captures on macOS with `mic` or a device's name.
+- **`CoreAudioCaptureSource`: audio capture on macOS**, behind the new
+  `coreaudio-capture` feature, in the shape `WasapiCaptureSource` and
+  `PipeWireAudioCaptureSource` have: `list_devices` lists inputs and
+  outputs as `CoreAudioDevice`s whose `CoreAudioDeviceKind` says which, and
+  `open` records an input or captures what the system plays to an output;
+  `list_processes` and `open_process` capture what one application — and
+  the helpers it has started — plays, mixed to stereo. What is played is
+  captured through a Core Audio process tap and a private aggregate device,
+  macOS 14.2 and newer (`ProcessTapsUnsupported` before it, the functions
+  looked up rather than linked so older systems still start), and needs the
+  "System Audio Recording" permission of an application whose `Info.plist`
+  has `NSAudioCaptureUsageDescription`; without it a tap records silence.
+  `open` returns the device's own rate and channels, 32-bit float
+  interleaved. `pts` counts what the device captured, so a pause costs
+  nothing and a packet dropped because downstream fell behind leaves its gap
+  where it happened, reported as `BusEvent::Dropped`; a tap, which hands
+  over nothing while nothing plays, has its silence made up once it has
+  been quiet for 100 ms, and nothing inserted while it plays. An unplugged
+  input ends the source with `DeviceGone`. The renderer refuses an input
+  device with `NotAnOutputDevice`. `audio_capture` captures on macOS, the
+  system's sound by default.
 
 - **A `Produce` can have several outputs, and begin a segment.** It says
   what its pads are in `Produce::outputs` — one, named for it, by

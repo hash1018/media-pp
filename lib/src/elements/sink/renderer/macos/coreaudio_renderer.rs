@@ -30,7 +30,7 @@ use crate::{
     element::{Element, ElementType, Render, element_pp_log},
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
-    elements::{AudioFormat, CoreAudioDevice},
+    elements::{AudioFormat, CoreAudioDevice, CoreAudioDeviceKind},
     error::Result,
     platform::macos::coreaudio::{self, HalUnit, OsStatusError, Refcon},
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
@@ -83,6 +83,9 @@ pub enum CoreAudioRendererError {
     /// The device has nothing to play to.
     #[error("{0:?} has no output channels")]
     NoOutputChannels(String),
+    /// An input device was supplied where an output is required.
+    #[error("CoreAudioRenderer needs an output device, and {0:?} is an input")]
+    NotAnOutputDevice(String),
     /// The device runs at a rate, or with a number of channels, an
     /// [`AudioFormat`] cannot describe.
     #[error("{name:?} plays {channels} channel(s) at {rate}Hz, which cannot be rendered to")]
@@ -484,6 +487,9 @@ impl CoreAudioRenderer {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CoreAudioRenderer, &name, None);
         let device = options.device;
+        if device.kind != CoreAudioDeviceKind::Output {
+            return Err(CoreAudioRendererError::NotAnOutputDevice(device.name));
+        }
         let channels = coreaudio::output_channels(device.id)?;
         if channels == 0 {
             return Err(CoreAudioRendererError::NoOutputChannels(device.name));
@@ -1156,6 +1162,7 @@ mod tests {
             id: u32::MAX,
             uid: "gone".into(),
             name: "Gone".into(),
+            kind: CoreAudioDeviceKind::Output,
             is_default: false,
         };
         let Err(error) = CoreAudioRenderer::open("out", CoreAudioRendererOptions { device }) else {
@@ -1163,6 +1170,26 @@ mod tests {
         };
         assert!(
             matches!(error, CoreAudioRendererError::CoreAudio { status, .. } if status != 0),
+            "{error}"
+        );
+    }
+
+    /// An input device is refused by name before anything is opened: the
+    /// mistake is a construction error, not a device that never plays.
+    #[test]
+    fn an_input_device_is_refused_before_anything_is_opened() {
+        let device = CoreAudioDevice {
+            id: u32::MAX,
+            uid: "some-mic".into(),
+            name: "Some Mic".into(),
+            kind: CoreAudioDeviceKind::Input,
+            is_default: true,
+        };
+        let Err(error) = CoreAudioRenderer::open("out", CoreAudioRendererOptions { device }) else {
+            panic!("an input cannot be played to");
+        };
+        assert!(
+            matches!(&error, CoreAudioRendererError::NotAnOutputDevice(name) if name == "Some Mic"),
             "{error}"
         );
     }

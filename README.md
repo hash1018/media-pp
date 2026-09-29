@@ -119,7 +119,7 @@ a software decode goes into it with no `#[cfg]`.
   (window), `MfCaptureSource` (camera), `WasapiCaptureSource` (audio),
   `D3d11SharedTextureSource`. Linux — `PipeWireScreenCaptureSource`,
   `PipeWireAudioCaptureSource`, `V4l2CaptureSource`. macOS —
-  `CoreAudioCaptureSource` (audio input devices).
+  `CoreAudioCaptureSource` (audio).
 - **Audio**: `AudioMixer`, `AudioResampler`, `AudioVolume`, `AudioGate`,
   `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `AudioTempo`,
   `AudioWaveform`, `SwAudioEncoder`; playback through `WasapiRenderer`,
@@ -151,7 +151,7 @@ exist only where their feature is enabled.
 | `pipewire-audio-capture` | System, per-application and microphone audio capture | Linux |
 | `pipewire-audio-renderer` | Audio playback | Linux |
 | `v4l2-capture` | Camera capture through Video4Linux2 | Linux |
-| `coreaudio-capture` | Microphone and line-in capture | macOS |
+| `coreaudio-capture` | System, per-application and microphone audio capture; the first two need macOS 14.2 | macOS |
 | `coreaudio-renderer` | Audio playback | macOS |
 | `ort` | ONNX Runtime object detection (YOLOv8/v11 layout) | All |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
@@ -189,7 +189,7 @@ index of the windowed ones.
   Windows also long paths and a short target directory — see
   [`transcribe`](examples/core/transcribe/README.md).
 
-macOS has audio output (`coreaudio-renderer`) and input-device capture
+macOS has audio output (`coreaudio-renderer`) and capture
 (`coreaudio-capture`), and no screen capture or GPU backend yet — see
 [`docs/macos.md`](docs/macos.md). Building and testing are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).

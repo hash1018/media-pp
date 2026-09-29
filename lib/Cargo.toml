@@ -160,10 +160,24 @@ objc2-core-audio-types = { version = "0.3", optional = true, default-features = 
     "std",
     "CoreAudioBaseTypes",
 ] }
-# A device's name and UID come back as `CFString`s.
+# A device's name and UID come back as `CFString`s; an aggregate device is
+# described by a `CFDictionary`.
 objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
     "std",
+    "CFDictionary",
     "CFString",
+] }
+# A process tap is described by `CATapDescription`, an Objective-C class,
+# and its aggregate device by a dictionary made with Foundation's.
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSObject",
+    "NSString",
+    "NSUUID",
+    "NSValue",
 ] }
 
 # Every `unsafe` block in this crate states why it is sound. The rule is
@@ -282,12 +296,17 @@ coreaudio-renderer = [
     "dep:objc2-core-audio-types",
     "dep:objc2-core-foundation",
 ]
-# Audio capture on macOS, from a Core Audio input device.
+# Audio capture on macOS: an input device, or what the system or some of
+# its applications play, through a Core Audio process tap (macOS 14.2+).
 coreaudio-capture = [
+    "dep:objc2",
     "dep:objc2-audio-toolbox",
     "dep:objc2-core-audio",
     "dep:objc2-core-audio-types",
     "dep:objc2-core-foundation",
+    "dep:objc2-foundation",
+    "objc2-core-audio/objc2",
+    "objc2-core-audio/objc2-foundation",
 ]
 pipewire-screen-capture = [
     "dep:ashpd",
