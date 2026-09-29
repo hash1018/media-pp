@@ -9,7 +9,11 @@
 mod linux;
 #[cfg(all(
     target_os = "macos",
-    any(feature = "coreaudio-capture", feature = "avfoundation-capture")
+    any(
+        feature = "coreaudio-capture",
+        feature = "avfoundation-capture",
+        feature = "screencapturekit-capture"
+    )
 ))]
 mod macos;
 #[cfg(all(
@@ -34,7 +38,11 @@ mod windows;
 pub use linux::*;
 #[cfg(all(
     target_os = "macos",
-    any(feature = "coreaudio-capture", feature = "avfoundation-capture")
+    any(
+        feature = "coreaudio-capture",
+        feature = "avfoundation-capture",
+        feature = "screencapturekit-capture"
+    )
 ))]
 pub use macos::*;
 #[cfg(all(

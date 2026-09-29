@@ -235,6 +235,8 @@ pub enum ElementType {
     CoreAudioCaptureSource,
     /// macOS AVFoundation camera capture source.
     AvFoundationCaptureSource,
+    /// macOS ScreenCaptureKit display or window capture source.
+    ScreenCaptureKitSource,
     /// RTSP publishing muxer sink, one or more tracks to an external
     /// server.
     RtspMuxer,

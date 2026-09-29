@@ -10,7 +10,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     element::{Element, ElementType, Output, Transform, element_pp_log},
-    elements::{VideoToolboxDevice, filter::is_codec_drain_boundary},
+    elements::{VideoToolboxDevice, VideoToolboxFrameFormat, filter::is_codec_drain_boundary},
     error::Result,
     platform::{
         ffmpeg::AvBufferRef,
@@ -46,6 +46,11 @@ impl VideoToolboxCodec {
 pub struct VideoToolboxEncoderOptions {
     /// The bitstream to encode.
     pub codec: VideoToolboxCodec,
+    /// What the frames it is handed hold. BGRA is converted to YUV by
+    /// VideoToolbox itself, on the media engine, always with BT.709's
+    /// matrix at limited range — which is what the stream then says it
+    /// holds; see [`VideoToolboxEncoder::with_color`].
+    pub format: VideoToolboxFrameFormat,
     /// Encoded frame width in pixels.
     pub width: u32,
     /// Encoded frame height in pixels.
@@ -90,9 +95,24 @@ pub enum VideoToolboxEncoderError {
     #[error("VideoToolboxEncoder was handed a VideoToolbox frame with no frames context")]
     NoFramesContext,
 
-    /// The frame holds a layout other than NV12.
-    #[error("VideoToolboxEncoder encodes NV12 frames, got {0:?}")]
-    UnsupportedLayout(ffmpeg::format::Pixel),
+    /// The frame holds a layout other than the one the encoder was opened
+    /// for.
+    #[error("VideoToolboxEncoder was opened for {expected:?} frames, got {got:?}")]
+    UnsupportedLayout {
+        /// What [`VideoToolboxEncoderOptions::format`] says.
+        expected: ffmpeg::format::Pixel,
+        /// What the frame holds.
+        got: ffmpeg::format::Pixel,
+    },
+
+    /// [`VideoToolboxEncoder::with_color`] was asked to describe BGRA
+    /// input, whose YUV VideoToolbox makes itself — always BT.709 at limited
+    /// range, whatever the stream says.
+    #[error(
+        "VideoToolboxEncoder converts BGRA with BT.709 at limited range and says so; \
+         another colour description would misdescribe the stream"
+    )]
+    ColorOfBgra,
 
     /// A frame arrived with a `pts` but no unit to read it in — see
     /// [`crate::elements::SwEncoderError::NoTimeBase`].
@@ -127,8 +147,8 @@ pub enum VideoToolboxEncoderError {
     HwFramesRef,
 }
 
-/// Encodes NV12 VideoToolbox frames into `Packet`s with the Mac's hardware
-/// encoder, through FFmpeg's VideoToolbox encoders — the macOS counterpart
+/// Encodes NV12 or BGRA VideoToolbox frames into `Packet`s with the Mac's
+/// hardware encoder, through FFmpeg's VideoToolbox encoders — the macOS counterpart
 /// of `CudaEncoder` and `VideoToolboxEncoder`, and a `Filter` as they are.
 ///
 /// Fed by [`crate::elements::VideoToolboxDecoder`] this is a transcode that
@@ -157,6 +177,8 @@ struct Encoding {
     /// What the encoder was opened with: it reads the layout of its input
     /// from it.
     _hw_frames_ctx: AvBufferRef,
+    /// What its input holds.
+    format: VideoToolboxFrameFormat,
     width: u32,
     height: u32,
     /// Nominal frame duration in `time_base` ticks, which the encoder
@@ -200,6 +222,10 @@ impl VideoToolboxEncoder {
     /// As [`Self::new`], and the stream says `color` is what it holds —
     /// written into its headers, where every player finds it; nothing is
     /// converted.
+    ///
+    /// NV12 only: BGRA is converted by VideoToolbox with BT.709 at limited
+    /// range whatever the stream is told, so [`Self::new`] says that of it
+    /// and this refuses it with [`VideoToolboxEncoderError::ColorOfBgra`].
     pub fn with_color(
         name: impl Into<String>,
         device: &VideoToolboxDevice,
@@ -218,20 +244,30 @@ impl VideoToolboxEncoder {
     ) -> std::result::Result<Self, VideoToolboxEncoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoToolboxEncoder, &name, None);
+        // Measured: VideoToolbox makes YUV of RGB with BT.709's matrix at
+        // limited range, and goes on doing so whatever matrix or range the
+        // session is told — only the headers follow what it is told.
+        let color = match (options.format, color) {
+            (VideoToolboxFrameFormat::Nv12, color) => color,
+            (VideoToolboxFrameFormat::Bgra, None) => Some(ColorDescription::BT709_LIMITED),
+            (VideoToolboxFrameFormat::Bgra, Some(_)) => {
+                return Err(VideoToolboxEncoderError::ColorOfBgra);
+            }
+        };
 
         let encoder_name = options.codec.encoder_name();
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
             .ok_or(VideoToolboxEncoderError::CodecNotFound(encoder_name))?;
 
         // The encoder reads the layout of the pixel buffers it is handed from
-        // the frames context it is opened with — NV12 — and the pixel buffers
+        // the frames context it is opened with, and the pixel buffers
         // themselves from each frame.
         // SAFETY: `create_frames_ctx`'s contract is a live device context,
         // which the device's own reference is for the length of the call.
         let hw_frames_ctx = unsafe {
             create_frames_ctx(
                 &device.retain(),
-                ffmpeg::format::Pixel::NV12,
+                options.format.pixel(),
                 options.width,
                 options.height,
             )
@@ -273,10 +309,11 @@ impl VideoToolboxEncoder {
 
         pp_info!(
             pp_log: &pp_log,
-            "opened: {} {}x{}, {} bps, gop={}",
+            "opened: {} {}x{} from {:?}, {} bps, gop={}",
             encoder_name,
             options.width,
             options.height,
+            options.format,
             options.bit_rate,
             options.gop_size
         );
@@ -285,6 +322,7 @@ impl VideoToolboxEncoder {
             pp_log,
             encoder,
             _hw_frames_ctx: hw_frames_ctx,
+            format: options.format,
             width: options.width,
             height: options.height,
             packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
@@ -315,9 +353,12 @@ impl Encoding {
 
     fn encode(&mut self, frame: &ffmpeg::frame::Video, out: &mut Output) -> Result<()> {
         match sw_format_of(frame) {
-            Ok(ffmpeg::format::Pixel::NV12) => {}
-            Ok(other) => {
-                return Err(self.refused(VideoToolboxEncoderError::UnsupportedLayout(other)));
+            Ok(got) if got == self.format.pixel() => {}
+            Ok(got) => {
+                return Err(self.refused(VideoToolboxEncoderError::UnsupportedLayout {
+                    expected: self.format.pixel(),
+                    got,
+                }));
             }
             Err(NotVideoToolbox::Format(format)) => {
                 return Err(self.refused(VideoToolboxEncoderError::NotVideoToolbox(format)));
@@ -407,7 +448,7 @@ impl Transform for Encoding {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
-                .with_layouts(crate::contract::PixelLayoutSet::NV12),
+                .with_layouts(self.format.layouts()),
         )
     }
 
@@ -453,6 +494,7 @@ mod tests {
     fn options(codec: VideoToolboxCodec, width: u32, height: u32) -> VideoToolboxEncoderOptions {
         VideoToolboxEncoderOptions {
             codec,
+            format: VideoToolboxFrameFormat::Nv12,
             width,
             height,
             frame_rate: ffmpeg::Rational::new(30, 1),
@@ -578,6 +620,67 @@ mod tests {
         assert!(
             mean < 3.0,
             "the last picture decodes to what was sent: {mean}"
+        );
+    }
+
+    /// BGRA is made YUV on the media engine with BT.709 at limited range,
+    /// and the stream says so: red decodes to BT.709's red, tagged BT.709.
+    /// Describing it as anything else is refused before an encoder opens.
+    #[test]
+    fn bgra_encodes_as_bt709_at_limited_range() {
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        let bgra = VideoToolboxEncoderOptions {
+            format: VideoToolboxFrameFormat::Bgra,
+            ..options(VideoToolboxCodec::H264, width, height)
+        };
+        assert!(matches!(
+            VideoToolboxEncoder::with_color(
+                "encoder",
+                &device,
+                bgra,
+                ColorDescription::BT709_LIMITED
+            ),
+            Err(VideoToolboxEncoderError::ColorOfBgra)
+        ));
+        let mut encoder = match VideoToolboxEncoder::new("encoder", &device, bgra) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: no VideoToolbox H.264 encoder here ({error})");
+                return;
+            }
+        };
+        let packets = capture(&mut encoder);
+        let mut upload = VideoToolboxUpload::new("upload", &device);
+        let uploaded = capture(&mut upload);
+        let frames = 10;
+        for index in 0..frames {
+            let mut red = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+            for pixel in red.data_mut(0).chunks_mut(4) {
+                pixel.copy_from_slice(&[0, 0, 255, 255]);
+            }
+            red.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut red, ffmpeg::Rational::new(1, 30));
+            upload.consume(MediaBuffer::video(red)).unwrap();
+            let frame = uploaded.lock().unwrap().remove(0);
+            encoder.consume(frame).expect("BGRA encodes");
+        }
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos");
+
+        let packets = std::mem::take(&mut *packets.lock().unwrap());
+        let decoded = decode(encoder.parameters(), &packets);
+        assert_eq!(decoded.len(), frames as usize, "every frame came back");
+        let last = decoded.last().unwrap();
+        assert_eq!(last.color_space(), ffmpeg::color::Space::BT709);
+        assert_eq!(last.color_range(), ffmpeg::color::Range::MPEG);
+        // BT.709 red at limited range: 16 + 219 * 0.2126, and Cr at its top.
+        let (y, u, v) = (last.data(0)[0], last.data(1)[0], last.data(2)[0]);
+        assert!(
+            y.abs_diff(63) <= 3 && u.abs_diff(102) <= 3 && v.abs_diff(240) <= 3,
+            "{y} {u} {v}"
         );
     }
 

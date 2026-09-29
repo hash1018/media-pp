@@ -7,9 +7,14 @@ pub(crate) mod avfoundation;
 /// record through.
 #[cfg(any(feature = "coreaudio-renderer", feature = "coreaudio-capture"))]
 pub(crate) mod coreaudio;
-/// Core Video pixel buffers as frames — what a camera hands over.
-#[cfg(feature = "avfoundation-capture")]
+/// Core Video pixel buffers as frames — what a camera and a screen hand
+/// over.
+#[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]
 pub(crate) mod pixel_buffer;
+/// ScreenCaptureKit, for `ScreenCaptureKitSource`: the displays and windows
+/// there are, and whether this program may record them.
+#[cfg(feature = "screencapturekit-capture")]
+pub(crate) mod screencapturekit;
 /// VideoToolbox through FFmpeg: the context its decoders, encoders and
 /// frames are on.
 #[cfg(feature = "videotoolbox")]

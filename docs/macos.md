@@ -16,7 +16,9 @@ The macOS backend so far is audio — `CoreAudioRenderer` behind
 sharing their device listing and AUHAL unit in `platform/macos/coreaudio/` —
 VideoToolbox frames behind `videotoolbox`: decode, encode, upload and
 download, in `MemoryDomain::VideoToolbox`, and the bins' VideoToolbox arms —
-and the camera, `AvFoundationCaptureSource` behind `avfoundation-capture`.
+the camera, `AvFoundationCaptureSource` behind `avfoundation-capture` — and
+displays and windows, `ScreenCaptureKitSource` behind
+`screencapturekit-capture`.
 Beside them a macOS build gets everything that is not a platform backend:
 
 - the pipeline core, `FileDemuxer`, `RtspSource`, `AppSource`/`AppSink`, the
@@ -28,7 +30,7 @@ Beside them a macOS build gets everything that is not a platform backend:
   / `VideoEncodeBin` with their `System` target only;
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
-It gets no screen capture, no window or `VideoWindow`,
+It gets no window or `VideoWindow`,
 no `Player`, and no GPU compositing: `cuda` compiles but finds no driver,
 and `vulkan` is discussed below.
 
@@ -239,10 +241,19 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   and letting it go in `stopping`, on the source's own thread, and stopping
   it for a pause in `pausing`/`resuming`, as the Windows and Linux captures
   do:
-  - screen and window: ScreenCaptureKit (`SCStream` with an
-    `SCContentFilter` for a display or a window), in system memory and as
-    `IOSurface` frames on the device, as `PipeWireScreenCaptureSource` has
-    `open` and `open_gpu`;
+  - screen and window: done, `ScreenCaptureKitSource` — an `SCStream` with
+    an `SCContentFilter` for a display or a window, BGRA in sRGB, emitted
+    at a fixed rate as the other screen captures are, in system memory or,
+    with `videotoolbox`, ScreenCaptureKit's own `IOSurface` pixel buffers as
+    VideoToolbox frames — which `VideoToolboxEncoder` encodes as they are,
+    the media engine converting BGRA to BT.709 limited-range YUV itself
+    (only that: it ignores the matrix and range it is told). Windows are
+    listed from every Space, since an application in full screen has one of
+    its own. Screen Recording is granted in System Settings to an
+    application, by its code signature: an ad hoc signed check loses it
+    each time it is rebuilt, so a check runs as the child of a small
+    launcher bundle that is never rebuilt, whose permission its children
+    share;
   - camera: done, `AvFoundationCaptureSource` — AVFoundation directly, an
     `AVCaptureVideoDataOutput` asking for NV12 (`420v`), in system memory
     or, with `videotoolbox`, the camera's own pixel buffers as VideoToolbox
@@ -313,8 +324,9 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    Audio process tap (macOS 14.2+).
 3. Capture in system memory: ScreenCaptureKit and the camera, feeding the
    software compositor. That is enough for obs-rs to show and record a
-   screen, slowly. The camera is done, `AvFoundationCaptureSource`, and
-   already delivers VideoToolbox frames as well.
+   screen, slowly. Done — `ScreenCaptureKitSource` and
+   `AvFoundationCaptureSource` — and both already deliver VideoToolbox
+   frames as well, which the media engine encodes.
 4. The Metal device, VideoToolbox decode and encode, upload and download.
    Done without Metal, all through FFmpeg: `VideoToolboxDevice`,
    `VideoToolboxDecoder`, `VideoToolboxEncoder`, `VideoToolboxUpload`,

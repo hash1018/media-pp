@@ -82,6 +82,10 @@ pub use crate::platform::linux::pipewire::{
 };
 #[cfg(all(target_os = "macos", feature = "avfoundation-capture"))]
 pub use crate::platform::macos::avfoundation::{AvFoundationCaptureFormat, AvFoundationDevice};
+#[cfg(all(target_os = "macos", feature = "screencapturekit-capture"))]
+pub use crate::platform::macos::screencapturekit::{
+    ScreenCaptureKitDisplay, ScreenCaptureKitWindow,
+};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use crate::platform::macos::videotoolbox::{
     VideoToolboxDevice, VideoToolboxDeviceError, VideoToolboxFrameFormat,
@@ -236,6 +240,11 @@ pub use source::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
 pub use source::{
     PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,
+};
+#[cfg(all(target_os = "macos", feature = "screencapturekit-capture"))]
+pub use source::{
+    ScreenCaptureKitOptions, ScreenCaptureKitSource, ScreenCaptureKitSourceError,
+    ScreenCaptureKitTarget,
 };
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 pub use source::{V4l2CaptureOptions, V4l2CaptureSource, V4l2CaptureSourceError};

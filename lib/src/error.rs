@@ -725,6 +725,11 @@ pub enum Error {
     #[error(transparent)]
     AvFoundationCaptureSourceError(#[from] crate::elements::AvFoundationCaptureSourceError),
 
+    /// Display or window capture through ScreenCaptureKit failed.
+    #[cfg(all(target_os = "macos", feature = "screencapturekit-capture"))]
+    #[error(transparent)]
+    ScreenCaptureKitSourceError(#[from] crate::elements::ScreenCaptureKitSourceError),
+
     /// Core Audio capture failed.
     #[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
     #[error(transparent)]

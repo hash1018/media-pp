@@ -109,7 +109,7 @@ compile error with no explanation.
 - **`ElementType` has `CoreAudioRenderer` and `CoreAudioCaptureSource`
   variants**, for the macOS audio elements, `VideoToolboxDecoder`,
   `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload`,
-  and `AvFoundationCaptureSource` — see Added. A `match` on
+  `AvFoundationCaptureSource` and `ScreenCaptureKitSource` — see Added. A `match` on
   `ElementType` needs an arm for each.
 
 - **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
@@ -122,6 +122,26 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`ScreenCaptureKitSource`: display and window capture on macOS**,
+  behind the new `screencapturekit-capture` feature (macOS 12.3+), in the
+  shape `DxgiCaptureSource`, `WgcCaptureSource` and
+  `PipeWireScreenCaptureSource` have, one source for both:
+  `ScreenCaptureKitTarget::Display` or `Window`, from `list_displays`
+  (`ScreenCaptureKitDisplay`, its size in pixels) and `list_windows`
+  (`ScreenCaptureKitWindow`, an application's windows at the normal level,
+  on this Space or another). It emits BGRA at a fixed rate
+  (`ScreenCaptureKitOptions::frame_rate`, a `FrameRateHandle` at run time),
+  `pts` counting ticks, a tick with nothing new offering the picture it
+  already has without copying it; sRGB, full range, the pointer drawn where
+  `include_cursor` says. `open` copies into system memory, and with
+  `videotoolbox` `open_videotoolbox` hands on ScreenCaptureKit's own pixel
+  buffers as VideoToolbox frames, which `VideoToolboxEncoder` — and so
+  `VideoEncodeBin` — encodes on the media engine with nothing copied. A
+  window resized is scaled into the size it was opened at; one closed, or
+  a display gone, ends the source with `SourceGone`. Recording the screen
+  needs the user's permission, which `open` asks for, returning
+  `PermissionDenied` until it is given and the program started again.
 
 - **`AvFoundationCaptureSource`: camera capture on macOS**, behind the new
   `avfoundation-capture` feature, on AVFoundation directly and in the shape
@@ -164,18 +184,22 @@ compile error with no explanation.
 
 - **`VideoToolboxEncoder`, and the bins on VideoToolbox**: H.264 and H.265
   (`VideoToolboxCodec`) on the Mac's media engine through FFmpeg's
-  `h264_videotoolbox` and `hevc_videotoolbox`, from NV12 VideoToolbox
-  frames — a `VideoToolboxDecoder`'s or a `VideoToolboxUpload`'s — with
+  `h264_videotoolbox` and `hevc_videotoolbox`, from NV12 or BGRA
+  VideoToolbox frames (`VideoToolboxEncoderOptions::format`) — a
+  `VideoToolboxDecoder`'s, a `VideoToolboxUpload`'s or a capture's — with
   `VulkanEncoder`'s options and contract: opened eagerly, packets drained
   after each frame and at `Eos`, a CPU frame or another layout refused
   before anything is encoded. It reads each frame's own pixel buffer, so
-  it takes frames from any VideoToolbox element. `DecodeTarget::VideoToolbox`
+  it takes frames from any VideoToolbox element. BGRA the media engine
+  makes YUV itself, always with BT.709's matrix at limited range whatever
+  the session is told, so the stream says exactly that and `with_color`
+  refuses to say otherwise of BGRA (`ColorOfBgra`). `DecodeTarget::VideoToolbox`
   decodes on the media engine where the stream allows and otherwise in
   software through `VideoToolboxUpload`, as on the other targets, 10-bit
   among the latter; `EncodeInput::VideoToolbox`, whose frames are NV12 or
   BGRA (`VideoToolboxFrameFormat`, as `VulkanFrameFormat` is on Vulkan),
-  encodes NV12 with `h264_videotoolbox` and BGRA in software after a
-  `VideoToolboxDownload`. So `transcode` decodes and encodes a file on
+  encodes both with `h264_videotoolbox`, and in software after a
+  `VideoToolboxDownload` where it does not open. So `transcode` decodes and encodes a file on
   macOS without its pictures reaching the CPU: five seconds of 1080p in
   0.7 s on a MacBook Air, 0.07 s of it on the CPU.
 

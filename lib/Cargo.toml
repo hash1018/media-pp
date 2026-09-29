@@ -200,6 +200,27 @@ objc2-core-video = { version = "0.3", optional = true, default-features = false,
     "CVPixelBuffer",
     "CVReturn",
 ] }
+# A screen or a window, through ScreenCaptureKit: what there is to capture,
+# the stream, and the pixel buffers each picture arrives in, handed over on a
+# dispatch queue as the camera's are. Core Graphics says how many pixels a
+# display has, and whether this program may record the screen at all.
+objc2-screen-capture-kit = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+    "SCShareableContent",
+    "SCStream",
+] }
+objc2-core-graphics = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CGColorSpace",
+    "CGDirectDisplay",
+    "CGWindow",
+] }
 dispatch2 = { version = "0.3", optional = true }
 block2 = { version = "0.6", optional = true }
 # A process tap is described by `CATapDescription`, an Objective-C class,
@@ -334,6 +355,18 @@ avfoundation-capture = [
     "dep:objc2-core-media",
     "dep:objc2-core-video",
     "dep:objc2-foundation",
+]
+# A screen or a window on macOS, through ScreenCaptureKit (macOS 12.3+).
+screencapturekit-capture = [
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-graphics",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-foundation",
+    "dep:objc2-screen-capture-kit",
 ]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]

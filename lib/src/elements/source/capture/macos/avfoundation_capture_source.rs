@@ -128,7 +128,7 @@ pub enum AvFoundationCaptureSourceError {
 impl From<PixelBufferError> for AvFoundationCaptureSourceError {
     fn from(error: PixelBufferError) -> Self {
         match error {
-            PixelBufferError::NotNv12(code) => Self::NotNv12(code),
+            PixelBufferError::Unexpected(code) => Self::NotNv12(code),
             PixelBufferError::Lock(_) | PixelBufferError::Truncated => Self::Unreadable,
         }
     }
@@ -621,7 +621,7 @@ impl Capturing {
                 let mut frame = pool.get();
                 captured
                     .buffer
-                    .copy_nv12(&mut frame)
+                    .copy_to(&mut frame, ffmpeg::format::Pixel::NV12)
                     .map_err(AvFoundationCaptureSourceError::from)?;
                 frame.set_pts(Some(pts));
                 crate::buffer::set_time_base(&mut frame, self.format.time_base);

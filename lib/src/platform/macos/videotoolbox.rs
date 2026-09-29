@@ -87,15 +87,16 @@ impl VideoToolboxDevice {
 }
 
 /// What VideoToolbox frames hold, where an element has to be told — as
-/// [`crate::elements::EncodeInput::VideoToolbox`] is: the two layouts
-/// everything that makes VideoToolbox frames here puts out.
+/// [`crate::elements::EncodeInput::VideoToolbox`] and
+/// [`crate::elements::VideoToolboxEncoderOptions::format`] are: the two
+/// layouts everything that makes VideoToolbox frames here puts out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoToolboxFrameFormat {
     /// NV12: what `VideoToolboxDecoder` decodes to, and what the media
     /// engine's encoders take.
     Nv12,
     /// 8-bit BGRA, with alpha: what `VideoToolboxUpload` makes of a BGRA
-    /// frame.
+    /// frame, and what `ScreenCaptureKitSource` captures.
     Bgra,
 }
 
@@ -106,6 +107,14 @@ impl VideoToolboxFrameFormat {
             ffmpeg::format::Pixel::NV12 => Some(Self::Nv12),
             ffmpeg::format::Pixel::BGRA => Some(Self::Bgra),
             _ => None,
+        }
+    }
+
+    /// The layout as FFmpeg names it.
+    pub(crate) const fn pixel(self) -> ffmpeg::format::Pixel {
+        match self {
+            Self::Nv12 => ffmpeg::format::Pixel::NV12,
+            Self::Bgra => ffmpeg::format::Pixel::BGRA,
         }
     }
 

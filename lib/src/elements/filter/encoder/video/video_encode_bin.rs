@@ -255,8 +255,8 @@ impl EncodePath {
 /// - CUDA frames: `h264_nvenc`, then software.
 /// - Vulkan frames: `h264_vulkan` for NV12, then software; BGRA in software,
 ///   nothing on Vulkan here converting RGB to YUV yet.
-/// - VideoToolbox frames: `h264_videotoolbox` for NV12, then software; BGRA in
-///   software, as on Vulkan.
+/// - VideoToolbox frames: `h264_videotoolbox`, then software. BGRA too: the
+///   media engine converts it to YUV itself.
 /// - Frames in system memory: software.
 ///
 /// Software is `libx264` where this FFmpeg has it, and `libopenh264`, which
@@ -299,7 +299,8 @@ impl EncodePath {
 /// Every path says in the stream what its YUV is. From RGB, each converts
 /// with a matrix it can state: `h264_nvenc` with BT.601, limited range,
 /// which FFmpeg's wrapper writes into the stream by itself; the software
-/// path with swscale's default, the same; and `h264_mf`, which converts by
+/// path with swscale's default, the same; `h264_videotoolbox` with BT.709,
+/// limited range, which is all it converts with; and `h264_mf`, which converts by
 /// the picture's size and says nothing, is given NV12 its scaler made BT.709
 /// and told so. YUV frames are converted by nothing, and
 /// [`VideoEncodeOptions::color`] is what is written for them.
@@ -730,9 +731,10 @@ fn videotoolbox(
     options: VideoEncodeOptions,
     tried: &mut Tried<'_>,
 ) -> Result<Chosen> {
-    if format == VideoToolboxFrameFormat::Nv12 && tried.may(EncodePath::VideoToolbox) {
+    if tried.may(EncodePath::VideoToolbox) {
         let videotoolbox_options = VideoToolboxEncoderOptions {
             codec: VideoToolboxCodec::H264,
+            format,
             width: options.width,
             height: options.height,
             frame_rate: options.frame_rate,
@@ -741,11 +743,12 @@ fn videotoolbox(
             max_b_frames: options.max_b_frames,
         };
         let encoder = format!("{name}-encoder");
-        let opened = match options.color {
-            Some(color) => {
+        // From BGRA the encoder converts, and says what it converted to.
+        let opened = match (format, options.color) {
+            (VideoToolboxFrameFormat::Nv12, Some(color)) => {
                 VideoToolboxEncoder::with_color(&encoder, device, videotoolbox_options, color)
             }
-            None => VideoToolboxEncoder::new(&encoder, device, videotoolbox_options),
+            _ => VideoToolboxEncoder::new(&encoder, device, videotoolbox_options),
         };
         match opened {
             Ok(encoder) => return Ok(Chosen::of(EncodePath::VideoToolbox, Vec::new(), encoder)),
@@ -1452,9 +1455,9 @@ mod tests {
             assert!(EncodeInput::for_decoded(&target, None).is_none());
         }
 
-        /// BGRA and NV12 in pixel buffers play as red: NV12 on
-        /// `h264_videotoolbox` and in software, BGRA in software after its
-        /// download.
+        /// BGRA and NV12 in pixel buffers play as red, each on
+        /// `h264_videotoolbox` — BGRA converted by the media engine and said
+        /// to be BT.709 — and in software after its download.
         #[test]
         fn videotoolbox_frames_play_as_red_on_every_path() {
             let Some(device) = crate::test_support::try_videotoolbox_device() else {
@@ -1487,10 +1490,14 @@ mod tests {
                     };
                     let path = encodes_red(input, color, skip, frames);
                     eprintln!("{format:?}, passing over {skip:?}: {path:?}");
-                    if format == VideoToolboxFrameFormat::Bgra || !skip.is_empty() {
-                        assert!(!path.is_hardware(), "{format:?}: in software");
+                    if skip.is_empty() {
+                        assert_eq!(
+                            path,
+                            EncodePath::VideoToolbox,
+                            "{format:?} on the media engine"
+                        );
                     } else {
-                        assert_eq!(path, EncodePath::VideoToolbox, "NV12 on the media engine");
+                        assert!(!path.is_hardware(), "{format:?}: in software");
                     }
                 }
             }
