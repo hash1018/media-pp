@@ -13,11 +13,12 @@ use std::{ffi::c_void, ptr::NonNull};
 
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
+use objc2_io_surface::IOSurfaceRef;
 use objc2_metal::{
-    MTLBarrierScope, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLLibrary, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLStorageMode, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
+    MTLBarrierScope, MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandBufferStatus,
+    MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLOrigin, MTLPixelFormat, MTLRegion,
+    MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use thiserror::Error as ThisError;
 
@@ -175,6 +176,43 @@ impl MetalGpu {
             })
     }
 
+    /// A texture over the whole of `surface`, a surface of one plane, seen
+    /// as `format` — its pixels where they are, as [`Self::plane`] sees a
+    /// pixel buffer's.
+    pub(crate) fn surface(
+        &self,
+        surface: &IOSurfaceRef,
+        format: MTLPixelFormat,
+        usage: MTLTextureUsage,
+    ) -> Result<Texture, MetalError> {
+        let (width, height) = (surface.width() as u32, surface.height() as u32);
+        let descriptor = descriptor(format, width, height, usage);
+        self.device
+            .newTextureWithDescriptor_iosurface_plane(&descriptor, surface, 0)
+            .ok_or(MetalError::Texture {
+                width,
+                height,
+                format,
+            })
+    }
+
+    /// Copies the whole of `from` into `to`, which are the same size and
+    /// format, and waits for the GPU to have done it.
+    pub(crate) fn copy(&self, from: &Texture, to: &Texture) -> Result<(), MetalError> {
+        let commands = self
+            .queue
+            .commandBuffer()
+            .ok_or(MetalError::Unavailable("command buffer"))?;
+        let encoder = commands
+            .blitCommandEncoder()
+            .ok_or(MetalError::Unavailable("blit encoder"))?;
+        // SAFETY: both textures are live, the caller's, until this returns,
+        // which is after the GPU has finished with them.
+        unsafe { encoder.copyFromTexture_toTexture(from, to) };
+        encoder.endEncoding();
+        run(&commands)
+    }
+
     /// A command buffer with one compute encoder open on it, for one
     /// frame's work.
     pub(crate) fn pass(&self) -> Result<Pass, MetalError> {
@@ -271,18 +309,23 @@ impl Pass {
     /// returns, every texture written holds what the pass wrote.
     pub(crate) fn finish(self) -> Result<(), MetalError> {
         self.encoder.endEncoding();
-        self.commands.commit();
-        self.commands.waitUntilCompleted();
-        if self.commands.status() == MTLCommandBufferStatus::Completed {
-            return Ok(());
-        }
-        Err(MetalError::Execution(
-            self.commands
-                .error()
-                .map(|error| error.localizedDescription().to_string())
-                .unwrap_or_else(|| format!("status {:?}", self.commands.status())),
-        ))
+        run(&self.commands)
     }
+}
+
+/// Runs `commands` and waits for the GPU to finish them.
+fn run(commands: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<(), MetalError> {
+    commands.commit();
+    commands.waitUntilCompleted();
+    if commands.status() == MTLCommandBufferStatus::Completed {
+        return Ok(());
+    }
+    Err(MetalError::Execution(
+        commands
+            .error()
+            .map(|error| error.localizedDescription().to_string())
+            .unwrap_or_else(|| format!("status {:?}", commands.status())),
+    ))
 }
 
 /// Writes `pixels` into the whole of `texture`, `width` by `height` pixels

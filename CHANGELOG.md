@@ -125,6 +125,28 @@ compile error with no explanation.
 
 ### Added
 
+- **`MetalSharedTextureSource`: another producer's `IOSurface`s, as this
+  pipeline's own frames** (macOS, `metal`), the sibling of
+  `D3d11SharedTextureSource` with its shape:
+
+  ```rust
+  let (source, handle) = MetalSharedTextureSource::new("browser", &device, 1920, 1080, 2)?;
+  // ...from the producer's own callback, while the surface is its picture:
+  handle.push(&surface, None)?;
+  ```
+
+  Each surface pushed — a browser engine's accelerated paint, or one
+  another process sent, looked up from its Mach port — is copied with a
+  Metal blit into a pixel buffer of this source's own and sent downstream
+  as a BGRA VideoToolbox frame, since the producer draws its next picture
+  into the same surface. A surface of another size, or anything but BGRA,
+  is refused rather than adapted; the producer owes a finished picture,
+  not a submitted one. `try_push` drops a picture rather than stall a
+  producer the source's paused pipeline is not draining. New:
+  `MetalSharedTextureHandle`, `MetalSharedTextureSourceError`,
+  `Error::MetalSharedTextureSourceError` and
+  `ElementType::MetalSharedTextureSource`.
+
 - **`screen_record_av`, `screen_record_nvenc` and `screen_record_overlay`
   run on macOS**: the desktop and the output device's sound through
   `ScreenCaptureKitSource` and `CoreAudioCaptureSource`; ScreenCaptureKit's

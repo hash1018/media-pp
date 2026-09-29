@@ -72,6 +72,9 @@ pub enum ElementType {
     MfCaptureSource,
     /// Source for textures another D3D11 device shares in.
     D3d11SharedTextureSource,
+    /// macOS source for `IOSurface`s another producer shares in, copied
+    /// with Metal.
+    MetalSharedTextureSource,
     /// Linux V4L2 camera capture source.
     V4l2CaptureSource,
     /// Multi-input audio mixer source.

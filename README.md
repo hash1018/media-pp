@@ -123,7 +123,7 @@ a software decode goes into it with no `#[cfg]`.
   `D3d11SharedTextureSource`. Linux — `PipeWireScreenCaptureSource`,
   `PipeWireAudioCaptureSource`, `V4l2CaptureSource`. macOS —
   `ScreenCaptureKitSource` (screen or window), `AvFoundationCaptureSource`
-  (camera), `CoreAudioCaptureSource` (audio).
+  (camera), `CoreAudioCaptureSource` (audio), `MetalSharedTextureSource`.
 - **Audio**: `AudioMixer`, `AudioResampler`, `AudioVolume`, `AudioGate`,
   `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `AudioTempo`,
   `AudioWaveform`, `SwAudioEncoder`; playback through `WasapiRenderer`,
@@ -147,7 +147,7 @@ exist only where their feature is enabled.
 | `d3d12` | D3D12VA decode, scaling, upload/download and rendering | Windows |
 | `vulkan` | Vulkan Video decode and encode, compositing, upload/download; `VulkanWindowRenderer` on Linux | Linux, Windows |
 | `videotoolbox` | VideoToolbox decode and encode, upload/download | macOS |
-| `metal` | Scaling, converting, keying, colour effects and compositing on VideoToolbox frames with Metal, and `MetalWindowRenderer`, `VideoWindow` and, with `coreaudio-renderer`, `Player`; enables `videotoolbox` | macOS |
+| `metal` | Scaling, converting, keying, colour effects and compositing on VideoToolbox frames with Metal, `MetalSharedTextureSource`, and `MetalWindowRenderer`, `VideoWindow` and, with `coreaudio-renderer`, `Player`; enables `videotoolbox` | macOS |
 | `dxgi-capture` | Desktop capture; enables `d3d11` | Windows |
 | `wgc-capture` | Window capture through Windows Graphics Capture; enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |

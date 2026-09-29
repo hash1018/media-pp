@@ -388,6 +388,12 @@ pub enum Error {
     #[error(transparent)]
     MetalWindowRendererError(#[from] crate::elements::MetalWindowRendererError),
 
+    /// Copying a pushed `IOSurface` into a Metal shared-texture source
+    /// failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalSharedTextureSourceError(#[from] crate::elements::MetalSharedTextureSourceError),
+
     /// A Metal video compositor operation failed.
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[error(transparent)]

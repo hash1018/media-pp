@@ -117,4 +117,8 @@ pub use rtsp_source::{RtspSource, RtspSourceError};
 pub use shared_texture::{
     D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,
 };
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use shared_texture::{
+    MetalSharedTextureHandle, MetalSharedTextureSource, MetalSharedTextureSourceError,
+};
 pub use synthetic::{TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource};

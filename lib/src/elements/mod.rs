@@ -248,6 +248,7 @@ pub use source::{
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use source::{
+    MetalSharedTextureHandle, MetalSharedTextureSource, MetalSharedTextureSourceError,
     MetalTextLayerHandle, MetalVideoCompositor, MetalVideoCompositorError,
     MetalVideoCompositorHandle, MetalVideoCompositorInput, MetalVideoCompositorInputSink,
     MetalVideoLayerHandle,
