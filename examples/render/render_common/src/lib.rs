@@ -3,19 +3,18 @@
 //!
 //! Every example draws through one of the library's window renderers, in a
 //! window the renderer opens itself — `D3d11WindowRenderer` or
-//! `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux — and all
-//! of them report that window through the library's one `WindowEvents`, so
-//! [`stop_on_close`] and [`Shutdown`] are the same on both platforms. What
-//! fits a software decode to a renderer's input is the library's own,
-//! `SwScaler::if_needed`.
+//! `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux,
+//! `MetalWindowRenderer` on macOS — and all of them report that window
+//! through the library's one `WindowEvents`, so [`stop_on_close`] and
+//! [`Shutdown`] are the same on every platform. What fits a software decode
+//! to a renderer's input is the library's own, `SwScaler::if_needed`.
 //!
-//! On macOS there is no window renderer yet, so only [`Shutdown`] is here;
-//! `stop_on_close` follows once the library has one there.
+//! On macOS a window is the main thread's, so an example's `main` runs its
+//! work inside the library's `run_with_windows`; everything here then works
+//! as it does elsewhere.
 
 mod shutdown;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod window;
 
 pub use shutdown::Shutdown;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub use window::stop_on_close;

@@ -280,7 +280,8 @@ impl BusReceiver {
             target_os = "linux",
             feature = "vulkan",
             feature = "pipewire-audio-renderer"
-        )
+        ),
+        all(target_os = "macos", feature = "metal", feature = "coreaudio-renderer")
     ))]
     pub(crate) fn receiver(&self) -> &Receiver<BusMessage> {
         &self.rx

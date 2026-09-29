@@ -1,16 +1,21 @@
 //! Demux -> SwDecoder -> Queue -> Pacer -> VideoWindow: decodes a video file
 //! in system memory and presents it in a native window at real playback
 //! speed. `VideoWindow` is whichever window renderer the platform has —
-//! `D3d11WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux — with a
-//! GPU of its own; it uploads the decoded frames itself, and a `SwScaler`
-//! goes in front only for a stream it cannot draw as it comes. One program
-//! for both platforms, with no `#[cfg]` of its own.
+//! `D3d11WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux,
+//! `MetalWindowRenderer` on macOS — with a GPU of its own; it uploads the
+//! decoded frames itself, and a `SwScaler` goes in front only for a stream
+//! it cannot draw as it comes. One program for every platform; the one
+//! `#[cfg]` is macOS's `main`, which runs it beside the main thread's event
+//! loop.
 //!
 //!     cargo run -p sw_decode_render -- path/to/video.mp4
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} supports Windows, Linux and macOS only",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -18,7 +23,14 @@ fn main() -> impl std::process::Termination {
     example::run()
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(example::run)
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{

@@ -4,14 +4,16 @@
 //!
 //! Both platforms run the identical graph, terminal sinks, and CLI; only the
 //! GPU stack differs — `D3d11Upload`/`D3d11VideoCompositor`/`D3d11Download`
-//! on Windows, `CudaUpload`/`CudaVideoCompositor`/`CudaDownload` on Linux.
+//! on Windows, `CudaUpload`/`CudaVideoCompositor`/`CudaDownload` on Linux,
+//! `VideoToolboxUpload`/`MetalVideoCompositor`/`VideoToolboxDownload` and
+//! `MetalWindowRenderer` on macOS.
 //!
 //!     cargo run -p gpu_video_compositor -- [output.mp4] [seconds]
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} supports Windows (D3D11) and Linux (CUDA) only",
+        "{} supports Windows (D3D11), Linux (CUDA) and macOS (Metal) only",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -24,6 +26,13 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(macos_example::run)
 }
 
 #[cfg(target_os = "windows")]
@@ -446,6 +455,252 @@ mod linux_example {
                 let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
                 let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
+                let to_yuv = SwScaler::new(
+                    "to-yuv",
+                    ffmpeg::format::Pixel::YUV420P,
+                    output_width,
+                    output_height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let record_branch = ctx
+                    .branch()
+                    .queue("record", 4)
+                    .pipe(download)
+                    .pipe(to_yuv)
+                    .queue("encode-frames", 8)
+                    .pipe(encoder)
+                    .to(muxer_sink)?;
+
+                let tee_branch = ctx
+                    .tee("tee")
+                    .branch(render_branch)
+                    .branch(record_branch)
+                    .build()?;
+                ctx.attach(source, 0, tee_branch)?;
+                Ok(())
+            })?;
+
+        // Published before `run`, so a close that arrives from here on finds
+        // the pipelines to stop. `true` means one already did, and nothing
+        // has presented yet.
+        if shutdown.publish(&[
+            background_pipeline.clone(),
+            foreground_pipeline.clone(),
+            output_pipeline.clone(),
+        ]) {
+            return Ok(());
+        }
+
+        output_pipeline.run()?;
+        background_pipeline.run()?;
+        foreground_pipeline.run()?;
+
+        let steps = seconds.saturating_mul(30);
+        let travel = output_width - foreground_width;
+        for step in 0..steps {
+            // Closing the window ends the animation early rather than leaving
+            // it to run out the fixed duration with nothing to present to.
+            if shutdown.requested() {
+                break;
+            }
+            let x = if steps <= 1 {
+                0
+            } else {
+                (u64::from(travel) * step / (steps - 1)) as i32
+            };
+            foreground_handle.set_rect(VideoRect::new(
+                x,
+                output_height as i32 - foreground_height as i32,
+                foreground_width,
+                foreground_height,
+            ))?;
+            thread::sleep(Duration::from_millis(33));
+        }
+
+        background_pipeline.stop();
+        foreground_pipeline.stop();
+        output_pipeline.finish();
+
+        for pipeline in [&background_pipeline, &foreground_pipeline, &output_pipeline] {
+            for event in pipeline.bus().iter() {
+                if let BusEvent::Error { name, error, .. } = event {
+                    eprintln!("[{name}] error: {error}");
+                }
+            }
+        }
+
+        println!("wrote {path}");
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use std::{thread, time::Duration};
+
+    use media_pp::ffmpeg;
+    use media_pp::{
+        bus::BusEvent,
+        color::Color,
+        elements::{
+            FileMuxer, MetalVideoCompositor, MetalWindowRenderer, SwEncoder, SwEncoderOptions,
+            SwScaler, TestVideoOptions, TestVideoSource, VideoCodec, VideoCompositorOptions,
+            VideoFit, VideoLayer, VideoRect, VideoToolboxDevice, VideoToolboxDownload,
+            VideoToolboxFrameFormat, VideoToolboxUpload, WindowOptions,
+        },
+        pipeline::Pipeline,
+    };
+
+    pub(super) fn run() -> media_pp::Result<()> {
+        let path = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "gpu_video_compositor.mp4".into());
+        let seconds: u64 = std::env::args()
+            .nth(2)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5);
+
+        play(&path, seconds)
+    }
+
+    fn play(path: &str, seconds: u64) -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let output_width = 640;
+        let output_height = 360;
+
+        // Every input uploads into pixel buffers, the compositor draws them
+        // and into pixel buffers of its own with Metal, and the renderer
+        // draws those as they are: none belongs to a device, so the
+        // VideoToolbox context is only what the uploads and the compositor
+        // make their pools on.
+        let device = VideoToolboxDevice::new()?;
+        let (renderer, window) = MetalWindowRenderer::open(
+            "renderer",
+            WindowOptions {
+                title: "media-pp gpu_video_compositor".into(),
+                width: output_width,
+                height: output_height,
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
+        let frame_rate = ffmpeg::Rational::new(30, 1);
+        let (compositor, compositor_handle) = MetalVideoCompositor::with_format(
+            "compositor",
+            &device,
+            VideoCompositorOptions {
+                width: output_width,
+                height: output_height,
+                frame_rate,
+                background: Color::new(24, 24, 24),
+                background_alpha: 255,
+                mode: media_pp::elements::RenderMode::Live,
+            },
+            VideoToolboxFrameFormat::Nv12,
+        )?;
+
+        let mut background_layer =
+            VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
+        background_layer.fit = VideoFit::Cover;
+        let background_input = compositor_handle.add_source("background", background_layer)?;
+        let background_sink = background_input.sink;
+
+        let foreground_width = 192;
+        let foreground_height = 144;
+        let mut foreground_layer = VideoLayer::new(VideoRect::new(
+            0,
+            output_height as i32 - foreground_height as i32,
+            foreground_width,
+            foreground_height,
+        ));
+        foreground_layer.z_index = 1;
+        foreground_layer.opacity = 0.85;
+        foreground_layer.fit = VideoFit::Cover;
+        let foreground_input = compositor_handle.add_source("foreground", foreground_layer)?;
+        let foreground_sink = foreground_input.sink;
+        let foreground_handle = foreground_input.layer;
+
+        // TestVideoSource -> SwScaler(NV12) -> VideoToolboxUpload: the
+        // CPU->GPU bridge every compositor input needs (see
+        // MetalVideoCompositor's own docs — it only accepts VideoToolbox
+        // frames).
+        let background_source = TestVideoSource::new(
+            "background-source",
+            TestVideoOptions {
+                width: output_width,
+                height: output_height,
+                frame_rate,
+            },
+        );
+        let (background_pipeline, ()) =
+            Pipeline::new("background-input", background_source, |source, ctx| {
+                let scaler = SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    output_width,
+                    output_height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let upload = VideoToolboxUpload::new("upload", &device);
+                let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })?;
+
+        // A different size and frame rate proves compositor inputs are
+        // independent live pipelines, same as the CPU `video_compositor`
+        // example — each sink retains only its latest frame and the
+        // compositor emits on its own 30fps clock.
+        let foreground_source = TestVideoSource::new(
+            "foreground-source",
+            TestVideoOptions {
+                width: 320,
+                height: 240,
+                frame_rate: ffmpeg::Rational::new(15, 1),
+            },
+        );
+        let (foreground_pipeline, ()) =
+            Pipeline::new("foreground-input", foreground_source, |source, ctx| {
+                let scaler = SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    320,
+                    240,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let upload = VideoToolboxUpload::new("upload", &device);
+                let branch = ctx.branch().pipe(scaler).pipe(upload).to(foreground_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })?;
+
+        let encoder = SwEncoder::new(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: output_width,
+                height: output_height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
+                frame_rate,
+                bit_rate: 2_000_000,
+                gop_size: 60,
+                max_b_frames: None,
+            },
+        )?;
+        let mut muxer = FileMuxer::create(path)?;
+        let track = muxer.add_stream("video", &encoder)?;
+        let muxer_sink = muxer.open()?.take(track)?;
+
+        let (output_pipeline, ()) =
+            Pipeline::new("composited-output", compositor, |source, ctx| {
+                let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
+
+                let download = VideoToolboxDownload::new("download");
                 let to_yuv = SwScaler::new(
                     "to-yuv",
                     ffmpeg::format::Pixel::YUV420P,

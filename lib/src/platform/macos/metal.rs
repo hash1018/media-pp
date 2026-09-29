@@ -262,6 +262,11 @@ impl Pass {
         );
     }
 
+    /// Puts `drawable` on the screen once what was encoded has drawn it.
+    pub(crate) fn present(&self, drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable>) {
+        self.commands.presentDrawable(drawable);
+    }
+
     /// Runs what was encoded and waits for the GPU to finish it: once this
     /// returns, every texture written holds what the pass wrote.
     pub(crate) fn finish(self) -> Result<(), MetalError> {
@@ -280,13 +285,36 @@ impl Pass {
     }
 }
 
-/// Writes `pixels`, `width` bytes a row, into the whole of `texture`, a
-/// one-byte-a-pixel texture of that size in memory the CPU writes.
-pub(crate) fn fill_bytes(texture: &Texture, pixels: &[u8], width: u32, height: u32) {
-    debug_assert_eq!(pixels.len(), width as usize * height as usize);
-    // SAFETY: the texture is `width` by `height` of one byte a pixel, in
-    // shared memory, and `pixels` holds exactly that many bytes, tightly
-    // packed; no command buffer is using it while it is written.
+/// Writes `pixels` into the whole of `texture`, `width` by `height` pixels
+/// in memory the CPU writes, each row `bytes_per_row` apart in `pixels` —
+/// of which the texture's own row size is read.
+///
+/// # Panics
+///
+/// If `pixels` is shorter than `height` rows of `bytes_per_row`, the last
+/// one only as long as the texture's row: the caller has checked.
+pub(crate) fn write_texture(
+    texture: &Texture,
+    pixels: &[u8],
+    bytes_per_row: usize,
+    width: u32,
+    height: u32,
+) {
+    let texel = match texture.pixelFormat() {
+        MTLPixelFormat::RG8Unorm => 2,
+        MTLPixelFormat::BGRA8Unorm | MTLPixelFormat::RGBA8Unorm => 4,
+        _ => 1,
+    };
+    let row = width as usize * texel;
+    let needed = (height as usize).saturating_sub(1) * bytes_per_row + row;
+    assert!(
+        height == 0 || (bytes_per_row >= row && pixels.len() >= needed),
+        "{} bytes for {height} rows of {row} bytes, {bytes_per_row} apart",
+        pixels.len()
+    );
+    // SAFETY: the texture is `width` by `height` in shared memory, and
+    // `pixels` holds that many rows `bytes_per_row` apart — checked above;
+    // no command buffer is using it while it is written.
     unsafe {
         texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
             MTLRegion {
@@ -299,7 +327,7 @@ pub(crate) fn fill_bytes(texture: &Texture, pixels: &[u8], width: u32, height: u
             },
             0,
             NonNull::from(pixels).cast::<c_void>(),
-            width as usize,
+            bytes_per_row,
         );
     }
 }

@@ -5,7 +5,8 @@
 `Pipeline::seek` with them while the window is open — proves `seek` actually
 changes what's on screen, not just that it compiles. The same prompt also
 exposes `pause`/`resume`. The renderer — `D3d12WindowRenderer` on Windows,
-`VulkanWindowRenderer` on Linux — uploads the decoded frames itself, through a
+`VulkanWindowRenderer` on Linux, `MetalWindowRenderer` on macOS — uploads the
+decoded frames itself, through a
 `SwScaler` only for a stream it cannot draw as it comes.
 
 ```sh

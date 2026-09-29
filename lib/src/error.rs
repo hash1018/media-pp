@@ -53,7 +53,8 @@ use crate::elements::V4l2CaptureSourceError;
 use crate::elements::VideoDecodeBinError;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 use crate::elements::VideoWindowError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
@@ -231,7 +232,8 @@ pub enum Error {
             target_os = "linux",
             feature = "vulkan",
             feature = "pipewire-audio-renderer"
-        )
+        ),
+        all(target_os = "macos", feature = "metal", feature = "coreaudio-renderer")
     ))]
     #[error(transparent)]
     PlayerError(#[from] crate::player::PlayerError),
@@ -239,7 +241,8 @@ pub enum Error {
     /// A video window could not be opened.
     #[cfg(any(
         all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-        all(target_os = "linux", feature = "vulkan")
+        all(target_os = "linux", feature = "vulkan"),
+        all(target_os = "macos", feature = "metal")
     ))]
     #[error(transparent)]
     VideoWindowError(#[from] VideoWindowError),
@@ -359,6 +362,11 @@ pub enum Error {
     #[cfg(feature = "vulkan")]
     #[error(transparent)]
     VulkanDownloadError(#[from] crate::elements::VulkanDownloadError),
+
+    /// A Metal window renderer could not be set up, or could not draw.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalWindowRendererError(#[from] crate::elements::MetalWindowRendererError),
 
     /// A Metal video compositor operation failed.
     #[cfg(all(target_os = "macos", feature = "metal"))]

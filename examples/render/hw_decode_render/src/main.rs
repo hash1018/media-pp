@@ -9,7 +9,11 @@
 //! renderer's input — the renderer draws NV12 and BGRA, and the bin may hand
 //! on P010, or a layout it cannot name where the stream does not say. The
 //! check is asked of the two before they are linked, rather than the example
-//! knowing what each one takes.
+//! knowing what each one takes. macOS decodes onto VideoToolbox (the media
+//! engine, or `SwDecoder` and an upload) into `MetalWindowRenderer`'s own
+//! window, drawing each pixel buffer as it is; where the check refuses the
+//! bin's output — 10-bit, which it hands on as P010 — the frames are brought
+//! back and a `SwScaler` makes them what the renderer draws.
 //! Compare against `sw_decode_render`, which always decodes on the CPU.
 //!
 //! Which way the bin decodes, and why where it is software, is printed when
@@ -18,10 +22,10 @@
 //!
 //!     cargo run -p hw_decode_render -- path/to/video.mp4
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} example only supports Windows and Linux",
+        "{} example only supports Windows, Linux and macOS",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -34,6 +38,13 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(macos_example::run)
 }
 
 #[cfg(target_os = "windows")]
@@ -202,6 +213,97 @@ mod linux_example {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use media_pp::ffmpeg::media;
+    use media_pp::{
+        contract::check_elements,
+        elements::{
+            DecodeTarget, FileDemuxer, MetalWindowRenderer, Pacer, SwScaler, VideoDecodeBin,
+            VideoToolboxDevice, VideoToolboxDownload, WindowOptions,
+        },
+        pipeline::Pipeline,
+    };
+
+    const VIDEO_QUEUE_DEPTH: usize = 8;
+
+    pub(super) fn run() -> media_pp::Result<()> {
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: hw_decode_render <video.mp4>");
+            std::process::exit(1);
+        };
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let (source, _) = FileDemuxer::open("demux", &path)?;
+        let video = source.best(media::Type::Video)?;
+
+        // A pixel buffer belongs to no device, so the renderer draws what
+        // any VideoToolbox element makes; this is only the decoder's.
+        let device = VideoToolboxDevice::new()?;
+        let (renderer, window) = MetalWindowRenderer::open(
+            "renderer",
+            WindowOptions {
+                title: "media-pp hw_decode_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
+
+        let mut decoder = VideoDecodeBin::open(
+            "decoder",
+            video.parameters.clone(),
+            DecodeTarget::VideoToolbox { device },
+            None,
+        )?;
+        println!("decoding: {:?}", decoder.path());
+        let decoding = decoder.handle();
+        // Asked before linking rather than known: the renderer draws NV12
+        // and BGRA pixel buffers, and the bin may hand on what it does not —
+        // P010 for a 10-bit stream. Where the two do not fit, the frames come
+        // back to system memory and a scaler makes them what it draws.
+        let fits = check_elements(&mut decoder, &renderer);
+        let to_drawable = if fits.is_refused() {
+            println!("decoder and renderer: {fits}; converting in software");
+            Some((
+                VideoToolboxDownload::new("download"),
+                SwScaler::if_needed("to-drawable", &video.parameters, &renderer)?,
+            ))
+        } else {
+            None
+        };
+
+        let (pipeline, ()) = Pipeline::new("hw-decode-render", source, |source, ctx| {
+            let pacer = Pacer::new("pacer");
+            let mut chain = ctx.branch().pipe(decoder);
+            if let Some((download, scaler)) = to_drawable {
+                chain = chain.pipe(download);
+                if let Some(scaler) = scaler {
+                    chain = chain.pipe(scaler);
+                }
+            }
+            let branch = chain
+                .queue("frames", VIDEO_QUEUE_DEPTH)
+                .pipe(pacer)
+                .to(renderer)?;
+            ctx.attach(source, video.index, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        super::drain_bus(&pipeline);
+        println!("decoded: {:?}", decoding.path());
+        Ok(())
+    }
+}
+
 /// Prints what the bus says until the stream ends or fails, then stops.
 ///
 /// Errors no longer end the pipeline on their own (see `BusEvent`'s docs) —
@@ -209,7 +311,7 @@ mod linux_example {
 /// frozen last frame after a renderer failure. It stops on `Finished`, which
 /// the pipeline posts once every terminal has ended, rather than on the
 /// first `Eos` any element posts.
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn drain_bus(pipeline: &media_pp::pipeline::Pipeline) {
     use media_pp::bus::BusEvent;
 

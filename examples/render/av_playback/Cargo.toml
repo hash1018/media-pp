@@ -16,3 +16,6 @@ media-pp = { path = "../../../lib", features = [
     "vulkan",
     "pipewire-audio-renderer",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["metal", "coreaudio-renderer"] }

@@ -1,8 +1,8 @@
 //! TestVideoSource -> Queue -> Renderer: a synthetic moving-gradient stream,
 //! no file/camera/decoder involved at all, presented in a native window. The
 //! renderer — `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on
-//! Linux — draws the source's YUV420P as it comes and uploads it itself, in a
-//! window of its own. This proves the source, upload, and presentation path
+//! Linux, `MetalWindowRenderer` on macOS — draws the source's YUV420P as it
+//! comes and uploads it itself, in a window of its own. This proves the source, upload, and presentation path
 //! works end to end without needing a real video source.
 //!
 //! No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
@@ -15,9 +15,12 @@
 //!
 //!     cargo run -p test_video
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} supports Windows, Linux and macOS only",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -28,6 +31,13 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(macos_example::run)
 }
 
 #[cfg(target_os = "windows")]
@@ -125,6 +135,64 @@ mod linux_example {
         };
         let (width, height) = (options.width, options.height);
         let (renderer, window) = VulkanWindowRenderer::open("renderer", &gpu, options)?;
+        let shutdown = render_common::stop_on_close([window]);
+
+        let source = TestVideoSource::new(
+            "test-video",
+            TestVideoOptions {
+                width,
+                height,
+                ..TestVideoOptions::default()
+            },
+        );
+        let (pipeline, ()) = Pipeline::new("test-video", source, |source, ctx| {
+            let branch = ctx.branch().queue("frames", 8).to(renderer)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn drain_bus(pipeline: &Pipeline) {
+        for event in pipeline.bus().iter() {
+            println!("{event}");
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use media_pp::{
+        bus::BusEvent,
+        elements::{MetalWindowRenderer, TestVideoOptions, TestVideoSource, WindowOptions},
+        pipeline::Pipeline,
+    };
+
+    pub(super) fn run() -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        // Frames in system memory, which the renderer uploads itself: YUV420P
+        // as the source makes it, with nothing in between.
+        let options = WindowOptions {
+            title: "media-pp test_video".into(),
+            ..WindowOptions::default()
+        };
+        let (width, height) = (options.width, options.height);
+        let (renderer, window) = MetalWindowRenderer::open("renderer", options)?;
         let shutdown = render_common::stop_on_close([window]);
 
         let source = TestVideoSource::new(

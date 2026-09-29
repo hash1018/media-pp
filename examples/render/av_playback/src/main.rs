@@ -13,26 +13,32 @@
 //!     keyseek 30
 //!     q
 //!
-//! Both platforms hold the audio pad open with a dynamic `Tee` and run the same
-//! audio branch — `SwDecoder -> AudioResampler -> Queue -> renderer`
-//! (`WasapiRenderer` on Windows, `PipeWireAudioRenderer` on Linux). The video
-//! branches differ in more than backend types, because only one of them decodes
-//! on the GPU:
+//! Every platform holds the audio pad open with a dynamic `Tee` and runs the
+//! same audio branch — `SwDecoder -> AudioResampler -> Queue -> renderer`
+//! (`WasapiRenderer` on Windows, `PipeWireAudioRenderer` on Linux,
+//! `CoreAudioRenderer` on macOS). The video branches differ in more than
+//! backend types, because only some of them decode on the GPU:
 //!
 //!     Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
 //!              -> D3d12WindowRenderer
 //!     Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
 //!              -> VulkanWindowRenderer
+//!     macOS:   FileDemuxer -> VideoToolboxDecoder -> Queue
+//!              -> VideoSynchronizer -> MetalWindowRenderer
 //!
-//! The Linux branch is the one that never brings decoded pixels to the CPU:
-//! NVDEC keeps every frame in CUDA memory and the renderer copies it straight
-//! into Vulkan-owned memory. Windows decodes in system memory and the renderer
+//! The Linux and macOS branches never bring decoded pixels to the CPU: NVDEC
+//! keeps every frame in CUDA memory and the renderer copies it straight into
+//! Vulkan-owned memory; VideoToolbox decodes into pixel buffers the Metal
+//! renderer draws as they are. Windows decodes in system memory and the renderer
 //! uploads each frame itself — through a `SwScaler` after the synchronizer
 //! only for a stream it cannot draw as it comes.
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} supports Windows, Linux and macOS only",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -53,12 +59,23 @@ fn main() -> media_pp::Result<()> {
     linux_example::play(path)
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> media_pp::Result<()> {
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: av_playback <video-with-audio.mp4>");
+        std::process::exit(2);
+    };
+    media_pp::elements::run_with_windows(move || macos_example::play(path))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod shell;
 
 /// The parts of `play` that are the same on every backend: opening the file
 /// and locating the two streams it needs.
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod common {
     use media_pp::elements::FileDemuxer;
     use media_pp::ffmpeg::{codec::Parameters, media};
@@ -311,8 +328,113 @@ mod linux_example {
     }
 }
 
-/// The bus loop, identical on both backends.
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use media_pp::{
+        Error,
+        elements::{
+            AudioResampler, CoreAudioRenderer, CoreAudioRendererOptions, MetalWindowRenderer,
+            SwDecoder, TeeHandle, VideoSynchronizer, VideoToolboxDecoder, VideoToolboxDevice,
+            WindowOptions,
+        },
+        pipeline::Pipeline,
+    };
+
+    use crate::common;
+
+    /// Matches the `video-frames` queue below. VideoToolbox's pool grows as
+    /// frames are held, so this is a latency choice rather than a budget:
+    /// eight frames are about 266 ms at 30 fps, as on Linux.
+    const VIDEO_QUEUE_DEPTH: usize = 8;
+
+    pub fn play(path: String) -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+        let (source, streams) = common::open(&path)?;
+
+        // The decoder makes its pixel buffers on this context; the renderer
+        // draws them as they are, since a pixel buffer belongs to no device.
+        let device = VideoToolboxDevice::new()?;
+        let (renderer, window) = MetalWindowRenderer::open(
+            "video-renderer",
+            WindowOptions {
+                title: "media-pp A/V playback".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
+
+        let (pipeline, audio_tee_handle) =
+            Pipeline::new("av-playback", source, |source, context| {
+                let video_branch = context
+                    .branch()
+                    .pipe(VideoToolboxDecoder::new(
+                        "video-decoder",
+                        streams.video_params.clone(),
+                        &device,
+                    )?)
+                    .queue("video-frames", VIDEO_QUEUE_DEPTH)
+                    .pipe(VideoSynchronizer::new("video-sync"))
+                    .to(renderer)?;
+                context.attach(source, streams.video_index, video_branch)?;
+
+                let (audio_tee, handle) = context.tee("audio-tee").build_dynamic()?;
+                context.attach(source, streams.audio_index, audio_tee)?;
+                Ok(handle)
+            })?;
+
+        // Published before `run`, so a close that arrives from here on finds
+        // the pipeline to stop. `true` means one already did.
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        {
+            let pipeline = pipeline.clone();
+            let tee = audio_tee_handle.clone();
+            let params = streams.audio_params.clone();
+            std::thread::spawn(move || {
+                let attach_tee = tee.clone();
+                crate::shell::read_commands(pipeline.clone(), tee, "Core Audio", move || {
+                    attach_audio(&attach_tee, &params)
+                });
+            });
+        }
+
+        crate::drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn attach_audio(
+        audio_tee: &TeeHandle,
+        audio_params: &media_pp::ffmpeg::codec::Parameters,
+    ) -> media_pp::Result<media_pp::graph::BranchId> {
+        let device = CoreAudioRenderer::list_devices()?
+            .into_iter()
+            .find(|device| device.is_default)
+            .ok_or_else(|| Error::Other("no default Core Audio output device".into()))?;
+        let device_name = device.name.clone();
+        let (audio_renderer, output_format) =
+            CoreAudioRenderer::open("speakers", CoreAudioRendererOptions { device })?;
+
+        let branch = audio_tee
+            .branch()?
+            .pipe(SwDecoder::new("audio-decoder", audio_params.clone())?)
+            .pipe(AudioResampler::new("audio-resampler", output_format))
+            .queue("audio-output", 8)
+            .to(audio_renderer)?;
+        let branch_id = audio_tee.attach(branch)?;
+        println!("audio on: {device_name}; video is synchronized to played audio");
+        Ok(branch_id)
+    }
+}
+
+/// The bus loop, identical on every backend.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn drain_bus(pipeline: &media_pp::pipeline::Pipeline) {
     use media_pp::bus::BusEvent;
 

@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use thiserror::Error as ThisError;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use crate::elements::MetalWindowRenderer as Backend;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{D3d11Gpu as Gpu, D3d11WindowRenderer as Backend};
 #[cfg(all(target_os = "windows", feature = "d3d12", not(feature = "d3d11")))]
@@ -45,7 +47,10 @@ pub enum VideoWindowError {
 /// A terminal sink that shows video in a window of its own, on whichever
 /// renderer this platform has — `D3d11WindowRenderer` on Windows (or
 /// `D3d12WindowRenderer` in a build with only `d3d12`), `VulkanWindowRenderer`
-/// on Linux — with a GPU of its own to draw it with. The GStreamer
+/// on Linux, `MetalWindowRenderer` on macOS — with a GPU of its own to draw
+/// it with. On macOS a program that opens one runs inside
+/// [`crate::elements::run_with_windows`], as every window there is the main
+/// thread's. The GStreamer
 /// `autovideosink` of this crate: the one video sink a program can name
 /// without a `#[cfg]`.
 ///
@@ -83,15 +88,21 @@ impl VideoWindow {
                 height: options.height,
             });
         }
-        let gpu = Gpu::new().map_err(|error| VideoWindowError::Gpu(Box::new(error)))?;
-        Self::open_on(name, &gpu, options)
+        #[cfg(not(target_os = "macos"))]
+        {
+            let gpu = Gpu::new().map_err(|error| VideoWindowError::Gpu(Box::new(error)))?;
+            Self::open_on(name, &gpu, options)
+        }
+        #[cfg(target_os = "macos")]
+        Self::open_on(name, options)
     }
 
     /// [`Self::open`], on a GPU a decoder can put its pictures on too — and
     /// the [`DecodeTarget`](crate::elements::DecodeTarget) that puts them there, `downstream_hw_frames` being
     /// its surface budget. That is D3D11 on Windows (D3D12 in a build with
-    /// only `d3d12`), and CUDA on Linux where the build has `cuda` and the
-    /// machine an NVIDIA GPU; on Linux otherwise, system memory.
+    /// only `d3d12`), CUDA on Linux where the build has `cuda` and the
+    /// machine an NVIDIA GPU, on Linux otherwise system memory, and
+    /// VideoToolbox on macOS.
     ///
     /// Crate-private, and `Player`'s: a public form would be a choice of GPU
     /// handed back beside the window, which a program wiring its own
@@ -99,7 +110,8 @@ impl VideoWindow {
     /// chose — as this type's own docs say to.
     #[cfg(any(
         all(target_os = "windows", feature = "wasapi-renderer"),
-        all(target_os = "linux", feature = "pipewire-audio-renderer")
+        all(target_os = "linux", feature = "pipewire-audio-renderer"),
+        all(target_os = "macos", feature = "coreaudio-renderer")
     ))]
     pub(crate) fn open_for_decoding(
         name: impl Into<String>,
@@ -152,17 +164,35 @@ impl VideoWindow {
             let _ = downstream_hw_frames;
             (Gpu::new().map_err(gpu_error)?, DecodeTarget::System)
         };
-        let (window, events) = Self::open_on(name, &gpu, options)?;
-        Ok((window, events, target))
+        // VideoToolbox decodes on the media engine into pixel buffers the
+        // window draws as they are; its pool grows, so it takes no budget.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = downstream_hw_frames;
+            let device = crate::elements::VideoToolboxDevice::new().map_err(gpu_error)?;
+            let (window, events) = Self::open_on(name, options)?;
+            Ok((window, events, DecodeTarget::VideoToolbox { device }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (window, events) = Self::open_on(name, &gpu, options)?;
+            Ok((window, events, target))
+        }
     }
 
     fn open_on(
         name: impl Into<String>,
-        gpu: &Gpu,
+        #[cfg(not(target_os = "macos"))] gpu: &Gpu,
         options: WindowOptions,
     ) -> std::result::Result<(Self, WindowEvents), VideoWindowError> {
-        let (renderer, events) = Backend::open(name, gpu, options)
-            .map_err(|error| VideoWindowError::Window(Box::new(error)))?;
+        // Metal draws with a GPU of the renderer's own: a pixel buffer
+        // belongs to no device, so there is none to share.
+        #[cfg(target_os = "macos")]
+        let opened = Backend::open(name, options);
+        #[cfg(not(target_os = "macos"))]
+        let opened = Backend::open(name, gpu, options);
+        let (renderer, events) =
+            opened.map_err(|error| VideoWindowError::Window(Box::new(error)))?;
         let control = renderer.window_control().ok_or_else(|| {
             VideoWindowError::Window("the renderer opened no window of its own".into())
         })?;

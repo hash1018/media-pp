@@ -11,15 +11,16 @@
 //! but the encoder and decoder add their own buffering and per-frame
 //! variance; this particular chain has not been validated without the
 //! final clock-anchored pacing stage. The renderer — `D3d12WindowRenderer` on
-//! Windows, `VulkanWindowRenderer` on Linux — comes straight after the
+//! Windows, `VulkanWindowRenderer` on Linux, `MetalWindowRenderer` on macOS —
+//! comes straight after the
 //! `Pacer`, drawing the decoded YUV420P as it comes and uploading it itself.
 //!
 //!     cargo run -p transcode_render
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} example only supports Windows and Linux",
+        "{} example only supports Windows, Linux and macOS",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -32,6 +33,13 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(macos_example::run)
 }
 
 #[cfg(target_os = "windows")]
@@ -156,6 +164,89 @@ mod linux_example {
         };
         let (width, height) = (window_options.width, window_options.height);
         let (renderer, window) = VulkanWindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
+
+        let options = TestVideoOptions {
+            width,
+            height,
+            ..TestVideoOptions::default()
+        };
+        let source = TestVideoSource::new("test-video", options);
+
+        let (pipeline, ()) = Pipeline::new("transcode-render", source, |source, ctx| {
+            let encoder = SwEncoder::new(
+                "encoder",
+                SwEncoderOptions {
+                    codec: VideoCodec::OpenH264,
+                    width,
+                    height,
+                    pixel_format: ffmpeg::format::Pixel::YUV420P,
+                    frame_rate: options.frame_rate,
+                    bit_rate: 2_000_000,
+                    gop_size: 60,
+                    max_b_frames: None,
+                },
+            )?;
+            let decoder = SwDecoder::new("decoder", encoder.parameters())?;
+            let branch = ctx
+                .branch()
+                .queue("to-encode", 8)
+                .pipe(encoder)
+                .queue("to-decode", 8)
+                .pipe(decoder)
+                .queue("frames", 8)
+                .pipe(Pacer::new("pacer"))
+                .to(renderer)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn drain_bus(pipeline: &Pipeline) {
+        for event in pipeline.bus().iter() {
+            println!("{event}");
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use media_pp::{
+        bus::BusEvent,
+        elements::{
+            MetalWindowRenderer, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions,
+            TestVideoSource, VideoCodec, WindowOptions,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+
+    pub(super) fn run() -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        // OpenH264 decodes to YUV420P, which the renderer draws as it comes
+        // and uploads itself.
+        let window_options = WindowOptions {
+            title: "media-pp transcode_render".into(),
+            ..WindowOptions::default()
+        };
+        let (width, height) = (window_options.width, window_options.height);
+        let (renderer, window) = MetalWindowRenderer::open("renderer", window_options)?;
         let shutdown = render_common::stop_on_close([window]);
 
         let options = TestVideoOptions {

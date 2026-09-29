@@ -227,6 +227,8 @@ objc2-core-graphics = { version = "0.3", optional = true, default-features = fal
 # VideoToolbox frames.
 objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
     "std",
+    "block2",
+    "objc2-core-foundation",
     "objc2-io-surface",
     "MTLAllocation",
     "MTLCommandBuffer",
@@ -235,12 +237,39 @@ objc2-metal = { version = "0.3", optional = true, default-features = false, feat
     "MTLComputeCommandEncoder",
     "MTLComputePipeline",
     "MTLDevice",
+    "MTLDrawable",
     "MTLLibrary",
     "MTLPixelFormat",
     "MTLResource",
     "MTLTexture",
     "MTLTypes",
 ] }
+# A window of `MetalWindowRenderer`'s own: AppKit's application, window and
+# view, and the `CAMetalLayer` it is drawn through — and an application's
+# window given as a `raw-window-handle`.
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "objc2-quartz-core",
+    "NSApplication",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSView",
+    "NSWindow",
+] }
+objc2-quartz-core = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-metal",
+    "CABase",
+    "CALayer",
+    "CAMetalLayer",
+] }
+raw-window-handle = { version = "0.6", optional = true, features = ["std"] }
 objc2-io-surface = { version = "0.3", optional = true, default-features = false, features = [
     "std",
     "objc2",
@@ -270,6 +299,12 @@ objc2-foundation = { version = "0.3", optional = true, default-features = false,
 # wrappers whose `count` no type constrained.
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# Opens real windows, which AppKit serves only from the main thread's event
+# loop — a loop the test harness does not run — so it has a `main` of its own.
+[[test]]
+name = "metal_window"
+harness = false
 
 [features]
 # CUDA-resident decode and rendering. FFmpeg owns the CUDA context and the
@@ -405,7 +440,13 @@ videotoolbox = []
 # the GPU without a copy.
 metal = [
     "videotoolbox",
+    "dep:block2",
+    "dep:dispatch2",
     "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-core-graphics",
+    "dep:objc2-quartz-core",
+    "dep:raw-window-handle",
     "dep:objc2-core-foundation",
     "dep:objc2-core-video",
     "dep:objc2-foundation",

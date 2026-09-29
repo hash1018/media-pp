@@ -329,7 +329,8 @@ mod test_support;
         target_os = "linux",
         feature = "vulkan",
         feature = "pipewire-audio-renderer"
-    )
+    ),
+    all(target_os = "macos", feature = "metal", feature = "coreaudio-renderer")
 ))]
 pub use app::player;
 pub use core::diagnostics::{log, pp_log, stats};

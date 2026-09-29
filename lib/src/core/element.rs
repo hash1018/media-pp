@@ -233,6 +233,9 @@ pub enum ElementType {
     WasapiRenderer,
     /// macOS Core Audio renderer sink.
     CoreAudioRenderer,
+    /// macOS Metal video renderer sink, drawing into a window of its own or
+    /// one it was given.
+    MetalWindowRenderer,
     /// macOS Core Audio input device capture source.
     CoreAudioCaptureSource,
     /// macOS AVFoundation camera capture source.

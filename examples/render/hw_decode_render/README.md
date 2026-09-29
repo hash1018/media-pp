@@ -13,6 +13,13 @@ presents the frames in a native window at real playback speed.
   and the bin may hand on P010, or a layout it cannot name where the stream
   does not say — a `CudaConverter` to NV12 goes between them:
   `Demux -> VideoDecodeBin -> CudaConverter -> Queue -> Pacer -> Renderer`.
+- macOS decodes onto VideoToolbox — the media engine, or `SwDecoder` and an
+  upload — and draws each pixel buffer as it is in `MetalWindowRenderer`'s
+  own window. Where `check_elements` refuses the bin's output, the frames
+  come back to system memory and a `SwScaler` makes them what the renderer
+  draws: `Demux -> VideoDecodeBin -> VideoToolboxDownload -> SwScaler ->
+  Queue -> Pacer -> Renderer`. For a 10-bit stream the bin does this itself,
+  converting before its upload.
 
 Which way the bin decodes, and why where it is software, is printed when it
 is opened (`decoding: ...`) and again when playback ends (`decoded: ...`),

@@ -14,7 +14,8 @@ itself is already paced accurately enough for direct rendering, but the
 encoder and decoder add their own buffering and per-frame variance; this
 particular chain has not been validated without the final clock-anchored
 pacing stage. The renderer — `D3d12WindowRenderer` on Windows,
-`VulkanWindowRenderer` on Linux — comes straight after the `Pacer`, drawing
+`VulkanWindowRenderer` on Linux, `MetalWindowRenderer` on macOS — comes
+straight after the `Pacer`, drawing
 the decoded YUV420P as it comes and uploading it itself.
 
 ```sh

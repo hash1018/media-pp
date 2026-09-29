@@ -1,7 +1,7 @@
-//! Ending the work when a renderer's own window is closed — the same on both
-//! platforms, since `D3d11WindowRenderer`, `D3d12WindowRenderer` and
-//! `VulkanWindowRenderer` all report their window through the library's one
-//! `WindowEvents`.
+//! Ending the work when a renderer's own window is closed — the same on
+//! every platform, since `D3d11WindowRenderer`, `D3d12WindowRenderer`,
+//! `VulkanWindowRenderer` and `MetalWindowRenderer` all report their window
+//! through the library's one `WindowEvents`.
 
 use std::{sync::Arc, thread};
 

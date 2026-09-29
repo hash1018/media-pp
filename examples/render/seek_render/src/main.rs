@@ -2,17 +2,17 @@
 //! `sw_decode_render`, plus a terminal prompt that reads timestamps and calls
 //! `Pipeline::seek` with them while the window is open — proves `seek`
 //! actually changes what's on screen, not just that it compiles. The renderer
-//! — `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux —
-//! uploads the decoded frames itself, through a `SwScaler` only for a stream
+//! — `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux,
+//! `MetalWindowRenderer` on macOS — uploads the decoded frames itself, through a `SwScaler` only for a stream
 //! it cannot draw as it comes.
 //!
 //!     cargo run -p seek_render -- path/to/video.mp4
 //!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} example only supports Windows and Linux",
+        "{} example only supports Windows, Linux and macOS",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -25,6 +25,13 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(macos_example::run)
 }
 
 #[cfg(target_os = "windows")]
@@ -217,6 +224,144 @@ mod linux_example {
         let (renderer, window) = VulkanWindowRenderer::open(
             "renderer",
             &gpu,
+            WindowOptions {
+                title: "media-pp seek_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
+        let to_drawable =
+            media_pp::elements::SwScaler::if_needed("to-drawable", &params, &renderer)?;
+
+        let (pipeline, ()) = Pipeline::new("seek-render", source, |source, ctx| {
+            let mut branch = ctx
+                .branch()
+                .pipe(SwDecoder::new("decoder", params)?)
+                .queue("frames", 32)
+                .pipe(Pacer::new("pacer"));
+            if let Some(to_drawable) = to_drawable {
+                branch = branch.pipe(to_drawable);
+            }
+            ctx.attach(source, video.index, branch.to(renderer)?)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        {
+            let pipeline = pipeline.clone();
+            thread::spawn(move || read_seek_commands(&pipeline));
+        }
+        drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn drain_bus(pipeline: &Pipeline) {
+        for event in pipeline.bus().iter() {
+            println!("{event}");
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
+    }
+
+    fn read_seek_commands(pipeline: &Pipeline) {
+        print_help();
+        for line in io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.eq_ignore_ascii_case("q") {
+                pipeline.stop();
+                break;
+            }
+            if line.eq_ignore_ascii_case("pause") {
+                pipeline.pause();
+                println!("paused");
+                continue;
+            }
+            if line.eq_ignore_ascii_case("resume") {
+                pipeline.resume();
+                println!("resumed");
+                continue;
+            }
+            if line.eq_ignore_ascii_case("help") {
+                print_help();
+                continue;
+            }
+            let value = line.strip_prefix("seek ").unwrap_or(line).trim();
+            match parse_timestamp(value) {
+                Some(target) => {
+                    println!("seeking to {target:.2?}...");
+                    if let Err(error) = pipeline.seek(target, SeekMode::Accurate) {
+                        eprintln!("seek rejected: {error}");
+                    }
+                }
+                None => eprintln!("couldn't parse {line:?} — use seconds (`30`) or mm:ss (`1:15`)"),
+            }
+        }
+    }
+
+    fn print_help() {
+        println!("commands:");
+        println!("  pause             pause playback");
+        println!("  resume            resume playback");
+        println!("  seek <seconds>    seek, for example `seek 30` or `seek 1:15`");
+        println!("  help              print this help");
+        println!("  q                 stop playback");
+    }
+
+    fn parse_timestamp(value: &str) -> Option<Duration> {
+        let seconds = match value.split_once(':') {
+            Some((minutes, seconds)) => {
+                minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?
+            }
+            None => value.parse::<f64>().ok()?,
+        };
+        if seconds.is_finite() && seconds >= 0.0 {
+            Some(Duration::from_secs_f64(seconds))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use std::{
+        io::{self, BufRead},
+        thread,
+        time::Duration,
+    };
+
+    use media_pp::ffmpeg::media;
+    use media_pp::{
+        bus::BusEvent,
+        elements::{FileDemuxer, MetalWindowRenderer, Pacer, SwDecoder, WindowOptions},
+        pipeline::{Pipeline, SeekMode},
+    };
+
+    pub(super) fn run() -> media_pp::Result<()> {
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: seek_render <video.mp4>");
+            std::process::exit(1);
+        };
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let (source, _) = FileDemuxer::open("demux", &path)?;
+        let video = source.best(media::Type::Video)?;
+        let params = video.parameters.clone();
+        let (renderer, window) = MetalWindowRenderer::open(
+            "renderer",
             WindowOptions {
                 title: "media-pp seek_render".into(),
                 ..WindowOptions::default()

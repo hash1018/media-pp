@@ -40,7 +40,7 @@ use crate::{
     platform::{
         ffmpeg::AvBufferRef,
         macos::{
-            metal::{Kernel, MetalError, MetalGpu, Pass, Texture, fill_bytes},
+            metal::{Kernel, MetalError, MetalGpu, Pass, Texture, write_texture},
             pixel_buffer::PixelBuffer,
             videotoolbox::{NotVideoToolbox, create_frames_ctx, sw_format_of},
         },
@@ -1244,7 +1244,13 @@ impl Compositing {
                             read,
                             true,
                         )?;
-                        fill_bytes(&texture, &mask.coverage, mask.width, mask.height);
+                        write_texture(
+                            &texture,
+                            &mask.coverage,
+                            mask.width as usize,
+                            mask.width,
+                            mask.height,
+                        );
                         self.masks.insert(key, texture);
                     }
                     vec![self.masks[&key].clone()]

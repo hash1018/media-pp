@@ -13,13 +13,17 @@
 //! speed and R turns round at the same speed, the up and down arrows turn
 //! the volume, M mutes, F or a double click fills the screen, Escape or
 //! closing the window stops; the title shows where playback is. One program
-//! for Windows and Linux.
+//! for Windows, Linux and macOS — where the window is the main thread's, so
+//! the player runs beside it, inside `run_with_windows`.
 //!
 //!     cargo run -p player -- path/to/video.mp4
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} supports Windows, Linux and macOS only",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -27,7 +31,14 @@ fn main() -> impl std::process::Termination {
     example::run()
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(example::run)
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod example {
     use std::time::Duration;
 

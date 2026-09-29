@@ -12,8 +12,11 @@ the CPU until the recording branch's download.
 - Linux: `CudaUpload` -> `CudaVideoCompositor` -> `VulkanWindowRenderer`,
   drawing the CUDA frames on a `VulkanGpu` made for that CUDA device /
   `CudaDownload`
+- macOS: `VideoToolboxUpload` -> `MetalVideoCompositor` ->
+  `MetalWindowRenderer`, drawing the compositor's pixel buffers as they are /
+  `VideoToolboxDownload`
 
-Both platforms run the same graph, layer settings and CLI — the foreground at
+Every platform runs the same graph, layer settings and CLI — the foreground at
 0.85 opacity with `VideoFit::Cover`. On CUDA those two are why the compositor
 scales with libavfilter's `scale_cuda` but crops by copy and blends with its
 own kernel: no CUDA filter there can crop or blend.

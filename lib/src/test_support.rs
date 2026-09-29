@@ -221,7 +221,8 @@ pub(crate) fn try_test_video() -> Option<String> {
         target_os = "linux",
         feature = "vulkan",
         feature = "pipewire-audio-renderer"
-    )
+    ),
+    all(target_os = "macos", feature = "metal", feature = "coreaudio-renderer")
 ))]
 pub(crate) fn try_test_sound() -> Option<String> {
     static SYNTHESIZED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -248,7 +249,8 @@ pub(crate) fn try_test_sound() -> Option<String> {
         target_os = "linux",
         feature = "vulkan",
         feature = "pipewire-audio-renderer"
-    )
+    ),
+    all(target_os = "macos", feature = "metal", feature = "coreaudio-renderer")
 ))]
 fn build_sound(
     name: &str,

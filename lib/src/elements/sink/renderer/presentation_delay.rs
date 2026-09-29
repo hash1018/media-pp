@@ -82,7 +82,9 @@ impl PresentationDelay {
     }
 
     /// Forgets what was measured, for a swap chain that may present
-    /// differently — full screen may skip the compositor.
+    /// differently — full screen may skip the compositor. A Metal layer has
+    /// no swap chain to remake.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) fn restart(&mut self) {
         self.samples.clear();
         self.since = 0;

@@ -5,6 +5,8 @@
 //! - Windows window: `WgcCaptureSource -> Queue -> D3d11WindowRenderer`
 //! - Linux: `PipeWireScreenCaptureSource(GPU) -> Queue ->
 //!   VulkanWindowRenderer`, drawing the capture's CUDA BGRA as it comes
+//! - macOS: `ScreenCaptureKitSource(VideoToolbox) -> Queue ->
+//!   MetalWindowRenderer`, drawing ScreenCaptureKit's own pixel buffers
 //!
 //! `WgcCaptureSource` deliberately takes only an `HWND` and shows no picker
 //! of its own (see its docs); on Windows, `wgc` with no `HWND` argument lists
@@ -14,12 +16,13 @@
 //! cargo run -p screen_preview_gpu -- dxgi
 //! cargo run -p screen_preview_gpu -- wgc [<HWND>] # Windows
 //! cargo run -p screen_preview_gpu -- [monitor|window] [restore-token] # Linux
+//! cargo run -p screen_preview_gpu -- [monitor|window] # macOS
 //! ```
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} supports Windows (DXGI) and Linux (PipeWire) only",
+        "{} supports Windows (DXGI), Linux (PipeWire) and macOS (ScreenCaptureKit) only",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -32,6 +35,13 @@ fn main() -> impl std::process::Termination {
 #[cfg(target_os = "linux")]
 fn main() -> impl std::process::Termination {
     linux_example::run()
+}
+
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the example runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    media_pp::elements::run_with_windows(macos_example::run)
 }
 
 #[cfg(target_os = "windows")]
@@ -445,6 +455,103 @@ mod linux_example {
                 }
             ),
             None => println!("the compositor issued no restore token; the next run will prompt"),
+        }
+        Ok(())
+    }
+}
+
+/// The macOS half: `ScreenCaptureKitSource` — the main display, or with
+/// `window` the frontmost window with a title — into `MetalWindowRenderer`.
+/// macOS asks once for the permission to record the screen, given in System
+/// Settings to the terminal this runs in, which then has to be started again.
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use media_pp::{
+        bus::BusEvent,
+        element::ElementType,
+        elements::{
+            MetalWindowRenderer, ScreenCaptureKitOptions, ScreenCaptureKitSource,
+            ScreenCaptureKitTarget, VideoToolboxDevice, WindowOptions,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+
+    pub(super) fn run() -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let target = match std::env::args().nth(1).as_deref() {
+            Some("window") => {
+                // An application's untitled windows are toolbars and strips
+                // more often than documents.
+                let window = ScreenCaptureKitSource::list_windows()?
+                    .into_iter()
+                    .find(|window| !window.title.is_empty())
+                    .ok_or_else(|| {
+                        media_pp::Error::Other("there is no window to capture".into())
+                    })?;
+                println!("capturing {:?} of {}", window.title, window.application);
+                ScreenCaptureKitTarget::Window(window.id)
+            }
+            _ => {
+                let display = ScreenCaptureKitSource::list_displays()?
+                    .into_iter()
+                    .find(|display| display.is_main)
+                    .ok_or_else(|| media_pp::Error::Other("there is no main display".into()))?;
+                ScreenCaptureKitTarget::Display(display.id)
+            }
+        };
+        let device = VideoToolboxDevice::new()?;
+        let (source, format) = ScreenCaptureKitSource::open_videotoolbox(
+            "screen",
+            ScreenCaptureKitOptions {
+                frame_rate: ffmpeg::Rational::new(60, 1),
+                include_cursor: true,
+                ..ScreenCaptureKitOptions::new(target)
+            },
+            &device,
+        )?;
+        let (renderer, window) = MetalWindowRenderer::open(
+            "renderer",
+            WindowOptions {
+                title: "media-pp screen_preview_gpu".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
+
+        let (pipeline, ()) = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
+            // ScreenCaptureKit's own pixel buffers, drawn as they come — no
+            // copy on either side; the renderer scales them to the window.
+            let branch = ctx.branch().queue("captured", 4).to(renderer)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        println!(
+            "presenting a {}x{} capture — close the window to stop",
+            format.width, format.height
+        );
+        pipeline.run()?;
+
+        for event in pipeline.bus().iter() {
+            println!("{event}");
+            let source_died = matches!(
+                &event,
+                BusEvent::Error { element_type, .. }
+                    if *element_type == ElementType::ScreenCaptureKitSource
+            );
+            if matches!(event, BusEvent::Finished) || source_died {
+                pipeline.stop();
+            }
         }
         Ok(())
     }

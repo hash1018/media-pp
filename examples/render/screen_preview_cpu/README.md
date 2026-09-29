@@ -7,8 +7,10 @@ encode/decode round trip:
   Duplication in CPU mode.
 - Linux: `PipeWireScreenCaptureSource -> Queue -> VulkanWindowRenderer`, the
   xdg-desktop-portal PipeWire CPU path.
+- macOS: `ScreenCaptureKitSource -> Queue -> MetalWindowRenderer`, the
+  capture in system memory.
 
-On both, the renderer draws the capture's system-memory BGRA as it comes,
+On each, the renderer draws the capture's system-memory BGRA as it comes,
 uploading and scaling it itself, in a window of its own. The capture includes
 the cursor.
 
@@ -24,4 +26,13 @@ default monitor with `window`, and pass the printed restore token on later runs:
 
 ```sh
 cargo run -p screen_preview_cpu -- [monitor|window] [restore-token]
+```
+
+On macOS the main display is captured, or with `window` the frontmost
+window with a title. macOS asks once for the permission to record the
+screen, given in System Settings to the terminal this runs in, which then
+has to be started again:
+
+```sh
+cargo run -p screen_preview_cpu -- [monitor|window]
 ```

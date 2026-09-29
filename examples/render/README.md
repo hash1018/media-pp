@@ -8,8 +8,8 @@ the same across platforms.
 
 | Example | Purpose | Platform | Capture and memory path | Output | Ends by | Arguments |
 |---|---|---|---|---|---|---|
-| [`screen_preview_cpu`](screen_preview_cpu/) | Preview a CPU-captured desktop | Windows / Linux | DXGI / PipeWire system memory -> D3D12 upload / `VulkanWindowRenderer` | Window | Escape or close window | Linux: `[monitor\|window] [restore-token]` |
-| [`screen_preview_gpu`](screen_preview_gpu/) | Preview without a system-memory pixel copy | Windows / Linux | DXGI/WGC D3D11 / PipeWire DMA-BUF -> CUDA | `D3d11WindowRenderer` / `VulkanWindowRenderer` | Escape or close window | Windows: `[dxgi\|wgc [<HWND>]]` (`wgc` with no `HWND` prompts); Linux: `[monitor\|window] [restore-token]` |
+| [`screen_preview_cpu`](screen_preview_cpu/) | Preview a CPU-captured desktop | Windows / Linux / macOS | DXGI / PipeWire / ScreenCaptureKit system memory -> D3D12 upload / `VulkanWindowRenderer` / `MetalWindowRenderer` | Window | Escape or close window | Linux: `[monitor\|window] [restore-token]`; macOS: `[monitor\|window]` |
+| [`screen_preview_gpu`](screen_preview_gpu/) | Preview without a system-memory pixel copy | Windows / Linux / macOS | DXGI/WGC D3D11 / PipeWire DMA-BUF -> CUDA / ScreenCaptureKit VideoToolbox | `D3d11WindowRenderer` / `VulkanWindowRenderer` / `MetalWindowRenderer` | Escape or close window | Windows: `[dxgi\|wgc [<HWND>]]` (`wgc` with no `HWND` prompts); Linux: `[monitor\|window] [restore-token]`; macOS: `[monitor\|window]` |
 | [`screen_record_software`](screen_record_software/) | Record with software conversion and encoding | Windows / Linux / macOS | DXGI / PipeWire / ScreenCaptureKit -> system-memory BGRA | OpenH264 MP4 | Fixed duration (`Finish`) | `[output.mp4] [seconds]` plus Linux source/token or macOS source |
 | [`screen_record_nvenc`](screen_record_nvenc/) | Record GPU-resident frames with NVENC | Windows / Linux | DXGI D3D11 / PipeWire DMA-BUF -> CUDA | NVENC MP4 | Fixed duration (`Finish`) | `<output.mp4> [seconds]` plus Linux source/token |
 | [`screen_record_overlay`](screen_record_overlay/) | Draw a live CUDA overlay and record it | Linux | PipeWire DMA-BUF -> CUDA compositor | NVENC MP4 | Fixed duration | `<output.mp4> [seconds] [monitor\|window] [restore-token]` |
@@ -29,14 +29,14 @@ restore token can be passed as the last argument on later runs.
 
 | Example | Purpose | Platform | Main path | Ends by | Required arguments |
 |---|---|---|---|---|---|
-| [`av_playback`](av_playback/) | Play synchronized audio/video | Windows / Linux | Software audio + platform GPU video | EOS, Escape or close window | `<video>` |
-| [`hw_decode_render`](hw_decode_render/) | Decode on the GPU where it can, in software where not, and render | Windows / Linux | `VideoDecodeBin` onto D3D12 / CUDA | EOS, Escape or close window | `<video>` |
-| [`seek_render`](seek_render/) | Interactive seek/pause/resume | Windows / Linux | CPU decode -> platform GPU upload | `q`, EOS, Escape or close window | `<video>` |
-| [`player`](player/) | Play a file with its sound through `Player` | Windows / Linux | `Player`: GPU decode where it can (D3D11VA / NVDEC), software where not -> `VideoWindow` + audio output | EOS, Escape or close window; Space pauses, arrows seek, `.`/`,` step a picture, `-`/`+` change the speed, F or a double click fills the screen | `<video>` |
-| [`sw_decode_render`](sw_decode_render/) | Software-decode and render | Windows / Linux | CPU decode -> `VideoWindow`, one program for both | EOS, Escape or close window | `<video>` |
-| [`test_video`](test_video/) | Render a synthetic source | Windows / Linux | CPU frame -> platform GPU upload | Escape or close window | None |
-| [`transcode_render`](transcode_render/) | Encode/decode round trip | Windows / Linux | OpenH264 round trip -> platform GPU | Escape or close window | None |
-| [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames, shown and recorded | Windows / Linux | D3D11 / CUDA compositor | Fixed duration, Escape or close window | `[output.mp4] [seconds]` |
+| [`av_playback`](av_playback/) | Play synchronized audio/video | Windows / Linux / macOS | Software audio + platform GPU video | EOS, Escape or close window | `<video>` |
+| [`hw_decode_render`](hw_decode_render/) | Decode on the GPU where it can, in software where not, and render | Windows / Linux / macOS | `VideoDecodeBin` onto D3D12 / CUDA / VideoToolbox | EOS, Escape or close window | `<video>` |
+| [`seek_render`](seek_render/) | Interactive seek/pause/resume | Windows / Linux / macOS | CPU decode -> platform GPU upload | `q`, EOS, Escape or close window | `<video>` |
+| [`player`](player/) | Play a file with its sound through `Player` | Windows / Linux / macOS | `Player`: GPU decode where it can (D3D11VA / NVDEC / VideoToolbox), software where not -> `VideoWindow` + audio output | EOS, Escape or close window; Space pauses, arrows seek, `.`/`,` step a picture, `-`/`+` change the speed, F or a double click fills the screen | `<video>` |
+| [`sw_decode_render`](sw_decode_render/) | Software-decode and render | Windows / Linux / macOS | CPU decode -> `VideoWindow`, one program for all | EOS, Escape or close window | `<video>` |
+| [`test_video`](test_video/) | Render a synthetic source | Windows / Linux / macOS | CPU frame -> platform GPU upload | Escape or close window | None |
+| [`transcode_render`](transcode_render/) | Encode/decode round trip | Windows / Linux / macOS | OpenH264 round trip -> platform GPU | Escape or close window | None |
+| [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames, shown and recorded | Windows / Linux / macOS | D3D11 / CUDA / Metal compositor | Fixed duration, Escape or close window | `[output.mp4] [seconds]` |
 | [`cuda_decode_render`](cuda_decode_render/) | NVDEC decode/render in the renderer's own window | Linux | CUDA, `VulkanWindowRenderer::open` | EOS, Escape or close window; Space pauses, F or a double click fills the screen | `<video>` |
 | [`vulkan_window_render`](vulkan_window_render/) | Render into a `winit` window with the library's Vulkan renderer | Linux | CPU NV12, YUV420P or BGRA (`--format`), or CUDA with `--cuda`, `VulkanWindowRenderer` | Close window, or after `--seconds N` | None; `--file <video>` plays a file |
 | [`d3d11_decode_render`](d3d11_decode_render/) | D3D11VA decode/render in the renderer's own window | Windows | D3D11 zero-copy, `D3d11WindowRenderer` | EOS, Escape or close window; Space pauses, F or a double click fills the screen | `<video>` |
@@ -50,5 +50,8 @@ restore token can be passed as the last argument on later runs.
 `render_common` is a support crate shared by windowed examples, not an
 executable example. Every example draws through one of the library's window
 renderers in a window of its own — `D3d11WindowRenderer` or
-`D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux — and what
-is left in it is turning a close of that window into a stop.
+`D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux,
+`MetalWindowRenderer` on macOS — and what is left in it is turning a close
+of that window into a stop. On macOS every window is the main thread's, so
+each of these examples' `main` runs the example inside the library's
+`run_with_windows`, which keeps AppKit's event loop on the main thread.

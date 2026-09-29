@@ -109,8 +109,8 @@ compile error with no explanation.
 - **`ElementType` has `CoreAudioRenderer` and `CoreAudioCaptureSource`
   variants**, for the macOS audio elements, `VideoToolboxDecoder`,
   `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload`,
-  `AvFoundationCaptureSource`, `ScreenCaptureKitSource` and
-  `MetalVideoCompositor` — see Added. A `match` on
+  `AvFoundationCaptureSource`, `ScreenCaptureKitSource`,
+  `MetalVideoCompositor` and `MetalWindowRenderer` — see Added. A `match` on
   `ElementType` needs an arm for each.
 
 - **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
@@ -123,6 +123,30 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`MetalWindowRenderer`, and `VideoWindow` and `Player` on macOS**,
+  behind `metal` (`Player` with `coreaudio-renderer` too). The renderer is
+  the Metal sibling of `D3d11WindowRenderer` and `VulkanWindowRenderer`,
+  with their API — `open` for a window of its own with `WindowEvents` and a
+  `WindowControl`, `for_window` for an application's AppKit view — and
+  their contract: VideoToolbox frames, NV12 or BGRA, drawn from their
+  pixel buffers as they are, and frames in system memory, NV12, YUV420P or
+  BGRA, uploaded; each in its own colours, letterboxed, presented at the
+  display's refresh into an sRGB layer. What a picture takes to reach the
+  screen is told to the playback clock — two refreshes of the display,
+  since the WindowServer gives a composited window no presented time.
+  AppKit serves every window from the main thread's event loop only, so a
+  window is made there from whichever thread opens it, and
+  **`run_with_windows`** runs a program's work beside that loop for one
+  that has none of its own; opening a window with no loop running fails
+  after a few seconds (`WindowError::NoMainLoop`) rather than hanging.
+  `VideoWindow` draws on it, and `Player` decodes on VideoToolbox and plays
+  through `CoreAudioRenderer`. `Key::Other` carries AppKit's key code on
+  macOS. Its checks open real windows, in a test with a `main` of its own
+  (`tests/metal_window.rs`), which also plays a file through `Player`.
+  `player`, `sw_decode_render`, `hw_decode_render`, `av_playback`,
+  `seek_render`, `test_video`, `transcode_render`, `gpu_video_compositor`,
+  `screen_preview_cpu` and `screen_preview_gpu` run on macOS.
 
 - **`MetalVideoCompositor`: compositing on the GPU on macOS**, behind the
   new `metal` feature (which enables `videotoolbox`), the Metal sibling of

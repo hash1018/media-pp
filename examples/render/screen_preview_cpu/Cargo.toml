@@ -14,3 +14,7 @@ media-pp = { path = "../../../lib", features = [
     "vulkan",
 ] }
 render_common = { path = "../render_common" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["screencapturekit-capture", "metal"] }
+render_common = { path = "../render_common" }

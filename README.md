@@ -67,7 +67,9 @@ fn main() -> media_pp::Result<()> {
 To play a file with its sound, `Player` builds the whole pipeline — decode on
 the GPU where it can, a window, the default audio output — and reports what
 happens to it (features `d3d11` and `wasapi-renderer` on Windows, `vulkan`
-and `pipewire-audio-renderer` on Linux):
+and `pipewire-audio-renderer` on Linux, `metal` and `coreaudio-renderer` on
+macOS — where every window is the main thread's, so `main` runs this inside
+`media_pp::elements::run_with_windows`):
 
 ```rust,no_run
 use media_pp::player::{Player, PlayerEvent, PlayerOptions};
@@ -106,7 +108,7 @@ versions, and what to write instead, is in [`CHANGELOG.md`].
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` | `MetalVideoCompositor` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | `VulkanChromaKey`, `VulkanVideoEffect` | |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` | `VideoToolboxUpload`, `VideoToolboxDownload` |
-| Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | |
+| Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | `MetalWindowRenderer` |
 
 Every compositor has text layers, runs live by default, and renders an export
 frame-exact with `RenderMode::Offline`; `VideoCompositorControl` lets one piece
@@ -145,7 +147,7 @@ exist only where their feature is enabled.
 | `d3d12` | D3D12VA decode, scaling, upload/download and rendering | Windows |
 | `vulkan` | Vulkan Video decode and encode, compositing, upload/download; `VulkanWindowRenderer` on Linux | Linux, Windows |
 | `videotoolbox` | VideoToolbox decode and encode, upload/download | macOS |
-| `metal` | Compositing VideoToolbox frames on the GPU with Metal; enables `videotoolbox` | macOS |
+| `metal` | Compositing VideoToolbox frames with Metal, and `MetalWindowRenderer`, `VideoWindow` and, with `coreaudio-renderer`, `Player`; enables `videotoolbox` | macOS |
 | `dxgi-capture` | Desktop capture; enables `d3d11` | Windows |
 | `wgc-capture` | Window capture through Windows Graphics Capture; enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |
@@ -198,8 +200,8 @@ index of the windowed ones.
 macOS has audio output (`coreaudio-renderer`) and capture
 (`coreaudio-capture`), screen and window capture
 (`screencapturekit-capture`), camera capture (`avfoundation-capture`) and
-VideoToolbox decode and encode (`videotoolbox`) with a Metal compositor on
-their frames (`metal`), and no window yet — see
+VideoToolbox decode and encode (`videotoolbox`), and Metal on their frames
+— a compositor, a window renderer, `VideoWindow` and `Player` (`metal`) — see
 [`docs/macos.md`](docs/macos.md). Building and testing are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

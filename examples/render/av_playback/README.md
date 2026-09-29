@@ -5,22 +5,25 @@ branch at runtime. `VideoSynchronizer` uses wall time while audio is absent
 and automatically hands scheduling to the audio renderer's played-sample
 position while the branch is attached.
 
-Both platforms hold the audio pad open with a dynamic `Tee` and run the same
-audio branch — `SwDecoder -> AudioResampler -> Queue -> renderer`
-(`WasapiRenderer` on Windows, `PipeWireAudioRenderer` on Linux). The video
-branches differ in more than backend types, because only one of them decodes on
-the GPU:
+Every platform holds the audio pad open with a dynamic `Tee` and runs the
+same audio branch — `SwDecoder -> AudioResampler -> Queue -> renderer`
+(`WasapiRenderer` on Windows, `PipeWireAudioRenderer` on Linux,
+`CoreAudioRenderer` on macOS). The video branches differ in more than backend
+types, because only some of them decode on the GPU:
 
 ```text
 Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
          [-> SwScaler] -> D3d12WindowRenderer
 Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
          -> VulkanWindowRenderer
+macOS:   FileDemuxer -> VideoToolboxDecoder -> Queue -> VideoSynchronizer
+         -> MetalWindowRenderer
 ```
 
-The Linux branch is the one that never brings decoded pixels to the CPU: NVDEC
+The Linux and macOS branches never bring decoded pixels to the CPU: NVDEC
 keeps every frame in CUDA memory and the renderer copies it straight into
-Vulkan-owned memory. Windows decodes in system memory and the renderer uploads
+Vulkan-owned memory; VideoToolbox decodes into pixel buffers the Metal
+renderer draws as they are. Windows decodes in system memory and the renderer uploads
 each frame itself — through a `SwScaler` after the synchronizer only for a
 stream it cannot draw as it comes.
 

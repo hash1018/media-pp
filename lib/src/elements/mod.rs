@@ -182,16 +182,20 @@ pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError};
 pub use sink::{D3d12WindowRenderer, D3d12WindowRendererError};
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 pub use sink::{
     Key, MouseButton, WindowControl, WindowEvent, WindowEvents, WindowGone, WindowOptions,
 };
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use sink::{MetalWindowRenderer, MetalWindowRendererError, run_with_windows};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 pub use sink::{VideoWindow, VideoWindowError};
 #[cfg(all(target_os = "linux", feature = "vulkan"))]

@@ -20,6 +20,8 @@ use std::{
 use crossbeam_channel::select;
 use thiserror::Error as ThisError;
 
+#[cfg(target_os = "macos")]
+use crate::elements::{CoreAudioRenderer as AudioOut, CoreAudioRendererOptions as AudioOutOptions};
 #[cfg(target_os = "linux")]
 use crate::elements::{
     PipeWireAudioRenderer as AudioOut, PipeWireAudioRendererOptions as AudioOutOptions,

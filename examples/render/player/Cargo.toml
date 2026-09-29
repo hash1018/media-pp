@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 # `Player` needs a window renderer and an audio renderer: D3D11 and WASAPI on
-# Windows, Vulkan and PipeWire on Linux.
+# Windows, Vulkan and PipeWire on Linux, Metal and Core Audio on macOS.
 [target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["d3d11", "wasapi-renderer"] }
 
@@ -17,3 +17,7 @@ media-pp = { path = "../../../lib", features = [
     "cuda",
     "pipewire-audio-renderer",
 ] }
+
+# Decoding on VideoToolbox, which `metal` brings.
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["metal", "coreaudio-renderer"] }

@@ -17,24 +17,30 @@ mod audio_rate;
 mod cuda;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 mod linux;
-#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "coreaudio-renderer", feature = "metal")
+))]
 mod macos;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 mod presentation_delay;
 mod submit_error;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 mod video_window;
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 mod vulkan;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 mod window;
 #[cfg(all(
@@ -47,19 +53,26 @@ mod windows;
 pub use cuda::*;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use linux::*;
-#[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "coreaudio-renderer", feature = "metal")
+))]
 pub use macos::*;
 pub use submit_error::SubmitError;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 pub use video_window::{VideoWindow, VideoWindowError};
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub use vulkan::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use window::run_with_windows;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
-    all(target_os = "linux", feature = "vulkan")
+    all(target_os = "linux", feature = "vulkan"),
+    all(target_os = "macos", feature = "metal")
 ))]
 pub use window::{
     Key, MouseButton, WindowControl, WindowEvent, WindowEvents, WindowGone, WindowOptions,

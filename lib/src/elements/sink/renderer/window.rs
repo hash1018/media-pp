@@ -1,6 +1,6 @@
 //! What a window renderer's own window says, and how it is opened —
-//! backend-independent, so the D3D11, D3D12 and Vulkan window renderers
-//! share it.
+//! backend-independent, so the D3D11, D3D12, Vulkan and Metal window
+//! renderers share it.
 
 use std::time::Duration;
 
@@ -9,6 +9,8 @@ use thiserror::Error as ThisError;
 
 #[cfg(target_os = "linux")]
 use crate::platform::linux::x11_window::Control;
+#[cfg(target_os = "macos")]
+use crate::platform::macos::window::Control;
 #[cfg(target_os = "windows")]
 use crate::platform::windows::window::Control;
 
@@ -69,7 +71,8 @@ pub enum WindowEvent {
     /// A second press of the same button in quick succession — in place of
     /// the second [`Self::MouseDown`], so a double click is one
     /// `MouseDown` and one `DoubleClick`. What counts as quick is the
-    /// desktop's own setting on Windows, and half a second on Linux.
+    /// desktop's own setting on Windows and macOS, and half a second on
+    /// Linux.
     DoubleClick {
         /// Which button.
         button: MouseButton,
@@ -119,7 +122,8 @@ pub enum Key {
     /// says `=` unshifted.
     Char(char),
     /// Any other key, by the platform's own code for it — on Windows, the
-    /// virtual-key code; on Linux, the X11 keysym.
+    /// virtual-key code; on Linux, the X11 keysym; on macOS, the key code
+    /// AppKit reports (`kVK_*`).
     Other(u32),
 }
 
@@ -170,6 +174,71 @@ impl Key {
             other => Self::Other(other),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+impl Key {
+    /// Reads an AppKit key: its key code, for the keys that have no
+    /// character, and the character it types without modifiers — Shift
+    /// aside, which AppKit leaves in — for the rest, so a letter reads the
+    /// same on every layout.
+    pub(crate) fn from_mac(code: u16, characters: Option<&str>) -> Self {
+        match code {
+            49 => Self::Space,
+            // Return, and the keypad's Enter.
+            36 | 76 => Self::Enter,
+            53 => Self::Escape,
+            123 => Self::Left,
+            124 => Self::Right,
+            125 => Self::Down,
+            126 => Self::Up,
+            // AppKit's "Delete" is the key a PC keyboard calls Backspace.
+            51 => Self::Backspace,
+            _ => {
+                let single = characters.and_then(|characters| {
+                    let mut chars = characters.chars();
+                    let first = chars.next()?;
+                    chars.next().is_none().then_some(first)
+                });
+                match single {
+                    Some(c) if c.is_ascii_alphanumeric() => Self::Char(c.to_ascii_lowercase()),
+                    // The same four punctuation keys as on the other
+                    // platforms; the plus key types `=` unshifted on a US
+                    // layout.
+                    Some(c @ ('.' | ',' | '-')) => Self::Char(c),
+                    Some('+' | '=') => Self::Char('+'),
+                    _ => Self::Other(u32::from(code)),
+                }
+            }
+        }
+    }
+}
+
+/// Runs `work` — a program's own `main`, in effect — on a thread of its
+/// own, while the main thread runs AppKit's event loop, and returns what
+/// `work` returns once it has. macOS only.
+///
+/// AppKit makes every window, and serves every window's events, on the
+/// process's main thread and nowhere else; the window renderers of the
+/// other platforms each run their window on a thread of their own. A
+/// program that opens windows — a [`crate::elements::VideoWindow`], a
+/// `MetalWindowRenderer`, a `Player` — and has no event loop of its own
+/// calls this from `main` and does everything else inside `work`, which
+/// may block on pipelines and window events as it would elsewhere. The
+/// event loop ends when `work` returns; a panic in `work` is carried on
+/// here.
+///
+/// An application that runs an event loop of its own on its main thread —
+/// AppKit's, `winit`'s — does not call this: windows are made on its loop,
+/// from whichever thread opens them. Opening one when the main thread runs
+/// no loop at all fails after a few seconds rather than hanging.
+///
+/// # Panics
+///
+/// If called from any thread other than the main one.
+#[cfg(target_os = "macos")]
+pub fn run_with_windows<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) -> R {
+    crate::platform::macos::window::run_with_windows(work)
 }
 
 /// What a window renderer's own window reports, as it happens.
@@ -270,6 +339,29 @@ mod tests {
         assert_eq!(Key::from_keysym(0xFF08), Key::Backspace);
         assert_eq!(Key::from_keysym(0x2F), Key::Other(0x2F));
         assert_eq!(Key::from_keysym(0xFFBE), Key::Other(0xFFBE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn appkit_keys_read_as_the_keys_a_player_uses() {
+        assert_eq!(Key::from_mac(49, Some(" ")), Key::Space);
+        assert_eq!(Key::from_mac(123, None), Key::Left);
+        assert_eq!(Key::from_mac(124, None), Key::Right);
+        assert_eq!(Key::from_mac(53, Some("\u{1b}")), Key::Escape);
+        assert_eq!(Key::from_mac(36, Some("\r")), Key::Enter);
+        assert_eq!(Key::from_mac(3, Some("f")), Key::Char('f'));
+        assert_eq!(Key::from_mac(3, Some("F")), Key::Char('f'));
+        assert_eq!(Key::from_mac(18, Some("1")), Key::Char('1'));
+        // A player's frame step keys.
+        assert_eq!(Key::from_mac(47, Some(".")), Key::Char('.'));
+        assert_eq!(Key::from_mac(43, Some(",")), Key::Char(','));
+        assert_eq!(Key::from_mac(27, Some("-")), Key::Char('-'));
+        // And its speed keys.
+        assert_eq!(Key::from_mac(24, Some("=")), Key::Char('+'));
+        assert_eq!(Key::from_mac(24, Some("+")), Key::Char('+'));
+        assert_eq!(Key::from_mac(51, Some("\u{7f}")), Key::Backspace);
+        assert_eq!(Key::from_mac(44, Some("/")), Key::Other(44));
+        assert_eq!(Key::from_mac(122, Some("\u{f704}")), Key::Other(122));
     }
 
     #[cfg(target_os = "windows")]

@@ -18,8 +18,9 @@ VideoToolbox frames behind `videotoolbox`: decode, encode, upload and
 download, in `MemoryDomain::VideoToolbox`, and the bins' VideoToolbox arms —
 the camera, `AvFoundationCaptureSource` behind `avfoundation-capture` —
 displays and windows, `ScreenCaptureKitSource` behind
-`screencapturekit-capture` — and compositing on the GPU,
-`MetalVideoCompositor` behind `metal`.
+`screencapturekit-capture` — and Metal on VideoToolbox frames behind
+`metal`: `MetalVideoCompositor`, `MetalWindowRenderer`, `VideoWindow`, and
+with `coreaudio-renderer`, `Player`.
 Beside them a macOS build gets everything that is not a platform backend:
 
 - the pipeline core, `FileDemuxer`, `RtspSource`, `AppSource`/`AppSink`, the
@@ -31,16 +32,14 @@ Beside them a macOS build gets everything that is not a platform backend:
   / `VideoEncodeBin` with their `System` target only;
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
-It gets no window or `VideoWindow`,
-no `Player`, and no Metal scaler, converter or effects yet: `cuda` compiles
-but finds no driver, and `vulkan` is discussed below.
+It gets no Metal scaler, converter or effects yet: `cuda` compiles but
+finds no driver, and `vulkan` is discussed below.
 
 On the Mac, `cargo build -p media-pp` builds with no features and without a
 warning, `cargo test -p media-pp` passes, and `cargo build --workspace`
 builds every example — the ones with a backend say which platforms they
-support and exit. `render_common` has only `Shutdown` there:
-`stop_on_close` needs the library's window types, which exist only beside a
-window renderer, so it opens to macOS with the Metal one. What remains:
+support and exit. The windowed examples run on macOS through
+`render_common` with the `metal` feature. What remains:
 
 - **The test fixture needs OpenH264.** `test_support::try_test_video`
   encodes its eight-second fixture with `VideoCodec::OpenH264`; a skip where
@@ -291,18 +290,28 @@ a breaking change: `MemoryDomain` and `ElementType` are not
   `PipeWireAudioRenderer` do. It plays through an AUHAL output unit whose
   real-time callback reads a ring the renderer writes, and says where
   playback is from the callback's host timestamps plus the device's and its
-  stream's latency. `Player` needs a window as well before it opens here.
+  stream's latency; `Player` plays through it.
 - **A frame renderer for a program's own presenter** — what obs-rs's
   Preview is built on: `CudaFrameRenderer` hands over device pointers,
   `D3d11FrameRenderer` textures. A Metal one hands over the `IOSurface` or
   `MTLTexture` of each composited frame.
-- **A window** — `window.rs`'s `WindowOptions`, `WindowEvents`,
-  `WindowControl` and a key mapper (`Key::from_virtual_key` on Windows,
-  `from_keysym` on Linux), a window renderer (`open`, `for_window` through
-  raw-window-handle's AppKit handle, `window_control`), presentation delay
-  (`presentation_delay.rs`), and `VideoWindow`'s `Gpu`/`Backend` aliases and
-  `open_for_decoding` arm. Then `Player` (`app/mod.rs`, `lib.rs`) can be
-  opened for macOS, with an `AudioOut` for the Core Audio renderer.
+- **A window** — done: `MetalWindowRenderer` (`open`, `for_window` through
+  raw-window-handle's AppKit handle, `window_control`), `Key::from_mac`,
+  `VideoWindow`'s macOS arm and `open_for_decoding` onto VideoToolbox, and
+  `Player` with `CoreAudioRenderer` as its `AudioOut`. The one thing the
+  other platforms did not have to design for: AppKit makes and serves every
+  window on the main thread's event loop only, where Win32 and X11 windows
+  each run on a thread of their own. So a window is made on the main
+  dispatch queue from whichever thread opens it, drawing happens on the
+  pipeline's thread through the `CAMetalLayer`, and `run_with_windows` runs
+  a program's work beside AppKit's loop for a program with none of its own
+  — the examples' `main`. It is also why the window checks are
+  `tests/metal_window.rs`, a test with a `main` of its own: the harness's
+  main thread runs no loop, so `Player`'s own unit tests skip on macOS.
+  The WindowServer gives a composited window's drawables no presented
+  time — `presentedTime` reads zero, and the presented handler is called as
+  the picture is handed over, not shown — so the presentation delay is
+  estimated as two refreshes, as Vulkan's is where it cannot measure.
 - **Features and gating** — a feature per backend part, as Windows has
   `d3d11`, `dxgi-capture`, `wasapi-renderer`, with its dependencies under a
   `cfg(target_os = "macos")` table (`objc2` and its framework crates are the
@@ -342,5 +351,6 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    The compositor is done — `MetalVideoCompositor`, on VideoToolbox frames,
    which capture already delivers; scaling, conversion, chroma key and
    effects on Metal remain.
-6. The window renderer and `Player`.
+6. The window renderer and `Player`. Done — `MetalWindowRenderer`,
+   `VideoWindow`, `Player`, and the windowed examples.
 7. A macOS job in CI (`macos-latest` runners are Apple silicon).
