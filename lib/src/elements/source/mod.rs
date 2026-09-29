@@ -54,6 +54,8 @@ pub use capture::{
     CaptureSourceKind, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
     PipeWireScreenCaptureSourceError,
 };
+#[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
+pub use capture::{CoreAudioCaptureOptions, CoreAudioCaptureSource, CoreAudioCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
 pub use capture::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]

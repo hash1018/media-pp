@@ -1,33 +1,51 @@
-//! What `CoreAudioRenderer` asks of Core Audio's hardware layer: the output
-//! devices there are, the format each plays, and how long a sample takes to
-//! be heard once handed to it.
+//! What the Core Audio elements ask of Core Audio: the devices there are to
+//! play to and record from, the format each runs in, how long a sample
+//! takes to be heard — and the AUHAL unit both drive a device through.
 //!
-//! Every query is `AudioObjectGetPropertyData` on an `AudioObjectID`, with a
-//! selector and a scope. A device that disappears between being listed and
-//! being asked answers with `kAudioHardwareBadObjectError`, which reaches the
-//! caller as an [`OsStatusError`] like any other failure.
+//! Every device query is `AudioObjectGetPropertyData` on an `AudioObjectID`,
+//! with a selector and a scope. A device that disappears between being
+//! listed and being asked answers with `kAudioHardwareBadObjectError`, which
+//! reaches the caller as an [`OsStatusError`] like any other failure.
 
 use std::{
     ffi::c_void,
     mem::{MaybeUninit, offset_of, size_of},
     ptr::{self, NonNull},
+    sync::Arc,
 };
 
+use objc2_audio_toolbox::{
+    AudioComponentDescription, AudioComponentFindNext, AudioComponentInstanceDispose,
+    AudioComponentInstanceNew, AudioOutputUnitStart, AudioOutputUnitStop, AudioUnit,
+    AudioUnitGetProperty, AudioUnitInitialize, AudioUnitSetProperty, AudioUnitUninitialize,
+    kAudioUnitManufacturer_Apple, kAudioUnitSubType_HALOutput, kAudioUnitType_Output,
+};
 use objc2_core_audio::{
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
     AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector,
-    kAudioDevicePropertyDeviceUID, kAudioDevicePropertyLatency,
-    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreamConfiguration,
-    kAudioDevicePropertyStreams, kAudioHardwareBadPropertySizeError,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioStreamPropertyLatency,
+    kAudioDevicePropertyDeviceUID, kAudioDevicePropertyNominalSampleRate,
+    kAudioDevicePropertyStreamConfiguration, kAudioHardwareBadPropertySizeError,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain, kAudioObjectPropertyName,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
 };
-use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
+#[cfg(feature = "coreaudio-capture")]
+use objc2_core_audio::{
+    kAudioDevicePropertyDeviceIsAlive, kAudioHardwarePropertyDefaultInputDevice,
+    kAudioObjectPropertyScopeInput,
+};
+#[cfg(feature = "coreaudio-renderer")]
+use objc2_core_audio::{
+    kAudioDevicePropertyLatency, kAudioDevicePropertyStreams,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeOutput,
+    kAudioStreamPropertyLatency,
+};
+use objc2_core_audio_types::AudioBuffer;
 use objc2_core_foundation::{CFRetained, CFString};
 
-/// One device Core Audio can play to, as `CoreAudioRenderer::list_devices`
-/// lists it and `CoreAudioRendererOptions::device` takes it.
+/// One audio device, as `CoreAudioRenderer::list_devices` lists those it can
+/// play to and `CoreAudioCaptureSource::list_devices` those it can record
+/// from. A device that does both — a headset — is in both lists, as the
+/// same device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreAudioDevice {
     /// The HAL's `AudioObjectID`. Good only while the device stays attached
@@ -40,7 +58,8 @@ pub struct CoreAudioDevice {
     pub uid: String,
     /// The name the system shows for the device.
     pub name: String,
-    /// Whether this was the system's default output when it was listed.
+    /// Whether this was the system's default device for the list's
+    /// direction — output or input — when it was listed.
     pub is_default: bool,
 }
 
@@ -60,12 +79,44 @@ pub(crate) fn check(status: i32, operation: &'static str) -> Result<(), OsStatus
     }
 }
 
+/// An `OSStatus` that spells four printable characters — most of Core
+/// Audio's do, `'!obj'` — as those characters too, for an error message.
+pub(crate) fn four_char_code(status: &i32) -> String {
+    let bytes = status.to_be_bytes();
+    if bytes
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+    {
+        format!(" ('{}')", String::from_utf8_lossy(&bytes))
+    } else {
+        String::new()
+    }
+}
+
 /// Every device with at least one output channel, the system's default
-/// marked. A device that fails to answer while being listed is left out
-/// rather than failing the whole list: it is most likely one unplugged
-/// between the two queries.
+/// output marked.
+#[cfg(feature = "coreaudio-renderer")]
 pub(crate) fn list_output_devices() -> Result<Vec<CoreAudioDevice>, OsStatusError> {
-    let default = default_output_device().ok();
+    list_devices(
+        kAudioObjectPropertyScopeOutput,
+        default_output_device().ok(),
+    )
+}
+
+/// Every device with at least one input channel, the system's default
+/// input marked.
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) fn list_input_devices() -> Result<Vec<CoreAudioDevice>, OsStatusError> {
+    list_devices(kAudioObjectPropertyScopeInput, default_input_device().ok())
+}
+
+/// Every device with channels in `scope`. One that fails to answer while
+/// being listed is left out rather than failing the whole list: it is most
+/// likely one unplugged between the two queries.
+fn list_devices(
+    scope: AudioObjectPropertyScope,
+    default: Option<AudioObjectID>,
+) -> Result<Vec<CoreAudioDevice>, OsStatusError> {
     let ids: Vec<AudioObjectID> = get_array(
         kAudioObjectSystemObject as AudioObjectID,
         kAudioHardwarePropertyDevices,
@@ -74,7 +125,7 @@ pub(crate) fn list_output_devices() -> Result<Vec<CoreAudioDevice>, OsStatusErro
     )?;
     Ok(ids
         .into_iter()
-        .filter(|&id| output_channels(id).is_ok_and(|channels| channels > 0))
+        .filter(|&id| channels(id, scope).is_ok_and(|channels| channels > 0))
         .filter_map(|id| {
             let uid = get_string(id, kAudioDevicePropertyDeviceUID, "read a device's UID").ok()?;
             let name = get_string(id, kAudioObjectPropertyName, "read a device's name")
@@ -90,6 +141,7 @@ pub(crate) fn list_output_devices() -> Result<Vec<CoreAudioDevice>, OsStatusErro
 }
 
 /// The system's default output device.
+#[cfg(feature = "coreaudio-renderer")]
 pub(crate) fn default_output_device() -> Result<AudioObjectID, OsStatusError> {
     get(
         kAudioObjectSystemObject as AudioObjectID,
@@ -99,13 +151,45 @@ pub(crate) fn default_output_device() -> Result<AudioObjectID, OsStatusError> {
     )
 }
 
+/// The system's default input device.
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) fn default_input_device() -> Result<AudioObjectID, OsStatusError> {
+    get(
+        kAudioObjectSystemObject as AudioObjectID,
+        kAudioHardwarePropertyDefaultInputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        "read the default input device",
+    )
+}
+
 /// How many channels `device` plays, across all its output streams.
+#[cfg(feature = "coreaudio-renderer")]
 pub(crate) fn output_channels(device: AudioObjectID) -> Result<u32, OsStatusError> {
-    const OPERATION: &str = "read a device's output channels";
-    let address = address(
-        kAudioDevicePropertyStreamConfiguration,
-        kAudioObjectPropertyScopeOutput,
-    );
+    channels(device, kAudioObjectPropertyScopeOutput)
+}
+
+/// How many channels `device` records, across all its input streams.
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) fn input_channels(device: AudioObjectID) -> Result<u32, OsStatusError> {
+    channels(device, kAudioObjectPropertyScopeInput)
+}
+
+/// Whether `device` is still there to be used — false once it is unplugged.
+#[cfg(feature = "coreaudio-capture")]
+pub(crate) fn is_alive(device: AudioObjectID) -> bool {
+    get::<u32>(
+        device,
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal,
+        "ask whether a device is alive",
+    )
+    .is_ok_and(|alive| alive != 0)
+}
+
+/// How many channels `device`'s streams in `scope` have, all together.
+fn channels(device: AudioObjectID, scope: AudioObjectPropertyScope) -> Result<u32, OsStatusError> {
+    const OPERATION: &str = "read a device's channels";
+    let address = address(kAudioDevicePropertyStreamConfiguration, scope);
     let size = data_size(device, &address, OPERATION)?;
     // An `AudioBufferList` of as many buffers as the device has streams,
     // laid out as C lays it out. `u64`s so that its pointers are aligned.
@@ -125,16 +209,17 @@ pub(crate) fn output_channels(device: AudioObjectID) -> Result<u32, OsStatusErro
     };
     check(status, OPERATION)?;
     let filled = filled as usize;
-    if filled < offset_of!(AudioBufferList, mBuffers) {
+    let buffers_at = offset_of!(objc2_core_audio_types::AudioBufferList, mBuffers);
+    if filled < buffers_at {
         return Ok(0);
     }
     let base = list.as_ptr().cast::<u8>();
-    // SAFETY: at least the list's count lies inside what the HAL filled,
-    // checked above, and `base` is aligned for it.
-    let buffers = unsafe { base.cast::<AudioBufferList>().read() }.mNumberBuffers as usize;
+    // SAFETY: the count, the list's first field, lies inside what the HAL
+    // filled, checked above, and `base` is aligned for it.
+    let buffers = unsafe { base.cast::<u32>().read() } as usize;
     let mut channels = 0u32;
     for index in 0..buffers {
-        let offset = offset_of!(AudioBufferList, mBuffers) + index * size_of::<AudioBuffer>();
+        let offset = buffers_at + index * size_of::<AudioBuffer>();
         if offset + size_of::<AudioBuffer>() > filled {
             break;
         }
@@ -159,6 +244,7 @@ pub(crate) fn nominal_sample_rate(device: AudioObjectID) -> Result<f64, OsStatus
 /// How many frames after the HAL hands `device` a sample it is heard: the
 /// device's own latency and that of its first output stream. Neither is
 /// something every device reports, so one it does not is counted as none.
+#[cfg(feature = "coreaudio-renderer")]
 pub(crate) fn output_latency_frames(device: AudioObjectID) -> u32 {
     let device_latency: u32 = get(
         device,
@@ -201,7 +287,7 @@ fn address(
 
 /// A value any bit pattern of its size is valid for, which is all a
 /// property read promises of what it writes.
-trait Plain: Copy {}
+pub(crate) trait Plain: Copy {}
 impl Plain for u32 {}
 impl Plain for f64 {}
 
@@ -325,6 +411,175 @@ fn get_string(
     Ok(string.to_string())
 }
 
+/// Apple's AUHAL output unit, for one hardware device: what plays to it and
+/// what records from it. Made stopped and uninitialized; the caller sets it
+/// up with [`Self::set`] and [`Self::initialize`]s it.
+///
+/// Dropping it stops, uninitializes and disposes of it, after which Core
+/// Audio calls none of its callbacks again — so what they read is dropped
+/// after it: see [`Refcon`].
+pub(crate) struct HalUnit {
+    unit: AudioUnit,
+    initialized: bool,
+}
+
+// SAFETY: an AudioUnit may be called from any thread; Core Audio serializes
+// its property and transport calls itself. Every call here takes `&mut self`
+// or reads a property, so this side never overlaps them either.
+unsafe impl Send for HalUnit {}
+
+impl HalUnit {
+    /// A new AUHAL unit, or `None` where the system has none.
+    pub(crate) fn new() -> Result<Option<Self>, OsStatusError> {
+        let description = AudioComponentDescription {
+            componentType: kAudioUnitType_Output,
+            componentSubType: kAudioUnitSubType_HALOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0,
+        };
+        // SAFETY: `description` is live for the call; a null start searches
+        // from the first component.
+        let component =
+            unsafe { AudioComponentFindNext(ptr::null_mut(), NonNull::from(&description)) };
+        if component.is_null() {
+            return Ok(None);
+        }
+        let mut unit: AudioUnit = ptr::null_mut();
+        // SAFETY: `component` was just found and `unit` is a live out-param.
+        let status = unsafe { AudioComponentInstanceNew(component, NonNull::from(&mut unit)) };
+        check(status, "create an AUHAL unit")?;
+        Ok(Some(Self {
+            unit,
+            initialized: false,
+        }))
+    }
+
+    /// The unit itself, for a callback to render from.
+    #[cfg(feature = "coreaudio-capture")]
+    pub(crate) fn raw(&self) -> AudioUnit {
+        self.unit
+    }
+
+    /// Sets `property` in `scope` on `element` to `value`.
+    pub(crate) fn set<T>(
+        &mut self,
+        property: u32,
+        scope: u32,
+        element: u32,
+        value: &T,
+        operation: &'static str,
+    ) -> Result<(), OsStatusError> {
+        // SAFETY: the unit is live and `value` is readable for its size for
+        // the call, which copies it.
+        let status = unsafe {
+            AudioUnitSetProperty(
+                self.unit,
+                property,
+                scope,
+                element,
+                ptr::from_ref(value).cast::<c_void>(),
+                size_of::<T>() as u32,
+            )
+        };
+        check(status, operation)
+    }
+
+    /// `property` in `scope` on `element`, where it is a plain value.
+    pub(crate) fn get<T: Plain + Default>(
+        &self,
+        property: u32,
+        scope: u32,
+        element: u32,
+        operation: &'static str,
+    ) -> Result<T, OsStatusError> {
+        let mut value = T::default();
+        let mut size = size_of::<T>() as u32;
+        // SAFETY: the unit is live and `value` is writable for `size` bytes.
+        let status = unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                property,
+                scope,
+                element,
+                NonNull::from(&mut value).cast::<c_void>(),
+                NonNull::from(&mut size),
+            )
+        };
+        check(status, operation)?;
+        Ok(value)
+    }
+
+    pub(crate) fn initialize(&mut self) -> Result<(), OsStatusError> {
+        // SAFETY: the unit is live; the caller has configured it.
+        let status = unsafe { AudioUnitInitialize(self.unit) };
+        check(status, "initialize the AUHAL unit")?;
+        self.initialized = true;
+        Ok(())
+    }
+
+    pub(crate) fn start(&mut self) -> Result<(), OsStatusError> {
+        // SAFETY: the unit is live and initialized.
+        check(
+            unsafe { AudioOutputUnitStart(self.unit) },
+            "start the device",
+        )
+    }
+
+    /// Stops the device. Returns once the unit no longer calls back.
+    pub(crate) fn stop(&mut self) -> Result<(), OsStatusError> {
+        // SAFETY: the unit is live; stopping a stopped unit does nothing.
+        check(unsafe { AudioOutputUnitStop(self.unit) }, "stop the device")
+    }
+}
+
+impl Drop for HalUnit {
+    fn drop(&mut self) {
+        // SAFETY: the unit is live; each call is best-effort teardown in the
+        // order Core Audio documents — stop, uninitialize, dispose — after
+        // which nothing calls its callbacks again.
+        unsafe {
+            AudioOutputUnitStop(self.unit);
+            if self.initialized {
+                AudioUnitUninitialize(self.unit);
+            }
+            AudioComponentInstanceDispose(self.unit);
+        }
+    }
+}
+
+/// An `Arc` handed to Core Audio as a callback's context: one strong
+/// reference, taken back when this drops.
+///
+/// Declared after the [`HalUnit`] whose callback reads it, in the struct
+/// holding both, so the unit is disposed of — and the callback done with
+/// for good — before this lets go.
+pub(crate) struct Refcon<T>(NonNull<T>);
+
+// SAFETY: this is one reference of an `Arc<T>`, which is `Send` for a `T`
+// that is `Send + Sync`.
+unsafe impl<T: Send + Sync> Send for Refcon<T> {}
+
+impl<T> Refcon<T> {
+    pub(crate) fn new(value: Arc<T>) -> Self {
+        // SAFETY: `Arc::into_raw` never returns null.
+        Self(unsafe { NonNull::new_unchecked(Arc::into_raw(value).cast_mut()) })
+    }
+
+    /// What Core Audio is given, and hands the callback back.
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
+        self.0.as_ptr().cast::<c_void>()
+    }
+}
+
+impl<T> Drop for Refcon<T> {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from `Arc::into_raw` in `new`, and is
+        // given back exactly once.
+        drop(unsafe { Arc::from_raw(self.0.as_ptr()) });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,19 +587,42 @@ mod tests {
     /// Whatever the machine has, what is listed can be asked again: every
     /// device plays at a rate and has channels, and at most one is the
     /// default. A machine with no output lists nothing, which says nothing.
-    #[test]
-    fn listed_devices_answer_for_their_format() {
-        let devices = list_output_devices().expect("the HAL lists its devices");
+    /// Whatever the machine has, what is listed can be asked again: every
+    /// device runs at a rate and has channels in the list's direction, and
+    /// at most one is the default. A machine with none lists nothing, which
+    /// says nothing.
+    fn listed_devices_answer_for_their_format(
+        devices: Vec<CoreAudioDevice>,
+        scope: AudioObjectPropertyScope,
+    ) {
         if devices.is_empty() {
-            eprintln!("skipping: no Core Audio output device");
+            eprintln!("skipping: no Core Audio device in this direction");
             return;
         }
         for device in &devices {
             assert!(!device.uid.is_empty(), "{device:?} has a UID");
-            assert!(output_channels(device.id).unwrap() > 0, "{device:?}");
+            assert!(channels(device.id, scope).unwrap() > 0, "{device:?}");
             assert!(nominal_sample_rate(device.id).unwrap() > 0.0, "{device:?}");
         }
         assert!(devices.iter().filter(|device| device.is_default).count() <= 1);
+    }
+
+    #[cfg(feature = "coreaudio-renderer")]
+    #[test]
+    fn listed_outputs_answer_for_their_format() {
+        listed_devices_answer_for_their_format(
+            list_output_devices().expect("the HAL lists its devices"),
+            kAudioObjectPropertyScopeOutput,
+        );
+    }
+
+    #[cfg(feature = "coreaudio-capture")]
+    #[test]
+    fn listed_inputs_answer_for_their_format() {
+        listed_devices_answer_for_their_format(
+            list_input_devices().expect("the HAL lists its devices"),
+            kAudioObjectPropertyScopeInput,
+        );
     }
 
     /// A device that is not there is a typed failure naming what was asked,

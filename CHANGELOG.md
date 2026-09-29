@@ -106,8 +106,9 @@ compile error with no explanation.
   `VideoSynchronizer`, which it could only run on the thread feeding it —
   see Added. A `match` on `RackError` needs an arm for it.
 
-- **`ElementType` has a `CoreAudioRenderer` variant**, for the macOS audio
-  renderer — see Added. A `match` on `ElementType` needs an arm for it.
+- **`ElementType` has `CoreAudioRenderer` and `CoreAudioCaptureSource`
+  variants**, for the macOS audio elements — see Added. A `match` on
+  `ElementType` needs an arm for each.
 
 ### Added
 
@@ -126,6 +127,19 @@ compile error with no explanation.
   renderer writes, so where playback is comes from the device's own
   timestamps and latency rather than from what was handed over.
   `audio_playback` plays on macOS with it.
+
+- **`CoreAudioCaptureSource`: audio input capture on macOS**, behind the
+  new `coreaudio-capture` feature — a microphone, a line input, an
+  interface. `CoreAudioCaptureSource::list_devices` lists the devices with
+  input channels as the same `CoreAudioDevice`s the renderer lists, a
+  headset in both; `open` returns the device's own rate and channels,
+  32-bit float interleaved. As `PipeWireAudioCaptureSource` does, `pts`
+  counts what the device captured, so a pause costs nothing and a packet
+  dropped because downstream fell behind leaves its gap where it happened,
+  reported as `BusEvent::Dropped`; a pause stops the device and playing on
+  lets go of what it held. An unplugged device ends the source with
+  `DeviceGone`. Capturing what the system plays is not here yet.
+  `audio_capture` captures on macOS with `mic` or a device's name.
 
 - **A `Produce` can have several outputs, and begin a segment.** It says
   what its pads are in `Produce::outputs` — one, named for it, by

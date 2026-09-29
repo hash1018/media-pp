@@ -223,6 +223,8 @@ pub enum ElementType {
     WasapiRenderer,
     /// macOS Core Audio renderer sink.
     CoreAudioRenderer,
+    /// macOS Core Audio input device capture source.
+    CoreAudioCaptureSource,
     /// RTSP publishing muxer sink, one or more tracks to an external
     /// server.
     RtspMuxer,

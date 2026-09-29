@@ -7,6 +7,8 @@
     )
 ))]
 mod linux;
+#[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
+mod macos;
 #[cfg(all(
     target_os = "windows",
     any(
@@ -27,6 +29,8 @@ mod windows;
     )
 ))]
 pub use linux::*;
+#[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
+pub use macos::*;
 #[cfg(all(
     target_os = "windows",
     any(

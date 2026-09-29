@@ -138,9 +138,10 @@ x11rb = { version = "0.13", optional = true, default-features = false, features 
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Core Audio, for `CoreAudioRenderer`: the HAL for devices and their
-# latency, AudioToolbox for the output unit that plays to one. Without their
-# default features, which bind every framework header and Objective-C class.
+# Core Audio, for `CoreAudioRenderer` and `CoreAudioCaptureSource`: the HAL
+# for devices and their latency, AudioToolbox for the AUHAL unit that plays
+# to one and records from it. Without their default features, which bind
+# every framework header and Objective-C class.
 objc2-audio-toolbox = { version = "0.3", optional = true, default-features = false, features = [
     "std",
     "AUComponent",
@@ -276,6 +277,13 @@ pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
 # Audio playback on macOS, through a Core Audio output unit.
 coreaudio-renderer = [
+    "dep:objc2-audio-toolbox",
+    "dep:objc2-core-audio",
+    "dep:objc2-core-audio-types",
+    "dep:objc2-core-foundation",
+]
+# Audio capture on macOS, from a Core Audio input device.
+coreaudio-capture = [
     "dep:objc2-audio-toolbox",
     "dep:objc2-core-audio",
     "dep:objc2-core-audio-types",

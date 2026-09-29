@@ -15,6 +15,8 @@ use thiserror::Error;
 
 use crate::element::ElementType;
 
+#[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
+use crate::elements::CoreAudioCaptureSourceError;
 #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
 use crate::elements::CoreAudioRendererError;
 #[cfg(all(
@@ -692,6 +694,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
     #[error(transparent)]
     WasapiRendererError(#[from] WasapiRendererError),
+
+    /// Core Audio capture failed.
+    #[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
+    #[error(transparent)]
+    CoreAudioCaptureSourceError(#[from] CoreAudioCaptureSourceError),
 
     /// Core Audio rendering failed.
     #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]

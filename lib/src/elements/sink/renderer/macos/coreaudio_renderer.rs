@@ -11,14 +11,9 @@ use std::{
 
 use ffmpeg_next::{self as ffmpeg, Rescale, Rounding};
 use objc2_audio_toolbox::{
-    AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext,
-    AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioOutputUnitStart,
-    AudioOutputUnitStop, AudioUnit, AudioUnitGetProperty, AudioUnitInitialize,
-    AudioUnitRenderActionFlags, AudioUnitSetProperty, AudioUnitUninitialize,
-    kAudioOutputUnitProperty_CurrentDevice, kAudioUnitManufacturer_Apple,
+    AURenderCallbackStruct, AudioUnitRenderActionFlags, kAudioOutputUnitProperty_CurrentDevice,
     kAudioUnitProperty_Latency, kAudioUnitProperty_SetRenderCallback,
     kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
-    kAudioUnitSubType_HALOutput, kAudioUnitType_Output,
 };
 use objc2_core_audio::{AudioConvertHostTimeToNanos, AudioGetCurrentHostTime};
 use objc2_core_audio_types::{
@@ -37,7 +32,7 @@ use crate::{
     elements::sink::renderer::audio_rate::PlayedMedia,
     elements::{AudioFormat, CoreAudioDevice},
     error::Result,
-    platform::macos::coreaudio::{self, OsStatusError, check},
+    platform::macos::coreaudio::{self, HalUnit, OsStatusError, Refcon},
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
     render::{RenderStage, render_sink},
     time::{MediaTimestamp, TimeBase},
@@ -78,7 +73,7 @@ pub struct CoreAudioRendererOptions {
 pub enum CoreAudioRendererError {
     /// A Core Audio call failed — a device unplugged since it was listed
     /// fails this way, `kAudioHardwareBadObjectError`.
-    #[error("Core Audio could not {operation}: OSStatus {status}{}", four_char_code(.status))]
+    #[error("Core Audio could not {operation}: OSStatus {status}{}", coreaudio::four_char_code(.status))]
     CoreAudio {
         /// What was being done.
         operation: &'static str,
@@ -103,9 +98,9 @@ pub enum CoreAudioRendererError {
     /// for one.
     #[error("the device stopped taking audio for {0:?}")]
     Stalled(Duration),
-    /// The system has no HAL output unit to play through.
-    #[error("the system has no HAL output audio unit")]
-    NoOutputUnit,
+    /// The system has no AUHAL unit to play through.
+    #[error("the system has no AUHAL audio unit")]
+    NoHalUnit,
     /// The input audio does not exactly match the device's format.
     #[error(
         "audio format mismatch: expected {expected:?}, got {actual:?}; insert AudioResampler before CoreAudioRenderer"
@@ -139,20 +134,6 @@ impl From<OsStatusError> for CoreAudioRendererError {
             operation: error.operation,
             status: error.status,
         }
-    }
-}
-
-/// An `OSStatus` that spells four printable characters — most of Core
-/// Audio's do, `'!obj'` — as those characters too.
-fn four_char_code(status: &i32) -> String {
-    let bytes = status.to_be_bytes();
-    if bytes
-        .iter()
-        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
-    {
-        format!(" ('{}')", String::from_utf8_lossy(&bytes))
-    } else {
-        String::new()
     }
 }
 
@@ -290,8 +271,8 @@ unsafe extern "C-unwind" fn render_callback(
     data: *mut AudioBufferList,
 ) -> i32 {
     // SAFETY: `refcon` is the `Shared` `OutputUnit::open` registered with the
-    // callback, which keeps a strong reference to it until the unit that
-    // calls this is disposed.
+    // callback, whose `Refcon` keeps a strong reference to it until the unit
+    // that calls this is disposed.
     let shared = unsafe { refcon.cast::<Shared>().as_ref() };
     let Some(data) = NonNull::new(data) else {
         return 0;
@@ -342,20 +323,12 @@ unsafe extern "C-unwind" fn render_callback(
     0
 }
 
-/// An AUHAL output unit playing one device, and the callback's reference to
-/// what it reads.
+/// An AUHAL unit playing one device, and the callback's reference to what it
+/// reads — declared after the unit, so the unit is disposed of first.
 struct OutputUnit {
-    unit: AudioUnit,
-    initialized: bool,
-    /// `Arc::into_raw` of what the callback reads, taken back once the unit
-    /// is disposed and nothing can call it any more.
-    shared: *const Shared,
+    unit: HalUnit,
+    _shared: Refcon<Shared>,
 }
-
-// SAFETY: an AudioUnit may be called from any thread; Core Audio serializes
-// its property and transport calls itself. `Rendering` makes every call
-// through `&mut self`, so they never overlap from this side either.
-unsafe impl Send for OutputUnit {}
 
 impl OutputUnit {
     /// An AUHAL unit playing `device` in `format`, calling back into
@@ -365,35 +338,12 @@ impl OutputUnit {
         format: AudioFormat,
         shared: Arc<Shared>,
     ) -> std::result::Result<Self, CoreAudioRendererError> {
-        let description = AudioComponentDescription {
-            componentType: kAudioUnitType_Output,
-            componentSubType: kAudioUnitSubType_HALOutput,
-            componentManufacturer: kAudioUnitManufacturer_Apple,
-            componentFlags: 0,
-            componentFlagsMask: 0,
-        };
-        // SAFETY: `description` is live for the call; a null start searches
-        // from the first component.
-        let component =
-            unsafe { AudioComponentFindNext(ptr::null_mut(), NonNull::from(&description)) };
-        if component.is_null() {
-            return Err(CoreAudioRendererError::NoOutputUnit);
-        }
-        let mut unit: AudioUnit = ptr::null_mut();
-        // SAFETY: `component` was just found and `unit` is a live out-param.
-        let status = unsafe { AudioComponentInstanceNew(component, NonNull::from(&mut unit)) };
-        check(status, "create the HAL output unit")?;
-        // From here on `Drop` disposes of the unit and takes back `shared`,
-        // whichever step fails.
-        let mut output = Self {
-            unit,
-            initialized: false,
-            shared: Arc::into_raw(shared),
-        };
-
-        output.set(
+        let mut unit = HalUnit::new()?.ok_or(CoreAudioRendererError::NoHalUnit)?;
+        let shared = Refcon::new(shared);
+        unit.set(
             kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global,
+            0,
             &device,
             "point the output unit at the device",
         )?;
@@ -409,103 +359,43 @@ impl OutputUnit {
             mBitsPerChannel: 32,
             mReserved: 0,
         };
-        output.set(
+        unit.set(
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Input,
+            0,
             &stream,
             "give the output unit its input format",
         )?;
         let callback = AURenderCallbackStruct {
             inputProc: Some(render_callback),
-            inputProcRefCon: output.shared.cast_mut().cast::<c_void>(),
+            inputProcRefCon: shared.as_ptr(),
         };
-        output.set(
+        unit.set(
             kAudioUnitProperty_SetRenderCallback,
             kAudioUnitScope_Input,
+            0,
             &callback,
             "set the output unit's render callback",
         )?;
-        // SAFETY: the unit is live and fully configured.
-        let status = unsafe { AudioUnitInitialize(output.unit) };
-        check(status, "initialize the output unit")?;
-        output.initialized = true;
-        Ok(output)
-    }
-
-    fn set<T>(
-        &mut self,
-        property: u32,
-        scope: u32,
-        value: &T,
-        operation: &'static str,
-    ) -> std::result::Result<(), OsStatusError> {
-        // SAFETY: the unit is live and `value` is readable for its size for
-        // the call, which copies it.
-        let status = unsafe {
-            AudioUnitSetProperty(
-                self.unit,
-                property,
-                scope,
-                0,
-                ptr::from_ref(value).cast::<c_void>(),
-                size_of::<T>() as u32,
-            )
-        };
-        check(status, operation)
+        unit.initialize()?;
+        Ok(Self {
+            unit,
+            _shared: shared,
+        })
     }
 
     /// The unit's own processing latency, which AUHAL reports as none on
     /// every device seen so far; asked rather than assumed.
     fn latency_ns(&self) -> u64 {
-        let mut seconds = 0f64;
-        let mut size = size_of::<f64>() as u32;
-        // SAFETY: the unit is live and `seconds` is writable for `size` bytes.
-        let status = unsafe {
-            AudioUnitGetProperty(
-                self.unit,
-                kAudioUnitProperty_Latency,
-                kAudioUnitScope_Global,
-                0,
-                NonNull::from(&mut seconds).cast::<c_void>(),
-                NonNull::from(&mut size),
-            )
-        };
-        if status != 0 || !seconds.is_finite() || seconds <= 0.0 {
-            return 0;
+        match self.unit.get::<f64>(
+            kAudioUnitProperty_Latency,
+            kAudioUnitScope_Global,
+            0,
+            "read the output unit's latency",
+        ) {
+            Ok(seconds) if seconds.is_finite() && seconds > 0.0 => (seconds * 1e9) as u64,
+            _ => 0,
         }
-        (seconds * 1e9) as u64
-    }
-
-    fn start(&mut self) -> std::result::Result<(), OsStatusError> {
-        // SAFETY: the unit is live and initialized.
-        check(
-            unsafe { AudioOutputUnitStart(self.unit) },
-            "start the device",
-        )
-    }
-
-    /// Stops the device. Returns once the callback no longer runs.
-    fn stop(&mut self) -> std::result::Result<(), OsStatusError> {
-        // SAFETY: the unit is live; stopping a stopped unit does nothing.
-        check(unsafe { AudioOutputUnitStop(self.unit) }, "stop the device")
-    }
-}
-
-impl Drop for OutputUnit {
-    fn drop(&mut self) {
-        // SAFETY: the unit is live; each call is best-effort teardown in the
-        // order Core Audio documents — stop, uninitialize, dispose — after
-        // which nothing calls the callback again.
-        unsafe {
-            AudioOutputUnitStop(self.unit);
-            if self.initialized {
-                AudioUnitUninitialize(self.unit);
-            }
-            AudioComponentInstanceDispose(self.unit);
-        }
-        // SAFETY: `shared` came from `Arc::into_raw` in `open`, and the unit
-        // that could use it is gone.
-        drop(unsafe { Arc::from_raw(self.shared) });
     }
 }
 
@@ -667,7 +557,10 @@ impl CoreAudioRenderer {
 impl Rendering {
     fn start(&mut self) -> Result<()> {
         if !self.running {
-            self.unit.start().map_err(CoreAudioRendererError::from)?;
+            self.unit
+                .unit
+                .start()
+                .map_err(CoreAudioRendererError::from)?;
             self.running = true;
         }
         Ok(())
@@ -676,7 +569,10 @@ impl Rendering {
     /// Stops the device, and counts what it had not played as heard.
     fn stop(&mut self) -> Result<()> {
         if self.running {
-            self.unit.stop().map_err(CoreAudioRendererError::from)?;
+            self.unit
+                .unit
+                .stop()
+                .map_err(CoreAudioRendererError::from)?;
             self.running = false;
         }
         self.shared.settle();
