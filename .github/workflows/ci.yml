@@ -344,3 +344,73 @@ jobs:
       # only exercised by the `#[ignore]`d soak scenario, not by this suite.
       - name: Test (Linux backends)
         run: cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
+
+  macos:
+    # Apple silicon, as every Mac this crate's macOS backend is for.
+    runs-on: macos-15
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      # No rustfmt: formatting sees every file whatever the platform, and the
+      # other two jobs check it.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      # Shared with the API documentation workflow's macOS build.
+      - name: Set up FFmpeg
+        uses: ./.github/actions/setup-ffmpeg
+        with:
+          vcpkg-features: openh264
+
+      - name: Cache downloaded crates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Lint (no features)
+        run: cargo clippy -p media-pp --all-targets -- -D warnings
+
+      # Together, and each alone: the pixel-buffer and Metal code the
+      # captures, VideoToolbox and Metal share is gated on whichever of them
+      # uses it, and a gate left too wide is dead code only when the others
+      # are off.
+      - name: Lint (macOS backends)
+        run: |
+          cargo clippy -p media-pp --all-targets --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer -- -D warnings
+          cargo clippy -p media-pp --all-targets --features videotoolbox -- -D warnings
+          cargo clippy -p media-pp --all-targets --features metal -- -D warnings
+          cargo clippy -p media-pp --all-targets --features avfoundation-capture -- -D warnings
+          cargo clippy -p media-pp --all-targets --features screencapturekit-capture -- -D warnings
+          cargo clippy -p media-pp --all-targets --features coreaudio-capture -- -D warnings
+          cargo clippy -p media-pp --all-targets --features coreaudio-renderer -- -D warnings
+
+      # `-D warnings` on top of the rpath `setup-ffmpeg` exported, which
+      # only matters to what runs.
+      - name: Check API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc -p media-pp --no-deps
+          cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
+
+      # The control conformance runs are the other two jobs': macOS has no
+      # way to pin a process to two cores.
+      - name: Test (no features)
+        run: cargo test -p media-pp
+
+      # A hosted Mac grants no camera, screen or audio-tap permission, so
+      # those tests skip, saying why; what needs only Metal and VideoToolbox
+      # runs. `tests/metal_window.rs` opens real windows on the runner's
+      # session.
+      - name: Test (macOS backends)
+        run: cargo test -p media-pp --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer

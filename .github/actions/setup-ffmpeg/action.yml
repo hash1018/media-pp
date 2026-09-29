@@ -194,9 +194,6 @@ runs:
         # fix above (same STATUS_DLL_NOT_FOUND-shaped failure otherwise).
         echo "LD_LIBRARY_PATH=$prefix/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
-    # Only `FFMPEG_DIR`: what runs on macOS so far documents the crate and
-    # never starts a binary linked against these dylibs, which would also
-    # need them on its loader's search path.
     - name: Export FFMPEG_DIR (macOS)
       if: runner.os == 'macOS'
       shell: bash
@@ -215,6 +212,16 @@ runs:
         grep -E '#define\s+LIBAVCODEC_VERSION_(MAJOR|MINOR)\s' \
           "$prefix"/include/libavcodec/version*.h
         echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+
+        # vcpkg names each dylib `@rpath/...`, so a test binary finds them
+        # only through an rpath of its own. `DYLD_FALLBACK_LIBRARY_PATH`, the
+        # counterpart of the Linux fix above, would not arrive: macOS strips
+        # `DYLD_*` from a protected binary's environment, and every step runs
+        # through `/bin/bash`. Doctests are linked by rustdoc, which reads
+        # its own flags. A step that sets either variable itself replaces
+        # this, which is harmless where it only documents.
+        echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$prefix/lib" >> "$GITHUB_ENV"
+        echo "RUSTDOCFLAGS=-C link-arg=-Wl,-rpath,$prefix/lib" >> "$GITHUB_ENV"
 
     # Only reached on a miss, after Export FFMPEG_DIR validated the tree, so
     # this never caches a truncated or wrong-version build. Runs before this
