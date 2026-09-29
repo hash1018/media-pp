@@ -146,7 +146,8 @@ compile error with no explanation.
   (`tests/metal_window.rs`), which also plays a file through `Player`.
   `player`, `sw_decode_render`, `hw_decode_render`, `av_playback`,
   `seek_render`, `test_video`, `transcode_render`, `gpu_video_compositor`,
-  `screen_preview_cpu` and `screen_preview_gpu` run on macOS.
+  `screen_preview_cpu`, `screen_preview_gpu` and `webrtc_video_call` run on
+  macOS.
 
 - **`MetalVideoCompositor`: compositing on the GPU on macOS**, behind the
   new `metal` feature (which enables `videotoolbox`), the Metal sibling of

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 str0m = { version = "0.21", default-features = false, features = [
     "rust-crypto",
 ] }
@@ -15,4 +15,8 @@ render_common = { path = "../../render/render_common" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 media-pp = { path = "../../../lib", features = ["webrtc", "vulkan"] }
+render_common = { path = "../../render/render_common" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["webrtc", "metal"] }
 render_common = { path = "../../render/render_common" }

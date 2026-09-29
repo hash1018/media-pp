@@ -11,10 +11,10 @@
 //!
 //!     cargo run -p webrtc_video_call -- path/to/video.mp4
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "{} example supports Windows and Linux only",
+        "{} example supports Windows, Linux and macOS only",
         env!("CARGO_PKG_NAME")
     );
 }
@@ -27,6 +27,13 @@ fn main() {
 #[cfg(target_os = "linux")]
 fn main() {
     linux_example::run()
+}
+
+/// A window is the main thread's on macOS: the main thread runs AppKit's
+/// event loop, and the call runs beside it.
+#[cfg(target_os = "macos")]
+fn main() {
+    media_pp::elements::run_with_windows(macos_example::run)
 }
 
 #[cfg(target_os = "windows")]
@@ -209,7 +216,94 @@ mod linux_example {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos_example {
+    use std::sync::Arc;
+
+    use media_pp::{
+        elements::{
+            MetalWindowRenderer, SwDecoder, WebRtcStreamInfo, WebRtcTrackSource, WindowOptions,
+        },
+        pipeline::Pipeline,
+    };
+    use render_common::Shutdown;
+    use str0m::format::Codec;
+
+    use super::common::{HEIGHT, WIDTH};
+
+    /// Where one side of the call is shown: the renderer that opened the
+    /// window, already drawing into it.
+    pub(super) type Target = MetalWindowRenderer;
+
+    pub(super) fn run() {
+        super::common::run();
+    }
+
+    /// Opens both windows, and the `Shutdown` that closing either sets off.
+    ///
+    /// What arrives is H.264 decoded to YUV420P in system memory, which the
+    /// renderer draws as it comes and uploads itself; each window's GPU is
+    /// its own.
+    pub(super) fn open_windows(
+        titles: [&str; 2],
+    ) -> media_pp::Result<(Target, Target, Arc<Shutdown>)> {
+        let open = |name: &str, title: &str| {
+            MetalWindowRenderer::open(
+                name,
+                WindowOptions {
+                    title: title.into(),
+                    width: WIDTH,
+                    height: HEIGHT,
+                },
+            )
+        };
+        let (screen_a, window_a) = open("peer-a-render", titles[0])?;
+        let (screen_b, window_b) = open("peer-b-render", titles[1])?;
+        let shutdown = render_common::stop_on_close([window_a, window_b]);
+        Ok((screen_a, screen_b, shutdown))
+    }
+
+    /// Nothing to share between the two sides: the renderers already have
+    /// their device.
+    pub(super) struct RenderContext;
+
+    impl RenderContext {
+        pub(super) fn new(_target: &Target) -> media_pp::Result<Self> {
+            Ok(Self)
+        }
+    }
+
+    /// `WebRtcTrackSource -> Queue -> SwDecoder -> MetalWindowRenderer`.
+    pub(super) fn receive_pipeline(
+        name: &str,
+        source: WebRtcTrackSource,
+        stream_info: WebRtcStreamInfo,
+        _render: &RenderContext,
+        screen: Target,
+    ) -> media_pp::Result<Arc<Pipeline>> {
+        validate_h264(name, &stream_info)?;
+        let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
+
+        let (pipeline, ()) = Pipeline::new(name, source, move |source, ctx| {
+            let branch = ctx.branch().queue("packets", 16).pipe(decoder).to(screen)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        Ok(pipeline)
+    }
+
+    fn validate_h264(name: &str, stream_info: &WebRtcStreamInfo) -> media_pp::Result<()> {
+        if stream_info.codec() != Codec::H264 {
+            return Err(media_pp::Error::Other(format!(
+                "{name} cannot decode the received {:?} stream; this example expects H.264",
+                stream_info.codec()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod common {
     use std::{
         net::UdpSocket,
@@ -220,6 +314,8 @@ mod common {
 
     #[cfg(target_os = "linux")]
     use super::linux_example as platform;
+    #[cfg(target_os = "macos")]
+    use super::macos_example as platform;
     #[cfg(target_os = "windows")]
     use super::windows_example as platform;
     use media_pp::{
