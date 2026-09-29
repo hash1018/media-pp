@@ -81,7 +81,9 @@ pub use crate::platform::linux::pipewire::{
     PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
 };
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
-pub use crate::platform::macos::videotoolbox::{VideoToolboxDevice, VideoToolboxDeviceError};
+pub use crate::platform::macos::videotoolbox::{
+    VideoToolboxDevice, VideoToolboxDeviceError, VideoToolboxFrameFormat,
+};
 #[cfg(feature = "webrtc")]
 pub use driver::{
     AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
@@ -134,8 +136,9 @@ pub use filter::{
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use filter::{
-    VideoToolboxDecoder, VideoToolboxDecoderError, VideoToolboxDownload, VideoToolboxDownloadError,
-    VideoToolboxUpload, VideoToolboxUploadError,
+    VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDecoderError, VideoToolboxDownload,
+    VideoToolboxDownloadError, VideoToolboxEncoder, VideoToolboxEncoderError,
+    VideoToolboxEncoderOptions, VideoToolboxUpload, VideoToolboxUploadError,
 };
 #[cfg(feature = "vulkan")]
 pub use filter::{

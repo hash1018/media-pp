@@ -86,6 +86,37 @@ impl VideoToolboxDevice {
     }
 }
 
+/// What VideoToolbox frames hold, where an element has to be told — as
+/// [`crate::elements::EncodeInput::VideoToolbox`] is: the two layouts
+/// everything that makes VideoToolbox frames here puts out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoToolboxFrameFormat {
+    /// NV12: what `VideoToolboxDecoder` decodes to, and what the media
+    /// engine's encoders take.
+    Nv12,
+    /// 8-bit BGRA, with alpha: what `VideoToolboxUpload` makes of a BGRA
+    /// frame.
+    Bgra,
+}
+
+impl VideoToolboxFrameFormat {
+    /// The layout as FFmpeg names it, where a frame holding it is `Some`.
+    pub(crate) fn of(format: ffmpeg::format::Pixel) -> Option<Self> {
+        match format {
+            ffmpeg::format::Pixel::NV12 => Some(Self::Nv12),
+            ffmpeg::format::Pixel::BGRA => Some(Self::Bgra),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn layouts(self) -> crate::contract::PixelLayoutSet {
+        match self {
+            Self::Nv12 => crate::contract::PixelLayoutSet::NV12,
+            Self::Bgra => crate::contract::PixelLayoutSet::BGRA,
+        }
+    }
+}
+
 #[derive(Debug, ThisError)]
 pub(crate) enum VideoToolboxFramesContextError {
     #[error("failed to allocate the VideoToolbox frames context")]

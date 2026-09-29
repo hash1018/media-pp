@@ -9,13 +9,13 @@ FileDemuxer ┬ video -> VideoDecodeBin -> Queue -> VideoEncodeBin -> FileMuxer
 ```
 
 The decode bin decodes onto a device — D3D11 on Windows, CUDA on Linux where
-an NVIDIA GPU is there, system memory otherwise — and
+an NVIDIA GPU is there, VideoToolbox on macOS, system memory otherwise — and
 `EncodeInput::for_decoded` turns where it put the pictures into what the
 encode bin takes, so the two meet with nothing in between and the pictures
 stay on the GPU where it takes both. The encode bin opens NVENC where it can,
-Media Foundation next on Windows, and software otherwise; both say which
-they chose, and the example prints it, as `decoding Hardware, encoding
-Nvenc`. The encoder is opened at the picture's own size and rate and told
+Media Foundation next on Windows, `h264_videotoolbox` on macOS, and software
+otherwise; both say which they chose, and the example prints it, as
+`decoding Hardware, encoding Nvenc`. The encoder is opened at the picture's own size and rate and told
 its colour, all read off the input's `StreamInfo`, and the muxer takes its
 track from the encode bin itself.
 

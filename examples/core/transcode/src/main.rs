@@ -4,11 +4,13 @@
 //! the pictures coming back to the CPU where the GPU takes both.
 //!
 //! The decode bin decodes onto a device — D3D11 on Windows, CUDA on Linux
-//! where an NVIDIA GPU is there, system memory otherwise — and
+//! where an NVIDIA GPU is there, VideoToolbox on macOS, system memory
+//! otherwise — and
 //! `EncodeInput::for_decoded` turns where it put the pictures into what the
 //! encode bin takes, so the two meet with nothing in between. The encode bin
-//! opens NVENC where it can, Media Foundation next on Windows, and software
-//! otherwise; both say which they chose, and this prints it. The encoder is
+//! opens NVENC where it can, Media Foundation next on Windows, the media
+//! engine's own encoder on macOS, and software otherwise; both say which
+//! they chose, and this prints it. The encoder is
 //! opened at the picture's own size and rate and told its colour, all read
 //! off the input's `StreamInfo`, and the muxer takes its track from the
 //! encode bin itself. The sound's packets go into the new file as they are.
@@ -164,8 +166,18 @@ mod example {
         })
     }
 
+    /// Where the pictures are decoded to: VideoToolbox, whose pool grows,
+    /// so there is no budget of pictures to give it.
+    #[cfg(target_os = "macos")]
+    fn target() -> media_pp::Result<DecodeTarget> {
+        let _ = SURFACES;
+        Ok(DecodeTarget::VideoToolbox {
+            device: media_pp::elements::VideoToolboxDevice::new()?,
+        })
+    }
+
     /// Where the pictures are decoded to: system memory.
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     fn target() -> media_pp::Result<DecodeTarget> {
         let _ = SURFACES;
         Ok(DecodeTarget::System)

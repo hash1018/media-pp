@@ -108,12 +108,18 @@ compile error with no explanation.
 
 - **`ElementType` has `CoreAudioRenderer` and `CoreAudioCaptureSource`
   variants**, for the macOS audio elements, and `VideoToolboxDecoder`,
-  `VideoToolboxUpload` and `VideoToolboxDownload` — see Added. A `match` on
+  `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload` —
+  see Added. A `match` on
   `ElementType` needs an arm for each.
 
 - **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
   pixel buffers — see Added. A `match` on `MemoryDomain` needs an arm for
   it.
+
+- **`DecodeTarget`, `EncodeInput` and `EncodePath` have VideoToolbox
+  variants** (`DecodeTarget::VideoToolbox` and `EncodeInput::VideoToolbox`
+  with the `videotoolbox` feature, `EncodePath::VideoToolbox` always). A
+  `match` on any of them needs an arm for it.
 
 ### Added
 
@@ -134,6 +140,23 @@ compile error with no explanation.
   their fourth plane pointer, as a VideoToolbox frame's is, are now told
   apart by it wherever an element recognises a repeated picture — before,
   every one of them read as the first.
+
+- **`VideoToolboxEncoder`, and the bins on VideoToolbox**: H.264 and H.265
+  (`VideoToolboxCodec`) on the Mac's media engine through FFmpeg's
+  `h264_videotoolbox` and `hevc_videotoolbox`, from NV12 VideoToolbox
+  frames — a `VideoToolboxDecoder`'s or a `VideoToolboxUpload`'s — with
+  `VulkanEncoder`'s options and contract: opened eagerly, packets drained
+  after each frame and at `Eos`, a CPU frame or another layout refused
+  before anything is encoded. It reads each frame's own pixel buffer, so
+  it takes frames from any VideoToolbox element. `DecodeTarget::VideoToolbox`
+  decodes on the media engine where the stream allows and otherwise in
+  software through `VideoToolboxUpload`, as on the other targets, 10-bit
+  among the latter; `EncodeInput::VideoToolbox`, whose frames are NV12 or
+  BGRA (`VideoToolboxFrameFormat`, as `VulkanFrameFormat` is on Vulkan),
+  encodes NV12 with `h264_videotoolbox` and BGRA in software after a
+  `VideoToolboxDownload`. So `transcode` decodes and encodes a file on
+  macOS without its pictures reaching the CPU: five seconds of 1080p in
+  0.7 s on a MacBook Air, 0.07 s of it on the CPU.
 
 - **`CoreAudioRenderer`: audio playback on macOS**, behind the new
   `coreaudio-renderer` feature. It is the Core Audio counterpart of

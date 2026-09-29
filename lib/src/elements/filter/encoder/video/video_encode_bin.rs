@@ -16,6 +16,11 @@ use crate::elements::{
     D3d11Download, D3d11Gpu, D3d11Scaler, D3d11ScalerFormat, D3d11VideoCodec, D3d11VideoEncoder,
     D3d11VideoEncoderOptions, D3d11VideoInputFormat,
 };
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+use crate::elements::{
+    VideoToolboxCodec, VideoToolboxDevice, VideoToolboxDownload, VideoToolboxEncoder,
+    VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
+};
 #[cfg(feature = "vulkan")]
 use crate::elements::{
     VulkanCodec, VulkanDevice, VulkanDownload, VulkanEncoder, VulkanEncoderOptions,
@@ -110,6 +115,15 @@ pub enum EncodeInput {
         /// What every frame holds.
         format: VulkanFrameFormat,
     },
+    /// VideoToolbox frames — Core Video pixel buffers — NV12 or BGRA.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    VideoToolbox {
+        /// The VideoToolbox context the pipeline's VideoToolbox elements
+        /// share.
+        device: VideoToolboxDevice,
+        /// What every pixel buffer holds.
+        format: VideoToolboxFrameFormat,
+    },
 }
 
 impl EncodeInput {
@@ -155,6 +169,11 @@ impl EncodeInput {
                     Pixel::BGRA => CudaFrameFormat::Bgra,
                     _ => return None,
                 },
+            }),
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            DecodeTarget::VideoToolbox { device } => Some(Self::VideoToolbox {
+                device: device.clone(),
+                format: VideoToolboxFrameFormat::of(format?)?,
             }),
             #[cfg(feature = "vulkan")]
             DecodeTarget::Vulkan { device, .. } => Some(Self::Vulkan {
@@ -205,6 +224,8 @@ pub enum EncodePath {
     MediaFoundation,
     /// `h264_vulkan`, on whichever GPU's Vulkan Video.
     Vulkan,
+    /// `h264_videotoolbox`, on the Mac's own media engine.
+    VideoToolbox,
     /// `libx264`, in software.
     X264,
     /// `libopenh264`, in software — where this FFmpeg has no `libx264`.
@@ -214,7 +235,10 @@ pub enum EncodePath {
 impl EncodePath {
     /// Whether the encoding is done on the GPU.
     pub fn is_hardware(self) -> bool {
-        matches!(self, Self::Nvenc | Self::MediaFoundation | Self::Vulkan)
+        matches!(
+            self,
+            Self::Nvenc | Self::MediaFoundation | Self::Vulkan | Self::VideoToolbox
+        )
     }
 }
 
@@ -231,6 +255,8 @@ impl EncodePath {
 /// - CUDA frames: `h264_nvenc`, then software.
 /// - Vulkan frames: `h264_vulkan` for NV12, then software; BGRA in software,
 ///   nothing on Vulkan here converting RGB to YUV yet.
+/// - VideoToolbox frames: `h264_videotoolbox` for NV12, then software; BGRA in
+///   software, as on Vulkan.
 /// - Frames in system memory: software.
 ///
 /// Software is `libx264` where this FFmpeg has it, and `libopenh264`, which
@@ -247,7 +273,8 @@ impl EncodePath {
 ///
 /// The encoder, and what the encoder needs in front of it: on the software
 /// path from a device, the download to system memory (`D3d11Download`,
-/// `CudaDownload` or `VulkanDownload`, in the layout the frames are in), and always
+/// `CudaDownload`, `VulkanDownload` or `VideoToolboxDownload`, in the layout the
+/// frames are in), and always
 /// a `SwScaler` to YUV420P at the size asked for; on `h264_mf` from BGRA
 /// textures, a `D3d11Scaler` to NV12. They are ordinary elements, run the
 /// way a [`Rack`](crate::elements::Rack) runs what it holds — each logging
@@ -376,6 +403,12 @@ impl VideoEncodeBin {
             EncodeInput::Cuda { device, format } => (
                 cuda(&name, device, *format, options, &mut tried)?,
                 PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                    .with_layouts(format.layouts()),
+            ),
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            EncodeInput::VideoToolbox { device, format } => (
+                videotoolbox(&name, device, *format, options, &mut tried)?,
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
                     .with_layouts(format.layouts()),
             ),
             #[cfg(feature = "vulkan")]
@@ -684,6 +717,46 @@ fn vulkan(
         name,
         vec![download],
         format == VulkanFrameFormat::Bgra,
+        options,
+        tried,
+    )
+}
+
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+fn videotoolbox(
+    name: &str,
+    device: &VideoToolboxDevice,
+    format: VideoToolboxFrameFormat,
+    options: VideoEncodeOptions,
+    tried: &mut Tried<'_>,
+) -> Result<Chosen> {
+    if format == VideoToolboxFrameFormat::Nv12 && tried.may(EncodePath::VideoToolbox) {
+        let videotoolbox_options = VideoToolboxEncoderOptions {
+            codec: VideoToolboxCodec::H264,
+            width: options.width,
+            height: options.height,
+            frame_rate: options.frame_rate,
+            bit_rate: options.bit_rate,
+            gop_size: options.gop_size,
+            max_b_frames: options.max_b_frames,
+        };
+        let encoder = format!("{name}-encoder");
+        let opened = match options.color {
+            Some(color) => {
+                VideoToolboxEncoder::with_color(&encoder, device, videotoolbox_options, color)
+            }
+            None => VideoToolboxEncoder::new(&encoder, device, videotoolbox_options),
+        };
+        match opened {
+            Ok(encoder) => return Ok(Chosen::of(EncodePath::VideoToolbox, Vec::new(), encoder)),
+            Err(error) => tried.refused("h264_videotoolbox", error),
+        }
+    }
+    let download: Box<dyn Filter> = Box::new(VideoToolboxDownload::new(format!("{name}-download")));
+    software(
+        name,
+        vec![download],
+        format == VideoToolboxFrameFormat::Bgra,
         options,
         tried,
     )
@@ -1336,6 +1409,88 @@ mod tests {
                     eprintln!("{format:?}, passing over {skip:?}: {path:?}");
                     if format == VulkanFrameFormat::Bgra || !skip.is_empty() {
                         assert!(!path.is_hardware(), "{format:?}: in software");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    mod videotoolbox {
+        use super::*;
+        use crate::elements::VideoToolboxUpload;
+
+        /// A format, what it holds, and how a frame of red is made in it.
+        type Case = (
+            VideoToolboxFrameFormat,
+            Option<ColorDescription>,
+            fn(i64) -> MediaBuffer,
+        );
+
+        /// A VideoToolbox decode's NV12 and BGRA are what the bin takes, as
+        /// they are on the other devices; any other layout — P010 — is not,
+        /// and is answered `None` rather than taken as it came.
+        #[test]
+        fn only_nv12_and_bgra_are_taken_from_a_decode() {
+            let Some(device) = crate::test_support::try_videotoolbox_device() else {
+                return;
+            };
+            let target = crate::elements::DecodeTarget::VideoToolbox { device };
+            let format = |pixel| match EncodeInput::for_decoded(&target, Some(pixel)) {
+                Some(EncodeInput::VideoToolbox { format, .. }) => Some(format),
+                _ => None,
+            };
+            assert_eq!(
+                format(ffmpeg::format::Pixel::NV12),
+                Some(VideoToolboxFrameFormat::Nv12)
+            );
+            assert_eq!(
+                format(ffmpeg::format::Pixel::BGRA),
+                Some(VideoToolboxFrameFormat::Bgra)
+            );
+            assert_eq!(format(ffmpeg::format::Pixel::P010LE), None);
+            assert!(EncodeInput::for_decoded(&target, None).is_none());
+        }
+
+        /// BGRA and NV12 in pixel buffers play as red: NV12 on
+        /// `h264_videotoolbox` and in software, BGRA in software after its
+        /// download.
+        #[test]
+        fn videotoolbox_frames_play_as_red_on_every_path() {
+            let Some(device) = crate::test_support::try_videotoolbox_device() else {
+                return;
+            };
+            let _session = crate::test_support::encoder_session();
+            let cases: [Case; 2] = [
+                (VideoToolboxFrameFormat::Bgra, None, bgra),
+                (
+                    VideoToolboxFrameFormat::Nv12,
+                    Some(ColorDescription::BT709_LIMITED),
+                    yuv420p,
+                ),
+            ];
+            for (format, color, make) in cases {
+                for skip in [&[][..], &[EncodePath::VideoToolbox][..]] {
+                    let mut upload = VideoToolboxUpload::new("upload", &device);
+                    let frames = (0..FRAMES).map(make).map(move |frame| {
+                        let MediaBuffer::Video(frame) = frame else {
+                            unreachable!()
+                        };
+                        MediaBuffer::Video(
+                            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
+                                .expect("the frame uploads"),
+                        )
+                    });
+                    let input = EncodeInput::VideoToolbox {
+                        device: device.clone(),
+                        format,
+                    };
+                    let path = encodes_red(input, color, skip, frames);
+                    eprintln!("{format:?}, passing over {skip:?}: {path:?}");
+                    if format == VideoToolboxFrameFormat::Bgra || !skip.is_empty() {
+                        assert!(!path.is_hardware(), "{format:?}: in software");
+                    } else {
+                        assert_eq!(path, EncodePath::VideoToolbox, "NV12 on the media engine");
                     }
                 }
             }

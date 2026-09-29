@@ -127,6 +127,8 @@ pub enum ElementType {
     VulkanDownload,
     /// VideoToolbox hardware decoder filter.
     VideoToolboxDecoder,
+    /// VideoToolbox hardware encoder filter.
+    VideoToolboxEncoder,
     /// System-memory to VideoToolbox upload filter.
     VideoToolboxUpload,
     /// VideoToolbox to system-memory download filter.

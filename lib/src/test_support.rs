@@ -430,7 +430,8 @@ pub(crate) fn try_single_threaded_d3d11_device()
 #[cfg(any(
     feature = "cuda",
     feature = "vulkan",
-    all(target_os = "windows", feature = "d3d11")
+    all(target_os = "windows", feature = "d3d11"),
+    all(target_os = "macos", feature = "videotoolbox")
 ))]
 pub(crate) fn encoder_session() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1095,7 +1096,8 @@ impl<F: crate::element::Filter> crate::element::Sink for Linked<F> {
 #[cfg(any(
     feature = "cuda",
     feature = "vulkan",
-    all(target_os = "windows", feature = "d3d11")
+    all(target_os = "windows", feature = "d3d11"),
+    all(target_os = "macos", feature = "videotoolbox")
 ))]
 pub(crate) fn one_frame(
     filter: &mut impl crate::element::Filter,

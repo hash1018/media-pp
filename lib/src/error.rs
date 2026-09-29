@@ -330,6 +330,11 @@ pub enum Error {
     #[error(transparent)]
     VideoToolboxDecoderError(#[from] crate::elements::VideoToolboxDecoderError),
 
+    /// Encoding through VideoToolbox failed.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    #[error(transparent)]
+    VideoToolboxEncoderError(#[from] crate::elements::VideoToolboxEncoderError),
+
     /// Uploading a frame to VideoToolbox failed.
     #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
     #[error(transparent)]

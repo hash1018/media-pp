@@ -14,8 +14,8 @@ application's half. The machine setup below serves both.
 The macOS backend so far is audio — `CoreAudioRenderer` behind
 `coreaudio-renderer` and `CoreAudioCaptureSource` behind `coreaudio-capture`,
 sharing their device listing and AUHAL unit in `platform/macos/coreaudio/` —
-and VideoToolbox frames behind `videotoolbox`: decode, upload and download,
-in `MemoryDomain::VideoToolbox`.
+and VideoToolbox frames behind `videotoolbox`: decode, encode, upload and
+download, in `MemoryDomain::VideoToolbox`, and the bins' VideoToolbox arms.
 Beside them a macOS build gets everything that is not a platform backend:
 
 - the pipeline core, `FileDemuxer`, `RtspSource`, `AppSource`/`AppSink`, the
@@ -28,8 +28,8 @@ Beside them a macOS build gets everything that is not a platform backend:
 - the platform-neutral features: `rnnoise`, `webrtc`, `whisper`, `ort`.
 
 It gets no screen or camera capture, no window or `VideoWindow`,
-no `Player`, no VideoToolbox encoder yet, and no GPU compositing: `cuda`
-compiles but finds no driver, and `vulkan` is discussed below.
+no `Player`, and no GPU compositing: `cuda` compiles but finds no driver,
+and `vulkan` is discussed below.
 
 On the Mac, `cargo build -p media-pp` builds with no features and without a
 warning, `cargo test -p media-pp` passes, and `cargo build --workspace`
@@ -303,10 +303,11 @@ a breaking change: `MemoryDomain` and `ElementType` are not
    software compositor. That is enough for obs-rs to show and record a
    screen, slowly.
 4. The Metal device, VideoToolbox decode and encode, upload and download.
-   Done: `VideoToolboxDevice`, `VideoToolboxDecoder`, `VideoToolboxUpload`,
-   `VideoToolboxDownload` and `MemoryDomain::VideoToolbox`, all through
-   FFmpeg with no Metal yet. Next: a VideoToolbox encoder and the
-   `DecodeTarget` / `EncodeInput` arms.
+   Done without Metal, all through FFmpeg: `VideoToolboxDevice`,
+   `VideoToolboxDecoder`, `VideoToolboxEncoder`, `VideoToolboxUpload`,
+   `VideoToolboxDownload`, `MemoryDomain::VideoToolbox`, and the
+   `DecodeTarget` / `EncodeInput` arms — `transcode` runs on the media
+   engine end to end. The Metal device comes with the compositor.
 5. The Metal compositor and effects, then capture straight onto the device.
 6. The window renderer and `Player`.
 7. A macOS job in CI (`macos-latest` runners are Apple silicon).

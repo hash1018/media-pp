@@ -142,7 +142,7 @@ exist only where their feature is enabled.
 | `d3d11` | D3D11 decode, encode, scaling, compositing, upload/download and rendering | Windows |
 | `d3d12` | D3D12VA decode, scaling, upload/download and rendering | Windows |
 | `vulkan` | Vulkan Video decode and encode, compositing, upload/download; `VulkanWindowRenderer` on Linux | Linux, Windows |
-| `videotoolbox` | VideoToolbox decode, upload/download | macOS |
+| `videotoolbox` | VideoToolbox decode and encode, upload/download | macOS |
 | `dxgi-capture` | Desktop capture; enables `d3d11` | Windows |
 | `wgc-capture` | Window capture through Windows Graphics Capture; enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |

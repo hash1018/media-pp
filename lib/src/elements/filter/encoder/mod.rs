@@ -24,5 +24,9 @@ pub use video::{
     EncodeInput, EncodePath, SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec,
     VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
 };
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use video::{
+    VideoToolboxCodec, VideoToolboxEncoder, VideoToolboxEncoderError, VideoToolboxEncoderOptions,
+};
 #[cfg(feature = "vulkan")]
 pub use video::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};

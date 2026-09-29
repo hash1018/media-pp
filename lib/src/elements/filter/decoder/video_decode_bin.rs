@@ -29,6 +29,8 @@ use crate::elements::D3d11Gpu;
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::D3d12Gpu;
 
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+use crate::elements::VideoToolboxDevice;
 #[cfg(feature = "vulkan")]
 use crate::elements::VulkanDevice;
 #[cfg(feature = "cuda")]
@@ -164,6 +166,20 @@ pub enum DecodeTarget {
         /// for `Cuda` — see [`crate::elements::VulkanDecoder::new`], which
         /// asks FFmpeg for this many beyond what decoding needs.
         downstream_hw_frames: i32,
+    },
+    /// VideoToolbox frames — Core Video pixel buffers — as
+    /// [`crate::elements::VideoToolboxDecoder`] and
+    /// [`crate::elements::VideoToolboxUpload`] make them: NV12, or BGRA where
+    /// the stream has alpha or an odd side. As on `Vulkan`, nothing here
+    /// brings 10-bit down to 8 bits or converts colour on VideoToolbox yet,
+    /// so a 10-bit stream is decoded in software, and a BT.2020 or HDR one
+    /// decoded in hardware stays NV12 with its own tags. Core Video's pool
+    /// grows, so, as for `D3d12`, there is no budget of frames to give.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    VideoToolbox {
+        /// The VideoToolbox context the pipeline's VideoToolbox elements
+        /// share.
+        device: VideoToolboxDevice,
     },
 }
 
@@ -793,6 +809,10 @@ fn refused(error: &Error) -> bool {
         Error::CudaDecoderError(crate::elements::CudaDecoderError::HwAccelUnavailable) => true,
         #[cfg(feature = "vulkan")]
         Error::VulkanDecoderError(crate::elements::VulkanDecoderError::HwAccelUnavailable) => true,
+        #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+        Error::VideoToolboxDecoderError(
+            crate::elements::VideoToolboxDecoderError::HwAccelUnavailable,
+        ) => true,
         _ => false,
     }
 }
@@ -842,6 +862,8 @@ impl DecodeTarget {
             Self::Cuda { .. } => MemoryDomain::Cuda,
             #[cfg(feature = "vulkan")]
             Self::Vulkan { .. } => MemoryDomain::Vulkan,
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            Self::VideoToolbox { .. } => MemoryDomain::VideoToolbox,
         }
     }
 
@@ -861,6 +883,10 @@ impl DecodeTarget {
             Self::Cuda { .. } => Some(crate::elements::CudaDecoder::supports(codec)),
             #[cfg(feature = "vulkan")]
             Self::Vulkan { .. } => Some(crate::elements::VulkanDecoder::supports(codec)),
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            Self::VideoToolbox { .. } => {
+                Some(crate::elements::VideoToolboxDecoder::supports(codec))
+            }
         }
     }
 
@@ -876,6 +902,8 @@ impl DecodeTarget {
             Self::Cuda { .. } => true,
             #[cfg(feature = "vulkan")]
             Self::Vulkan { .. } => true,
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            Self::VideoToolbox { .. } => true,
         }
     }
 
@@ -892,6 +920,8 @@ impl DecodeTarget {
             Self::Cuda { .. } => true,
             #[cfg(feature = "vulkan")]
             Self::Vulkan { .. } => false,
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            Self::VideoToolbox { .. } => false,
         }
     }
 
@@ -902,6 +932,8 @@ impl DecodeTarget {
         match self {
             #[cfg(feature = "vulkan")]
             Self::Vulkan { .. } => false,
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            Self::VideoToolbox { .. } => false,
             _ => self.keeps_alpha(),
         }
     }
@@ -1071,6 +1103,10 @@ impl DecodeTarget {
                 device,
                 *downstream_hw_frames,
             )?),
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            Self::VideoToolbox { device } => Box::new(crate::elements::VideoToolboxDecoder::new(
+                name, params, device,
+            )?),
         })
     }
 
@@ -1107,6 +1143,10 @@ impl DecodeTarget {
             Self::Vulkan { device, .. } => {
                 Some(Box::new(crate::elements::VulkanUpload::new(name, device)))
             }
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            Self::VideoToolbox { device } => Some(Box::new(
+                crate::elements::VideoToolboxUpload::new(name, device),
+            )),
         })
     }
 }
@@ -1619,7 +1659,8 @@ mod tests {
     #[cfg(any(
         feature = "cuda",
         feature = "vulkan",
-        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+        all(target_os = "macos", feature = "videotoolbox")
     ))]
     fn open_or_skip(
         name: &str,
@@ -2622,6 +2663,112 @@ mod tests {
             );
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
             let download = VulkanDownload::new("read-back", &device);
+            let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            let frame = frames.last().unwrap();
+            assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
+            let luma = frame.data(0)[frame.stride(0) * 72 + 128];
+            assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    mod videotoolbox {
+        use super::*;
+        use crate::{elements::VideoToolboxDownload, test_support::try_encoded_packets};
+
+        fn target(device: &VideoToolboxDevice) -> DecodeTarget {
+            DecodeTarget::VideoToolbox {
+                device: device.clone(),
+            }
+        }
+
+        /// H.264 decodes on the media engine, every picture as an NV12
+        /// VideoToolbox frame with the value it was encoded with.
+        #[test]
+        fn h264_decodes_with_videotoolbox() {
+            let Some(device) = crate::test_support::try_videotoolbox_device() else {
+                return;
+            };
+            let (params, packets) = h264();
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("h264", params, target(&device)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+            let handle = bin.handle();
+            let download = VideoToolboxDownload::new("read-back");
+            let frames = run(bin, Some(Box::new(download)), packets).expect("H.264 decodes");
+            assert_eq!(handle.path(), DecodePath::Hardware, "and stayed on it");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            for frame in &frames {
+                assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
+                let luma = frame.data(0)[frame.stride(0) * 32 + 32];
+                assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+            }
+        }
+
+        /// ProRes 4444's alpha is decoded in software and arrives in a BGRA
+        /// pixel buffer.
+        #[test]
+        fn alpha_survives_onto_videotoolbox() {
+            let Some(device) = crate::test_support::try_videotoolbox_device() else {
+                return;
+            };
+            let Some((params, packets)) = try_encoded_packets(
+                "prores_ks",
+                ffmpeg::format::Pixel::YUVA444P10LE,
+                (64, 48),
+                2,
+            ) else {
+                return;
+            };
+            let Some(bin) = open_or_skip("prores", params, target(&device)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
+            let download = VideoToolboxDownload::new("read-back");
+            let frames = run(bin, Some(Box::new(download)), packets).expect("ProRes decodes");
+            let frame = frames.last().expect("a picture came out");
+            let alpha = frame.data(0)[3];
+            assert!(
+                (120..=136).contains(&alpha),
+                "alpha {alpha} is not the half it was encoded with"
+            );
+        }
+
+        /// Nothing on VideoToolbox here brings 10 bits down to 8, so a
+        /// 10-bit stream — the media engine's own HEVC Main 10 — is decoded
+        /// in software and goes up as NV12.
+        #[test]
+        fn ten_bit_is_decoded_in_software_and_goes_up_as_nv12() {
+            let Some(device) = crate::test_support::try_videotoolbox_device() else {
+                return;
+            };
+            let Some((params, packets)) = try_encoded_packets(
+                "hevc_videotoolbox",
+                ffmpeg::format::Pixel::P010LE,
+                (256, 144),
+                90,
+            ) else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("hevc10", params, target(&device)) else {
+                return;
+            };
+            assert!(
+                matches!(
+                    bin.path(),
+                    DecodePath::Software(SoftwareReason::PixelFormat(_))
+                ),
+                "{:?}",
+                bin.path()
+            );
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+            let download = VideoToolboxDownload::new("read-back");
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(frames.len(), sent, "every picture comes out");
             let frame = frames.last().unwrap();

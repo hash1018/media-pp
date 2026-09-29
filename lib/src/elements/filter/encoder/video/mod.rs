@@ -7,6 +7,12 @@ mod video_encode_bin;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+mod videotoolbox;
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use videotoolbox::{
+    VideoToolboxCodec, VideoToolboxEncoder, VideoToolboxEncoderError, VideoToolboxEncoderOptions,
+};
 #[cfg(feature = "vulkan")]
 mod vulkan;
 #[cfg(feature = "vulkan")]
