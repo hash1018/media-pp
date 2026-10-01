@@ -1,7 +1,8 @@
 #[cfg(any(
     feature = "wasapi-capture",
     feature = "wasapi-renderer",
-    feature = "mf-capture"
+    feature = "mf-capture",
+    feature = "mf-virtual-camera"
 ))]
 pub(crate) mod com;
 #[cfg(feature = "d3d11")]

@@ -2068,6 +2068,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "media-pp-vcam"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4398,6 +4406,13 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "video_compositor"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
+name = "virtual_camera"
 version = "0.1.0"
 dependencies = [
  "media-pp",

@@ -29,6 +29,8 @@ use crate::elements::DmaBufCudaError;
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
 use crate::elements::MfCaptureSourceError;
+#[cfg(all(target_os = "windows", feature = "mf-virtual-camera"))]
+use crate::elements::MfVirtualCameraError;
 #[cfg(feature = "rnnoise")]
 use crate::elements::NoiseSuppressorError;
 #[cfg(feature = "ort")]
@@ -748,6 +750,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "mf-capture"))]
     #[error(transparent)]
     MfCaptureSourceError(#[from] MfCaptureSourceError),
+
+    /// The Media Foundation virtual camera could not be made or fed.
+    #[cfg(all(target_os = "windows", feature = "mf-virtual-camera"))]
+    #[error(transparent)]
+    MfVirtualCameraError(#[from] MfVirtualCameraError),
 
     /// V4L2 camera capture failed.
     #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]

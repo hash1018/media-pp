@@ -407,6 +407,19 @@ mf-capture = [
     "windows/Win32_System_Com",
     "windows/Win32_System_Com_StructuredStorage",
 ]
+# The pipeline's pictures as a camera other applications open, through
+# Windows 11's Media Foundation virtual cameras. The camera itself is the
+# `media-pp-vcam` DLL beside this crate, registered once for the machine.
+mf-virtual-camera = [
+    "dep:windows",
+    "windows/Win32_Foundation",
+    "windows/Win32_Media_MediaFoundation",
+    "windows/Win32_System_Com",
+    "windows/Win32_System_LibraryLoader",
+    "windows/Win32_System_Memory",
+    "windows/Win32_System_Registry",
+    "windows/Win32_System_SystemInformation",
+]
 v4l2-capture = ["dep:libc"]
 # A camera on macOS, through AVFoundation.
 avfoundation-capture = [

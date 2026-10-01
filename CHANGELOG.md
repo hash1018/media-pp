@@ -111,8 +111,9 @@ compile error with no explanation.
   `VideoToolboxEncoder`, `VideoToolboxUpload` and `VideoToolboxDownload`,
   `AvFoundationCaptureSource`, `ScreenCaptureKitSource`,
   `MetalVideoCompositor`, `MetalWindowRenderer`, `MetalScaler`,
-  `MetalConverter`, `MetalChromaKey` and `MetalVideoEffect` — see Added. A
-  `match` on `ElementType` needs an arm for each.
+  `MetalConverter`, `MetalChromaKey` and `MetalVideoEffect`, and
+  `MfVirtualCamera` — see Added. A `match` on `ElementType` needs an arm
+  for each.
 
 - **`MemoryDomain` has a `VideoToolbox` variant**, for frames in Core Video
   pixel buffers — see Added. A `match` on `MemoryDomain` needs an arm for
@@ -124,6 +125,19 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`MfVirtualCamera`: a pipeline's pictures as a Windows camera**
+  (feature `mf-virtual-camera`, Windows 11). Every application that lists
+  cameras — Teams, Zoom, a browser, the Camera app — sees "… Windows
+  Virtual Camera" for as long as the element lives, and gets each picture
+  as NV12 at the size it chose (1920x1080, 1280x720 or 640x360, 30 frames
+  a second), converted to BT.709 from any system-memory video. The camera
+  itself is a DLL of its own, the new `vcam` crate, which Windows' Frame
+  Server loads and which is installed once per machine from an elevated
+  prompt (`vcam/install.ps1`); without it `MfVirtualCamera::new` answers
+  `MfVirtualCameraError::NotInstalled`, and before Windows 11
+  `Unsupported`. The `virtual_camera` example shows a test pattern or a
+  looping file.
 
 - **`MetalRenderer`: VideoToolbox frames drawn by an application's own
   Metal code** (macOS, `metal`), the sibling of `D3d11Renderer` and

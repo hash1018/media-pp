@@ -130,7 +130,8 @@ a software decode goes into it with no `#[cfg]`.
   `AudioWaveform`, `SwAudioEncoder`; playback through `WasapiRenderer`,
   `PipeWireAudioRenderer` and `CoreAudioRenderer`.
 - **Outputs**: `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`,
-  `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`.
+  `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`, and
+  `MfVirtualCamera`, a Windows virtual camera.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
 - **Analysis**: `OrtDetector`, `WhisperTranscriber`, `FrameCounter`,
@@ -152,6 +153,7 @@ exist only where their feature is enabled.
 | `dxgi-capture` | Desktop capture; enables `d3d11` | Windows |
 | `wgc-capture` | Window capture through Windows Graphics Capture; enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |
+| `mf-virtual-camera` | The pipeline's pictures as a camera other applications open; Windows 11, with the [`vcam`](vcam/README.md) DLL installed | Windows |
 | `wasapi-capture` | System, per-application and microphone audio capture | Windows |
 | `wasapi-renderer` | Audio playback | Windows |
 | `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal | Linux |
@@ -175,7 +177,8 @@ run without one; no media is checked in. [`examples/render`](examples/render/REA
 index of the windowed ones.
 
 - `core`: decoding, queues, fan-out, dynamic tees, app sources and sinks,
-  audio, remuxing, GPU transcoding, HLS, RTMP, transcription, compositing.
+  audio, remuxing, GPU transcoding, HLS, RTMP, transcription, compositing,
+  a virtual camera.
 - `cuda`: headless CUDA recording and GPU text compositing.
 - `render`: `Player`, playback on every renderer, seeking, capture, GPU
   scaling, keying, hardware encoding and recording.

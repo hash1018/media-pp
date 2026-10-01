@@ -18,6 +18,8 @@ pub use cuda::{CudaScaler, CudaScalerError, CudaScalerInterp};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metal::{MetalScaler, MetalScalerError, MetalScalerInterp};
 pub use sw_scaler::{SwScaler, SwScalerError};
+#[cfg(all(target_os = "windows", feature = "mf-virtual-camera"))]
+pub(crate) use sw_scaler::{is_rgb, matrix};
 #[cfg(feature = "vulkan")]
 pub use vulkan::{VulkanScaler, VulkanScalerError, VulkanScalerInterp};
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]

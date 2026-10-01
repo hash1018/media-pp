@@ -23,6 +23,7 @@ mod muxer;
 mod ort_detector;
 mod packet_counter;
 mod renderer;
+mod virtual_camera;
 #[cfg(feature = "whisper")]
 mod whisper_transcriber;
 
@@ -78,6 +79,8 @@ pub use renderer::{VideoWindow, VideoWindowError};
 pub use renderer::{VulkanWindowRenderer, VulkanWindowRendererError, WindowSize};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
+#[cfg(all(target_os = "windows", feature = "mf-virtual-camera"))]
+pub use virtual_camera::{MfVirtualCamera, MfVirtualCameraError};
 #[cfg(feature = "whisper")]
 pub use whisper_transcriber::{
     ChunkPolicy, SAMPLE_RATE as WHISPER_SAMPLE_RATE, Segment, TokenTiming, WhisperTranscriber,

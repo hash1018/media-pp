@@ -512,7 +512,7 @@ impl Colour {
 }
 
 /// swscale's name for the matrix a frame says it was made with.
-fn matrix(space: ffmpeg::color::Space) -> std::ffi::c_int {
+pub(crate) fn matrix(space: ffmpeg::color::Space) -> std::ffi::c_int {
     use ffmpeg::color::Space;
     use ffmpeg::ffi::{SWS_CS_BT2020, SWS_CS_DEFAULT, SWS_CS_FCC, SWS_CS_ITU709, SWS_CS_SMPTE240M};
     match space {
@@ -527,7 +527,7 @@ fn matrix(space: ffmpeg::color::Space) -> std::ffi::c_int {
 
 /// Whether `pixel` holds RGB rather than YUV — for which a matrix and a
 /// range mean nothing.
-fn is_rgb(pixel: ffmpeg::format::Pixel) -> bool {
+pub(crate) fn is_rgb(pixel: ffmpeg::format::Pixel) -> bool {
     // SAFETY: a lookup in libavutil's static table of descriptors, which
     // answers null for a format it does not know.
     unsafe {

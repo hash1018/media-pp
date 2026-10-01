@@ -8,4 +8,5 @@ members = [
     "examples/rtsp/*",
     "examples/vision/*",
     "examples/webrtc/*",
+    "vcam",
 ]

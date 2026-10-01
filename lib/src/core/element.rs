@@ -242,6 +242,8 @@ pub enum ElementType {
     PipeWireAudioRenderer,
     /// Windows WASAPI audio renderer sink.
     WasapiRenderer,
+    /// Windows Media Foundation virtual camera sink.
+    MfVirtualCamera,
     /// macOS Core Audio renderer sink.
     CoreAudioRenderer,
     /// macOS Metal video renderer sink, drawing into a window of its own or

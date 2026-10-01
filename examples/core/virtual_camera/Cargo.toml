@@ -1,0 +1,8 @@
+[package]
+name = "virtual_camera"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+media-pp = { path = "../../../lib", features = ["mf-virtual-camera"] }

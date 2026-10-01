@@ -198,6 +198,8 @@ pub use sink::{
     MetalFrame, MetalFramePlanes, MetalFrameRenderer, MetalRenderer, MetalRendererError,
     MetalTexture, MetalWindowRenderer, MetalWindowRendererError, run_with_windows,
 };
+#[cfg(all(target_os = "windows", feature = "mf-virtual-camera"))]
+pub use sink::{MfVirtualCamera, MfVirtualCameraError};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
 #[cfg(any(
