@@ -1,8 +1,10 @@
 # AGENTS.md
 
 Repository guidance for AI-assisted and human development. Read `README.md`
-first for the element inventory, feature flags, examples, and build
-requirements, the crate documentation in `lib/src/lib.rs` for how a pipeline
+first and the files it lists under `docs/` — the element inventory
+(`docs/elements.md`), feature flags and what each needs
+(`docs/features.md`), examples (`docs/examples.md`), and platform setup
+(`docs/building/`) — the crate documentation in `lib/src/lib.rs` for how a pipeline
 runs, and `CONTRIBUTING.md` for how to test. Treat the code and tests as the
 final source of truth when documentation and implementation differ.
 
@@ -386,8 +388,11 @@ final source of truth when documentation and implementation differ.
 
 ## Documentation and repository hygiene
 
-- Update `README.md` when public API, feature flags, requirements, or examples
-  change. Keep volatile roadmap ideas out of agent instruction files.
+- Update the documentation when public API, feature flags, requirements, or
+  examples change: the element inventory in `docs/elements.md`, feature flags
+  and their requirements in `docs/features.md`, examples in
+  `docs/examples.md`, platform setup in `docs/building/`. `README.md` stays a
+  short overview with a table of those files; detail goes into `docs/`. Keep volatile roadmap ideas out of agent instruction files.
 - Doc comments should explain invariants, ownership, thread/error behavior, and
   non-obvious rationale. Do not repeat claims that can be read directly from a
   struct definition.

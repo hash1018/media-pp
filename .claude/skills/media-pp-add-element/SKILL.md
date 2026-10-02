@@ -105,8 +105,8 @@ choosing the public API.
   end-of-stream and seek behavior, handle lifetime and backend requirements.
   Public docs may not link private items (CI runs rustdoc with `-D warnings`
   for every feature set).
-- Update the README inventory or feature table when the public surface
-  changes. Extend an existing example rather than adding a parallel one.
+- Update the inventory in `docs/elements.md` or the feature table in
+  `docs/features.md` when the public surface changes. Extend an existing example rather than adding a parallel one.
 
 ## Verify the observable contract
 
