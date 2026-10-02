@@ -382,13 +382,7 @@ mod tests {
             self.open.load(Ordering::SeqCst)
         }
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            if self
-                .refusals
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                    left.checked_sub(1)
-                })
-                .is_ok()
-            {
+            if crate::test_support::take_one(&self.refusals) {
                 return Err(ffmpeg::Error::InvalidData.into());
             }
             if let MediaBuffer::Video(frame) = &buf {

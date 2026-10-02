@@ -215,6 +215,21 @@ struct Playback {
     ended: AtomicBool,
 }
 
+/// Takes `frames` off `count`, stopping at zero — a flush may have zeroed it
+/// in between. A loop of its own rather than `fetch_update`, which Rust 1.99
+/// deprecates for a `try_update` the crate's minimum Rust does not have.
+fn saturating_sub(count: &AtomicU64, frames: u64) {
+    let mut current = count.load(Ordering::Acquire);
+    while let Err(actual) = count.compare_exchange_weak(
+        current,
+        current.saturating_sub(frames),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        current = actual;
+    }
+}
+
 /// What the PipeWire thread reports back to `open` once, at startup.
 enum Startup {
     Ready(AudioFormat),
@@ -759,11 +774,7 @@ impl Rendering {
     }
 
     fn rollback_queued(&self, frames: u64) {
-        let _ = self.playback.queued_frames.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |queued| Some(queued.saturating_sub(frames)),
-        );
+        saturating_sub(&self.playback.queued_frames, frames);
     }
 
     /// Starts the stream once enough audio is queued to survive the first few
@@ -1329,11 +1340,7 @@ fn run_pipewire(
                         }
                         // Saturating, because a flush may have zeroed the
                         // count between the copy and here.
-                        let _ = playback.queued_frames.fetch_update(
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                            |queued| Some(queued.saturating_sub(consumed)),
-                        );
+                        saturating_sub(&playback.queued_frames, consumed);
                         want
                     };
 

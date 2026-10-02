@@ -399,11 +399,7 @@ mod tests {
             {
                 self.seen.lock().unwrap().push(pts);
             }
-            let _ = self
-                .room
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |room| {
-                    room.checked_sub(1)
-                });
+            crate::test_support::take_one(&self.room);
             Ok(())
         }
     }

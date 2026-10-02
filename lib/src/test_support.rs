@@ -149,6 +149,23 @@ impl Sink for Room {
     }
 }
 
+/// Takes one off `count` unless it is already zero, and says whether it
+/// did — what a test's sink counts its refusals or its room down with. A
+/// loop of its own rather than `fetch_update`, which Rust 1.99 deprecates
+/// for a `try_update` the crate's minimum Rust does not have.
+pub(crate) fn take_one(count: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut current = count.load(Ordering::SeqCst);
+    while current > 0 {
+        match count.compare_exchange_weak(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
+}
+
 /// Path to a video file for tests that need one — synthesized here, every
 /// time, on every machine.
 ///
