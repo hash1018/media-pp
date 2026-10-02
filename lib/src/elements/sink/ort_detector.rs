@@ -9,7 +9,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     error::Result,
 };
 
@@ -259,7 +259,7 @@ where
     }
 }
 
-impl<F> Sink for OrtDetector<F>
+impl<F> RawSink for OrtDetector<F>
 where
     F: FnMut(&ffmpeg::frame::Video, &[Detection]) -> Result<()> + Send + 'static,
 {

@@ -44,13 +44,13 @@ impl Element for EndingSource {
     }
 }
 
-impl Source for EndingSource {
+impl SrcPads for EndingSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for EndingSource {
+impl RawSource for EndingSource {
     fn is_live(&self) -> bool {
         false
     }
@@ -121,7 +121,7 @@ impl Element for EndingSink {
     }
 }
 
-impl Sink for EndingSink {
+impl RawSink for EndingSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Ok(())
     }
@@ -178,7 +178,7 @@ impl Element for Screen {
     }
 }
 
-impl Sink for Screen {
+impl RawSink for Screen {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         self.pictures.fetch_add(1, Ordering::SeqCst);
         Ok(())

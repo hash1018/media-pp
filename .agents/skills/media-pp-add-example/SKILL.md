@@ -54,7 +54,7 @@ pipeline from its wiring closure rather than from imports or filenames.
 - Source the README from an existing crate-level doc comment where available,
   reformatting without changing its claims. Otherwise write only what the
   construction code demonstrates.
-- State the actual graph using `SourceType -> Filter -> SinkType` notation and
+- State the actual graph using `SourceType -> RawFilter -> SinkType` notation and
   account for branches explicitly. Do not infer the graph from imports.
 - Keep general feature tables, installation requirements, and repository-wide
   build instructions in the root README or type documentation, not the example

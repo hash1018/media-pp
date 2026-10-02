@@ -33,7 +33,7 @@ pub enum RtspMuxerError {
 }
 
 /// Publishes one or more compressed packet streams to an already-running
-/// RTSP server, and hands out one [`Sink`](crate::element::Sink) per track.
+/// RTSP server, and hands out one [`RawSink`](crate::element::RawSink) per track.
 ///
 /// The server must already be listening at `url` and must permit publishing
 /// to that path. It can be [MediaMTX] or any other implementation that
@@ -132,7 +132,7 @@ impl RtspMuxer {
 
     /// Registers one more track this session will publish. `format` (see
     /// [`TrackFormat`]) must describe every packet subsequently passed to that
-    /// track's [`Sink::consume`](crate::element::Sink::consume). `name` becomes the track's own
+    /// track's [`RawSink::consume`](crate::element::RawSink::consume). `name` becomes the track's own
     /// [`Element::name`](crate::element::Element::name)/`pp_log` identity — pick something that tells the
     /// tracks apart in logs and [`crate::bus::BusEvent`]s, such as
     /// `"video"`/`"audio"`.
@@ -172,10 +172,10 @@ impl RtspMuxer {
     /// Performs the `ANNOUNCE`/`SETUP`/`RECORD` handshake — every
     /// [`RtspMuxer::add_stream`] call this session will get must already
     /// have happened, since the SDP it announces describes them all — and
-    /// returns one [`Sink`](crate::element::Sink) per track, each taken out by the [`MuxerTrack`]
+    /// returns one [`RawSink`](crate::element::RawSink) per track, each taken out by the [`MuxerTrack`]
     /// its [`RtspMuxer::add_stream`] returned.
     ///
-    /// All returned `Sink`s write through the same session behind a shared
+    /// All returned `RawSink`s write through the same session behind a shared
     /// lock: independently-threaded branches arrive concurrently, and
     /// neither `av_interleaved_write_frame` nor `av_write_trailer` is safe
     /// to call from two threads against one output at once. They also share
@@ -241,7 +241,7 @@ fn alloc_output(url: &str) -> Result<ffmpeg::format::context::Output> {
 /// One track's published timestamps, kept monotonic across an upstream seek.
 ///
 /// Split out from the sink because it is the part worth testing on its own:
-/// exercising it through a `Sink` would need a listening RTSP server, and
+/// exercising it through a `RawSink` would need a listening RTSP server, and
 /// what it has to get right is arithmetic.
 #[derive(Default)]
 struct Timeline {

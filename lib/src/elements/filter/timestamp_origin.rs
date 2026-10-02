@@ -7,9 +7,9 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Shifts a packet stream so that its timeline starts at zero, taking the
@@ -80,9 +80,9 @@ use crate::{
 /// One packet copy each, to leave the `Arc` this was handed untouched — a
 /// sibling branch off the same `Tee` must not see this branch's timeline.
 /// The same copy [`crate::elements::FileMuxer`] already makes to rescale.
-pub struct TimestampOrigin(TransformStage<Rebasing>);
+pub struct TimestampOrigin(FilterStage<Rebasing>);
 
-transform_filter!(TimestampOrigin);
+filter_stage!(TimestampOrigin);
 
 /// What a [`TimestampOrigin`] does to each packet: all of its work, which
 /// the framework makes the filter.
@@ -100,7 +100,7 @@ impl TimestampOrigin {
     pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::TimestampOrigin, &name, None);
-        Self(TransformStage::new(Rebasing {
+        Self(FilterStage::new(Rebasing {
             pp_log,
             name,
             origin: None,
@@ -154,7 +154,7 @@ impl Element for Rebasing {
     }
 }
 
-impl Transform for Rebasing {
+impl Filter for Rebasing {
     /// Encoded media of either kind. It reads timestamps and nothing else, so
     /// which medium the packets carry does not matter — but frames are not
     /// what it handles, and a chain that wired them here would be wrong
@@ -210,7 +210,7 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::{Sink, SinkExt, Source};
+    use crate::element::{RawSink, RawSinkExt, SrcPads};
 
     fn capture(element: &mut TimestampOrigin) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

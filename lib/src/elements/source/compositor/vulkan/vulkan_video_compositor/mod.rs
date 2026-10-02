@@ -32,7 +32,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     elements::VulkanDevice,
@@ -47,7 +47,7 @@ use crate::{
         },
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
     stats::TickCounters,
     stream::StreamEvent,
@@ -345,7 +345,7 @@ impl VulkanVideoCompositorHandle {
         })
     }
 
-    /// Registers an input and returns *only* its layer handle — no `Sink` —
+    /// Registers an input and returns *only* its layer handle — no `RawSink` —
     /// for a caller that sets this input's picture itself through
     /// [`VulkanVideoLayerHandle::set_frame`] rather than wiring a pipeline
     /// into it. Replaces any registration of the same name, as
@@ -507,7 +507,7 @@ impl Element for VulkanVideoCompositorInputSink {
     }
 }
 
-impl Sink for VulkanVideoCompositorInputSink {
+impl RawSink for VulkanVideoCompositorInputSink {
     /// Every layer is drawn on the device, from a Vulkan frame of its own.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -821,9 +821,9 @@ impl Kernels {
 /// what [`crate::elements::VulkanDecoder`] and [`crate::elements::VulkanUpload`]
 /// make. A BGRA layer keeps its alpha, which is blended as the D3D11
 /// compositor blends it, [`VideoLayer::premultiplied_alpha`] included.
-pub struct VulkanVideoCompositor(ProducingSource<Compositing>);
+pub struct VulkanVideoCompositor(SourceStage<Compositing>);
 
-produce_source!(VulkanVideoCompositor);
+source_stage!(VulkanVideoCompositor);
 
 /// What a [`VulkanVideoCompositor`] does when asked: the next frame of the
 /// composition. All of its work, which the framework makes the source.
@@ -965,7 +965,7 @@ impl VulkanVideoCompositor {
             device.name()
         );
         Ok((
-            Self(ProducingSource::new(Compositing {
+            Self(SourceStage::new(Compositing {
                 name,
                 pp_log,
                 shared: shared.clone(),
@@ -1879,7 +1879,7 @@ impl Element for Compositing {
     }
 }
 
-impl Produce for Compositing {
+impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }

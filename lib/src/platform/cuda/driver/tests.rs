@@ -6,7 +6,7 @@ use ffmpeg_next::{self as ffmpeg};
 use super::*;
 use crate::{
     buffer::MediaBuffer,
-    element::Sink,
+    element::RawSink,
     elements::{CudaDownload, CudaFrameFormat, CudaUpload},
     test_support::try_cuda_device,
 };

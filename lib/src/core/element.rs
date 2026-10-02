@@ -1,13 +1,13 @@
 //! The traits every element implements, and the identity it carries.
 //!
-//! [`Sink`] consumes buffers, [`Source`] owns the [`SrcPad`](crate::pad::SrcPad)s
-//! they leave through, and [`Filter`] is simply both. [`SourceElement`] adds
+//! [`RawSink`] consumes buffers, [`SrcPads`] owns the [`SrcPad`](crate::pad::SrcPad)s
+//! they leave through, and [`RawFilter`] is simply both. [`RawSource`] adds
 //! the one thing a graph needs exactly once: a `run` loop that drives the
 //! whole pipeline. [`SeekableSource`] is what a source adds to be sought,
 //! and [`ReversibleSource`] and [`ReversibleDecoder`] what a source and a
 //! decoder add to play backwards.
 //!
-//! [`Transform`] is the other way to write a filter: the media work alone,
+//! [`Filter`] is the other way to write a filter: the media work alone,
 //! with the pad and the stream's rules left to the framework.
 //!
 //! [`Element`] itself is the identity half — an element's type and its
@@ -36,10 +36,10 @@ use crate::{
 };
 
 pub use crate::produce::{
-    AsProduce, AsSourceElement, IntoSource, Produce, ProduceError, Produced, ProducingSource, Wait,
+    AsSource, AsSourceElement, IntoSource, ProduceError, Produced, Source, SourceStage, Wait,
 };
-pub use crate::render::{AsRender, AsSink, IntoTerminal, Render};
-pub use crate::transform::{AsFilter, AsTransform, IntoFilter, Output, Transform};
+pub use crate::render::{AsRawSink, AsSink, IntoTerminal, Sink};
+pub use crate::transform::{AsFilter, AsRawFilter, Filter, IntoFilter, Output};
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
 /// compare/match, unlike the accompanying `name: Arc<str>` (an
@@ -80,7 +80,7 @@ pub enum ElementType {
     /// Multi-input audio mixer source.
     AudioMixer,
     /// One input registered with an [`ElementType::AudioMixer`], which is a
-    /// `Sink` in whichever pipeline feeds it rather than part of the mixer's
+    /// `RawSink` in whichever pipeline feeds it rather than part of the mixer's
     /// own.
     ///
     /// Its own variant because it reads as one: an input that called itself
@@ -280,7 +280,7 @@ pub enum ElementType {
     /// RTMP publishing muxer sink, one FLV stream to an external server.
     RtmpMuxer,
     /// Anything outside this crate's own elements — a test double, or a
-    /// custom `Sink`/`SourceElement` implemented downstream of this
+    /// custom `RawSink`/`RawSource` implemented downstream of this
     /// crate. Keeps this enum from needing to grow every time someone
     /// adds their own element.
     Other,
@@ -505,18 +505,27 @@ impl Context {
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input
-/// side of an element, or a plain terminal sink. Every `Sink` is named
+/// side of an element, or a terminal. Every `RawSink` is named
 /// (via `Element`) so bus events (e.g. EOS) can identify which one they
 /// came from.
+///
+/// An element of your own implements this only to route the stream itself
+/// — a muxer of several tracks, a terminal handing the stream's events on
+/// to the application — since it is then handed every
+/// [`stream_event`](Self::stream_event) to deal with. One that does
+/// something with each buffer is a [`Sink`], and one that makes buffers of
+/// buffers a [`Filter`], which the framework makes one of. A muxer's track,
+/// a compositor's input, a bridge's feeding end are handed out as a
+/// `Box<dyn RawSink>`, which a chain ends in as it ends in any sink.
 ///
 /// This is the only "connection" primitive in the pipeline. By default,
 /// consuming a buffer is a plain function call on the caller's thread —
 /// zero overhead. Thread boundaries are introduced explicitly by wrapping
-/// a `Sink` in a [`crate::queue::Queue`], not by elements spawning their
+/// a `RawSink` in a [`crate::queue::Queue`], not by elements spawning their
 /// own threads — but for this crate's that wait on the clock inside
 /// `consume`, which a chain puts behind a queue of their own; see
 /// [`crate::elements::Pacer`].
-pub trait Sink: Element {
+pub trait RawSink: Element {
     /// Returns whether calling [`Self::consume`] can make progress now.
     ///
     /// Thread boundaries check this before removing the next queued buffer,
@@ -647,27 +656,27 @@ pub trait Sink: Element {
     }
 }
 
-/// What the pipeline asks of an element, as [`Sink`]'s hidden hook is
+/// What the pipeline asks of an element, as [`RawSink`]'s hidden hook is
 /// handed it — a type nothing outside this crate can make or read, which
 /// keeps the hook this crate's own. A sink of your own hears a pause, a
-/// resume and a stop through [`Sink::pausing`], [`Sink::resuming`] and
-/// [`Sink::stopping`], and a seek through the flushed segment
-/// [`Sink::stream_event`] is handed; one that wraps another sink hands it
+/// resume and a stop through [`RawSink::pausing`], [`RawSink::resuming`] and
+/// [`RawSink::stopping`], and a seek through the flushed segment
+/// [`RawSink::stream_event`] is handed; one that wraps another sink hands it
 /// on whole.
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Flow<'a>(pub(crate) &'a ControlMsg);
 
 /// Says an element waits on the clock inside `consume` and runs behind a
-/// queue of its own, as [`Sink`]'s hidden hook answers it — see
+/// queue of its own, as [`RawSink`]'s hidden hook answers it — see
 /// [`crate::elements::Pacer`]. Only this crate can make one.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
 pub struct OwnQueue(pub(crate) ());
 
 /// A pause, a resume and a stop, handed to `sink`'s hooks — what
-/// [`Sink::flow`] does unless an element of this crate says otherwise.
-pub(crate) fn hooks<S: Sink + ?Sized>(sink: &mut S, msg: &ControlMsg) -> Result<()> {
+/// [`RawSink::flow`] does unless an element of this crate says otherwise.
+pub(crate) fn hooks<S: RawSink + ?Sized>(sink: &mut S, msg: &ControlMsg) -> Result<()> {
     match msg {
         ControlMsg::Pause => sink.pausing(),
         ControlMsg::Resume => sink.resuming(),
@@ -677,36 +686,36 @@ pub(crate) fn hooks<S: Sink + ?Sized>(sink: &mut S, msg: &ControlMsg) -> Result<
 }
 
 /// How this crate hands a sink what the pipeline asks: `sink.control(msg)`
-/// for [`Sink::flow`] with the message wrapped.
+/// for [`RawSink::flow`] with the message wrapped.
 ///
 /// Only the reaction. Passing the message on is not the sink's to do: a
 /// filter in a graph is behind a wrapper that hands it on through the
-/// filter's [`Source::src_pads`] once this returns, whatever it returns
+/// filter's [`SrcPads::src_pads`] once this returns, whatever it returns
 /// (`control::deliver` does the same for a filter driven by hand); a
 /// terminal has nothing after it; and an element that routes control its
 /// own way — a `Queue`, across a thread, a `Tee`, to branches that come and
 /// go — does that from its hook. An error goes back to whoever sent the
 /// message, and the message has still gone on downstream.
-pub(crate) trait SinkExt: Sink {
+pub(crate) trait RawSinkExt: RawSink {
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         self.flow(Flow(msg))
     }
 }
 
-impl<S: Sink + ?Sized> SinkExt for S {}
+impl<S: RawSink + ?Sized> RawSinkExt for S {}
 
 /// An element with one or more output ports. It sends data downstream by
 /// pushing into its own `src_pads()` (e.g. `self.src_pads()[0].push(buf)`)
 /// — it's never handed a `downstream` argument from the outside. See
 /// [`SrcPad`].
 ///
-/// `Source` and `Sink` are the two halves of the duality: `Sink` is "has
-/// an input", `Source` is "has an output". An element that both receives
-/// and produces (a decoder, say) implements both side by side — `Sink` to
-/// receive, `Source` to push whatever it produces into its own pad(s)
+/// `SrcPads` and `RawSink` are the two halves of the duality: `RawSink` is "has
+/// an input", `SrcPads` is "has an output". An element that both receives
+/// and produces (a decoder, say) implements both side by side — `RawSink` to
+/// receive, `SrcPads` to push whatever it produces into its own pad(s)
 /// from inside `consume`. There's no separate "processing element" trait
 /// or wrapper needed for that.
-pub trait Source: Element {
+pub trait SrcPads: Element {
     /// Returns every output pad owned by this element.
     ///
     /// The slice order is the element's public pad-index contract. Implementors
@@ -723,9 +732,9 @@ pub trait Source: Element {
 ///
 /// Implemented only by this crate's sources: the loop is handed a channel
 /// nothing outside can name, and answering it right is what this crate's
-/// sources share. A source of your own is a [`Produce`], which the
+/// sources share. A source of your own is a [`Source`], which the
 /// framework makes one of — see [`IntoSource`].
-pub trait SourceElement: Source {
+pub trait RawSource: SrcPads {
     /// Whether this source produces data from a live, externally advancing
     /// input rather than from a finite or application-controlled timeline.
     ///
@@ -764,7 +773,7 @@ pub trait SourceElement: Source {
     /// `bus` is this source's own way to report a failure pushing into
     /// one of its pads *without* treating it as fatal — post a
     /// `BusEvent::Error` and keep going (drop that one buffer), the same
-    /// way a `Queue` handles a failing downstream `Sink` — rather than
+    /// way a `Queue` handles a failing downstream `RawSink` — rather than
     /// returning `Err` and ending this source's thread over one bad buffer.
     /// A returned `Err` is still how genuinely fatal failures (this source
     /// can't continue at all) reach `Pipeline::run`, which posts it to
@@ -778,7 +787,7 @@ pub trait SourceElement: Source {
     /// message by the time downstream elements see it.
     ///
     /// The source-side counterpart of a sink's hidden hook, for a source
-    /// that holds state of its own. The framework running a [`Produce`]
+    /// that holds state of its own. The framework running a [`Source`]
     /// uses it for what it holds back for an output: `Flush` discards what
     /// belongs to the timeline being left.
     ///
@@ -823,13 +832,13 @@ pub trait SourceElement: Source {
 
 /// A source that can reposition its own input timeline — what
 /// [`crate::pipeline::Pipeline::seek`] asks of every source. It says it is
-/// one through [`SourceElement::as_seekable`].
+/// one through [`RawSource::as_seekable`].
 ///
 /// This is only the source's side. A seekable source does not mean every
 /// branch after it can follow a seek; that is asked of the whole graph as
-/// it is wired — see [`Sink::accepts_seek`].
+/// it is wired — see [`RawSink::accepts_seek`].
 ///
-/// A [`Produce`] says it is one through [`Produce::as_seekable`]; the
+/// A [`Source`] says it is one through [`Source::as_seekable`]; the
 /// framework takes each seek on the source's thread, between one thing made
 /// and the next.
 pub trait SeekableSource: Element {
@@ -867,8 +876,8 @@ pub trait SeekableSource: Element {
 /// A source that can read its media backwards — what
 /// [`crate::pipeline::Pipeline::set_rate`] asks of every source for
 /// [`crate::pipeline::Pipeline::REVERSE_RATE`]. It says it is one through
-/// [`SourceElement::as_reversible`], or a [`Produce`] through
-/// [`Produce::as_reversible`].
+/// [`RawSource::as_reversible`], or a [`Source`] through
+/// [`Source::as_reversible`].
 ///
 /// Backwards is what the source reads and in what order; what makes the
 /// next thing is the same. From a [`Self::seek_backwards`] on it hands the
@@ -901,7 +910,7 @@ pub trait ReversibleSource: SeekableSource {
 /// A decoder, an element that turns a picture's packets into pictures,
 /// that can hand them on backwards — what a pipeline asks of every such
 /// element for [`crate::pipeline::Pipeline::REVERSE_RATE`]. It says it is
-/// one through [`Sink::as_reversible`].
+/// one through [`RawSink::as_reversible`].
 ///
 /// Played backwards, the packets come in the stretches a
 /// [`ReversibleSource`] reads, and the pipeline says where each begins and
@@ -913,7 +922,7 @@ pub trait ReversibleSource: SeekableSource {
 ///
 /// A `Flush` ends a stretch unfinished: what is held of it is dropped with
 /// the rest of the timeline being left.
-pub trait ReversibleDecoder: Sink {
+pub trait ReversibleDecoder: RawSink {
     /// A stretch begins: hold every picture from here until
     /// [`Self::end_stretch`].
     fn begin_stretch(&mut self) -> Result<()>;
@@ -925,12 +934,16 @@ pub trait ReversibleDecoder: Sink {
 }
 
 /// An element with both an input and an output — decoder, encoder,
-/// filter, thumbnail extractor, ... Just a name for "has a `Sink` to
-/// receive and a `Source` to push what it produces into"; nothing new to
+/// filter, thumbnail extractor, ... Just a name for "has a `RawSink` to
+/// receive and a `SrcPads` to push what it produces into"; nothing new to
 /// implement beyond those two.
-pub trait Filter: Source + Sink {}
+///
+/// Implemented directly only by an element that routes the stream itself —
+/// splits it, holds it back, waits on a clock; one that makes buffers of
+/// buffers is a [`Filter`].
+pub trait RawFilter: SrcPads + RawSink {}
 
-impl<T: Source + Sink> Filter for T {}
+impl<T: SrcPads + RawSink> RawFilter for T {}
 
 /// A boxed element is the element it holds — a boxed sink a sink, a boxed
 /// filter a filter — so anything that takes one takes it boxed or not.
@@ -973,13 +986,13 @@ impl<E: Element + ?Sized> Element for Box<E> {
     }
 }
 
-impl<S: Source + ?Sized> Source for Box<S> {
+impl<S: SrcPads + ?Sized> SrcPads for Box<S> {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         (**self).src_pads()
     }
 }
 
-impl<S: Sink + ?Sized> Sink for Box<S> {
+impl<S: RawSink + ?Sized> RawSink for Box<S> {
     fn ready_consume(&mut self) -> bool {
         (**self).ready_consume()
     }
@@ -1055,7 +1068,7 @@ mod tests {
         }
     }
 
-    impl Sink for Opinionated {
+    impl RawSink for Opinionated {
         fn ready_consume(&mut self) -> bool {
             false
         }
@@ -1099,11 +1112,11 @@ mod tests {
 
     /// A boxed sink answers what the sink inside answers — including where
     /// the trait has a default the box could have fallen back to — whether
-    /// it is boxed as itself or as `dyn Sink`, which is what lets
+    /// it is boxed as itself or as `dyn RawSink`, which is what lets
     /// `ChainBuilder::to` take either.
     #[test]
     fn a_boxed_sink_is_the_sink_inside_it() {
-        fn check(mut sink: impl Sink) {
+        fn check(mut sink: impl RawSink) {
             assert_eq!(&*sink.name(), "opinionated");
             assert!(!sink.ready_consume(), "not the default of true");
             assert_eq!(
@@ -1140,10 +1153,10 @@ mod tests {
             assert!(sink.own_queue().is_some(), "not the default of no queue");
         }
         check(Box::new(opinionated()));
-        check(Box::new(opinionated()) as Box<dyn Sink>);
-        check(Box::new(Box::new(opinionated()) as Box<dyn Sink>));
+        check(Box::new(opinionated()) as Box<dyn RawSink>);
+        check(Box::new(Box::new(opinionated()) as Box<dyn RawSink>));
 
-        let mut boxed: Box<dyn Sink> = Box::new(opinionated());
+        let mut boxed: Box<dyn RawSink> = Box::new(opinionated());
         boxed.consume(packet()).unwrap();
         let mut twice = Box::new(boxed);
         twice.consume(packet()).unwrap();

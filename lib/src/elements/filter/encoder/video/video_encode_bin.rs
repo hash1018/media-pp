@@ -33,7 +33,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Context, Element, ElementType, Filter, Flow, Sink, Source, element_pp_log},
+    element::{Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads, element_pp_log},
     elements::{
         SwEncoder, SwEncoderOptions, SwScaler, TrackFormat, VideoCodec, filter::line::Line,
     },
@@ -310,7 +310,7 @@ pub struct VideoEncodeBin {
     line: Line,
     /// What goes into `line` on its first use, once the bin knows whether it
     /// is in a pipeline — see [`Element::attach_context`].
-    pending: Option<Vec<Box<dyn Filter>>>,
+    pending: Option<Vec<Box<dyn RawFilter>>>,
     context: Option<Arc<Context>>,
     pad: SrcPad,
     path: EncodePath,
@@ -325,16 +325,16 @@ pub struct VideoEncodeBin {
 /// What an encoder the bin may choose is built with, and what came of it.
 struct Chosen {
     path: EncodePath,
-    elements: Vec<Box<dyn Filter>>,
+    elements: Vec<Box<dyn RawFilter>>,
     parameters: ffmpeg::codec::Parameters,
     time_base: ffmpeg::Rational,
 }
 
 impl Chosen {
     /// `encoder` behind `before`, taking its stream's parameters first.
-    fn of<E>(path: EncodePath, mut before: Vec<Box<dyn Filter>>, encoder: E) -> Self
+    fn of<E>(path: EncodePath, mut before: Vec<Box<dyn RawFilter>>, encoder: E) -> Self
     where
-        E: Filter + 'static,
+        E: RawFilter + 'static,
         for<'a> TrackFormat: From<&'a E>,
     {
         let TrackFormat {
@@ -508,7 +508,7 @@ impl From<&VideoEncodeBin> for TrackFormat {
 /// reaches the scaler is RGB, which decides what the stream says it holds.
 fn software(
     name: &str,
-    before: Vec<Box<dyn Filter>>,
+    before: Vec<Box<dyn RawFilter>>,
     rgb: bool,
     options: VideoEncodeOptions,
     tried: &mut Tried<'_>,
@@ -611,7 +611,7 @@ fn d3d11(
                             mf_options,
                             ColorDescription::BT709_LIMITED,
                         )?;
-                        Ok((vec![Box::new(scaler) as Box<dyn Filter>], encoder))
+                        Ok((vec![Box::new(scaler) as Box<dyn RawFilter>], encoder))
                     })
             }
             D3d11VideoInputFormat::Nv12 => match options.color {
@@ -629,7 +629,8 @@ fn d3d11(
 
     // Software, from the same layout in system memory: nothing on the GPU
     // is asked of a device that may have no video processor at all.
-    let download: Box<dyn Filter> = Box::new(D3d11Download::new(format!("{name}-download"), gpu)?);
+    let download: Box<dyn RawFilter> =
+        Box::new(D3d11Download::new(format!("{name}-download"), gpu)?);
     software(
         name,
         vec![download],
@@ -670,7 +671,7 @@ fn cuda(
             Err(error) => tried.refused("h264_nvenc", error),
         }
     }
-    let download: Box<dyn Filter> = Box::new(CudaDownload::new(
+    let download: Box<dyn RawFilter> = Box::new(CudaDownload::new(
         format!("{name}-download"),
         device,
         format,
@@ -712,7 +713,7 @@ fn vulkan(
             Err(error) => tried.refused("h264_vulkan", error),
         }
     }
-    let download: Box<dyn Filter> =
+    let download: Box<dyn RawFilter> =
         Box::new(VulkanDownload::new(format!("{name}-download"), device));
     software(
         name,
@@ -755,7 +756,8 @@ fn videotoolbox(
             Err(error) => tried.refused("h264_videotoolbox", error),
         }
     }
-    let download: Box<dyn Filter> = Box::new(VideoToolboxDownload::new(format!("{name}-download")));
+    let download: Box<dyn RawFilter> =
+        Box::new(VideoToolboxDownload::new(format!("{name}-download")));
     software(
         name,
         vec![download],
@@ -820,13 +822,13 @@ impl Element for VideoEncodeBin {
     }
 }
 
-impl Source for VideoEncodeBin {
+impl SrcPads for VideoEncodeBin {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for VideoEncodeBin {
+impl RawSink for VideoEncodeBin {
     /// What the first element in it says, as that element would in the
     /// bin's place — see `Rack::ready_consume`.
     fn ready_consume(&mut self) -> bool {

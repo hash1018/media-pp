@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, ReversibleDecoder, SrcPads, element_pp_log},
     elements::{VulkanDevice, filter::is_codec_drain_boundary},
     pad::SrcPad,
     platform::ffmpeg::AvBufferRef,
@@ -57,7 +57,7 @@ pub enum VulkanDecoderError {
 
 /// Decodes one video stream's `Packet`s into Vulkan frames with Vulkan
 /// Video, on a [`VulkanDevice`] — on any GPU whose driver decodes the codec
-/// through Vulkan: NVIDIA's, and AMD's and Intel's with Mesa. A `Filter`, same
+/// through Vulkan: NVIDIA's, and AMD's and Intel's with Mesa. A `RawFilter`, same
 /// shape as [`crate::elements::SwDecoder`].
 ///
 /// Frames this produces are still plain `MediaBuffer::Video`, tagged
@@ -254,13 +254,13 @@ impl Element for VulkanDecoder {
     }
 }
 
-impl Source for VulkanDecoder {
+impl SrcPads for VulkanDecoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for VulkanDecoder {
+impl RawSink for VulkanDecoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {

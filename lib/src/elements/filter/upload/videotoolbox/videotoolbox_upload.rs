@@ -11,7 +11,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::{VideoToolboxDevice, filter::upload::nv12},
     error::Result,
     platform::{
@@ -20,7 +20,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to [`VideoToolboxUpload`]. Converts into the crate-wide
@@ -83,7 +83,7 @@ const LAYOUTS: PixelLayoutSet =
 /// encoder to take. The macOS sibling of `VulkanUpload`;
 /// [`crate::elements::VideoToolboxDownload`] is the mirror of this element.
 ///
-/// A `Filter`: receives via `Sink`, pushes the uploaded frame into its own
+/// A `RawFilter`: receives via `RawSink`, pushes the uploaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///
@@ -96,9 +96,9 @@ const LAYOUTS: PixelLayoutSet =
 ///
 /// The pool frames come from is made for the first frame's size and layout,
 /// and made again when a source changes either mid-stream.
-pub struct VideoToolboxUpload(TransformStage<Uploading>);
+pub struct VideoToolboxUpload(FilterStage<Uploading>);
 
-transform_filter!(VideoToolboxUpload);
+filter_stage!(VideoToolboxUpload);
 
 /// What a [`VideoToolboxUpload`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -134,7 +134,7 @@ impl VideoToolboxUpload {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoToolboxUpload, &name, None);
         pp_info!(pp_log: &pp_log, "opened: -> VideoToolbox");
-        Self(TransformStage::new(Uploading {
+        Self(FilterStage::new(Uploading {
             name,
             pp_log,
             hw_device_ctx: device.retain(),
@@ -276,7 +276,7 @@ impl Element for Uploading {
     }
 }
 
-impl Transform for Uploading {
+impl Filter for Uploading {
     /// CPU-readable planes, in a layout that goes up — see the type's docs.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(

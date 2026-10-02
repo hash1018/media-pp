@@ -14,13 +14,13 @@ use windows::Win32::Graphics::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::filter::upload::nv12,
     error::Result,
     platform::windows::{d3d11_gpu::D3d11Gpu, d3d11va::wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `D3d11Upload`. Converts into the crate-wide `Error`
@@ -110,9 +110,9 @@ pub enum D3d11UploadError {
 /// resolution mid-stream simply produces differently sized textures from
 /// then on — there is nothing here allocated ahead of a frame to disagree
 /// with it.
-pub struct D3d11Upload(TransformStage<Uploading>);
+pub struct D3d11Upload(FilterStage<Uploading>);
 
-transform_filter!(D3d11Upload);
+filter_stage!(D3d11Upload);
 
 /// What a [`D3d11Upload`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -149,7 +149,7 @@ impl D3d11Upload {
         let pp_log = element_pp_log(ElementType::D3d11Upload, &name, None);
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened");
-        Self(TransformStage::new(Uploading {
+        Self(FilterStage::new(Uploading {
             name,
             pp_log,
             device: device.clone(),
@@ -312,7 +312,7 @@ impl Element for Uploading {
     }
 }
 
-impl Transform for Uploading {
+impl Filter for Uploading {
     /// CPU-readable planes specifically: uploading is what this element does, so a frame already on the device has no work here.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -418,7 +418,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::Sink, platform::windows::d3d11va::d3d11va_texture, pool::UnboundObjectPool,
+        element::RawSink, platform::windows::d3d11va::d3d11va_texture, pool::UnboundObjectPool,
         test_support::try_d3d11_gpu,
     };
 

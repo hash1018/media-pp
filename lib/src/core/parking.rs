@@ -304,7 +304,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::{Element, ElementType, Sink, element_pp_log};
+    use crate::element::{Element, ElementType, RawSink, element_pp_log};
     use crate::pp_log::PpLog;
 
     /// A packet due at `ms`, in milliseconds, carrying its time base.
@@ -383,7 +383,7 @@ mod tests {
         }
     }
 
-    impl Sink for Gated {
+    impl RawSink for Gated {
         fn ready_consume(&mut self) -> bool {
             let refusals = self.refusals.load(Ordering::SeqCst);
             if refusals > 0 {

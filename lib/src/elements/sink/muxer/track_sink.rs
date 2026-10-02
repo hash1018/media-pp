@@ -25,7 +25,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, element_pp_log},
     error::{Error, Result},
     pp_log::{PpLog, pp_error, pp_info},
     stream::StreamEvent,
@@ -134,7 +134,7 @@ pub(super) fn open_tracks<M: Muxer>(
             .into_iter()
             .zip(output_time_bases)
             .enumerate()
-            .map(|(index, (stream, output_time_base))| -> Box<dyn Sink> {
+            .map(|(index, (stream, output_time_base))| -> Box<dyn RawSink> {
                 let pp_log = element_pp_log(M::ELEMENT_TYPE, &stream.name, None);
                 if let Some(destination) = &shared.destination {
                     pp_info!(pp_log: &pp_log, "publishing: url={destination}, tracks={total}");
@@ -261,7 +261,7 @@ impl<M: Muxer> Element for TrackSink<M> {
     }
 }
 
-impl<M: Muxer> Sink for TrackSink<M> {
+impl<M: Muxer> RawSink for TrackSink<M> {
     /// A muxer interleaves already-encoded data and has no encoder of its
     /// own, so a decoded frame has no route through it. The medium is this
     /// track's own, so a video encoder wired into the audio track is refused
@@ -347,7 +347,7 @@ impl<M> Drop for TrackSink<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::elements::{AudioCodec, FileMuxerError, SwAudioEncoder, SwAudioEncoderOptions};
 
     /// A file muxer in all but name, so the options can be varied freely.
@@ -381,7 +381,7 @@ mod tests {
     }
 
     /// One AAC track's sink over an MP4 whose header is already written.
-    fn one_track(path: &std::path::Path, options: TrackOptions) -> Box<dyn Sink> {
+    fn one_track(path: &std::path::Path, options: TrackOptions) -> Box<dyn RawSink> {
         let time_base = ffmpeg::Rational::new(1, 48_000);
         let encoder = SwAudioEncoder::new(
             "encoder",
@@ -407,7 +407,7 @@ mod tests {
             .expect("the muxer's own track")
     }
 
-    fn seek_refused(sink: &mut Box<dyn Sink>) -> bool {
+    fn seek_refused(sink: &mut Box<dyn RawSink>) -> bool {
         !sink.accepts_seek()
     }
 
@@ -466,7 +466,7 @@ mod tests {
         )
         .expect("AAC is built into FFmpeg");
         let encoded = Arc::new(Mutex::new(Vec::new()));
-        crate::element::Source::src_pads(&mut encoder)[0].link(Box::new(CapturingSink {
+        crate::element::SrcPads::src_pads(&mut encoder)[0].link(Box::new(CapturingSink {
             received: encoded.clone(),
             pp_log: element_pp_log(ElementType::Other, "encoded", None),
         }));

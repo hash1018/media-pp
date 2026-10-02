@@ -320,7 +320,7 @@ mod tests {
 
     use super::*;
     use crate::control::{ControlMsg, PrerollContext};
-    use crate::element::{Element, ElementType, Sink, element_pp_log};
+    use crate::element::{Element, ElementType, RawSink, element_pp_log};
     use crate::pool::UnboundObjectPool;
     use crate::pp_log::PpLog;
 
@@ -377,7 +377,7 @@ mod tests {
         }
     }
 
-    impl Sink for Screen {
+    impl RawSink for Screen {
         fn ready_consume(&mut self) -> bool {
             self.open.load(Ordering::SeqCst)
         }

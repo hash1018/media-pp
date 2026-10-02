@@ -5,18 +5,18 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::CounterHandle,
     error::Result,
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
 };
 
 /// Terminal sink that counts packets. The [`CounterHandle`] it comes
 /// with reads the count from outside the pipeline, even while this sink runs
 /// on a `Queue` worker thread.
-pub struct PacketCounter(RenderStage<Counting>);
+pub struct PacketCounter(SinkStage<Counting>);
 
-render_sink!(PacketCounter);
+sink_stage!(PacketCounter);
 
 /// What a [`PacketCounter`] does with each buffer: counts it, where it is one of
 /// the packets it counts.
@@ -35,7 +35,7 @@ impl PacketCounter {
         let pp_log = element_pp_log(ElementType::PacketCounter, &name, None);
         pp_info!(pp_log: &pp_log, "created");
         (
-            Self(RenderStage::new(Counting {
+            Self(SinkStage::new(Counting {
                 name,
                 pp_log,
                 count: count.clone(),
@@ -63,7 +63,7 @@ impl Element for Counting {
     }
 }
 
-impl Render for Counting {
+impl Sink for Counting {
     /// Counts encoded packets specifically — FrameCounter is the decoded-side counterpart.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::Packets(MediaKindSet::PACKETS))

@@ -53,5 +53,6 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 
-Elements of your own are a `Transform` (a filter), a `Render` (a terminal)
-or a `Produce` (a source); the crate documentation's first page shows each.
+Elements of your own are a `Source`, a `Filter` or a `Sink`; the crate
+documentation's first page says what each is handed, and
+[`custom_element`](../examples/core/custom_element) writes one of each.

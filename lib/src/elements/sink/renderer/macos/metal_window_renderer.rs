@@ -24,7 +24,7 @@ use crate::{
         InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
         PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     elements::{
         MetalError, WindowControl, WindowEvents, WindowOptions,
         sink::renderer::presentation_delay::PresentationDelay,
@@ -264,7 +264,7 @@ impl Element for MetalWindowRenderer {
     }
 }
 
-impl Sink for MetalWindowRenderer {
+impl RawSink for MetalWindowRenderer {
     /// A VideoToolbox frame, NV12 or BGRA; or a frame in system memory,
     /// NV12, YUV420P or BGRA.
     fn input_contract(&self) -> InputContract {

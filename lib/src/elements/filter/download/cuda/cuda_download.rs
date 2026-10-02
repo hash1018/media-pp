@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     frame_size::ForSize,
     platform::{
@@ -20,7 +20,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `CudaDownload`. Converts into the crate-wide `Error`
@@ -59,7 +59,7 @@ pub enum CudaDownloadError {
 /// hardware-decoded stream, for instance — goes
 /// `CudaDecoder -> CudaDownload -> SwScaler -> ...`.
 ///
-/// A `Filter`: receives via `Sink`, pushes the downloaded frame into its own
+/// A `RawFilter`: receives via `RawSink`, pushes the downloaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///
@@ -77,9 +77,9 @@ pub enum CudaDownloadError {
 /// Every frame is a device-to-host copy over PCIe. Downloading a stream only
 /// to re-upload it is strictly worse than staying on the GPU; put this where
 /// the pipeline genuinely has to leave CUDA.
-pub struct CudaDownload(TransformStage<Downloading>);
+pub struct CudaDownload(FilterStage<Downloading>);
 
-transform_filter!(CudaDownload);
+filter_stage!(CudaDownload);
 
 /// What a [`CudaDownload`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -136,7 +136,7 @@ impl CudaDownload {
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
         pp_info!(pp_log: &pp_log, "opened: CUDA -> {:?}", format.pixel());
-        Self(TransformStage::new(Downloading {
+        Self(FilterStage::new(Downloading {
             name,
             pp_log,
             _hw_device_ctx: hw_device_ctx,
@@ -233,7 +233,7 @@ impl Element for Downloading {
     }
 }
 
-impl Transform for Downloading {
+impl Filter for Downloading {
     /// The mirror of CudaUpload: only device memory has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -283,7 +283,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::{
         elements::{CudaDecoder, CudaUpload},
         test_support::{try_cuda_device, try_test_video},

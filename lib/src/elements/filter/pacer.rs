@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, OwnQueue, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, OwnQueue, RawSink, SrcPads, element_pp_log},
     pad::SrcPad,
     playback_clock::PlaybackClock,
     playback_state::PlaybackState,
@@ -73,8 +73,8 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Delays each buffer until its presentation time, so downstream sees
 /// frames (or, upstream of a decoder, compressed packets) at real playback
-/// speed instead of as fast as demux/decode can produce them. A `Filter`:
-/// receives via `Sink`, waits in short interruptible sleeps inside
+/// speed instead of as fast as demux/decode can produce them. A `RawFilter`:
+/// receives via `RawSink`, waits in short interruptible sleeps inside
 /// `consume`, then pushes the same buffer through its own (single) src pad.
 /// A pending pause/seek/stop interrupts that wait so the owning worker can
 /// process control: pause retains the in-flight buffer for resume, while
@@ -324,7 +324,7 @@ impl Element for Pacer {
     }
 }
 
-impl Source for Pacer {
+impl SrcPads for Pacer {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
@@ -373,7 +373,7 @@ impl Pacer {
     }
 }
 
-impl Sink for Pacer {
+impl RawSink for Pacer {
     /// Pacing is a delay, not a transform: every kind is held until its
     /// own PTS comes due and then forwarded unchanged.
     fn input_contract(&self) -> InputContract {
@@ -425,7 +425,7 @@ mod tests {
     use super::*;
     use crate::clock::Clock;
     use crate::control::PrerollContext;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use std::thread;
     use std::{
         sync::mpsc,
@@ -922,7 +922,7 @@ mod tests {
     /// the subtraction silently (a plain `-`) or let the buffer through
     /// unpaced (an earlier `checked_sub` that swallowed the error). Now
     /// it's a typed `PacerError` `consume` propagates via `?`, and — since
-    /// `Queue`/a pushing source both treat a `Sink::consume` failure as
+    /// `Queue`/a pushing source both treat a `RawSink::consume` failure as
     /// "drop this one buffer, report on the bus, keep going" — a Pacer
     /// that hits this on one buffer must still pace the next one normally.
     #[test]

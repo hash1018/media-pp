@@ -6,9 +6,9 @@ use ffmpeg_next as ffmpeg;
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     pool::UnboundObjectPool,
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
 };
 
@@ -79,9 +79,9 @@ impl Default for TestVideoOptions {
 /// Runs until `Stop` — never reaches `Eos` on its own (no frame-count
 /// limit is exposed, deliberately, mirroring a live camera source more
 /// than a file).
-pub struct TestVideoSource(ProducingSource<Generating>);
+pub struct TestVideoSource(SourceStage<Generating>);
 
-produce_source!(TestVideoSource);
+source_stage!(TestVideoSource);
 
 /// What a [`TestVideoSource`] makes, one frame when asked: all of its
 /// work, which the framework makes the source.
@@ -135,7 +135,7 @@ impl TestVideoSource {
         } else {
             Duration::ZERO
         };
-        Self(ProducingSource::new(Generating {
+        Self(SourceStage::new(Generating {
             name,
             pp_log,
             options,
@@ -218,7 +218,7 @@ impl Element for Generating {
     }
 }
 
-impl Produce for Generating {
+impl Source for Generating {
     fn is_live(&self) -> bool {
         true
     }
@@ -268,7 +268,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::{Sink, SourceElement},
+        element::{RawSink, RawSource},
         pipeline::Pipeline,
     };
 
@@ -298,7 +298,7 @@ mod tests {
         }
     }
 
-    impl Sink for RecordingSink {
+    impl RawSink for RecordingSink {
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
             if let MediaBuffer::Video(frame) = buf {
                 self.seen.lock().unwrap().push((
@@ -391,7 +391,7 @@ mod tests {
         }
     }
 
-    impl Sink for TimestampSink {
+    impl RawSink for TimestampSink {
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
             if matches!(buf, MediaBuffer::Video(_)) {
                 self.seen.lock().unwrap().push(Instant::now());
@@ -481,7 +481,7 @@ mod tests {
         }
     }
 
-    impl Sink for SlowFirstFrameSink {
+    impl RawSink for SlowFirstFrameSink {
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
             if matches!(buf, MediaBuffer::Video(_)) {
                 if !self.delayed {

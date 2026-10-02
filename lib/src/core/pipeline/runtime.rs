@@ -88,7 +88,7 @@ pub enum PipelineError {
 /// supplied to a source's own `wire` closure also retains its `Bus`
 /// sender; in that case bus draining intentionally remains blocked until
 /// that extra context is dropped. A source-level failure (returned from
-/// [`crate::element::SourceElement::run`] itself, as opposed to one
+/// [`crate::element::RawSource::run`] itself, as opposed to one
 /// reported from inside a `Queue`) shows up there too, as a
 /// [`BusEvent::Error`](crate::bus::BusEvent::Error) under that source's own name, since there's no
 /// synchronous return path left to carry it.
@@ -222,7 +222,7 @@ impl Pipeline {
     pub fn new<M, I: IntoSource<M>, T>(
         id: impl Into<String>,
         source: I,
-        wire: impl FnOnce(&mut I::Source, &Arc<Context>) -> Result<T>,
+        wire: impl FnOnce(&mut I::Raw, &Arc<Context>) -> Result<T>,
     ) -> Result<(Arc<Self>, T)> {
         let (builder, wired) = PipelineBuilder::new(id).add_source(source, wire)?;
         Ok((builder.build(), wired))

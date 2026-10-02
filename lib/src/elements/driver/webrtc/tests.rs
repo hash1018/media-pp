@@ -29,7 +29,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
     driver::DriverRunner,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     elements::{
         CounterHandle, FileDemuxer, FrameCounter, SwDecoder, SwEncoder, SwEncoderOptions,
         TestVideoOptions, TestVideoSource, VideoCodec,
@@ -938,7 +938,7 @@ impl Element for CountingSink {
     }
 }
 
-impl Sink for CountingSink {
+impl RawSink for CountingSink {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         if matches!(buf, MediaBuffer::Packet(_)) {
             self.count.fetch_add(1, Ordering::SeqCst);

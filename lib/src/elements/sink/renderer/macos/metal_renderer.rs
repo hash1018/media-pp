@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::SubmitError,
     error::Result,
     platform::macos::{
@@ -19,7 +19,7 @@ use crate::{
     },
     pool::UnboundObjectPoolRef,
     pp_log::{PpLog, pp_error, pp_info},
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
 };
 
 /// What [`MetalRenderer`] needs from an application's own Metal drawing —
@@ -168,9 +168,9 @@ pub enum MetalRendererError {
 /// It draws nothing and does not pace. Put a
 /// [`crate::elements::VideoSynchronizer`] or [`crate::elements::Pacer`] in
 /// front for a picture shown at its own time.
-pub struct MetalRenderer(RenderStage<Submitting>);
+pub struct MetalRenderer(SinkStage<Submitting>);
 
-render_sink!(MetalRenderer);
+sink_stage!(MetalRenderer);
 
 /// What a [`MetalRenderer`] does with each frame: makes its textures and
 /// hands them over.
@@ -195,7 +195,7 @@ impl MetalRenderer {
         let pp_log = element_pp_log(ElementType::MetalRenderer, &name, None);
         let device = renderer.device();
         pp_info!(pp_log: &pp_log, "created");
-        Self(RenderStage::new(Submitting {
+        Self(SinkStage::new(Submitting {
             pp_log,
             name,
             inner: renderer,
@@ -294,7 +294,7 @@ impl Element for Submitting {
     }
 }
 
-impl Render for Submitting {
+impl Sink for Submitting {
     /// VideoToolbox frames holding NV12 or BGRA — anything else has no
     /// surface to make a texture over.
     fn input_contract(&self) -> InputContract {
@@ -327,7 +327,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::Sink,
+        element::RawSink,
         elements::VideoToolboxUpload,
         test_support::{capture, try_videotoolbox_device},
     };

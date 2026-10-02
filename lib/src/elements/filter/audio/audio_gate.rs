@@ -9,9 +9,9 @@ use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// How quickly the level the gate listens to falls once the sound stops.
@@ -244,9 +244,9 @@ impl Rates {
 /// front. `Flush` and `Stop` return it to closed, since whatever follows is
 /// a different stretch of sound; `Eos` passes straight through, as nothing
 /// is held back.
-pub struct AudioGate(TransformStage<Gating>);
+pub struct AudioGate(FilterStage<Gating>);
 
-transform_filter!(AudioGate);
+filter_stage!(AudioGate);
 
 /// What an [`AudioGate`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -280,7 +280,7 @@ impl AudioGate {
         let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
-            Self(TransformStage::new(Gating {
+            Self(FilterStage::new(Gating {
                 name: name.clone(),
                 pp_log,
                 control: control.clone(),
@@ -369,7 +369,7 @@ impl Element for Gating {
     }
 }
 
-impl Transform for Gating {
+impl Filter for Gating {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -411,8 +411,8 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::SinkExt;
-    use crate::element::{Sink, Source};
+    use crate::element::RawSinkExt;
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;

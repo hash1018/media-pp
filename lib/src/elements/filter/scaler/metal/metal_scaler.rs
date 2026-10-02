@@ -11,7 +11,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::VideoToolboxDevice,
     error::Result,
     frame_size::ForSize,
@@ -25,7 +25,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/metal/scale.metal");
@@ -124,9 +124,9 @@ impl MetalScalerInterp {
 ///
 /// The colour description and the timing are carried through unchanged; so
 /// is the layout, since this converts nothing.
-pub struct MetalScaler(TransformStage<Scaling>);
+pub struct MetalScaler(FilterStage<Scaling>);
 
-transform_filter!(MetalScaler);
+filter_stage!(MetalScaler);
 
 /// What a [`MetalScaler`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -177,7 +177,7 @@ impl MetalScaler {
             kernels.next().expect("one kernel for each name"),
         );
         pp_info!(pp_log: &pp_log, "opened: to {width}x{height}, {interp:?}");
-        Ok(Self(TransformStage::new(Scaling {
+        Ok(Self(FilterStage::new(Scaling {
             pp_log,
             name,
             gpu,
@@ -383,7 +383,7 @@ impl Element for Scaling {
     }
 }
 
-impl Transform for Scaling {
+impl Filter for Scaling {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
@@ -434,7 +434,7 @@ impl Drop for Scaling {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{VideoToolboxDownload, VideoToolboxUpload},
         test_support::{capture, try_videotoolbox_device},

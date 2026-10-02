@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     frame_size::ForSize,
     platform::{
@@ -17,7 +17,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// How many GPU frames [`D3d12Upload`]'s `hw_frames_ctx` pool starts with.
@@ -96,9 +96,9 @@ pub enum D3d12UploadError {
 /// `av_hwframe_ctx_init`, so the pool is made for the first frame's size
 /// and made again if a source changes resolution mid-stream — see
 /// `ForSize`.
-pub struct D3d12Upload(TransformStage<Uploading>);
+pub struct D3d12Upload(FilterStage<Uploading>);
 
-transform_filter!(D3d12Upload);
+filter_stage!(D3d12Upload);
 
 /// What a [`D3d12Upload`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -151,7 +151,7 @@ impl D3d12Upload {
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened");
-        Ok(Self(TransformStage::new(Uploading {
+        Ok(Self(FilterStage::new(Uploading {
             name,
             pp_log,
             hw_device_ctx,
@@ -180,7 +180,7 @@ impl Element for Uploading {
     }
 }
 
-impl Transform for Uploading {
+impl Filter for Uploading {
     /// CPU-readable planes: the D3D12 counterpart of D3d11Upload.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(

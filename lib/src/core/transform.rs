@@ -1,10 +1,10 @@
-//! Writing a filter by its media work alone — see [`Transform`].
+//! Writing a filter by its media work alone — see [`Filter`].
 //!
-//! A filter written directly, as [`Sink`] and [`Source`], owns everything
+//! A filter written directly, as [`RawSink`] and [`SrcPads`], owns everything
 //! the pipeline asks of one: its pad, handing its end on after what it still
 //! holds, dropping what a seek left behind, saying whether it can take a
 //! buffer. Each did that for itself, and each a little differently —
-//! docs/stream-events.md lists what that cost. A [`Transform`] does the
+//! docs/stream-events.md lists what that cost. A [`Filter`] does the
 //! media work and nothing else; the framework does the rest, once, the same
 //! way for every one.
 
@@ -14,7 +14,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Flow, Sink, Source},
+    element::{Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads},
     error::Result,
     graph::ElementId,
     pad::SrcPad,
@@ -33,12 +33,12 @@ use crate::{
 ///
 /// Put in a pipeline as any filter is, with
 /// [`ChainBuilder::pipe`](crate::pipeline::ChainBuilder::pipe), which takes
-/// a `Transform` as it takes a [`Filter`]; where a list of filters is asked
+/// a `Filter` as it takes a [`RawFilter`]; where a list of filters is asked
 /// for — [`Rack`](crate::elements::Rack) — [`IntoFilter::into_filter`] makes
-/// one. Implement this or [`Sink`] and [`Source`], not both: a filter that
+/// one. Implement this or [`RawSink`] and [`SrcPads`], not both: a filter that
 /// routes the stream itself — splits it, holds it back, waits on a clock —
 /// is written the direct way.
-pub trait Transform: Element {
+pub trait Filter: Element {
     /// Makes what `buf` answers to, into `out` — nothing, one buffer, or
     /// several. Never handed the end of the stream: that is `drain`'s.
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()>;
@@ -62,7 +62,7 @@ pub trait Transform: Element {
         self.reset();
     }
 
-    /// What it takes — see [`Sink::input_contract`]. Nothing said by default.
+    /// What it takes — see [`RawSink::input_contract`]. Nothing said by default.
     fn input_contract(&self) -> InputContract {
         InputContract::Unknown
     }
@@ -73,14 +73,14 @@ pub trait Transform: Element {
         OutputContract::Unknown
     }
 
-    /// Whether it can follow a seek — see [`Sink::accepts_seek`]. Yes by
+    /// Whether it can follow a seek — see [`RawSink::accepts_seek`]. Yes by
     /// default.
     fn accepts_seek(&self) -> bool {
         true
     }
 }
 
-/// Where a [`Transform`] puts what it makes, in the order it is to go on.
+/// Where a [`Filter`] puts what it makes, in the order it is to go on.
 #[derive(Default)]
 pub struct Output {
     made: Vec<MediaBuffer>,
@@ -93,9 +93,9 @@ impl Output {
     }
 }
 
-/// What a [`Transform`] is in a pipeline: the filter the framework makes of
+/// What a [`Filter`] is in a pipeline: the filter the framework makes of
 /// it, with the pad and the rules it does not keep itself.
-pub(crate) struct TransformStage<T> {
+pub(crate) struct FilterStage<T> {
     inner: T,
     pad: SrcPad,
     /// What it made that its pad could not take while a preroll held the
@@ -103,7 +103,7 @@ pub(crate) struct TransformStage<T> {
     stash: OutputStash,
 }
 
-impl<T: Transform> TransformStage<T> {
+impl<T: Filter> FilterStage<T> {
     pub(crate) fn new(inner: T) -> Self {
         let pad = SrcPad::with_contract(format!("{}_src", inner.name()), inner.output_contract());
         Self {
@@ -139,7 +139,7 @@ impl<T: Transform> TransformStage<T> {
     }
 }
 
-impl<T: Transform> Element for TransformStage<T> {
+impl<T: Filter> Element for FilterStage<T> {
     fn name(&self) -> Arc<str> {
         self.inner.name()
     }
@@ -166,13 +166,13 @@ impl<T: Transform> Element for TransformStage<T> {
     }
 }
 
-impl<T: Transform> Source for TransformStage<T> {
+impl<T: Filter> SrcPads for FilterStage<T> {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl<T: Transform> Sink for TransformStage<T> {
+impl<T: Filter> RawSink for FilterStage<T> {
     fn ready_consume(&mut self) -> bool {
         self.stash.ready(&mut self.pad) && self.pad.ready_consume()
     }
@@ -233,55 +233,55 @@ impl<T: Transform> Sink for TransformStage<T> {
     }
 }
 
-/// What can be put where a [`Filter`] is asked for: a filter itself, or a
-/// [`Transform`], which the framework makes one of.
+/// What can be put where a [`RawFilter`] is asked for: a filter itself, or a
+/// [`Filter`], which the framework makes one of.
 ///
 /// `M` says which of the two a type is, and the compiler works it out:
 /// nothing names it. A type that is both is refused as ambiguous —
 /// implement one or the other.
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is neither a `Filter` nor a `Transform`",
-    note = "implement `Transform` for an element that makes buffers of buffers, or `Sink` and `Source` for one that routes the stream itself"
+    message = "`{Self}` is neither a `RawFilter` nor a `Filter`",
+    note = "implement `Filter` for an element that makes buffers of buffers, or `RawSink` and `SrcPads` for one that routes the stream itself"
 )]
 pub trait IntoFilter<M>: sealed::Sealed<M> {
     /// The filter this is, boxed — for a list of filters, as a
     /// [`Rack`](crate::elements::Rack) takes.
-    fn into_filter(self) -> Box<dyn Filter>;
+    fn into_filter(self) -> Box<dyn RawFilter>;
 }
+
+/// Says a type goes in as the [`RawFilter`] it is — see [`IntoFilter`].
+pub enum AsRawFilter {}
 
 /// Says a type goes in as the [`Filter`] it is — see [`IntoFilter`].
 pub enum AsFilter {}
 
-/// Says a type goes in as the [`Transform`] it is — see [`IntoFilter`].
-pub enum AsTransform {}
-
-impl<F: Filter + 'static> IntoFilter<AsFilter> for F {
-    fn into_filter(self) -> Box<dyn Filter> {
+impl<F: RawFilter + 'static> IntoFilter<AsRawFilter> for F {
+    fn into_filter(self) -> Box<dyn RawFilter> {
         Box::new(self)
     }
 }
 
-impl<T: Transform + 'static> IntoFilter<AsTransform> for T {
-    fn into_filter(self) -> Box<dyn Filter> {
-        Box::new(TransformStage::new(self))
+impl<T: Filter + 'static> IntoFilter<AsFilter> for T {
+    fn into_filter(self) -> Box<dyn RawFilter> {
+        Box::new(FilterStage::new(self))
     }
 }
 
 mod sealed {
-    use super::{AsFilter, AsTransform, Filter, Transform};
+    use super::{AsFilter, AsRawFilter, Filter, RawFilter};
 
     /// Keeps [`super::IntoFilter`] to the two ways in it has.
     pub trait Sealed<M> {}
 
-    impl<F: Filter + 'static> Sealed<AsFilter> for F {}
-    impl<T: Transform + 'static> Sealed<AsTransform> for T {}
+    impl<F: RawFilter + 'static> Sealed<AsRawFilter> for F {}
+    impl<T: Filter + 'static> Sealed<AsFilter> for T {}
 }
 
-/// Makes `$name`, a newtype over `TransformStage<_>`, the filter its stage
+/// Makes `$name`, a newtype over `FilterStage<_>`, the filter its stage
 /// is — every method the stage's. For an element of this crate that keeps
-/// the public name, constructors and `Filter` it always had while its work
-/// moves into a [`Transform`].
-macro_rules! transform_filter {
+/// the public name, constructors and `RawFilter` it always had while its work
+/// moves into a [`Filter`].
+macro_rules! filter_stage {
     ($name:ident) => {
         impl $crate::element::Element for $name {
             fn name(&self) -> ::std::sync::Arc<str> {
@@ -304,13 +304,13 @@ macro_rules! transform_filter {
             }
         }
 
-        impl $crate::element::Source for $name {
+        impl $crate::element::SrcPads for $name {
             fn src_pads(&mut self) -> &mut [$crate::pad::SrcPad] {
                 self.0.src_pads()
             }
         }
 
-        impl $crate::element::Sink for $name {
+        impl $crate::element::RawSink for $name {
             fn ready_consume(&mut self) -> bool {
                 self.0.ready_consume()
             }
@@ -336,7 +336,7 @@ macro_rules! transform_filter {
     };
 }
 
-pub(crate) use transform_filter;
+pub(crate) use filter_stage;
 
 #[cfg(test)]
 mod tests {
@@ -348,7 +348,7 @@ mod tests {
     use ffmpeg_next as ffmpeg;
 
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::{
         contract::{MediaKind, PortContract},
         element::element_pp_log,
@@ -390,7 +390,7 @@ mod tests {
         }
     }
 
-    impl Sink for Heard {
+    impl RawSink for Heard {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             self.1.lock().unwrap().extend(tags(&[buf]));
             Ok(())
@@ -406,7 +406,7 @@ mod tests {
 
     /// Links a [`Heard`] to `stage`'s pad, and returns what it will have
     /// heard.
-    fn hear<T: Transform>(stage: &mut TransformStage<T>) -> Arc<Mutex<Vec<Option<u8>>>> {
+    fn hear<T: Filter>(stage: &mut FilterStage<T>) -> Arc<Mutex<Vec<Option<u8>>>> {
         let heard = Arc::new(Mutex::new(Vec::new()));
         stage.src_pads()[0].link(Box::new(Heard(
             element_pp_log(ElementType::Other, "heard", None),
@@ -457,7 +457,7 @@ mod tests {
         }
     }
 
-    impl Transform for Delay {
+    impl Filter for Delay {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
             if let Some(held) = self.held.replace(buf) {
                 out.push(held);
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn what_a_transform_holds_goes_on_before_the_end() {
         let (delay, _) = Delay::new();
-        let mut stage = TransformStage::new(delay);
+        let mut stage = FilterStage::new(delay);
         let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn a_flush_or_a_stop_lets_go_of_what_it_holds() {
         let (delay, resets) = Delay::new();
-        let mut stage = TransformStage::new(delay);
+        let mut stage = FilterStage::new(delay);
         let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
@@ -560,7 +560,7 @@ mod tests {
         }
     }
 
-    impl Transform for Timeline {
+    impl Filter for Timeline {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
             out.push(buf);
             Ok(())
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn a_flush_resets_and_a_stop_stops() {
         let told = Arc::new(Mutex::new(Vec::new()));
-        let mut stage = TransformStage::new(Timeline {
+        let mut stage = FilterStage::new(Timeline {
             pp_log: element_pp_log(ElementType::Other, "timeline", None),
             told: Arc::clone(&told),
         });
@@ -597,7 +597,7 @@ mod tests {
     fn a_failed_drain_still_ends_the_stream() {
         let (mut delay, _) = Delay::new();
         delay.drain_fails = true;
-        let mut stage = TransformStage::new(delay);
+        let mut stage = FilterStage::new(delay);
         let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
@@ -629,7 +629,7 @@ mod tests {
         }
     }
 
-    impl Transform for Twice {
+    impl Filter for Twice {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
             let [tag] = tags(std::slice::from_ref(&buf))[..] else {
                 unreachable!()
@@ -665,7 +665,7 @@ mod tests {
         }
     }
 
-    impl Sink for Refusing {
+    impl RawSink for Refusing {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if tags(std::slice::from_ref(&buf)) == [Some(self.refused)] {
                 return Err(ffmpeg::Error::InvalidData.into());
@@ -679,8 +679,7 @@ mod tests {
     /// after it from the same input; the refusal is still answered.
     #[test]
     fn every_buffer_made_goes_on_even_after_one_is_refused() {
-        let mut stage =
-            TransformStage::new(Twice(element_pp_log(ElementType::Other, "twice", None)));
+        let mut stage = FilterStage::new(Twice(element_pp_log(ElementType::Other, "twice", None)));
         let received = Arc::new(Mutex::new(Vec::new()));
         stage.src_pads()[0].link(Box::new(Refusing {
             pp_log: element_pp_log(ElementType::Other, "refusing", None),
@@ -742,7 +741,7 @@ mod tests {
         }
     }
 
-    impl Sink for TakesOne {
+    impl RawSink for TakesOne {
         fn ready_consume(&mut self) -> bool {
             self.open.load(Ordering::SeqCst)
         }
@@ -767,8 +766,7 @@ mod tests {
             crate::graph::ElementId::for_test(1),
             Arc::new(crate::clock::Clock::new()),
         ));
-        let mut stage =
-            TransformStage::new(Twice(element_pp_log(ElementType::Other, "twice", None)));
+        let mut stage = FilterStage::new(Twice(element_pp_log(ElementType::Other, "twice", None)));
         stage.attach_context(&context);
         let open = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let received = Arc::new(Mutex::new(Vec::new()));

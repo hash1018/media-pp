@@ -15,7 +15,7 @@ use crate::{
 ///
 /// A publish has no equivalent of a file write that always returns: a server
 /// that stops reading leaves the socket writable-then-not, and an unbounded
-/// write parks the thread inside [`Sink::consume`](crate::element::Sink::consume) — which the
+/// write parks the thread inside [`RawSink::consume`](crate::element::RawSink::consume) — which the
 /// [`Queue`](crate::queue::Queue) in front of it cannot reclaim (see the
 /// module docs on [`crate::elements`]'s sink module).
 ///
@@ -61,7 +61,7 @@ pub enum RtmpMuxerError {
 }
 
 /// Publishes one FLV stream to an RTMP server — Twitch, YouTube, or a local
-/// [MediaMTX] — and hands out one [`Sink`](crate::element::Sink) per track.
+/// [MediaMTX] — and hands out one [`RawSink`](crate::element::RawSink) per track.
 ///
 /// This is the publishing half only. It does not run a server and does not
 /// depend on a particular one: the address and the stream key come from
@@ -73,7 +73,7 @@ pub enum RtmpMuxerError {
 /// A broadcast is video *and* audio in one FLV container, so the header has
 /// to describe both before the first packet goes out — the same two-phase
 /// constraint `FileMuxer` has, and the reason this is a builder that returns
-/// sinks rather than a `Sink` itself. Every muxer in this crate is shaped
+/// sinks rather than a `RawSink` itself. Every muxer in this crate is shaped
 /// that way, including [`RtspMuxer`](crate::elements::RtspMuxer).
 ///
 /// It is a remuxer: incoming buffers are compressed
@@ -196,7 +196,7 @@ impl RtmpMuxer {
     /// typically `&encoder` for the encoder that feeds it (see
     /// [`TrackFormat`]). `name` becomes this track's own
     /// [`Element::name`](crate::element::Element::name)/`pp_log` identity once [`RtmpMuxer::open`] turns it
-    /// into a `Sink`.
+    /// into a `RawSink`.
     ///
     /// The returned [`MuxerTrack`] is how this track's sink is taken out of
     /// what [`RtmpMuxer::open`] returns.
@@ -223,13 +223,13 @@ impl RtmpMuxer {
 
     /// Writes the FLV header — every [`RtmpMuxer::add_stream`] call this
     /// broadcast will get must already have happened — and returns one
-    /// [`Sink`](crate::element::Sink) per track, each taken out by the [`MuxerTrack`] its
+    /// [`RawSink`](crate::element::RawSink) per track, each taken out by the [`MuxerTrack`] its
     /// [`RtmpMuxer::add_stream`] returned.
     ///
     /// This is where a codec FLV cannot carry is refused, and where a
     /// server that accepted the connection but rejects the stream says so.
     ///
-    /// All returned `Sink`s write through the same connection behind a
+    /// All returned `RawSink`s write through the same connection behind a
     /// shared lock: a video encode chain and an audio encode chain sit on
     /// their own [`Queue`](crate::queue::Queue)s and arrive concurrently,
     /// and neither `av_interleaved_write_frame` nor `av_write_trailer` is

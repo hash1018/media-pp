@@ -52,11 +52,11 @@
 //! # Reacting to one
 //!
 //! An element reacts through
-//! [`Sink::stream_event`](crate::element::Sink::stream_event): a filter by
+//! [`RawSink::stream_event`](crate::element::RawSink::stream_event): a filter by
 //! pushing what it answers the event with — a decoder what it still holds
 //! at the end — which the framework then follows with the event itself
-//! through the filter's pads. A [`Transform`](crate::element::Transform) or
-//! a [`Render`](crate::element::Render) is never handed one: the framework
+//! through the filter's pads. A [`Filter`](crate::element::Filter) or
+//! a [`Sink`](crate::element::Sink) is never handed one: the framework
 //! drains, resets and ends it.
 
 use std::{fmt, sync::Arc, time::Duration};
@@ -194,7 +194,7 @@ pub(crate) fn begin_segment(pads: &mut [SrcPad], segment: Segment, pp_log: &PpLo
 /// reaction, then the event on through its pads, a failure in either
 /// keeping the other from none of them.
 #[cfg(test)]
-pub(crate) fn deliver<F: crate::element::Filter + ?Sized>(
+pub(crate) fn deliver<F: crate::element::RawFilter + ?Sized>(
     filter: &mut F,
     event: &StreamEvent,
 ) -> Result<()> {

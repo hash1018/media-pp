@@ -17,10 +17,10 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait, element_pp_log,
+        Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait, element_pp_log,
     },
     error::Result,
-    produce::produce_source,
+    produce::source_stage,
     queue::OverflowPolicy,
     stream::StreamEvent,
 };
@@ -106,7 +106,7 @@ impl Default for PipelineBridgeOptions {
 /// ```
 ///
 /// The downstream half is this element, its pipeline's own source. The
-/// upstream half is a [`Sink`] from
+/// upstream half is a [`RawSink`] from
 /// [`PipelineBridgeHandle::connect`], which whichever pipeline is feeding it
 /// terminates at.
 ///
@@ -115,7 +115,7 @@ impl Default for PipelineBridgeOptions {
 /// Deliberately, and unlike a mixer: with no way to combine buffers, several
 /// inputs would only interleave in whatever order they arrived. A second
 /// [`PipelineBridgeHandle::connect`] *replaces* the first, which is the
-/// reconnection path — the old [`Sink`] then refuses with
+/// reconnection path — the old [`RawSink`] then refuses with
 /// [`PipelineBridgeError::Superseded`] rather than feeding its own
 /// replacement.
 ///
@@ -173,9 +173,9 @@ impl Default for PipelineBridgeOptions {
 /// unguarded is a [`crate::elements::Pacer`] — it would be pacing one
 /// pipeline's timestamps against another pipeline's clock, which is a stream
 /// released all at once or one that never arrives.
-pub struct PipelineBridge(ProducingSource<Bridging>);
+pub struct PipelineBridge(SourceStage<Bridging>);
 
-produce_source!(PipelineBridge);
+source_stage!(PipelineBridge);
 
 /// What a [`PipelineBridge`] hands on, as its feeding side hands it over:
 /// all of its work, which the framework makes the source.
@@ -219,7 +219,7 @@ struct BridgeShared {
     /// Buffers `OverflowPolicy::DropNewest` has thrown away.
     ///
     /// Counted here rather than reported where it happens, because where it
-    /// happens is a `Sink` on the feeding pipeline's thread and the bus that
+    /// happens is a `RawSink` on the feeding pipeline's thread and the bus that
     /// should hear about it belongs to this one. The run loop posts what it
     /// sees this move by — same visibility a `Queue` gives its own drops,
     /// from the side that has a bus to say it on.
@@ -281,7 +281,7 @@ impl PipelineBridge {
             name: name.clone(),
         };
         (
-            Self(ProducingSource::new(Bridging {
+            Self(SourceStage::new(Bridging {
                 pp_log,
                 name,
                 shared,
@@ -319,12 +319,12 @@ pub struct PipelineBridgeHandle {
 }
 
 impl PipelineBridgeHandle {
-    /// A [`Sink`] for the feeding pipeline to terminate at, replacing
+    /// A [`RawSink`] for the feeding pipeline to terminate at, replacing
     /// whatever was connected before.
     ///
     /// Fails with [`PipelineBridgeError::Disconnected`] once the bridge's own
     /// pipeline has finished.
-    pub fn connect(&self) -> std::result::Result<Box<dyn Sink>, PipelineBridgeError> {
+    pub fn connect(&self) -> std::result::Result<Box<dyn RawSink>, PipelineBridgeError> {
         let shared = self
             .shared
             .upgrade()
@@ -407,7 +407,7 @@ impl Element for PipelineBridgeSink {
     }
 }
 
-impl Sink for PipelineBridgeSink {
+impl RawSink for PipelineBridgeSink {
     /// Anything, because a bridge is defined by not caring: it exists for
     /// what a mixer and a compositor cannot carry. Paired with the
     /// `Passthrough` on the other half, so whatever contract arrives keeps
@@ -557,7 +557,7 @@ impl Bridging {
     }
 }
 
-impl Produce for Bridging {
+impl Source for Bridging {
     /// Live, because it cannot be asked for a buffer it has not been given.
     /// Whether what feeds it is live is the other pipeline's business and not
     /// something this can see.
@@ -630,14 +630,14 @@ mod tests {
     use std::sync::{Mutex as StdMutex, atomic::AtomicUsize};
 
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::{elements::AppSink, pipeline::Pipeline};
 
     /// What crossed the bridge, in order.
     /// A sink, the timestamps that reached it, and how many ends of stream it
     /// saw.
     type Watched = (
-        Box<dyn Sink>,
+        Box<dyn RawSink>,
         Arc<StdMutex<Vec<Option<i64>>>>,
         Arc<AtomicUsize>,
     );
@@ -691,7 +691,7 @@ mod tests {
         }
     }
 
-    impl Sink for FlushWatcher {
+    impl RawSink for FlushWatcher {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = &buf {
                 self.seen.lock().unwrap().push(packet.pts());
@@ -714,7 +714,7 @@ mod tests {
     }
 
     /// The downstream pipeline, running, with the bridge as its source.
-    fn downstream(bridge: PipelineBridge, sink: Box<dyn Sink>) -> std::sync::Arc<Pipeline> {
+    fn downstream(bridge: PipelineBridge, sink: Box<dyn RawSink>) -> std::sync::Arc<Pipeline> {
         let (pipeline, ()) = Pipeline::new("down", bridge, move |source, context| {
             let branch = context.branch().to(sink)?;
             context.attach(source, 0, branch)?;
@@ -937,7 +937,7 @@ mod tests {
         }
     }
 
-    impl Sink for StreamWatcher {
+    impl RawSink for StreamWatcher {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = &buf {
                 self.crossed

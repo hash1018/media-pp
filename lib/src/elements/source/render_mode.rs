@@ -11,7 +11,7 @@ use ffmpeg_next as ffmpeg;
 /// A choice made at construction, not a switch: a live element and an
 /// offline one differ in what a pipeline may do with them — whether it can
 /// be sought, whether it can preroll — and a pipeline settles that when it
-/// is wired (see [`crate::element::SourceElement::is_live`]).
+/// is wired (see [`crate::element::RawSource::is_live`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Emits at its own rate by the wall clock, drawing whatever each input

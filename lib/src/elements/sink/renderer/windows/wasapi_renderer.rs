@@ -14,7 +14,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
     elements::{AudioFormat, WasapiDevice, WasapiDeviceKind},
@@ -23,7 +23,7 @@ use crate::{
         ComApartment, list_devices as enumerate_wasapi_devices, open_device, resolve_mix_format,
     },
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
     time::{MediaTimestamp, TimeBase},
 };
 
@@ -136,9 +136,9 @@ pub enum WasapiRendererError {
 /// enough WASAPI ring-buffer space to submit the whole input frame. Put a
 /// [`crate::queue::Queue`] immediately before this sink when its blocking
 /// must not hold up another branch.
-pub struct WasapiRenderer(RenderStage<Rendering>);
+pub struct WasapiRenderer(SinkStage<Rendering>);
 
-render_sink!(WasapiRenderer);
+sink_stage!(WasapiRenderer);
 
 /// What a [`WasapiRenderer`] does with each frame: plays it on the device.
 /// All of its work, which the framework makes the terminal.
@@ -285,7 +285,7 @@ impl WasapiRenderer {
         );
 
         Ok((
-            Self(RenderStage::new(Rendering {
+            Self(SinkStage::new(Rendering {
                 name,
                 pp_log,
                 audio_client,
@@ -304,7 +304,7 @@ impl WasapiRenderer {
         ))
     }
 
-    /// Returns the endpoint mix format required by [`Sink::consume`](crate::element::Sink::consume).
+    /// Returns the endpoint mix format required by [`RawSink::consume`](crate::element::RawSink::consume).
     pub fn format(&self) -> AudioFormat {
         self.0.inner.format
     }
@@ -691,7 +691,7 @@ impl Element for Rendering {
     }
 }
 
-impl Render for Rendering {
+impl Sink for Rendering {
     /// Writes samples to the shared-mode endpoint buffer.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -787,8 +787,10 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::SinkExt;
-    use crate::{clock::Clock, control::ControlMsg, element::Sink, playback_clock::PlaybackMaster};
+    use crate::element::RawSinkExt;
+    use crate::{
+        clock::Clock, control::ControlMsg, element::RawSink, playback_clock::PlaybackMaster,
+    };
 
     fn frame(format: AudioFormat, samples: usize) -> ffmpeg::frame::Audio {
         let mut frame =

@@ -173,9 +173,9 @@ pub enum D3d11SharedDeviceError {
 /// Crate-wide error. Each element defines its own `{Element}Error` (see
 /// [`FileDemuxerError`], [`SwDecoderError`], [`QueueError`]) for its own
 /// domain-specific failures; this enum just aggregates them so trait
-/// methods (`Sink::consume`, `SourceElement::run`, ...) — which have to
+/// methods (`RawSink::consume`, `RawSource::run`, ...) — which have to
 /// return one common error type to stay object-safe across arbitrary
-/// `Box<dyn Sink>` — can report any of them. `?` chains through
+/// `Box<dyn RawSink>` — can report any of them. `?` chains through
 /// automatically: an element's own function returns its own error type,
 /// and the moment that gets used with `?` inside a function returning
 /// this top-level `Result`, it's converted here via `#[from]`.

@@ -8,8 +8,8 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, Flow, IntoFilter, IntoTerminal, ReversibleDecoder,
-        Sink, SinkExt, Source, element_pp_log,
+        Context, Element, ElementType, Flow, IntoFilter, IntoTerminal, RawFilter, RawSink,
+        RawSinkExt, ReversibleDecoder, SrcPads, element_pp_log,
     },
     error::Result,
     graph::{
@@ -37,7 +37,7 @@ const OWN_QUEUE_CAPACITY: usize = 8;
 /// Because each element needs a handle to *its* downstream to be
 /// constructed, the chain is assembled back-to-front: elements are
 /// collected in call order, then folded right-to-left starting from the
-/// terminal `Sink` at [`ChainBuilder::to`] time.
+/// terminal `RawSink` at [`ChainBuilder::to`] time.
 pub struct ChainBuilder {
     context: Arc<Context>,
     elements: Vec<Box<dyn StageBuilder>>,
@@ -62,7 +62,7 @@ struct PlannedNode {
 /// A fully constructed runtime chain whose graph nodes are still detached.
 /// Dropping it has no topology effect; only an attach operation commits it.
 pub struct DetachedBranch {
-    pub(crate) root: Box<dyn Sink>,
+    pub(crate) root: Box<dyn RawSink>,
     pub(crate) plan: BranchPlan,
 }
 
@@ -77,7 +77,7 @@ impl DetachedBranch {
 }
 
 trait StageBuilder: Send {
-    /// Turns one planned stage into a live `Sink` in front of `downstream`.
+    /// Turns one planned stage into a live `RawSink` in front of `downstream`.
     ///
     /// Takes the whole `Context` rather than the pieces it needs, because
     /// what a stage needs from its pipeline has grown twice already — the
@@ -86,9 +86,9 @@ trait StageBuilder: Send {
     /// a stage against one pipeline's identity and another's timing.
     fn wrap(
         self: Box<Self>,
-        downstream: Box<dyn Sink>,
+        downstream: Box<dyn RawSink>,
         context: &Arc<Context>,
-    ) -> Result<Box<dyn Sink>>;
+    ) -> Result<Box<dyn RawSink>>;
 }
 
 struct DirectStage<T>(T, Arc<ElementCounters>);
@@ -148,13 +148,13 @@ impl<T: Element> Element for FlowTracer<T> {
     }
 }
 
-impl<T: Source> Source for FlowTracer<T> {
+impl<T: SrcPads> SrcPads for FlowTracer<T> {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         self.inner.src_pads()
     }
 }
 
-impl<T: Filter> Sink for FlowTracer<T> {
+impl<T: RawFilter> RawSink for FlowTracer<T> {
     fn ready_consume(&mut self) -> bool {
         self.inner.ready_consume() && self.inner.src_pads().iter_mut().all(SrcPad::ready_consume)
     }
@@ -186,7 +186,7 @@ impl<T: Filter> Sink for FlowTracer<T> {
 
     /// The filter's own reaction, and then the message on through its pads
     /// — the passing on that no filter does itself (see
-    /// `Sink::flow`). Traced around both, so a log shows everything
+    /// `RawSink::flow`). Traced around both, so a log shows everything
     /// after this element handle the message inside this one's record of it.
     fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
         pp_trace!(
@@ -263,7 +263,7 @@ impl<T: Filter> Sink for FlowTracer<T> {
 /// and ends, before it is handed `buf`: a stretch ends where a packet's
 /// decode time goes back, the next beginning with that packet, and the
 /// last ends with the end of the stream (`end_last_stretch`).
-fn mark_stretch<T: Filter>(
+fn mark_stretch<T: RawFilter>(
     stretches: &mut Option<Stretches>,
     inner: &mut T,
     buf: &MediaBuffer,
@@ -304,7 +304,7 @@ fn mark_stretch<T: Filter>(
 
 /// Ends the stretch under way, where one is, as the stream ends — see
 /// `mark_stretch`.
-fn end_last_stretch<T: Filter>(stretches: &mut Option<Stretches>, inner: &mut T) -> Result<()> {
+fn end_last_stretch<T: RawFilter>(stretches: &mut Option<Stretches>, inner: &mut T) -> Result<()> {
     let Some(stretches) = stretches else {
         return Ok(());
     };
@@ -347,13 +347,13 @@ impl<T: Element> FlowTracer<T> {
 
 impl<T> StageBuilder for DirectStage<T>
 where
-    T: Filter + 'static,
+    T: RawFilter + 'static,
 {
     fn wrap(
         self: Box<Self>,
-        downstream: Box<dyn Sink>,
+        downstream: Box<dyn RawSink>,
         context: &Arc<Context>,
-    ) -> Result<Box<dyn Sink>> {
+    ) -> Result<Box<dyn RawSink>> {
         let DirectStage(mut element, counters) = *self;
         *element.pp_log_mut() = element_pp_log(
             element.element_type(),
@@ -383,7 +383,7 @@ struct QueueStage {
     counters: Arc<ElementCounters>,
 }
 
-/// Traces EOS/control at a terminal `Sink` and posts a `BusEvent::Eos` (under
+/// Traces EOS/control at a terminal `RawSink` and posts a `BusEvent::Eos` (under
 /// the sink's own `Element::name()`) once EOS completes — mirrors what
 /// `Queue` does for its own downstream, but without introducing a thread
 /// boundary. This is what lets a fully direct chain (no `queue()` calls at
@@ -394,7 +394,7 @@ struct QueueStage {
 struct TerminalTracer {
     bus: Bus,
     id: ElementId,
-    inner: Box<dyn Sink>,
+    inner: Box<dyn RawSink>,
     /// Whether this terminal takes anything, and which preroll it reports
     /// its sample to — the pipeline's to say.
     state: Arc<PlaybackState>,
@@ -430,7 +430,7 @@ impl Element for TerminalTracer {
     }
 }
 
-impl Sink for TerminalTracer {
+impl RawSink for TerminalTracer {
     fn ready_consume(&mut self) -> bool {
         if self.state.holds() {
             return false;
@@ -480,7 +480,7 @@ impl Sink for TerminalTracer {
         {
             self.state.picture_taken(self.id, at, lasts);
         }
-        // `Sink::consume` defines successful terminal return as acceptance
+        // `RawSink::consume` defines successful terminal return as acceptance
         // into that sink's output path. This is the preroll completion point;
         // deliberately do not claim physical presentation has completed.
         if result.is_ok()
@@ -604,9 +604,9 @@ fn picture_position(frame: &ffmpeg_next::frame::Video) -> Option<(Duration, Opti
 impl StageBuilder for QueueStage {
     fn wrap(
         self: Box<Self>,
-        downstream: Box<dyn Sink>,
+        downstream: Box<dyn RawSink>,
         context: &Arc<Context>,
-    ) -> Result<Box<dyn Sink>> {
+    ) -> Result<Box<dyn RawSink>> {
         // No `attach_context`: a `Queue` is built here rather than handed in,
         // so there is no chance of it having been given another pipeline's
         // anything.
@@ -637,7 +637,7 @@ impl ChainBuilder {
 
     /// Adds a single-output filter (decoder, encoder, filter, ...) that
     /// receives what is upstream of it and hands on through its one pad —
-    /// either a [`Filter`] or a [`Transform`], which the framework makes one
+    /// either a [`RawFilter`] or a [`Filter`](crate::element::Filter), which the framework makes one
     /// of (see [`IntoFilter`]). It runs on the same thread as whatever is
     /// upstream of it — direct function call, no queue — unless it waits on
     /// the clock inside `consume`, as a [`Pacer`] and a
@@ -646,7 +646,7 @@ impl ChainBuilder {
     /// before them is that queue, and where there is none this puts one of
     /// eight there, named `<name>-queue`.
     ///
-    /// [`Transform`]: crate::element::Transform
+    /// [`RawFilter`]: crate::element::Filter
     /// [`Pacer`]: crate::elements::Pacer
     /// [`VideoSynchronizer`]: crate::elements::VideoSynchronizer
     pub fn pipe<M>(mut self, element: impl IntoFilter<M>) -> Self {
@@ -740,7 +740,7 @@ impl ChainBuilder {
         self
     }
 
-    /// Terminates the chain with a `Sink` (muxer, file sink, ...) and
+    /// Terminates the chain with a `RawSink` (muxer, file sink, ...) and
     /// assembles everything into one branch ready to be linked into a
     /// source's src pad. The terminal's own `Element::name()` is what shows
     /// up on the bus when it reports EOS.
@@ -748,7 +748,7 @@ impl ChainBuilder {
     /// Any sink, as it is — `.to(counter)` — or already boxed, the way a
     /// muxer hands its sinks over: a boxed sink is a sink.
     pub fn to<M>(self, terminal: impl IntoTerminal<M>) -> Result<DetachedBranch> {
-        let mut terminal: Box<dyn Sink> = terminal.into_terminal();
+        let mut terminal: Box<dyn RawSink> = terminal.into_terminal();
         if let Some(error) = self.error {
             return Err(error.into());
         }
@@ -818,7 +818,7 @@ impl ChainBuilder {
             .map(|node| (node.info.id, Arc::downgrade(&node.counters)))
             .collect();
         counters.insert(terminal_id, Arc::downgrade(&terminal_counters));
-        let terminal: Box<dyn Sink> = Box::new(TerminalTracer {
+        let terminal: Box<dyn RawSink> = Box::new(TerminalTracer {
             bus: self.context.bus.for_element(terminal_id),
             id: terminal_id,
             inner: terminal,
@@ -852,10 +852,10 @@ impl ChainBuilder {
 
     /// Ends the chain at an already-assembled [`DetachedBranch`] — a
     /// [`crate::elements::TeeBuilder`]'s fan-out, in practice — instead of a
-    /// plain `Sink`.
+    /// plain `RawSink`.
     ///
     /// A `Tee` cannot be a [`Self::pipe`] stage: its outputs live behind a
-    /// lock rather than in `src_pads`, so it is not a `Source` and nothing
+    /// lock rather than in `src_pads`, so it is not a `SrcPads` and nothing
     /// can be chained onto it. It is still where a chain *ends*, though, and
     /// without this the only way to put stages in front of one is to attach
     /// the fan-out to a mid-chain element's own pad and then attach that
@@ -962,7 +962,7 @@ impl Context {
     /// If a lifecycle or seek operation is in progress, this returns
     /// [`GraphError::TimelineOperationInProgress`] immediately; build a fresh
     /// detached branch and retry after that operation finishes.
-    pub fn attach<S: Source>(
+    pub fn attach<S: SrcPads>(
         &self,
         source: &mut S,
         pad_index: usize,
@@ -1061,7 +1061,7 @@ mod tests {
         }
     }
 
-    impl Sink for CountingTerminal {
+    impl RawSink for CountingTerminal {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())

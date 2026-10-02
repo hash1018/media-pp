@@ -34,7 +34,7 @@ mod tests {
 
     use ffmpeg_next as ffmpeg;
 
-    use crate::{buffer::MediaBuffer, element::Sink, elements::PacketCounter};
+    use crate::{buffer::MediaBuffer, element::RawSink, elements::PacketCounter};
 
     /// Every clone reads the one count its sink keeps, and goes on reading
     /// the final number once that sink is gone; what the sink does not

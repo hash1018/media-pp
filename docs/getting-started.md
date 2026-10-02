@@ -83,7 +83,10 @@ each type's page says what it accepts, owns and how it fails. Both are on
 [Windows API documentation] and the [macOS API documentation] for
 everything on those platforms.
 
-What is in the library is in [elements.md](elements.md), the runnable
+An element of your own is a `Source`, a `Filter` or a `Sink` —
+[`custom_element`](../examples/core/custom_element) writes one of each and
+runs them together. What is in the library is in
+[elements.md](elements.md), the runnable
 examples in [examples.md](examples.md), and what changed between versions,
 and what to write instead, in [`CHANGELOG.md`](../CHANGELOG.md).
 

@@ -18,7 +18,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
@@ -27,7 +27,7 @@ use crate::{
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
     tone_map::ToneMap,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/tone_map.hlsl");
@@ -149,9 +149,9 @@ struct ToneMapConstants {
 /// every draw and the context flushed after it, for `D3d11VideoEffect`'s
 /// reasons. A repeated input texture is answered with the output already
 /// made from it.
-pub struct D3d11ToneMap(TransformStage<Mapping>);
+pub struct D3d11ToneMap(FilterStage<Mapping>);
 
-transform_filter!(D3d11ToneMap);
+filter_stage!(D3d11ToneMap);
 
 /// What a [`D3d11ToneMap`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -208,7 +208,7 @@ impl D3d11ToneMap {
         )?;
 
         pp_info!(pp_log: &pp_log, "created");
-        Ok(Self(TransformStage::new(Mapping {
+        Ok(Self(FilterStage::new(Mapping {
             name,
             pp_log,
             device: device.clone(),
@@ -401,7 +401,7 @@ impl Element for Mapping {
     }
 }
 
-impl Transform for Mapping {
+impl Filter for Mapping {
     /// Drawn on the GPU from a D3D11 texture.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -447,7 +447,7 @@ mod tests {
     use windows::Win32::Graphics::Direct3D11::D3D11_SUBRESOURCE_DATA;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::D3d11Download;
     use crate::test_support::try_d3d11_gpu as try_device;
     use crate::tone_map::HdrTransfer;

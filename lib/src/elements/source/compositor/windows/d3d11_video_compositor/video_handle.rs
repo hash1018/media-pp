@@ -109,7 +109,7 @@ impl D3d11VideoLayerHandle {
     }
 
     /// Pushes a new `Pixel::D3D11` frame for this input to draw next
-    /// composite, without going through a `Sink` at all — for handles
+    /// composite, without going through a `RawSink` at all — for handles
     /// obtained via [`super::D3d11VideoCompositorHandle::add_layer`], which
     /// receive frames by direct call instead of `Pipeline` dataflow. Does
     /// exactly what `D3d11VideoCompositorInputSink::consume`'s

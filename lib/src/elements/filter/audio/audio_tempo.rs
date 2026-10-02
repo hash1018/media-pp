@@ -6,13 +6,13 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Context, Element, ElementType, Output, Transform, element_pp_log},
+    element::{Context, Element, ElementType, Filter, Output, element_pp_log},
     elements::AudioFormat,
     error::Result,
     playback_clock::PlaybackClock,
     playback_state::PlaybackState,
     pp_log::PpLog,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 use super::stretcher::{Piece, Stretcher};
@@ -59,9 +59,9 @@ pub enum AudioTempoError {
 /// it on before the `Eos`. While a preroll runs a frame goes on as it came:
 /// what a preroll asks of the terminal after this is one sample, and a
 /// stretch hands on nothing until it has been given more than that.
-pub struct AudioTempo(TransformStage<Stretching>);
+pub struct AudioTempo(FilterStage<Stretching>);
 
-transform_filter!(AudioTempo);
+filter_stage!(AudioTempo);
 
 /// What an [`AudioTempo`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -82,7 +82,7 @@ impl AudioTempo {
     /// passes everything as it came in none.
     pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
-        Self(TransformStage::new(Stretching {
+        Self(FilterStage::new(Stretching {
             pp_log: element_pp_log(ElementType::AudioTempo, &name, None),
             name,
             playback_clock: None,
@@ -217,7 +217,7 @@ impl Element for Stretching {
     }
 }
 
-impl Transform for Stretching {
+impl Filter for Stretching {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -260,8 +260,8 @@ mod tests {
     use super::*;
     use crate::clock::Clock;
     use crate::control::ControlMsg;
-    use crate::element::SinkExt;
-    use crate::element::{Sink, Source};
+    use crate::element::RawSinkExt;
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::AppSink;
 
     const RATE: u32 = 48_000;

@@ -32,7 +32,7 @@ use windows::{
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::VideoFormat,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     platform::windows::{
@@ -41,7 +41,7 @@ use crate::{
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
 };
 
@@ -430,9 +430,9 @@ struct CaptureUnit {
 /// [`CaptureArea::Region`] — in which case every field below that used
 /// to describe "the" duplication instead describes one `CaptureUnit`
 /// per contributing output.
-pub struct DxgiCaptureSource(ProducingSource<Capturing>);
+pub struct DxgiCaptureSource(SourceStage<Capturing>);
 
-produce_source!(DxgiCaptureSource);
+source_stage!(DxgiCaptureSource);
 
 /// What a [`DxgiCaptureSource`] does when asked: the next tick's picture of
 /// the desktop. All of its work, which the framework makes the source.
@@ -841,7 +841,7 @@ impl DxgiCaptureSource {
         );
 
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 name,
                 pp_log,
                 device,
@@ -1743,7 +1743,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

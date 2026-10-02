@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     elements::sink::renderer::SubmitError,
     platform::{
         cuda::{
@@ -238,7 +238,7 @@ impl Element for CudaRenderer {
     }
 }
 
-impl Sink for CudaRenderer {
+impl RawSink for CudaRenderer {
     /// Presents a device-resident frame; nothing else reaches its interop path.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -273,7 +273,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::Source,
+        element::SrcPads,
         elements::CudaDecoder,
         test_support::{try_cuda_device, try_test_video},
     };
@@ -515,7 +515,7 @@ mod tests {
         }
     }
 
-    impl Sink for Collector {
+    impl RawSink for Collector {
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
             if matches!(buf, MediaBuffer::Video(_)) {
                 self.received.lock().unwrap().push(buf);

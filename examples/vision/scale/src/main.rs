@@ -22,7 +22,7 @@ mod example {
         Result,
         buffer::MediaBuffer,
         bus::BusEvent,
-        element::{Element, ElementType, Sink, element_pp_log},
+        element::{Element, ElementType, RawSink, element_pp_log},
         elements::{FileDemuxer, SwDecoder, SwScaler},
         pipeline::Pipeline,
     };
@@ -112,7 +112,7 @@ mod example {
         }
     }
 
-    impl Sink for VerifyingSink {
+    impl RawSink for VerifyingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Video(frame) = &buf
                 && self.count.fetch_add(1, Ordering::Relaxed) == 0

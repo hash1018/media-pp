@@ -63,13 +63,13 @@ impl Element for Watcher {
     }
 }
 
-impl Source for Watcher {
+impl SrcPads for Watcher {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for Watcher {
+impl RawSink for Watcher {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.seen.lock().unwrap().push(Seen::Buffer);
         self.pad.push(buf)

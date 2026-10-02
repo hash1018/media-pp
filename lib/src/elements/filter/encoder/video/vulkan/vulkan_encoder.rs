@@ -9,14 +9,14 @@ use crate::color::ColorDescription;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::{VulkanDevice, filter::is_codec_drain_boundary},
     error::Result,
     platform::{
         ffmpeg::AvBufferRef,
         vulkan::frames::{NotOurs, create_frames_ctx, sw_format_of},
     },
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 // The video-encoder helpers every backend shares, a module up from this one.
@@ -131,7 +131,7 @@ pub enum VulkanEncoderError {
 
 /// Encodes NV12 Vulkan frames into `Packet`s with Vulkan Video, on a
 /// [`VulkanDevice`] — on any GPU whose driver encodes through Vulkan. The
-/// Vulkan counterpart of `CudaEncoder`, and a `Filter` as it is.
+/// Vulkan counterpart of `CudaEncoder`, and a `RawFilter` as it is.
 ///
 /// Fed by [`crate::elements::VulkanDecoder`] this is a transcode that never
 /// brings a pixel to the CPU; fed by an NV12
@@ -144,9 +144,9 @@ pub enum VulkanEncoderError {
 /// As `CudaEncoder`'s: packets are drained after every frame and at `Eos`,
 /// and each is stamped with this encoder's [`Self::time_base`] and a
 /// nominal duration.
-pub struct VulkanEncoder(TransformStage<Encoding>);
+pub struct VulkanEncoder(FilterStage<Encoding>);
 
-transform_filter!(VulkanEncoder);
+filter_stage!(VulkanEncoder);
 
 /// What a [`VulkanEncoder`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -286,7 +286,7 @@ impl VulkanEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self(TransformStage::new(Encoding {
+        Ok(Self(FilterStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -425,7 +425,7 @@ impl Element for Encoding {
     }
 }
 
-impl Transform for Encoding {
+impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
@@ -472,7 +472,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::{
         elements::{SwDecoder, VulkanUpload},
         test_support::{CapturingSink, try_vulkan_device},
@@ -492,7 +492,7 @@ mod tests {
 
     type Received = Arc<Mutex<Vec<MediaBuffer>>>;
 
-    fn capture(source: &mut dyn Source) -> Received {
+    fn capture(source: &mut dyn SrcPads) -> Received {
         let received = Arc::new(Mutex::new(Vec::new()));
         source.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),

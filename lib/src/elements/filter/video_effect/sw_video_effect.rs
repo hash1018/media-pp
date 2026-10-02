@@ -9,11 +9,11 @@ use super::options::{EffectParams, VideoEffect, apply};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Output frames allocated once the input size is known — the same count
@@ -45,7 +45,7 @@ pub enum SwVideoEffectError {
 }
 
 /// Applies a [`VideoEffect`] — a colour correction or a luma key — to a
-/// decoded BGRA frame, on the CPU. A `Filter`: receives via `Sink`, pushes
+/// decoded BGRA frame, on the CPU. A `RawFilter`: receives via `RawSink`, pushes
 /// the result on through its own single src pad.
 ///
 /// The software member of a family whose GPU members are `D3d11VideoEffect`
@@ -63,9 +63,9 @@ pub enum SwVideoEffectError {
 ///
 /// [`ColorCorrection::default`]: super::ColorCorrection::default
 /// [`LumaKey`]: super::LumaKey
-pub struct SwVideoEffect(TransformStage<Applying>);
+pub struct SwVideoEffect(FilterStage<Applying>);
 
-transform_filter!(SwVideoEffect);
+filter_stage!(SwVideoEffect);
 
 /// What a [`SwVideoEffect`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -97,7 +97,7 @@ impl SwVideoEffect {
         pp_info!(pp_log: &pp_log, "created: {} {effect:?}", effect.name());
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self(TransformStage::new(Applying {
+        let element = Self(FilterStage::new(Applying {
             name,
             pp_log,
             effect,
@@ -164,7 +164,7 @@ impl Element for Applying {
     }
 }
 
-impl Transform for Applying {
+impl Filter for Applying {
     /// Works pixel by pixel on the CPU; the GPU counterparts take frames
     /// resident on their own device.
     fn input_contract(&self) -> InputContract {
@@ -276,7 +276,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{ColorCorrection, LumaKey};
 
     fn new_effect(

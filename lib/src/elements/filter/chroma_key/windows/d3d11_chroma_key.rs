@@ -18,7 +18,7 @@ use crate::{
     buffer::MediaBuffer,
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
@@ -26,7 +26,7 @@ use crate::{
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/chroma_key_bgra.hlsl");
@@ -163,7 +163,7 @@ impl ChromaKeyConstants {
 /// frame into its alpha channel without ever touching the CPU — the D3D11
 /// half of this crate's chroma-key support, doing through a pixel shader
 /// exactly what [`crate::elements::SwChromaKey`] does per pixel on the CPU.
-/// A `Filter`: receives via `Sink`, pushes the keyed frame on through its
+/// A `RawFilter`: receives via `RawSink`, pushes the keyed frame on through its
 /// own single src pad.
 ///
 /// The point is placement: `DxgiCaptureSource -> D3d11ChromaKey ->
@@ -211,9 +211,9 @@ impl ChromaKeyConstants {
 /// the flush point for everything else queued on the shared context, which
 /// is the trade it makes: batching across elements in exchange for a bound
 /// on what the device holds. See `key`'s own comment for the measurements.
-pub struct D3d11ChromaKey(TransformStage<Keying>);
+pub struct D3d11ChromaKey(FilterStage<Keying>);
 
-transform_filter!(D3d11ChromaKey);
+filter_stage!(D3d11ChromaKey);
 
 /// What a [`D3d11ChromaKey`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -304,7 +304,7 @@ impl D3d11ChromaKey {
         );
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self(TransformStage::new(Keying {
+        let element = Self(FilterStage::new(Keying {
             name,
             pp_log,
             device: device.clone(),
@@ -548,7 +548,7 @@ impl Element for Keying {
     }
 }
 
-impl Transform for Keying {
+impl Filter for Keying {
     /// Keying happens on the GPU; a system-memory frame belongs in SwChromaKey.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -608,7 +608,7 @@ mod tests {
     };
 
     use super::{super::super::options::ChromaKeyMethod, *};
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::D3d11Download;
     use crate::test_support::try_d3d11_gpu as try_device;
 

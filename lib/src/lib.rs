@@ -1,9 +1,9 @@
 //! A small, GStreamer-flavored media pipeline library built on
 //! [`ffmpeg-next`](https://docs.rs/ffmpeg-next).
 //!
-//! A pipeline has one or more [`SourceElement`](element::SourceElement)s,
-//! each feeding a graph of [`Filter`](element::Filter)s that ends in a
-//! [`Sink`](element::Sink):
+//! A pipeline has one or more [`RawSource`](element::RawSource)s,
+//! each feeding a graph of [`RawFilter`](element::RawFilter)s that ends in a
+//! [`RawSink`](element::RawSink):
 //!
 //! ```text
 //! FileDemuxer -> SwDecoder -> Queue -> Pacer -> FrameCounter
@@ -11,7 +11,7 @@
 //!
 //! Each source registered with a [`Pipeline`](pipeline::Pipeline) runs on its
 //! own background thread. Within that source's graph,
-//! [`Sink::consume`](element::Sink::consume) is otherwise a plain synchronous
+//! [`RawSink::consume`](element::RawSink::consume) is otherwise a plain synchronous
 //! call that returns [`Result`], so a stage's failure propagates straight back
 //! up the call stack with `?`. A [`Queue`](queue::Queue) adds another explicit
 //! thread boundary inside a branch: it owns a worker thread and a bounded
@@ -183,7 +183,7 @@
 //!
 //! [`contract::check_elements`] asks about a producer's first output;
 //! [`contract::check_link`] takes a pad's [`pad::SrcPad::contract`] and a
-//! sink's [`element::Sink::input_contract`] for a source with several. Both
+//! sink's [`element::RawSink::input_contract`] for a source with several. Both
 //! answer [`LinkCheck::Fits`](contract::LinkCheck::Fits),
 //! [`Refused`](contract::LinkCheck::Refused), or
 //! [`Unknown`](contract::LinkCheck::Unknown) where one side says too little
@@ -231,7 +231,7 @@
 //! # Writing a filter
 //!
 //! A filter that makes buffers of buffers — converts, scales, analyses —
-//! implements [`Transform`](element::Transform): what each buffer becomes,
+//! implements [`Filter`](element::Filter): what each buffer becomes,
 //! what it still holds when the stream ends (`drain`), and what it lets go
 //! of when a seek leaves the timeline behind (`reset`) or a stop abandons the
 //! run (`stopping`). The framework gives it its one pad, hands the end of the
@@ -241,13 +241,13 @@
 //! makes one of it where a list of filters is asked for, as a
 //! [`Rack`](elements::Rack)'s is. A filter that routes the stream itself —
 //! splits it, holds it back, waits on a clock — implements
-//! [`Sink`](element::Sink) and [`Source`](element::Source) instead.
+//! [`RawSink`](element::RawSink) and [`SrcPads`](element::SrcPads) instead.
 //!
 //! # Writing a source
 //!
 //! A source that makes one thing at a time — a generator, a device read a
 //! frame at a time, a live stream's packets on an output each — implements
-//! [`Produce`](element::Produce): asked for the next thing, it
+//! [`Source`](element::Source): asked for the next thing, it
 //! makes it, waiting where it has to only through the
 //! [`Wait`](element::Wait) it is handed. Buffers another thread of the
 //! application hands in need no source of their own:
@@ -258,7 +258,7 @@
 //! the source's own thread — an apartment joined, a capture started — goes
 //! in its `starting`, and is let go of in its `stopping`, which the
 //! framework calls there. [`Pipeline::new`](pipeline::Pipeline::new)
-//! takes one as it takes any [`SourceElement`](element::SourceElement), and
+//! takes one as it takes any [`RawSource`](element::RawSource), and
 //! one with several outputs says what they are in its `outputs` and which
 //! each buffer is for. One that can be sought says so in its
 //! `as_seekable`: the framework takes each seek between one thing made and
@@ -268,15 +268,20 @@
 //! # Writing a terminal
 //!
 //! A terminal that does something with each buffer — plays it, shows it,
-//! hands it out of the pipeline — implements [`Render`](element::Render):
+//! hands it out of the pipeline — implements [`Sink`](element::Sink):
 //! `render` for each buffer, `drain` before its end is taken, `reset` for a
 //! seek or a stop — `stopping` for a stop, where it does more — and
 //! `pausing` and `resuming` for a device of its own.
 //! The framework does the rest, and [`ChainBuilder::to`](pipeline::ChainBuilder::to)
-//! takes one as it takes any [`Sink`](element::Sink). A terminal that routes
-//! the stream itself — a muxer of several tracks — implements `Sink`: it
+//! takes one as it takes any [`RawSink`](element::RawSink). A terminal that routes
+//! the stream itself — a muxer of several tracks — implements `RawSink`: it
 //! hears a pause, a resume and a stop through its hooks, and a seek, and
-//! its stream's end, through [`Sink::stream_event`](element::Sink::stream_event).
+//! its stream's end, through [`RawSink::stream_event`](element::RawSink::stream_event).
+//!
+//! [`custom_element`] writes one of each — a source, a filter and a
+//! terminal — and runs them together.
+//!
+//! [`custom_element`]: https://github.com/hash1018/media-pp/tree/main/examples/core/custom_element
 //!
 //! # Watching it run
 //!
@@ -347,11 +352,11 @@ pub use core::{
 /// What the pipeline asks of its elements — pause, resume, seek, stop —
 /// travels inside this crate, on a channel of its own to each of the
 /// pipeline's threads. An element of your own hears of it through its
-/// hooks: a sink's [`pausing`](element::Sink::pausing),
-/// [`resuming`](element::Sink::resuming) and
-/// [`stopping`](element::Sink::stopping), a seek as the flushed
+/// hooks: a sink's [`pausing`](element::RawSink::pausing),
+/// [`resuming`](element::RawSink::resuming) and
+/// [`stopping`](element::RawSink::stopping), a seek as the flushed
 /// [`Segment`](stream::Segment) that begins its stream again, and a
-/// [`Produce`](element::Produce)'s through the loop the framework runs for
+/// [`Source`](element::Source)'s through the loop the framework runs for
 /// it.
 pub mod control {
     pub use crate::core::control::{PrerollError, SeekError, SeekRejectReason, SeekRejection};

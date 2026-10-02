@@ -9,7 +9,7 @@ use crate::color::ColorDescription;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     error::Result,
     platform::cuda::{
@@ -17,7 +17,7 @@ use crate::{
         frame::{self, CudaFrameError, CudaSurfaces, create_hw_frames_ctx},
     },
     platform::ffmpeg::AvBufferRef,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 // The video-encoder helpers every backend shares, a module up from this one.
@@ -144,7 +144,7 @@ pub enum CudaEncoderError {
 /// Encodes GPU-resident `Pixel::CUDA` `Video` frames into `Packet`s on the
 /// GPU's dedicated NVENC block — the CUDA counterpart to
 /// [`crate::elements::SwEncoder`] and the sibling of
-/// `D3d11VideoEncoder`. A `Filter`: receives via `Sink`,
+/// `D3d11VideoEncoder`. A `RawFilter`: receives via `RawSink`,
 /// pushes what it produces into its own single src pad.
 ///
 /// Fed by [`crate::elements::CudaDecoder`] this is a transcode that never
@@ -165,9 +165,9 @@ pub enum CudaEncoderError {
 /// shape as `SwEncoder`'s own drain loop, and stamps each packet's
 /// `time_base` and nominal duration since `avcodec_receive_packet` sets
 /// neither.
-pub struct CudaEncoder(TransformStage<Encoding>);
+pub struct CudaEncoder(FilterStage<Encoding>);
 
-transform_filter!(CudaEncoder);
+filter_stage!(CudaEncoder);
 
 /// What a [`CudaEncoder`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -329,7 +329,7 @@ impl CudaEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self(TransformStage::new(Encoding {
+        Ok(Self(FilterStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -447,7 +447,7 @@ impl Element for Encoding {
     }
 }
 
-impl Transform for Encoding {
+impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
@@ -497,7 +497,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::{
         elements::{CudaDecoder, CudaUpload, FileDemuxer, PacketCounter},
         pipeline::Pipeline,

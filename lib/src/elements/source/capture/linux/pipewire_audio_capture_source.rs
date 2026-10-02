@@ -23,13 +23,13 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::AudioFormat,
     error::Result,
     platform::linux::pipewire::{
         PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
     },
-    produce::{Received, produce_source},
+    produce::{Received, source_stage},
 };
 
 /// How long [`PipeWireAudioCaptureSource::open`] waits for the stream to
@@ -228,9 +228,9 @@ fn wait_set_active(
 /// downstream — the same division of labor `WasapiCaptureSource` documents. If
 /// something downstream needs a fixed rate or layout, use
 /// [`crate::elements::AudioResampler`] rather than hiding conversion here.
-pub struct PipeWireAudioCaptureSource(ProducingSource<Capturing>);
+pub struct PipeWireAudioCaptureSource(SourceStage<Capturing>);
 
-produce_source!(PipeWireAudioCaptureSource);
+source_stage!(PipeWireAudioCaptureSource);
 
 /// What a [`PipeWireAudioCaptureSource`] hands on, a packet at a time as
 /// the PipeWire thread captures it: all of its work, which the framework
@@ -395,7 +395,7 @@ impl PipeWireAudioCaptureSource {
         );
 
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 name: name.into(),
                 pp_log,
                 format,
@@ -522,7 +522,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }
@@ -1108,7 +1108,7 @@ mod tests {
     #[cfg(feature = "pipewire-audio-renderer")]
     #[test]
     fn an_application_capture_takes_what_that_application_plays() {
-        use crate::element::Sink;
+        use crate::element::RawSink;
         use crate::elements::{PipeWireAudioRenderer, PipeWireAudioRendererOptions};
 
         let Some(sink) = (match PipeWireAudioRenderer::list_devices() {

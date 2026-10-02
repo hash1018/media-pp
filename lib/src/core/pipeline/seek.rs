@@ -151,7 +151,7 @@ impl Pipeline {
     ///
     /// Answered from the graph as it stands: a source that is live or cannot
     /// reposition, and a sink that cannot follow a jump in the timeline (see
-    /// [`Sink::accepts_seek`](crate::element::Sink::accepts_seek)), say so as
+    /// [`RawSink::accepts_seek`](crate::element::RawSink::accepts_seek)), say so as
     /// they are wired. So this works before [`Self::run`] and after the
     /// sources have stopped, costs a lock rather than a round trip through
     /// every thread, and changes as branches come and go — a recording
@@ -201,7 +201,7 @@ impl Pipeline {
     /// advances to the sample covering `target`.
     ///
     /// Completion means every terminal accepted its first new-timeline sample
-    /// according to [`Sink::consume`](crate::element::Sink::consume). For a
+    /// according to [`RawSink::consume`](crate::element::RawSink::consume). For a
     /// video renderer that includes installing or submitting the preview
     /// frame, but not waiting for physical display scanout.
     pub fn seek(&self, target: Duration, mode: SeekMode) -> Result<()> {

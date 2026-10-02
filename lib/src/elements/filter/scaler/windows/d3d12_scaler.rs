@@ -18,7 +18,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     platform::{
         ffmpeg::AvBufferRef,
@@ -27,7 +27,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 use super::d3d12_video_processor::{D3d12VideoProcessor, ProcessorShape, VideoProcessFrame};
@@ -160,9 +160,9 @@ pub enum D3d12ScalerError {
 /// are learned from the first frame and the video processor is rebuilt after
 /// a later input renegotiation. PTS, duration, and color metadata are copied
 /// to the scaled frame unchanged.
-pub struct D3d12Scaler(TransformStage<Scaling>);
+pub struct D3d12Scaler(FilterStage<Scaling>);
 
-transform_filter!(D3d12Scaler);
+filter_stage!(D3d12Scaler);
 
 /// What a [`D3d12Scaler`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -221,7 +221,7 @@ impl D3d12Scaler {
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: NV12 -> {width}x{height} NV12");
-        Ok(Self(TransformStage::new(Scaling {
+        Ok(Self(FilterStage::new(Scaling {
             pp_log,
             name,
             device: device.clone(),
@@ -399,7 +399,7 @@ impl Element for Scaling {
     }
 }
 
-impl Transform for Scaling {
+impl Filter for Scaling {
     /// Scales on the GPU; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -511,7 +511,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{D3d12Download, D3d12Upload};
     use crate::test_support::try_d3d12_gpu as try_device;
 

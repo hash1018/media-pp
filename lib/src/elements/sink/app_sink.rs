@@ -5,14 +5,14 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::InputContract,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     error::Result,
     stream::StreamEvent,
 };
 
 /// Terminal sink that hands every buffer (and, optionally, every event in
 /// the stream) to a plain closure instead of requiring a bespoke `struct` +
-/// `Element`/`Sink` impl — the equivalent of GStreamer's `appsink`: the
+/// `Element`/`RawSink` impl — the equivalent of GStreamer's `appsink`: the
 /// pipeline's job ends here, and whatever the caller does with the data
 /// (run inference, forward it to a channel, write it out, ...) is none of
 /// this crate's concern.
@@ -114,7 +114,7 @@ where
     }
 }
 
-impl<F, E> Sink for AppSink<F, E>
+impl<F, E> RawSink for AppSink<F, E>
 where
     F: FnMut(MediaBuffer) -> Result<()> + Send + 'static,
     E: FnMut(&StreamEvent) -> Result<()> + Send + 'static,
@@ -155,7 +155,7 @@ mod tests {
         sink.stream_event(&StreamEvent::Eos).unwrap();
     }
 
-    /// A terminal `Sink`'s error has to come back out of `consume`
+    /// A terminal `RawSink`'s error has to come back out of `consume`
     /// unchanged: that return value is what a direct caller propagates
     /// with `?`, and what a `Queue` worker turns into `BusEvent::Error`.
     /// Swallowing it here would make both silently impossible.

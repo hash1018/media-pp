@@ -9,7 +9,7 @@ use crate::{
     buffer::{MediaBuffer, release_picture},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, SrcPads, element_pp_log},
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -235,13 +235,13 @@ impl Element for PauseGate {
     }
 }
 
-impl Source for PauseGate {
+impl SrcPads for PauseGate {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for PauseGate {
+impl RawSink for PauseGate {
     /// Video frames. It reads a timestamp and forwards a reference, so where
     /// the pixels live is not its business.
     fn input_contract(&self) -> InputContract {
@@ -352,7 +352,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
 
     fn capture(element: &mut PauseGate) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

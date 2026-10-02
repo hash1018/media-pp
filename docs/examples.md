@@ -13,7 +13,7 @@ so. Each has a README with its pipeline drawn out.
 
 | Directory | What is there |
 |---|---|
-| [`core`](../examples/core) | Decoding, queues, fan-out, dynamic tees, app sources and sinks, audio capture and playback, remuxing, GPU transcoding, HLS, RTMP, transcription, CPU compositing |
+| [`core`](../examples/core) | Decoding, queues, fan-out, dynamic tees, app sources and sinks, elements of your own, audio capture and playback, remuxing, GPU transcoding, HLS, RTMP, transcription, CPU compositing |
 | [`cuda`](../examples/cuda) | Headless CUDA recording and GPU text compositing, on Windows and Linux |
 | [`render`](../examples/render/README.md) | `Player`, playback on every renderer, seeking, screen preview and recording, GPU scaling, keying, hardware encoding — with an index of its own |
 | [`rtsp`](../examples/rtsp) | Publishing to an RTSP server such as MediaMTX, seeking what is published, and receiving from one — this crate does not serve RTSP itself |

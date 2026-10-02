@@ -9,9 +9,9 @@ use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Settings for [`AudioCompressor`], and what
@@ -203,9 +203,9 @@ impl Rates {
 /// next frame. A frame that is not `f32` is an error for that frame and
 /// changes nothing. `Flush` and `Stop` let go of whatever it was holding
 /// down; `Eos` passes straight through.
-pub struct AudioCompressor(TransformStage<Compressing>);
+pub struct AudioCompressor(FilterStage<Compressing>);
 
-transform_filter!(AudioCompressor);
+filter_stage!(AudioCompressor);
 
 /// What an [`AudioCompressor`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -237,7 +237,7 @@ impl AudioCompressor {
         let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
-            Self(TransformStage::new(Compressing {
+            Self(FilterStage::new(Compressing {
                 name: name.clone(),
                 pp_log,
                 control: control.clone(),
@@ -298,7 +298,7 @@ impl Element for Compressing {
     }
 }
 
-impl Transform for Compressing {
+impl Filter for Compressing {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -339,7 +339,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;

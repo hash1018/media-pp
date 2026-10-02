@@ -12,11 +12,33 @@ compile error with no explanation.
 
 ### Breaking
 
+- **The traits an element implements are renamed, so the plain names are
+  the ones you write.** `Source`, `Filter` and `Sink` are now the traits an
+  element of your own implements — a source asked for the next thing, a
+  filter that makes buffers of buffers, a terminal that does something
+  with each one; each is described under Added. The traits those names had
+  in 0.3 are the ones an element implements only to route the stream
+  itself, and carry `Raw`:
+
+  | 0.3 | Now |
+  |---|---|
+  | `Sink` | `RawSink` |
+  | `Source` | `SrcPads` |
+  | `Filter` | `RawFilter` |
+  | `SourceElement` | `RawSource` |
+
+  So `Box<dyn Sink>` — a muxer's track, a bridge's feeding end, a renderer
+  picked at run time — is `Box<dyn RawSink>`, `impl Sink for` an element
+  that routes the stream is `impl RawSink for`, and `impl Source for` is
+  `impl SrcPads for`. A terminal or a filter of your own is shorter
+  written as the new `Sink` or `Filter`; `custom_element` writes one of
+  each kind. The entries below use the new names.
+
 - **The end of a stream is `StreamEvent::Eos`, not a buffer.**
   `MediaBuffer` is data only: `MediaBuffer::Eos` and `is_eos` are gone,
   and the end travels as an event in the stream, in order with the
   buffers, as a segment already did. The `stream` module is public, and a
-  `Sink` hears the end through `stream_event(&StreamEvent)` — a muxer
+  `RawSink` hears the end through `stream_event(&StreamEvent)` — a muxer
   track, `FrameCounter` and a sink of your own alike — never through
   `consume`. An element in the middle of a chain never passes the end on
   itself: it reacts, pushing whatever it still holds, and the pipeline
@@ -31,9 +53,9 @@ compile error with no explanation.
     `match` there ends in a `_ => {}` arm:
     `match event { StreamEvent::Eos => self.finish()?, _ => {} }`.
 
-- **`Sink::control` is gone, and control stays inside the crate.** A sink
+- **`RawSink::control` is gone, and control stays inside the crate.** A sink
   of your own hears a pause, a resume and a stop through the new
-  `Sink::pausing`, `Sink::resuming` and `Sink::stopping` hooks, which do
+  `RawSink::pausing`, `RawSink::resuming` and `RawSink::stopping` hooks, which do
   nothing by default, and a seek through the flushed
   `StreamEvent::Segment` its `stream_event` is handed — where it lets go
   of what it held from before the seek. `ControlMsg`, `PrerollContext`,
@@ -45,12 +67,12 @@ compile error with no explanation.
   `control` writes those arms as the hooks, and one that matched
   `ControlMsg::Flush` or `Seek` reacts to a segment with `flushed` set.
 
-- **`SourceElement` is implemented only by this crate's sources.** Its
+- **`RawSource` is implemented only by this crate's sources.** Its
   loop answers the pipeline through a channel that is no longer public.
-  A source of your own is a `Produce`, which `Pipeline::new` and
+  A source of your own is a `Source`, which `Pipeline::new` and
   `add_source` take as they take any source — with several outputs, a
   segment of its own, or seeking and playing backwards where it can (see
-  Added). `SourceElement` stays nameable, as a bound.
+  Added). `RawSource` stays nameable, as a bound.
 
 - **`AppSink::with_control` is `AppSink::with_events`**, whose closure is
   handed each `&StreamEvent` — the end, and each segment, a seek's one
@@ -102,7 +124,7 @@ compile error with no explanation.
   stretch under way has been read to its end, and the framework asks it
   for more until it has, as a `Finish` arrives while playing backwards.
   `SeekableSource` asks only `Element` of what implements it now, so a
-  `Produce` can — see Added.
+  `Source` can — see Added.
 
 - **`RackError` has a `Waits` variant**: a `Rack` refuses a `Pacer` or a
   `VideoSynchronizer`, which it could only run on the thread feeding it —
@@ -348,8 +370,8 @@ compile error with no explanation.
   device with `NotAnOutputDevice`. `audio_capture` captures on macOS, the
   system's sound by default.
 
-- **A `Produce` can have several outputs, and begin a segment.** It says
-  what its pads are in `Produce::outputs` — one, named for it, by
+- **A `Source` can have several outputs, and begin a segment.** It says
+  what its pads are in `Source::outputs` — one, named for it, by
   default — and which each buffer is for with `Produced::On(n, buffer)`;
   its end goes out through every one. `Produced::Segment` begins a new run
   of what it makes through every output, on the timeline its pipeline is
@@ -358,17 +380,17 @@ compile error with no explanation.
   `ProduceError::NoOutput`. With several outputs, what one cannot take
   yet is held back, within bounds, so the one read cursor keeps the others
   fed — what `FileDemuxer` did for itself, now any such source's — and
-  each output has its end as soon as it owes nothing. A `Produce` that can
-  be sought says so through `Produce::as_seekable` and `as_reversible`:
+  each output has its end as soon as it owes nothing. A `Source` that can
+  be sought says so through `Source::as_seekable` and `as_reversible`:
   its seeks are taken between one thing made and the next, and it stays
   at its end until stopped or sought back into what it reads.
   `RtspSource`, `PipelineBridge`, `WebRtcTrackSource` and `FileDemuxer`
   are written on it now, their API unchanged.
-- **`Render::stopping`** tells a stop from a seek's flush, as
-  `Transform::stopping` does: `reset` by default. `PipeWireAudioRenderer`
-  is a `Render` now and uses it — a stop deactivates its stream and hands
+- **`Sink::stopping`** tells a stop from a seek's flush, as
+  `Filter::stopping` does: `reset` by default. `PipeWireAudioRenderer`
+  is a `Sink` now and uses it — a stop deactivates its stream and hands
   back the position it masters, a flush only empties its queue — and the
-  V4L2 and PipeWire captures are `Produce`s, so every source of this crate
+  V4L2 and PipeWire captures are `Source`s, so every source of this crate
   runs the framework's loop. Their API is unchanged.
 - **A `Pacer` or `VideoSynchronizer` always runs behind a queue.** Each
   waits on the clock inside `consume`, and in a chain with nothing queued
@@ -381,22 +403,22 @@ compile error with no explanation.
   nothing changes for a chain that already had it, and putting it there
   yourself is how to choose its depth — for a hardware decoder's fixed
   pool, say.
-- **`Transform::stopping`** tells a stop from a seek's flush: it lets go
+- **`Filter::stopping`** tells a stop from a seek's flush: it lets go
   of what the run as a whole kept, beside what `reset` does, and does
   what `reset` does by default. `TimestampOrigin` and `FrameRateLimiter`
   are transforms now, their output timeline begun again by a stop and
   kept across a seek as before.
 
-- **`Render` writes a terminal as what it does with each buffer.**
+- **`Sink` writes a terminal as what it does with each buffer.**
   `render` for each one, `drain` before its end is taken, `reset` for a
   seek or a stop, and `pausing` and `resuming` for a device it stops while
   paused; the framework turns the control messages into those, and the
   element never sees one. `ChainBuilder::to` and `build` now take
-  `impl IntoTerminal<M>`, which a `Sink` and a `Render` both are.
+  `impl IntoTerminal<M>`, which a `RawSink` and a `Sink` both are.
   `WasapiRenderer`, `WhisperTranscriber`, `FrameCounter` and
   `PacketCounter` are written this way now.
 
-- **`Produce` writes a source as what it makes alone.** Asked for the next
+- **`Source` writes a source as what it makes alone.** Asked for the next
   thing, it makes it — a buffer, nothing yet, or the end of its stream —
   waiting where it has to only through the `Wait` it is handed, which lets
   go as soon as the pipeline has something for the thread, and whose clock
@@ -405,9 +427,9 @@ compile error with no explanation.
   calls its `starting` and `stopping` around it on the source's own thread,
   for what a device sets up there — an apartment joined, a capture started.
   `Pipeline::new` and `PipelineBuilder::add_source` now take
-  `impl IntoSource<M>`, which a `SourceElement` and a `Produce` both are;
+  `impl IntoSource<M>`, which a `RawSource` and a `Source` both are;
   the wiring closure is handed the source itself, as before, or the
-  `ProducingSource` a `Produce` is made into. `TestVideoSource`,
+  `SourceStage` a `Source` is made into. `TestVideoSource`,
   `TestAudioSource`, `AppSource`, `AudioMixer`, the four video
   compositors, the Windows captures (`DxgiCaptureSource`,
   `WgcCaptureSource`, `MfCaptureSource`, `WasapiCaptureSource`) and
@@ -415,17 +437,17 @@ compile error with no explanation.
   waits out `TestVideoSource`'s current frame interval, nor a request a
   live mixer's tick or a WASAPI capture's poll.
 
-- **`Transform` writes a filter as its media work alone.** Its `transform`
+- **`Filter` writes a filter as its media work alone.** Its `transform`
   makes what each buffer answers to — nothing, one buffer or several — into
   an `Output`; `drain` hands on what it still holds before the end of the
   stream, and `reset` lets go of what a seek or a stop leaves behind. The
   framework gives it its one pad, forwards `Eos` after the drain, resets it
   on a `Flush` or a `Stop`, and answers whether it can take a buffer; it
   never sees a control message. `ChainBuilder::pipe` takes one as it takes
-  any filter — it now takes `impl IntoFilter<M>`, which a `Filter` and a
-  `Transform` both are, with the marker worked out by the compiler — and
+  any filter — it now takes `impl IntoFilter<M>`, which a `RawFilter` and a
+  `Filter` both are, with the marker worked out by the compiler — and
   `into_filter()` makes one of it for a list, as a `Rack` takes. A filter
-  written as `Sink` and `Source` is unchanged. The scalers, uploads,
+  written as `RawSink` and `SrcPads` is unchanged. The scalers, uploads,
   downloads, converters, chroma keys, video effects and encoders of every
   backend, `D3d11ToneMap`, the audio filters, `AudioWaveform` and
   `ChangeGate` are written this way now, with their names, constructors,

@@ -17,11 +17,11 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
     element::{
-        Element, ElementType, Produce, Produced, ProducingSource, ReversibleSource, SeekableSource,
+        Element, ElementType, Produced, ReversibleSource, SeekableSource, Source, SourceStage,
         Wait, element_pp_log,
     },
     pad::SrcPad,
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// Errors specific to `FileDemuxer`. Converts into the crate-wide `Error`
@@ -244,13 +244,13 @@ impl FileDemuxerHandle {
 /// reading a file does not end when the file does: it posts
 /// [`BusEvent::Finished`](crate::bus::BusEvent::Finished) once everything
 /// read has reached its terminals, and it is the caller's to stop it then.
-/// Run by hand, [`run`](crate::element::SourceElement::run) returns at that
+/// Run by hand, [`run`](crate::element::RawSource::run) returns at that
 /// point only once its control sender is gone.
 ///
 /// [`FileDemuxer::seek`]: crate::element::SeekableSource::seek
-pub struct FileDemuxer(ProducingSource<Demuxing>);
+pub struct FileDemuxer(SourceStage<Demuxing>);
 
-produce_source!(FileDemuxer);
+source_stage!(FileDemuxer);
 
 /// What a [`FileDemuxer`] reads, a packet at a time: all of its work, which
 /// the framework makes the source.
@@ -418,7 +418,7 @@ impl FileDemuxer {
             streams.len()
         );
         Ok((
-            Self(ProducingSource::new(Demuxing {
+            Self(SourceStage::new(Demuxing {
                 name,
                 pp_log,
                 input,
@@ -506,7 +506,7 @@ impl Element for Demuxing {
     }
 }
 
-impl Produce for Demuxing {
+impl Source for Demuxing {
     fn is_live(&self) -> bool {
         false
     }
@@ -1194,7 +1194,7 @@ mod tests {
     /// with no stream for a caller to index into.
     #[test]
     fn a_file_with_no_streams_is_refused() {
-        use crate::element::Sink;
+        use crate::element::RawSink;
         use crate::elements::{FileMuxer, SwEncoder, SwEncoderOptions, VideoCodec};
 
         let path = std::env::temp_dir().join(format!(
@@ -1234,7 +1234,7 @@ mod tests {
 
     use super::*;
     use crate::control;
-    use crate::element::{Source, SourceElement};
+    use crate::element::{RawSource, SrcPads};
     use crate::test_support::try_test_video;
 
     struct CountingSink {
@@ -1263,7 +1263,7 @@ mod tests {
         }
     }
 
-    impl crate::element::Sink for CountingSink {
+    impl crate::element::RawSink for CountingSink {
         fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
             if let crate::stream::StreamEvent::Eos = event {
                 self.saw_eos.store(true, Ordering::SeqCst);
@@ -1329,7 +1329,7 @@ mod tests {
         }
     }
 
-    impl crate::element::Sink for LoopSink {
+    impl crate::element::RawSink for LoopSink {
         fn stream_event(&mut self, event: &crate::stream::StreamEvent) -> crate::error::Result<()> {
             if let crate::stream::StreamEvent::Eos = event {
                 self.saw_eos.store(true, Ordering::SeqCst);
@@ -1927,7 +1927,7 @@ mod tests {
         }
     }
 
-    impl crate::element::Sink for EndRecorder {
+    impl crate::element::RawSink for EndRecorder {
         fn ready_consume(&mut self) -> bool {
             self.open.load(Ordering::SeqCst)
         }

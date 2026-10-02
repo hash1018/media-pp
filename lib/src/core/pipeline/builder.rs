@@ -7,9 +7,7 @@ use crate::{
     bus::{Bus, BusReceiver},
     clock::Clock,
     control::{self, ControlReceiver, ControlSender},
-    element::{
-        Context, Element, IntoSource, Source, SourceElement, element_pp_log, pipeline_pp_log,
-    },
+    element::{Context, Element, IntoSource, RawSource, SrcPads, element_pp_log, pipeline_pp_log},
     error::Result,
     graph::{ElementId, PipelineGraph},
     pad::SrcPad,
@@ -19,7 +17,7 @@ use crate::{
 
 use super::{Pipeline, completion::Completion, seek::PrerollSlot};
 
-pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
+pub(super) type SourceEntry = (ElementId, Box<dyn RawSource>);
 
 /// Accumulates one or more sources into a single [`Pipeline`] — the
 /// multi-source generalization of what [`Pipeline::new`] does for exactly
@@ -37,7 +35,7 @@ pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
 /// Reach for `PipelineBuilder` directly once there's more than one live
 /// source to combine into one file/output — e.g. a video capture and an
 /// audio capture both feeding the same [`crate::elements::FileMuxer`]: two
-/// independent sources under today's [`crate::element::SourceElement`]
+/// independent sources under today's [`crate::element::RawSource`]
 /// model, but one [`Pipeline`] so `run()`/`pause()`/`resume()`/`stop()`
 /// only need to be called once, not once per source.
 pub struct PipelineBuilder {
@@ -115,7 +113,7 @@ impl PipelineBuilder {
     pub fn add_source<M, I: IntoSource<M>, T>(
         mut self,
         source: I,
-        wire: impl FnOnce(&mut I::Source, &Arc<Context>) -> Result<T>,
+        wire: impl FnOnce(&mut I::Raw, &Arc<Context>) -> Result<T>,
     ) -> Result<(Self, T)> {
         let mut source = source.into_source();
         *source.pp_log_mut() =

@@ -31,7 +31,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Sink, element_pp_log},
+    element::{Context, Element, ElementType, RawSink, element_pp_log},
     error::Result,
     graph::PipelineGraph,
 };

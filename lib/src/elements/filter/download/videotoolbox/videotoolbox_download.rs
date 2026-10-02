@@ -11,12 +11,12 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     platform::macos::videotoolbox::{NotVideoToolbox, sw_format_of},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to [`VideoToolboxDownload`]. Converts into the
@@ -63,15 +63,15 @@ const LAYOUTS: PixelLayoutSet =
 /// hold — the mirror of [`crate::elements::VideoToolboxUpload`], and what
 /// lets a VideoToolbox frame reach anything that reads pixel bytes.
 ///
-/// A `Filter`: receives via `Sink`, pushes the downloaded frame into its own
+/// A `RawFilter`: receives via `RawSink`, pushes the downloaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///
 /// It takes no device: a pixel buffer is readable wherever in the process it
 /// was made, through the frames context each frame carries.
-pub struct VideoToolboxDownload(TransformStage<Downloading>);
+pub struct VideoToolboxDownload(FilterStage<Downloading>);
 
-transform_filter!(VideoToolboxDownload);
+filter_stage!(VideoToolboxDownload);
 
 /// What a [`VideoToolboxDownload`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -97,7 +97,7 @@ impl VideoToolboxDownload {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoToolboxDownload, &name, None);
         pp_info!(pp_log: &pp_log, "opened: VideoToolbox ->");
-        Self(TransformStage::new(Downloading {
+        Self(FilterStage::new(Downloading {
             name,
             pp_log,
             pool: None,
@@ -183,7 +183,7 @@ impl Element for Downloading {
     }
 }
 
-impl Transform for Downloading {
+impl Filter for Downloading {
     /// Only device memory has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -228,7 +228,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::{
         elements::{VideoToolboxDevice, VideoToolboxUpload},
         test_support::{CapturingSink, try_videotoolbox_device},
@@ -236,7 +236,7 @@ mod tests {
 
     type Received = Arc<Mutex<Vec<MediaBuffer>>>;
 
-    fn capture(source: &mut dyn Source) -> Received {
+    fn capture(source: &mut dyn SrcPads) -> Received {
         let received = Arc::new(Mutex::new(Vec::new()));
         source.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),

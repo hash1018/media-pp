@@ -2,7 +2,7 @@
 //!
 //! A [`Driver`] is a self-contained loop with nothing to push into and
 //! nothing to pull out of — whatever it produces or consumes it does through
-//! `Sink`/`Source` pairs it mints on the side, the way a WebRTC peer hands out
+//! `RawSink`/`SrcPads` pairs it mints on the side, the way a WebRTC peer hands out
 //! per-track endpoints. [`DriverRunner`] runs one on a background thread.
 //!
 //! This is the deliberately smaller sibling of
@@ -28,7 +28,7 @@ use crate::{
 /// Checked, not blocked on: a [`Driver`] owns a single self-contained loop
 /// with no downstream dataflow graph to cascade a stop through (unlike
 /// [`crate::pipeline::Pipeline`]'s `control` channel, which has to reach
-/// every `Sink` a `Queue` boundary away before it can call `Stop` fully
+/// every `RawSink` a `Queue` boundary away before it can call `Stop` fully
 /// handled). So [`DriverRunner::stop`] just flips a flag instead of
 /// sending something that has to be received and acked — nothing here can
 /// reproduce the deadlock that pattern is prone to when a receiver can
@@ -48,19 +48,19 @@ impl StopReceiver {
     }
 }
 
-/// A background task with no `Sink`/`Source` ports of its own — nothing to
+/// A background task with no `RawSink`/`SrcPads` ports of its own — nothing to
 /// push into, nothing to pull out of *this* object; whatever it produces
-/// or consumes happens through other `Sink`/`Source` pairs it mints on the
+/// or consumes happens through other `RawSink`/`SrcPads` pairs it mints on the
 /// side (e.g. `WebRtcPeer` handing out
 /// `WebRtcTrackSink`/`WebRtcTrackSource`). Reach for
-/// [`crate::pipeline::Pipeline`]/[`crate::element::SourceElement`] instead
+/// [`crate::pipeline::Pipeline`]/[`crate::element::RawSource`] instead
 /// for anything that actually has a `src_pads()` dataflow graph to wire —
 /// `Driver` deliberately has no `Pause`/`Seek`/`Clock`, none of which have
 /// a sensible meaning for a connection that isn't part of one.
 pub trait Driver: Element {
     /// Drives this task until it ends on its own or `stop.is_stopped()`
     /// says to abandon — check it periodically, in the same spirit as a
-    /// [`crate::element::SourceElement`] answering its pipeline between
+    /// [`crate::element::RawSource`] answering its pipeline between
     /// reads. `bus` is this task's own way to report a failure without
     /// necessarily ending itself over it: post a
     /// [`crate::bus::BusEvent::Error`] and keep going, and return `Err`

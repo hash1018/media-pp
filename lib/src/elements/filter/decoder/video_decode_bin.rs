@@ -43,7 +43,7 @@ use crate::{
     },
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, Flow, ReversibleDecoder, Sink, Source,
+        Context, Element, ElementType, Flow, RawFilter, RawSink, ReversibleDecoder, SrcPads,
         element_pp_log,
     },
     elements::{DecodeThreading, SwDecoder, filter::line::Line},
@@ -309,7 +309,7 @@ pub struct VideoDecodeBin {
     line: Line,
     /// What goes into `line` on its first use, once the bin knows whether it
     /// is in a pipeline — see [`Element::attach_context`].
-    pending: Option<Vec<Box<dyn Filter>>>,
+    pending: Option<Vec<Box<dyn RawFilter>>>,
     context: Option<Arc<Context>>,
     pad: SrcPad,
     /// What the line made that `pad` could not take while a preroll held the
@@ -509,7 +509,7 @@ impl VideoDecodeBin {
         }
     }
 
-    fn fill(&mut self, elements: Vec<Box<dyn Filter>>) {
+    fn fill(&mut self, elements: Vec<Box<dyn RawFilter>>) {
         if let Some(line) = self.line.fill(elements, self.context.as_ref()) {
             pp_info!(self, "filled: {line}");
         }
@@ -653,13 +653,13 @@ impl Element for VideoDecodeBin {
     }
 }
 
-impl Source for VideoDecodeBin {
+impl SrcPads for VideoDecodeBin {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for VideoDecodeBin {
+impl RawSink for VideoDecodeBin {
     /// Not while it keeps what its pad cannot take yet, nor while the decoder
     /// inside keeps its own — the crate's output stash.
     fn ready_consume(&mut self) -> bool {
@@ -826,13 +826,13 @@ fn software(
     format: Option<ffmpeg::format::Pixel>,
     target: &DecodeTarget,
     threading: Option<DecodeThreading>,
-) -> Result<Vec<Box<dyn Filter>>> {
+) -> Result<Vec<Box<dyn RawFilter>>> {
     let decoder = format!("{name}-decoder");
     let decoder = match threading {
         Some(threading) => SwDecoder::with_threading(decoder, params, threading)?,
         None => SwDecoder::new(decoder, params)?,
     };
-    let mut line: Vec<Box<dyn Filter>> = vec![Box::new(decoder)];
+    let mut line: Vec<Box<dyn RawFilter>> = vec![Box::new(decoder)];
     if let Some(format) = format {
         let (width, height) = size.ok_or(VideoDecodeBinError::UnknownSize)?;
         // The size the stream was opened with: a change of layout, and of
@@ -967,7 +967,7 @@ impl DecodeTarget {
         height: u32,
         output: ffmpeg::format::Pixel,
         hdr: bool,
-    ) -> Result<Vec<Box<dyn Filter>>> {
+    ) -> Result<Vec<Box<dyn RawFilter>>> {
         let bgra = output == ffmpeg::format::Pixel::BGRA;
         Ok(match self {
             // PQ or HLG, which no video processor here brings to SDR — see
@@ -1014,7 +1014,7 @@ impl DecodeTarget {
             ],
             #[cfg(feature = "cuda")]
             Self::Cuda { device, .. } => {
-                let mut line: Vec<Box<dyn Filter>> =
+                let mut line: Vec<Box<dyn RawFilter>> =
                     vec![Box::new(crate::elements::CudaScaler::with_format(
                         format!("{name}-convert"),
                         device,
@@ -1067,7 +1067,7 @@ impl DecodeTarget {
         &self,
         name: String,
         params: ffmpeg::codec::Parameters,
-    ) -> Result<Box<dyn Filter>> {
+    ) -> Result<Box<dyn RawFilter>> {
         Ok(match self {
             // `choose` never picks the hardware for a target without any.
             Self::System => Box::new(SwDecoder::new(name, params)?),
@@ -1121,7 +1121,7 @@ impl DecodeTarget {
         &self,
         name: String,
         format: ffmpeg::format::Pixel,
-    ) -> Result<Option<Box<dyn Filter>>> {
+    ) -> Result<Option<Box<dyn RawFilter>>> {
         Ok(match self {
             Self::System => None,
             #[cfg(all(target_os = "windows", feature = "d3d11"))]
@@ -1418,10 +1418,10 @@ mod tests {
     type Frames = Vec<Arc<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>>>;
 
     /// Wires `bin`, then `after` if any, into a collector.
-    fn collect(bin: &mut VideoDecodeBin, after: Option<Box<dyn Filter>>) -> Arc<Mutex<Frames>> {
+    fn collect(bin: &mut VideoDecodeBin, after: Option<Box<dyn RawFilter>>) -> Arc<Mutex<Frames>> {
         let frames = Arc::new(Mutex::new(Vec::new()));
         let collected = Arc::clone(&frames);
-        let collector: Box<dyn Sink> = Box::new(AppSink::new("out", move |buffer| {
+        let collector: Box<dyn RawSink> = Box::new(AppSink::new("out", move |buffer| {
             if let MediaBuffer::Video(frame) = buffer {
                 collected.lock().unwrap().push(frame);
             }
@@ -1430,7 +1430,7 @@ mod tests {
         let downstream = match after {
             Some(mut after) => {
                 after.src_pads()[0].link(collector);
-                Box::new(after) as Box<dyn Sink>
+                Box::new(after) as Box<dyn RawSink>
             }
             None => collector,
         };
@@ -1442,7 +1442,7 @@ mod tests {
     /// and answers every picture that comes out of the end.
     fn run(
         mut bin: VideoDecodeBin,
-        after: Option<Box<dyn Filter>>,
+        after: Option<Box<dyn RawFilter>>,
         packets: Vec<ffmpeg::Packet>,
     ) -> Result<Frames> {
         let frames = collect(&mut bin, after);
@@ -1489,7 +1489,7 @@ mod tests {
         }
     }
 
-    impl Sink for Shuts {
+    impl RawSink for Shuts {
         fn ready_consume(&mut self) -> bool {
             self.open.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -1786,7 +1786,7 @@ mod tests {
         use std::time::Duration;
 
         use super::*;
-        use crate::element::SinkExt;
+        use crate::element::RawSinkExt;
         use crate::{
             control::PrerollContext, elements::D3d11Download, test_support::try_encoded_packets,
         };

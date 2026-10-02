@@ -64,7 +64,7 @@ use crate::rate::{FrameRate, FrameRateHandle};
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     platform::windows::{
         d3d11::protect_shared_device,
@@ -73,7 +73,7 @@ use crate::{
     },
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_error, pp_info, pp_warn},
-    produce::{Received, produce_source},
+    produce::{Received, source_stage},
     schedule::PeriodicSchedule,
 };
 
@@ -216,9 +216,9 @@ impl Default for WgcCaptureOptions {
 /// not seekable. A downstream push error is posted to the pipeline's bus and
 /// only that frame is dropped; WGC/session/device failures are fatal because
 /// capture cannot meaningfully continue.
-pub struct WgcCaptureSource(ProducingSource<Capturing>);
+pub struct WgcCaptureSource(SourceStage<Capturing>);
 
-produce_source!(WgcCaptureSource);
+source_stage!(WgcCaptureSource);
 
 /// What a [`WgcCaptureSource`] does when asked: the window's picture at the
 /// next tick. All of its work, which the framework makes the source.
@@ -372,7 +372,7 @@ impl WgcCaptureSource {
             );
         }
 
-        Self(ProducingSource::new(Capturing {
+        Self(SourceStage::new(Capturing {
             pp_log,
             name,
             hwnd: target.hwnd,
@@ -577,7 +577,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

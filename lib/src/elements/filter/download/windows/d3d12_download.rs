@@ -7,12 +7,12 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     frame_size::ForSize,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to [`D3d12Download`].
@@ -66,9 +66,9 @@ pub enum D3d12DownloadError {
 /// [`crate::elements::D3d12Decoder`] and [`crate::elements::D3d12Upload`].
 /// PTS, duration, and color metadata are copied without creating a new
 /// timeline. The size of the frames comes from the frames themselves.
-pub struct D3d12Download(TransformStage<Downloading>);
+pub struct D3d12Download(FilterStage<Downloading>);
 
-transform_filter!(D3d12Download);
+filter_stage!(D3d12Download);
 
 /// What a [`D3d12Download`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -91,7 +91,7 @@ impl D3d12Download {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Download, &name, None);
         pp_info!(pp_log: &pp_log, "opened: D3D12 -> NV12");
-        Self(TransformStage::new(Downloading {
+        Self(FilterStage::new(Downloading {
             pp_log,
             name,
             pool: ForSize::new(),
@@ -196,7 +196,7 @@ impl Element for Downloading {
     }
 }
 
-impl Transform for Downloading {
+impl Filter for Downloading {
     /// The mirror of D3d12Upload: only a device resource has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -242,7 +242,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::D3d12Upload;
     use crate::test_support::try_d3d12_gpu as try_device;
 

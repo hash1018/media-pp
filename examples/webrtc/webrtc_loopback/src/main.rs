@@ -30,7 +30,7 @@ mod example {
         Result,
         buffer::MediaBuffer,
         driver::DriverRunner,
-        element::{Element, ElementType, Sink, element_pp_log},
+        element::{Element, ElementType, RawSink, element_pp_log},
         elements::{AttachedTrack, TrackEndpoints, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
         pipeline::Pipeline,
     };
@@ -229,7 +229,7 @@ mod example {
         }
     }
 
-    impl Sink for CountingSink {
+    impl RawSink for CountingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if matches!(buf, MediaBuffer::Packet(_)) {
                 self.count.fetch_add(1, Ordering::SeqCst);

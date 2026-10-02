@@ -10,9 +10,9 @@ use ffmpeg_next as ffmpeg;
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     error::Result,
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// How often a [`TestAudioSource`] wakes up to top up however many
@@ -65,9 +65,9 @@ impl Default for TestAudioOptions {
 /// Runs until `Stop` — never reaches `Eos` on its own, same as every other
 /// live source in this crate (no sample-count limit is exposed,
 /// deliberately, mirroring a live capture source more than a file).
-pub struct TestAudioSource(ProducingSource<Generating>);
+pub struct TestAudioSource(SourceStage<Generating>);
 
-produce_source!(TestAudioSource);
+source_stage!(TestAudioSource);
 
 /// What a [`TestAudioSource`] makes, a tick's worth of samples when asked:
 /// all of its work, which the framework makes the source.
@@ -107,7 +107,7 @@ impl TestAudioSource {
             options.channels,
             options.frequency
         );
-        Self(ProducingSource::new(Generating {
+        Self(SourceStage::new(Generating {
             name,
             pp_log,
             sample_rate: options.sample_rate,
@@ -192,7 +192,7 @@ impl Element for Generating {
     }
 }
 
-impl Produce for Generating {
+impl Source for Generating {
     fn is_live(&self) -> bool {
         true
     }
@@ -232,7 +232,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::{Sink, SourceElement},
+        element::{RawSink, RawSource},
         pipeline::Pipeline,
     };
 
@@ -259,7 +259,7 @@ mod tests {
         }
     }
 
-    impl Sink for RecordingSink {
+    impl RawSink for RecordingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Audio(frame) = buf
                 && frame.samples() > 0

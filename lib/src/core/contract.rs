@@ -651,7 +651,7 @@ impl fmt::Display for PortContract {
     }
 }
 
-/// What a [`Sink`](crate::element::Sink) can be fed.
+/// What a [`RawSink`](crate::element::RawSink) can be fed.
 ///
 /// [`Any`](Self::Any) and [`Unknown`](Self::Unknown) both link to
 /// anything, but they mean opposite things and differ in what happens
@@ -938,8 +938,8 @@ impl fmt::Display for LinkCheck {
 /// is asked about through [`check_link`] and the pad in question, and one
 /// with none answers [`LinkCheck::Unknown`].
 pub fn check_elements(
-    producer: &mut (impl crate::element::Source + ?Sized),
-    consumer: &(impl crate::element::Sink + ?Sized),
+    producer: &mut (impl crate::element::SrcPads + ?Sized),
+    consumer: &(impl crate::element::RawSink + ?Sized),
 ) -> LinkCheck {
     match producer.src_pads().first() {
         Some(pad) => check_link(&pad.contract(), &consumer.input_contract()),

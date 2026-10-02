@@ -49,7 +49,7 @@ impl Element for Taker {
     }
 }
 
-impl Sink for Taker {
+impl RawSink for Taker {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let at = match &buf {
             MediaBuffer::Video(frame) => position(frame.pts(), crate::buffer::time_base(frame)),

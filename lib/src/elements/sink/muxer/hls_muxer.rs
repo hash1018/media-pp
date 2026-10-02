@@ -307,7 +307,7 @@ pub enum HlsMuxerError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// Builds one HLS media playlist and returns one [`Sink`](crate::element::Sink) per registered
+/// Builds one HLS media playlist and returns one [`RawSink`](crate::element::RawSink) per registered
 /// track. FFmpeg owns segment boundary selection, fMP4/MPEG-TS creation,
 /// atomic playlist replacement, live-window trimming, and final
 /// `#EXT-X-ENDLIST` generation.
@@ -414,7 +414,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::MediaBuffer,
-        element::{Sink, Source},
+        element::{RawSink, SrcPads},
         elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions},
     };
 

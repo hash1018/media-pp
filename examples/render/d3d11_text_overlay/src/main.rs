@@ -103,7 +103,7 @@ mod windows_example {
         let background_input = compositor_handle.add_source("background", background_layer)?;
         let background_sink = background_input.sink;
 
-        // `D3d11TextLayerHandle` never receives `Pipeline` frames — no `Sink` to wire up,
+        // `D3d11TextLayerHandle` never receives `Pipeline` frames — no `RawSink` to wire up,
         // just a handle driven directly by `set_text`. `add_text_layer` takes a
         // `TextLayer` the same way `add_source` takes a `VideoLayer`, and
         // builds the `D3d11TextLayerHandle` in one call, always against this

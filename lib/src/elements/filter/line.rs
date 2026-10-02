@@ -16,7 +16,8 @@ use crate::{
     control::ControlMsg,
     core::pipeline::chain::FlowTracer,
     element::{
-        Context, Element, ElementType, Filter, ReversibleDecoder, Sink, SinkExt, element_pp_log,
+        Context, Element, ElementType, RawFilter, RawSink, RawSinkExt, ReversibleDecoder,
+        element_pp_log,
     },
     error::Result,
     stream::StreamEvent,
@@ -38,7 +39,7 @@ pub(crate) struct Line {
     /// each one linked into the next, so everything after the first is
     /// owned by the pad in front of it. It is the same fold
     /// `ChainBuilder::to` does, for the same reason — a link takes ownership.
-    head: Option<Box<dyn Sink>>,
+    head: Option<Box<dyn RawSink>>,
     /// Where the last element in the line puts what it made, for the owner
     /// to push onward. Empty between buffers.
     ///
@@ -79,7 +80,7 @@ impl Line {
     /// only the first is left to hold.
     pub(crate) fn fill(
         &mut self,
-        elements: Vec<Box<dyn Filter>>,
+        elements: Vec<Box<dyn RawFilter>>,
         context: Option<&Arc<Context>>,
     ) -> Option<String> {
         // Read before the fold, which takes ownership of every one of them.
@@ -101,7 +102,7 @@ impl Line {
         if elements.is_empty() {
             return None;
         }
-        let collector: Box<dyn Sink> = Box::new(Collector {
+        let collector: Box<dyn RawSink> = Box::new(Collector {
             pp_log: element_pp_log(self.owner, &self.name, None),
             owner: self.owner,
             made: self.made.clone(),
@@ -131,7 +132,7 @@ impl Line {
                 if let Some(pad) = element.src_pads().first_mut() {
                     pad.link(downstream);
                 }
-                Box::new(FlowTracer::new(element)) as Box<dyn Sink>
+                Box::new(FlowTracer::new(element)) as Box<dyn RawSink>
             });
         self.head = Some(head);
         // Handed the stream's segment ahead of its first buffer.
@@ -244,7 +245,7 @@ impl Element for Collector {
     }
 }
 
-impl Sink for Collector {
+impl RawSink for Collector {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.made
             .lock()

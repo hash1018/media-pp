@@ -28,7 +28,7 @@ mod checks {
 
     use media_pp::{
         buffer::MediaBuffer,
-        element::Sink,
+        element::RawSink,
         elements::{
             AppSource, MetalWindowRenderer, MetalWindowRendererError, VideoToolboxDevice,
             VideoToolboxUpload, VideoWindow, WindowGone, WindowOptions, run_with_windows,

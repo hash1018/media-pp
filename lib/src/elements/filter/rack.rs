@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Flow, Sink, Source, element_pp_log},
+    element::{Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads, element_pp_log},
     error::Result,
     pad::SrcPad,
     stash::OutputStash,
@@ -142,11 +142,11 @@ pub struct Rack {
 /// and released, never held across the work.
 #[derive(Default)]
 struct RackControl {
-    pending: Mutex<Option<Vec<Box<dyn Filter>>>>,
+    pending: Mutex<Option<Vec<Box<dyn RawFilter>>>>,
 }
 
 impl RackControl {
-    fn take(&self) -> Option<Vec<Box<dyn Filter>>> {
+    fn take(&self) -> Option<Vec<Box<dyn RawFilter>>> {
         self.pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -177,7 +177,7 @@ impl RackHandle {
     /// instead of through a bus event one frame later.
     pub fn replace(
         &self,
-        mut elements: Vec<Box<dyn Filter>>,
+        mut elements: Vec<Box<dyn RawFilter>>,
     ) -> std::result::Result<(), RackError> {
         for element in &mut elements {
             let count = element.src_pads().len();
@@ -237,7 +237,7 @@ impl Rack {
     }
 
     /// Replaces what is in the rack with `elements`.
-    fn fill(&mut self, elements: Vec<Box<dyn Filter>>) {
+    fn fill(&mut self, elements: Vec<Box<dyn RawFilter>>) {
         // At Info because a fill is a topology change of the same kind a
         // dynamic `Tee` attach is: sparse, caller-driven, and invisible in
         // the pipeline's own diagram, since what a rack holds are not graph
@@ -276,13 +276,13 @@ impl Element for Rack {
     }
 }
 
-impl Source for Rack {
+impl SrcPads for Rack {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for Rack {
+impl RawSink for Rack {
     /// What the first element in it says, as that element would in the
     /// rack's place: a rack that answered yes for an element that cannot take
     /// a buffer yet had the thread in front of it wait inside the push
@@ -361,7 +361,7 @@ mod tests {
 
     use super::*;
     use crate::contract::{MediaKind, MemoryDomain, PortContract};
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::pool::UnboundObjectPool;
 
     /// Records what reached the end of the branch the rack is in.
@@ -386,7 +386,7 @@ mod tests {
         }
     }
 
-    impl Sink for CapturingSink {
+    impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             self.received.lock().unwrap().push(buf);
             Ok(())
@@ -435,13 +435,13 @@ mod tests {
         }
     }
 
-    impl Source for Marker {
+    impl SrcPads for Marker {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl Sink for Marker {
+    impl RawSink for Marker {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             let MediaBuffer::Video(frame) = buf else {
                 return self.pad.push(buf);
@@ -485,13 +485,13 @@ mod tests {
         }
     }
 
-    impl Source for Waiting {
+    impl SrcPads for Waiting {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl Sink for Waiting {
+    impl RawSink for Waiting {
         fn ready_consume(&mut self) -> bool {
             self.ready.load(std::sync::atomic::Ordering::Relaxed)
         }
@@ -540,7 +540,7 @@ mod tests {
         }
     }
 
-    impl crate::element::Transform for Doubles {
+    impl crate::element::Filter for Doubles {
         fn transform(&mut self, buf: MediaBuffer, out: &mut crate::element::Output) -> Result<()> {
             let pts = pts_of(&buf);
             out.push(buf);
@@ -572,7 +572,7 @@ mod tests {
         }
     }
 
-    impl Sink for Shuts {
+    impl RawSink for Shuts {
         fn ready_consume(&mut self) -> bool {
             self.open.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -831,12 +831,12 @@ mod tests {
                 &mut self.pp_log
             }
         }
-        impl Source for TwoOut {
+        impl SrcPads for TwoOut {
             fn src_pads(&mut self) -> &mut [SrcPad] {
                 &mut self.pads
             }
         }
-        impl Sink for TwoOut {
+        impl RawSink for TwoOut {
             fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
                 Ok(())
             }
@@ -932,13 +932,13 @@ mod tests {
         }
     }
 
-    impl Source for Boom {
+    impl SrcPads for Boom {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl Sink for Boom {
+    impl RawSink for Boom {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Err(crate::error::Error::Other("this element refuses".into()))
         }
@@ -994,12 +994,12 @@ mod tests {
                 &mut self.pp_log
             }
         }
-        impl Source for Deaf {
+        impl SrcPads for Deaf {
             fn src_pads(&mut self) -> &mut [SrcPad] {
                 std::slice::from_mut(&mut self.pad)
             }
         }
-        impl Sink for Deaf {
+        impl RawSink for Deaf {
             fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
                 self.pad.push(buf)
             }

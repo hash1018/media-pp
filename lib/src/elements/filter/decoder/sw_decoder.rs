@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, ReversibleDecoder, SrcPads, element_pp_log},
     pad::SrcPad,
     pool::UnboundObjectPool,
     stream::StreamEvent,
@@ -87,7 +87,7 @@ pub struct DecodeThreading {
 }
 
 /// Decodes one stream's `Packet`s into `Frame`s in software (plain
-/// libavcodec, no hardware acceleration). A `Filter`: receives via `Sink`,
+/// libavcodec, no hardware acceleration). A `RawFilter`: receives via `RawSink`,
 /// pushes what it produces into its own (single) src pad.
 ///
 /// One packet can turn into zero, one, or several frames (B-frame
@@ -290,13 +290,13 @@ impl Element for SwDecoder {
     }
 }
 
-impl Source for SwDecoder {
+impl SrcPads for SwDecoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for SwDecoder {
+impl RawSink for SwDecoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {
@@ -522,7 +522,7 @@ mod tests {
         }
     }
 
-    impl Sink for CapturingSink {
+    impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             self.received.lock().unwrap().buffers.push(buf);
             Ok(())

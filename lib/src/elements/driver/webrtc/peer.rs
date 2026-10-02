@@ -54,7 +54,7 @@ const CHANNEL_CAPACITY: usize = 128;
 /// The [`Driver`] — owns the [`Rtc`] session and its [`UdpSocket`], and
 /// drives str0m's sans-I/O poll loop on the dedicated thread
 /// [`crate::driver::DriverRunner::run`] gives it. Not a
-/// [`crate::element::SourceElement`]/[`crate::element::Source`]: it has no `src_pads()`
+/// [`crate::element::RawSource`]/[`crate::element::SrcPads`]: it has no `src_pads()`
 /// dataflow graph of its own — see [`Driver`]'s own docs for why a
 /// connection with dynamically-appearing, independently bidirectional
 /// tracks doesn't fit that shape. Whatever it produces or consumes flows
@@ -97,7 +97,7 @@ pub struct WebRtcPeer {
     rtc: Rtc,
     socket: UdpSocket,
     /// Where inbound data for each attached track goes: just a plain
-    /// `Sender`, not a `Box<dyn Sink>` — the matching `Receiver` lives
+    /// `Sender`, not a `Box<dyn RawSink>` — the matching `Receiver` lives
     /// inside that track's own [`WebRtcTrackSource`], driven by *its own*
     /// `Pipeline` on its own thread, so nothing here needs to know about
     /// `ControlMsg` at all. Its codec cell is the same

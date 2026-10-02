@@ -224,7 +224,7 @@ impl Element for Recorder {
     }
 }
 
-impl Sink for Recorder {
+impl RawSink for Recorder {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         // No buffer outside a segment — see `crate::stream`.
         if self.segment.is_none() {
@@ -326,7 +326,7 @@ enum Decode {
 
 /// What the decoded picture goes through before it is paced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Filter {
+enum Filtering {
     None,
     /// A scaler, which answers a repeated picture with what it made.
     Scaled,
@@ -366,7 +366,7 @@ enum Depth {
 
 const BRANCHES: [Branches; 3] = [Branches::One, Branches::PictureTee, Branches::PacketTee];
 const DECODE: [Decode; 2] = [Decode::Decoder, Decode::Bin];
-const FILTER: [Filter; 3] = [Filter::None, Filter::Scaled, Filter::Racked];
+const FILTER: [Filtering; 3] = [Filtering::None, Filtering::Scaled, Filtering::Racked];
 const PACING: [Pacing; 3] = [Pacing::Pacer, Pacing::Synchronizer, Pacing::Unpaced];
 const SOUND: [Sound; 3] = [Sound::None, Sound::Stretched, Sound::Resampled];
 const DEPTH: [Depth; 2] = [Depth::Normal, Depth::Tight];
@@ -378,7 +378,7 @@ const AXES: [usize; 6] = [3, 2, 3, 3, 3, 2];
 struct FileShape {
     branches: Branches,
     decode: Decode,
-    filter: Filter,
+    filter: Filtering,
     pacing: Pacing,
     sound: Sound,
     depth: Depth,
@@ -389,7 +389,7 @@ impl FileShape {
         Self {
             branches,
             decode: Decode::Decoder,
-            filter: Filter::None,
+            filter: Filtering::None,
             pacing,
             sound,
             depth,
@@ -650,15 +650,15 @@ fn decoded(
 fn filtered(shape: FileShape, chain: ChainBuilder, name: &str) -> ChainBuilder {
     let bilinear = ffmpeg::software::scaling::Flags::BILINEAR;
     match shape.filter {
-        Filter::None => chain,
-        Filter::Scaled => chain.pipe(SwScaler::new(
+        Filtering::None => chain,
+        Filtering::Scaled => chain.pipe(SwScaler::new(
             format!("{name}-scaler"),
             ffmpeg::format::Pixel::YUV420P,
             160,
             120,
             bilinear,
         )),
-        Filter::Racked => {
+        Filtering::Racked => {
             let frame = || PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System);
             let (rack, handle) = Rack::new(
                 format!("{name}-rack"),
@@ -2402,7 +2402,7 @@ fn packets_fanned_out_backwards_step_on_in_every_branch() {
     // The sequence the matrix found it with: backwards, played to the start,
     // and a step on from a keyframe seek.
     let shape = FileShape {
-        filter: Filter::Scaled,
+        filter: Filtering::Scaled,
         ..FileShape::new(
             Branches::PacketTee,
             Pacing::Unpaced,

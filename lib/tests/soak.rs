@@ -249,7 +249,7 @@ fn repeated_record_cycles_do_not_grow_process_memory() {
 
 /// Pause/resume hammering on one long-lived pipeline. Each round-trip runs
 /// the whole synchronous control cascade — source `drain_control`, every
-/// `Queue` worker, every `Sink::control` — which is where a per-message
+/// `Queue` worker, every `RawSink::control` — which is where a per-message
 /// allocation or a retained buffer would accumulate.
 #[test]
 #[ignore = "soak test; run with --ignored"]

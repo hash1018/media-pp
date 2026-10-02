@@ -14,7 +14,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, SinkExt, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, RawSinkExt, element_pp_log},
     error::Result,
     stream::StreamEvent,
 };
@@ -65,7 +65,7 @@ struct StreamDef {
 /// is written) — `create` picks the rotation policy and how segments get
 /// named, `add_stream` registers each track exactly like
 /// [`FileMuxer::add_stream`], `open` writes the first segment's header and
-/// returns one [`Sink`] per track.
+/// returns one [`RawSink`] per track.
 ///
 /// ```no_run
 /// # use std::{path::PathBuf, time::Duration};
@@ -159,10 +159,10 @@ impl SegmentedFileMuxer {
         track
     }
 
-    /// Writes the first segment's header and returns one [`Sink`] per
+    /// Writes the first segment's header and returns one [`RawSink`] per
     /// track, each taken out by the [`MuxerTrack`]
     /// [`SegmentedFileMuxer::add_stream`] returned — same shape as
-    /// [`FileMuxer::open`]. All returned `Sink`s share one
+    /// [`FileMuxer::open`]. All returned `RawSink`s share one
     /// rotation lock: a track's `consume` blocks while another track (on
     /// its own thread) is mid-rotation, same tradeoff [`FileMuxer`]'s own
     /// shared file lock already makes.
@@ -225,7 +225,7 @@ impl SegmentedFileMuxer {
             tracks
                 .into_iter()
                 .enumerate()
-                .map(|(index, (name, kind))| -> Box<dyn Sink> {
+                .map(|(index, (name, kind))| -> Box<dyn RawSink> {
                     Box::new(SegmentedTrackSink {
                         pp_log: element_pp_log(ElementType::SegmentedFileMuxer, &name, None),
                         name,
@@ -241,7 +241,7 @@ impl SegmentedFileMuxer {
 
 /// One segment file, its sinks in the order of `streams` — which is the
 /// order [`SegmentedTrackSink::track_index`] indexes them by.
-fn open_segment(streams: &[StreamDef], path: PathBuf) -> Result<Vec<Box<dyn Sink>>> {
+fn open_segment(streams: &[StreamDef], path: PathBuf) -> Result<Vec<Box<dyn RawSink>>> {
     let mut muxer = FileMuxer::create(&path)?;
     let tracks = streams
         .iter()
@@ -270,7 +270,7 @@ struct GroupState {
     /// The currently-open segment's own per-track sinks, in the same
     /// order as `streams` — index-aligned with
     /// [`SegmentedTrackSink::track_index`].
-    current_sinks: Vec<Box<dyn Sink>>,
+    current_sinks: Vec<Box<dyn RawSink>>,
     /// What this segment has been given so far, for [`SegmentPolicy::Size`]
     /// — every track's packets, since they all land in the one file.
     segment_bytes: u64,
@@ -577,7 +577,7 @@ impl SegmentGroup {
     }
 }
 
-/// One track's own [`Sink`] — a lightweight handle sharing a
+/// One track's own [`RawSink`] — a lightweight handle sharing a
 /// [`SegmentGroup`] with every other track [`SegmentedFileMuxer::open`]
 /// returned alongside it.
 struct SegmentedTrackSink {
@@ -608,7 +608,7 @@ impl Element for SegmentedTrackSink {
     }
 }
 
-impl Sink for SegmentedTrackSink {
+impl RawSink for SegmentedTrackSink {
     /// Same as FileMuxer: encoded packets only, cut into segments on keyframes.
     fn input_contract(&self) -> InputContract {
         match self.kind {

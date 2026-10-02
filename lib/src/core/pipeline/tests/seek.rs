@@ -27,7 +27,7 @@ impl Element for Recording {
     }
 }
 
-impl Sink for Recording {
+impl RawSink for Recording {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Ok(())
     }
@@ -161,13 +161,13 @@ impl Element for SeekLoopSource {
     }
 }
 
-impl Source for SeekLoopSource {
+impl SrcPads for SeekLoopSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for SeekLoopSource {
+impl RawSource for SeekLoopSource {
     fn is_live(&self) -> bool {
         false
     }
@@ -222,7 +222,7 @@ impl Element for ControlRecordingSink {
     }
 }
 
-impl Sink for ControlRecordingSink {
+impl RawSink for ControlRecordingSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -510,7 +510,7 @@ impl Element for PrerollProbe {
     }
 }
 
-impl Sink for PrerollProbe {
+impl RawSink for PrerollProbe {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let pts = match &buf {
             MediaBuffer::Video(frame) => frame.pts(),
@@ -769,13 +769,13 @@ impl Element for MuteAfterSeekSource {
     }
 }
 
-impl Source for MuteAfterSeekSource {
+impl SrcPads for MuteAfterSeekSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for MuteAfterSeekSource {
+impl RawSource for MuteAfterSeekSource {
     fn is_live(&self) -> bool {
         false
     }
@@ -881,7 +881,7 @@ impl Element for NeverReadySink {
     }
 }
 
-impl Sink for NeverReadySink {
+impl RawSink for NeverReadySink {
     fn ready_consume(&mut self) -> bool {
         false
     }
@@ -981,13 +981,13 @@ impl Element for EndingSource {
     }
 }
 
-impl Source for EndingSource {
+impl SrcPads for EndingSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for EndingSource {
+impl RawSource for EndingSource {
     fn is_live(&self) -> bool {
         false
     }
@@ -1632,13 +1632,13 @@ impl Element for UnpausingSource {
     }
 }
 
-impl Source for UnpausingSource {
+impl SrcPads for UnpausingSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for UnpausingSource {
+impl RawSource for UnpausingSource {
     fn is_live(&self) -> bool {
         false
     }
@@ -1982,13 +1982,13 @@ impl Element for ReadingOnSource {
     }
 }
 
-impl Source for ReadingOnSource {
+impl SrcPads for ReadingOnSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for ReadingOnSource {
+impl RawSource for ReadingOnSource {
     fn is_live(&self) -> bool {
         false
     }

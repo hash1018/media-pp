@@ -17,26 +17,26 @@ similar name.
 Pick the smallest kind that fits; the framework then owns the pads, the
 control messages, the stream events and the preroll for it.
 
-- **`Produce`** — a source that makes one thing at a time (a file, a device,
+- **`Source`** — a source that makes one thing at a time (a file, a device,
   a network stream, a compositor tick). It waits only through its `Wait`,
   names its outputs in `outputs` and hands on with `Produced::On` when it has
   several, begins its own segments with `Produced::Segment`, and says it can
   be sought or played backwards through `as_seekable` / `as_reversible`.
   Device setup on the source thread goes in `starting`/`stopping`, a device
   it stops for a pause in `pausing`/`resuming`. Expose it as a newtype over
-  `ProducingSource` with `produce_source!`. There is no hand-written
-  `SourceElement` loop outside tests.
-- **`Transform`** — a filter that turns each buffer into none, one or
+  `SourceStage` with `source_stage!`. There is no hand-written
+  `RawSource` loop outside tests.
+- **`Filter`** — a filter that turns each buffer into none, one or
   several: its media work in `transform`, `drain` for what it holds at the
   end, `reset` for what a `Flush` lets go of, `stopping` for a `Stop`.
-  Expose it as a newtype with `transform_filter!`.
-- **`Render`** — a terminal that does something with each buffer (plays,
+  Expose it as a newtype with `filter_stage!`.
+- **`Sink`** — a terminal that does something with each buffer (plays,
   shows, counts, hands out): `render`, `drain`, `reset`, `stopping`,
-  `pausing`/`resuming`. Expose it with `render_sink!`.
-- **`Sink` (and `Source`) written directly** — only for an element that
+  `pausing`/`resuming`. Expose it with `sink_stage!`.
+- **`RawSink` (and `SrcPads`) written directly** — only for an element that
   routes the stream itself: a queue, a tee, a bin or rack, a muxer of
   several tracks, a compositor or mixer input, an `AppSink`. It reacts to
-  control through its own state only (`Sink::flow`, crate-private) and never
+  control through its own state only (`RawSink::flow`, crate-private) and never
   forwards a message; the graph passes control and stream events on through
   its pads.
 - A padless driver or a plain control-plane object when there is no stream
@@ -50,8 +50,8 @@ choosing the public API.
 
 ## Declare what wiring can check
 
-- Link contract: `input_contract` and `output_contract` (a `Transform`'s own,
-  or `Sink::input_contract` and `SrcPad::with_contract`). State only what
+- Link contract: `input_contract` and `output_contract` (a `Filter`'s own,
+  or `RawSink::input_contract` and `SrcPad::with_contract`). State only what
   construction settles — the `MediaKind`s, and for decoded frames the
   `MemoryDomainSet` and, where fixed, every `PixelLayout` the runtime check
   lets through. `OutputContract::SameLayout` for an output that follows its
@@ -60,11 +60,11 @@ choosing the public API.
   `Any` with `OutputContract::Passthrough` only for an element that forwards
   every kind unchanged; a genuinely runtime-dependent one stays `Unknown`.
 - Seeking: a sink recording the stream as it ran (a file, a replay window)
-  returns false from `Sink::accepts_seek`. A source that can reposition is a
+  returns false from `RawSink::accepts_seek`. A source that can reposition is a
   `SeekableSource`; one that can play backwards a `ReversibleSource`, and a
   decoder that can a `ReversibleDecoder`. A live source says so in `is_live`.
 - An element that waits on the playback clock inside `consume` answers
-  `Sink::own_queue`, so a chain puts it behind a queue; a `Rack` refuses it.
+  `RawSink::own_queue`, so a chain puts it behind a queue; a `Rack` refuses it.
   Its constructor takes no queue depth.
 - Keep backend-specific public names prefixed; an unprefixed type has a
   deliberately backend-independent contract. Derive values that must agree,

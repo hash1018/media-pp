@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::VideoToolboxDevice,
     error::Result,
     platform::macos::{
@@ -18,7 +18,7 @@ use crate::{
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/metal/convert.metal");
@@ -64,9 +64,9 @@ impl From<MetalPassError> for MetalConverterError {
 /// BT.709 above 576 rows and BT.601 at or below where it names none — and
 /// comes out full-range RGB, opaque, with its timing carried through and
 /// tagged as what it now is.
-pub struct MetalConverter(TransformStage<Converting>);
+pub struct MetalConverter(FilterStage<Converting>);
 
-transform_filter!(MetalConverter);
+filter_stage!(MetalConverter);
 
 /// What a [`MetalConverter`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -89,7 +89,7 @@ impl MetalConverter {
         let pp_log = element_pp_log(ElementType::MetalConverter, &name, None);
         let pass = MetalPass::new(device, SHADER, "convert", PassInput::Nv12)?;
         pp_info!(pp_log: &pp_log, "opened: NV12 -> BGRA");
-        Ok(Self(TransformStage::new(Converting {
+        Ok(Self(FilterStage::new(Converting {
             name,
             pp_log,
             pass,
@@ -164,7 +164,7 @@ impl Element for Converting {
     }
 }
 
-impl Transform for Converting {
+impl Filter for Converting {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
@@ -208,7 +208,7 @@ impl Drop for Converting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{VideoToolboxDownload, VideoToolboxUpload},
         test_support::{capture, try_videotoolbox_device},

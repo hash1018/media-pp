@@ -5,18 +5,18 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, MemoryDomainSet, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::CounterHandle,
     error::Result,
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
 };
 
 /// Terminal sink that counts decoded frames, video or audio. The
 /// [`CounterHandle`] it comes with reads the count from outside the
 /// pipeline, even while this sink runs on a `Queue` worker thread.
-pub struct FrameCounter(RenderStage<Counting>);
+pub struct FrameCounter(SinkStage<Counting>);
 
-render_sink!(FrameCounter);
+sink_stage!(FrameCounter);
 
 /// What a [`FrameCounter`] does with each buffer: counts it, where it is one of
 /// the decoded frames it counts.
@@ -35,7 +35,7 @@ impl FrameCounter {
         let pp_log = element_pp_log(ElementType::FrameCounter, &name, None);
         pp_info!(pp_log: &pp_log, "created");
         (
-            Self(RenderStage::new(Counting {
+            Self(SinkStage::new(Counting {
                 name,
                 pp_log,
                 count: count.clone(),
@@ -63,7 +63,7 @@ impl Element for Counting {
     }
 }
 
-impl Render for Counting {
+impl Sink for Counting {
     /// Counts decoded buffers of either medium — it only tallies them,
     /// so it neither reads the samples nor cares which memory they live
     /// in. PacketCounter is the encoded-side counterpart.

@@ -38,13 +38,13 @@ impl Element for PassThrough {
     }
 }
 
-impl Source for PassThrough {
+impl SrcPads for PassThrough {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for PassThrough {
+impl RawSink for PassThrough {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.pad.push(buf)
     }
@@ -260,7 +260,7 @@ impl Element for LingeringEosSink {
     }
 }
 
-impl Sink for LingeringEosSink {
+impl RawSink for LingeringEosSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Ok(())
     }

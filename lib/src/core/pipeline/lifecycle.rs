@@ -140,7 +140,7 @@ impl Pipeline {
                     }
                     // `source.run()` itself already reports non-fatal,
                     // per-buffer failures to `bus` as it goes (see
-                    // `SourceElement::run`'s docs) — a returned `Err` here
+                    // `RawSource::run`'s docs) — a returned `Err` here
                     // means something genuinely ended this source, e.g.
                     // a `Seek` that failed outright.
                     let outcome = if let Err(error) = source.run(&control_rx, &bus) {
@@ -386,7 +386,7 @@ impl Pipeline {
     /// draining to a natural `Eos`. This call is synchronous: it sends
     /// a stop to every source at once and waits until each
     /// one's own cascade has finished. It therefore cannot preempt an arbitrary
-    /// source read or `Sink::consume` call already blocked inside user or
+    /// source read or `RawSink::consume` call already blocked inside user or
     /// external-library code; the call returns only after that work gives
     /// the control cascade a turn. It returns once every source's background
     /// thread — and with it every Queue worker it owns — has ended, so
