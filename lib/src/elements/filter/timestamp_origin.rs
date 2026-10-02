@@ -95,6 +95,8 @@ struct Rebasing {
 }
 
 impl TimestampOrigin {
+    /// A filter that starts its packets' timestamps from zero, from the
+    /// first one it sees.
     pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::TimestampOrigin, &name, None);

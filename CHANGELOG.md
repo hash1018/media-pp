@@ -27,7 +27,9 @@ compile error with no explanation.
     `sink.stream_event(&StreamEvent::Eos)`;
   - a `consume` that matched `MediaBuffer::Eos` moves that arm into
     `stream_event`, and a filter of your own that pushed `Eos` on after
-    draining now only drains.
+    draining now only drains. `StreamEvent` is `#[non_exhaustive]`, so the
+    `match` there ends in a `_ => {}` arm:
+    `match event { StreamEvent::Eos => self.finish()?, _ => {} }`.
 
 - **`Sink::control` is gone, and control stays inside the crate.** A sink
   of your own hears a pause, a resume and a stop through the new
@@ -552,6 +554,12 @@ compile error with no explanation.
   `.../macos/media_pp/`.
 
 ### Fixed
+
+- **`Player::position` after a step is where the picture is.** With sound,
+  the sound renderer sets the clock from the sample it has reached, and
+  after a step that was up to a buffer away from the picture shown — 550 ms
+  for a picture at 566.7 ms. Paused after a seek or a step, the position
+  is now where they put it, as the docs said.
 
 - **A playing seek behind a `Tee` shows where it landed.** With every
   branch of a `Tee` held by a seek's preroll, the `Tee` still took what

@@ -192,10 +192,10 @@ impl Pipeline {
     ///
     /// `wire` is called once with the freshly created source and a
     /// [`Context`] bundling this pipeline's `Bus`, `id`, [`PipelineGraph`]
-    /// (already seeded with the source itself), and `Clock` (share it with
-    /// every [`crate::elements::Pacer`] via `Clock::clone` — one clock per
-    /// pipeline, so every paced branch agrees on the same t=0 and the same
-    /// pause/resume timeline) — everything a [`super::ChainBuilder`]/
+    /// (already seeded with the source itself), and the pipeline's clocks —
+    /// one per pipeline, which every [`crate::elements::Pacer`] takes from
+    /// the context as it is wired, so every paced branch agrees on the same
+    /// t=0 and the same pause/resume timeline — everything a [`super::ChainBuilder`]/
     /// [`crate::elements::Tee`] needs, in one `Arc` clone instead of four
     /// separate arguments. `wire` creates detached chains and attaches
     /// them through [`Context::attach`]. Pads left unattached drop data.

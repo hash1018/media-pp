@@ -470,6 +470,13 @@ impl Player {
             .sought
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        // Held where a seek or a step put it for as long as it stays paused:
+        // the clock is not where the picture is then. With sound, the sound
+        // renderer sets the clock from the sample it has reached, which a
+        // step leaves up to a buffer away from the picture it shows.
+        if self.is_paused() && sought.is_some() {
+            return *sought;
+        }
         match self.pipeline.position() {
             Some(position) => {
                 *sought = None;
@@ -934,10 +941,14 @@ mod tests {
     }
 
     /// A step pauses on the picture after or before the one shown, and the
-    /// position says where that is; playing on moves from there.
+    /// position says where that is; playing on moves from there. With the
+    /// sound playing where there is an output for it: the sound renderer
+    /// masters the clock, and the clock is not where the picture is.
     #[test]
     fn a_step_holds_the_next_picture_and_says_where_it_is() {
-        let Some(player) = open(false) else { return };
+        let Some(player) = open(true).or_else(|| open(false)) else {
+            return;
+        };
         player.play().unwrap();
         assert!(
             wait_until(|| player.position() > Some(Duration::from_millis(500))),

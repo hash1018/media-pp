@@ -108,7 +108,9 @@ pub struct AudioMixerOptions {
 /// stored copy of either could only ever disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MixFormat {
+    /// Samples a second.
     pub sample_rate: u32,
+    /// Interleaved channels, in the default layout for their count.
     pub channels: u16,
 }
 

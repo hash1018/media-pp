@@ -146,6 +146,33 @@ impl Pipeline {
         }
     }
 
+    /// Whether a [`Self::seek`] would be refused, and by what — without
+    /// seeking, and without asking anything running.
+    ///
+    /// Answered from the graph as it stands: a source that is live or cannot
+    /// reposition, and a sink that cannot follow a jump in the timeline (see
+    /// [`Sink::accepts_seek`](crate::element::Sink::accepts_seek)), say so as
+    /// they are wired. So this works before [`Self::run`] and after the
+    /// sources have stopped, costs a lock rather than a round trip through
+    /// every thread, and changes as branches come and go — a recording
+    /// attached to a `Tee` refuses from the moment it is attached until it is
+    /// detached. What a player needs to decide whether to offer a seek bar.
+    pub fn check_seek(&self) -> std::result::Result<(), crate::control::SeekError> {
+        crate::control::SeekError::from_rejections(self.graph.seek_rejections())
+    }
+
+    /// Says whether [`Self::set_rate`] with a negative rate would be
+    /// refused, and by what, without changing anything — answered from the
+    /// graph as [`Self::check_seek`] is. Playing backwards starts with a
+    /// seek, so what refuses one refuses it too; besides, every source has
+    /// to be a [`crate::element::ReversibleSource`], and every element that
+    /// turns a picture's packets into pictures a
+    /// [`crate::element::ReversibleDecoder`]. What a player needs to decide
+    /// whether to offer it.
+    pub fn check_reverse(&self) -> std::result::Result<(), crate::control::SeekError> {
+        crate::control::SeekError::from_rejections(self.graph.reverse_rejections())
+    }
+
     /// Jumps to an absolute position from the start of the media. The whole
     /// operation is serialized against lifecycle controls and internally runs
     /// `Pause -> Flush -> Seek -> Preroll -> Pause`, and `Resume` after that if it
@@ -177,33 +204,6 @@ impl Pipeline {
     /// according to [`Sink::consume`](crate::element::Sink::consume). For a
     /// video renderer that includes installing or submitting the preview
     /// frame, but not waiting for physical display scanout.
-    /// Whether a [`Self::seek`] would be refused, and by what — without
-    /// seeking, and without asking anything running.
-    ///
-    /// Answered from the graph as it stands: a source that is live or cannot
-    /// reposition, and a sink that cannot follow a jump in the timeline (see
-    /// [`Sink::accepts_seek`](crate::element::Sink::accepts_seek)), say so as
-    /// they are wired. So this works before [`Self::run`] and after the
-    /// sources have stopped, costs a lock rather than a round trip through
-    /// every thread, and changes as branches come and go — a recording
-    /// attached to a `Tee` refuses from the moment it is attached until it is
-    /// detached. What a player needs to decide whether to offer a seek bar.
-    pub fn check_seek(&self) -> std::result::Result<(), crate::control::SeekError> {
-        crate::control::SeekError::from_rejections(self.graph.seek_rejections())
-    }
-
-    /// Says whether [`Self::set_rate`] with a negative rate would be
-    /// refused, and by what, without changing anything — answered from the
-    /// graph as [`Self::check_seek`] is. Playing backwards starts with a
-    /// seek, so what refuses one refuses it too; besides, every source has
-    /// to be a [`crate::element::ReversibleSource`], and every element that
-    /// turns a picture's packets into pictures a
-    /// [`crate::element::ReversibleDecoder`]. What a player needs to decide
-    /// whether to offer it.
-    pub fn check_reverse(&self) -> std::result::Result<(), crate::control::SeekError> {
-        crate::control::SeekError::from_rejections(self.graph.reverse_rejections())
-    }
-
     pub fn seek(&self, target: Duration, mode: SeekMode) -> Result<()> {
         let _operation = self
             .operation

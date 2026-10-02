@@ -246,11 +246,13 @@
 //! # Writing a source
 //!
 //! A source that makes one thing at a time — a generator, a device read a
-//! frame at a time, buffers an application hands in, a live stream's
-//! packets on an output each — implements
+//! frame at a time, a live stream's packets on an output each — implements
 //! [`Produce`](element::Produce): asked for the next thing, it
 //! makes it, waiting where it has to only through the
-//! [`Wait`](element::Wait) it is handed. The framework runs the loop: what
+//! [`Wait`](element::Wait) it is handed. Buffers another thread of the
+//! application hands in need no source of their own:
+//! [`AppSource`](elements::AppSource) is one, and lets go of a pause or a
+//! stop the moment it comes. The framework runs the loop: what
 //! the pipeline asks in between, a pause kept out of the clock the source
 //! schedules on, and the end of its stream. What a device has to set up on
 //! the source's own thread — an apartment joined, a capture started — goes

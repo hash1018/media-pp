@@ -352,18 +352,14 @@ impl SwVideoCompositorHandle {
         }
     }
 
-    /// Returns the number of compositor inputs currently registered.
-    ///
-    /// Returns zero after the compositor has been dropped.
     /// Changes the rate this compositor emits at, from the next tick.
     ///
     /// Fails with [`SwVideoCompositorError::InvalidFrameRate`] for a rate that is not
     /// positive, and [`SwVideoCompositorError::Stopped`] for a compositor that has already
     /// been dropped; either way the running rate is left alone. An offline compositor
     /// refuses any change with [`SwVideoCompositorError::FixedFrameRate`].
-    /// The same contract as the GPU
-    /// compositors' setters, and with the same caveat: [`
-    /// SwVideoCompositor::time_base`] is the reciprocal of this and the output
+    /// The same contract as the GPU compositors' setters, and with the same
+    /// caveat: [`SwVideoCompositor::time_base`] is the reciprocal of this and the output
     /// `pts` is a tick counter in those units, so a change re-means every
     /// timestamp after it while the ones already downstream were stamped under
     /// the old rate — see [`crate::rate`].
@@ -392,6 +388,7 @@ impl SwVideoCompositorHandle {
         Some(self.shared.upgrade()?.frame_rate.get())
     }
 
+    /// How many inputs are registered, or zero once the compositor is gone.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()

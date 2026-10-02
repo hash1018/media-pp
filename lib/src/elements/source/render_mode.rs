@@ -30,6 +30,14 @@ pub enum RenderMode {
     /// frame begins; it holds back whatever feeds it once it is a frame
     /// ahead of the output, which needs a [`crate::queue::Queue`] somewhere
     /// upstream in its pipeline to wait on.
+    ///
+    /// So the render goes as fast as its slowest input, and an input that
+    /// makes its frames at a rate of its own — a
+    /// [`TestVideoSource`](crate::elements::TestVideoSource), a capture —
+    /// holds the whole export to that rate, and never ends it without an
+    /// `end`. A still background is the compositor's own background colour,
+    /// or a layer whose picture is set rather than fed; a file decodes as
+    /// fast as it can.
     Offline {
         /// The output time the stream ends at. `None` ends it once every
         /// input fed through a sink has ended and been shown to its last

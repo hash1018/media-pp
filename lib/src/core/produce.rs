@@ -191,6 +191,13 @@ impl Wait<'_> {
     /// is there; `false`, let go before, where the pipeline has something
     /// for this thread — answer [`Produced::Nothing`] then, and be asked
     /// again.
+    ///
+    /// The only wait a source of your own has: blocking on anything else —
+    /// a channel, a device call with no timeout — keeps a pause or a stop
+    /// waiting for it. A source fed from another thread is
+    /// [`AppSource`](crate::elements::AppSource)'s job; one that must look
+    /// at something of its own waits a few milliseconds at a time here and
+    /// looks again.
     pub fn until(&mut self, at: Instant) -> bool {
         let Some(control) = self.control else {
             std::thread::sleep(at.saturating_duration_since(self.now()));

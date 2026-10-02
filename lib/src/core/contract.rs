@@ -929,6 +929,10 @@ impl fmt::Display for LinkCheck {
 /// }
 /// ```
 ///
+/// The answer says what does not fit and what goes between, not which two
+/// elements were asked about — the caller knows; a refusal at wiring names
+/// them.
+///
 /// It asks about the producer's first output, which for every element
 /// with one is the only one. A source with several — a demuxer, a `Tee` —
 /// is asked about through [`check_link`] and the pad in question, and one

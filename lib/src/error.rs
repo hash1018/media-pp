@@ -824,7 +824,9 @@ pub enum Error {
 /// `stream-video` failed" is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
+    /// The kind of element.
     pub element_type: ElementType,
+    /// The name it was given, which tells it apart from others of its kind.
     pub name: Arc<str>,
 }
 
@@ -839,11 +841,10 @@ pub struct Origin {
 /// "where" is what decides whether a broadcast has dropped or an encoder
 /// hiccupped.
 ///
-/// The identity is attached by whichever tracer sees the error first, which
-/// is the one closest to the failure — see `FlowTracer` and `TerminalTracer`
-/// in `pipeline::chain`. Once attached it is never replaced, so what an
-/// observer reads is the element that raised it rather than the last one to
-/// pass it on.
+/// The identity is attached where the error first leaves an element of a
+/// pipeline — the closest point to the failure. Once attached it is never
+/// replaced, so what an observer reads is the element that raised it rather
+/// than the last one to pass it on.
 #[derive(Debug, Error)]
 // Reads as the error it wraps and nothing more: the origin is for whoever
 // asks [`Error::origin`], not for the message. A line that named the element
@@ -851,7 +852,9 @@ pub struct Origin {
 // than one that names it where it is acted on.
 #[error("{source}")]
 pub struct Traced {
+    /// The element that raised it.
     pub origin: Origin,
+    /// What went wrong.
     #[source]
     pub source: Box<Error>,
 }
