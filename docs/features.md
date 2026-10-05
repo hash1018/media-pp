@@ -67,6 +67,19 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
   9.23 and TensorRT 10.15; `CudaOrtDetector::runtime` says what falls
   short.
 
+  An application that ships them beside itself on Linux, as it would
+  FFmpeg, needs one thing more where TensorRT comes from NVIDIA's tar
+  archive: that `libnvinfer` has no run path of its own, and it opens its
+  builder resources by name when it builds an engine, which only the
+  loader's own path and an *RPATH* on the executable reach — not the
+  RUNPATH linkers write by default. Link with
+  `-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib` rather than
+  `-Wl,-rpath,$ORIGIN/lib`. Without it the program starts and runs from an
+  engine already cached, and fails on a machine building its first one,
+  with `TensorRT EP failed to create engine`. NVIDIA's pip wheels set
+  `$ORIGIN` on `libnvinfer` and need neither. Preloading the resources
+  does not help: their sonames are not the names they are opened by.
+
 What an element needs at run time — one shared `D3d11Gpu`, one `CudaDevice`
 per process, a portal for screen capture on Linux, a server to publish RTSP
 to, the permissions a Mac asks for — is on that element's documentation
