@@ -39,10 +39,11 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            AppSink, BoxColors, CudaCodec, CudaDecoder, CudaDetectionOverlay, CudaDevice,
-            CudaEncoder, CudaEncoderOptions, CudaFrameFormat, CudaOrtDetector,
-            CudaOrtDetectorOptions, Detection, DetectionOverlayOptions, Detections, FileDemuxer,
-            FileMuxer, LabelStyle, ObjectTracker, OrtDetectorOptions, TrackerOptions,
+            AppSink, BoxColors, COCO_CLASS_LABELS, CudaCodec, CudaDecoder, CudaDetectionOverlay,
+            CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat, CudaOrtClassifier,
+            CudaOrtDetector, CudaOrtDetectorOptions, Detection, DetectionOverlayOptions,
+            Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle, ObjectTracker,
+            OrtClassifierOptions, OrtDetectorOptions, TrackerOptions,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -65,6 +66,9 @@ mod example {
         interval: u32,
         confirm: u32,
         visual: bool,
+        classifier: Option<String>,
+        classifier_labels: Option<String>,
+        classify: Option<Vec<usize>>,
         out: Option<String>,
         eval: Option<Vec<u32>>,
     }
@@ -72,7 +76,9 @@ mod example {
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
-                "usage: cuda_track <model.onnx> <video.mp4> [--interval N] [--confirm N] [--visual] [--out tracked.mp4]\n\
+                "usage: cuda_track <model.onnx> <video.mp4> [--interval N] [--confirm N] [--visual]\n\
+                 \x20        [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]]\n\
+                 \x20        [--out tracked.mp4]\n\
                  \x20      cuda_track <model.onnx> <video.mp4> --eval 1,2,4,9 [--confirm N] [--visual]"
             );
             std::process::exit(1);
@@ -81,6 +87,7 @@ mod example {
         let (mut interval, mut out, mut eval) = (0, None, None);
         let mut confirm = TrackerOptions::default().confirm_after;
         let mut visual = false;
+        let (mut classifier, mut classifier_labels, mut classify) = (None, None, None);
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -97,6 +104,19 @@ mod example {
                         .unwrap_or_else(|| usage())
                 }
                 "--visual" => visual = true,
+                "--classifier" => classifier = Some(args.next().unwrap_or_else(|| usage())),
+                "--classifier-labels" => {
+                    classifier_labels = Some(args.next().unwrap_or_else(|| usage()))
+                }
+                "--classify" => {
+                    classify = Some(
+                        args.next()
+                            .unwrap_or_else(|| usage())
+                            .split(',')
+                            .map(|n| n.parse().unwrap_or_else(|_| usage()))
+                            .collect(),
+                    )
+                }
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
                 "--eval" => {
                     eval = Some(
@@ -117,6 +137,9 @@ mod example {
             interval,
             confirm,
             visual,
+            classifier,
+            classifier_labels,
+            classify,
             out,
             eval,
         }
@@ -175,6 +198,10 @@ mod example {
             &args.model,
             CudaOrtDetectorOptions {
                 detector: OrtDetectorOptions {
+                    // Stock Ultralytics weights are COCO's, and an export
+                    // that lost its names would otherwise put numbers on the
+                    // boxes.
+                    labels: Some(COCO_CLASS_LABELS.map(String::from).to_vec()),
                     // The tracker matches unconfident detections too, so it
                     // is handed them; the reference keeps Ultralytics' own.
                     conf_threshold: if track {
@@ -242,6 +269,28 @@ mod example {
             None => None,
         };
 
+        // A second model on what was found, if asked for: an ImageNet
+        // classifier, as the public ones are, on the classes asked for.
+        let classifier = match (&args.classifier, track) {
+            (Some(path), true) => Some(CudaOrtClassifier::new(
+                "classifier",
+                device,
+                path,
+                OrtClassifierOptions {
+                    labels: args
+                        .classifier_labels
+                        .as_ref()
+                        .and_then(|path| std::fs::read_to_string(path).ok())
+                        .map(|text| text.lines().map(str::to_owned).collect()),
+                    classes: args.classify.clone(),
+                    input: InputScale::ImageNet,
+                    min_score: 0.3,
+                    ..OrtClassifierOptions::default()
+                },
+            )?),
+            _ => None,
+        };
+
         let params = stream.parameters.clone();
         let (pipeline, ()) = Pipeline::new("cuda-track", source, |source, ctx| {
             let decoder = CudaDecoder::new("decoder", params, device, 16)?;
@@ -259,6 +308,9 @@ mod example {
                         ..TrackerOptions::default()
                     },
                 ));
+            }
+            if let Some(classifier) = classifier {
+                branch = branch.pipe(classifier);
             }
             let branch = match recording {
                 None => branch.to(sink)?,
@@ -361,7 +413,7 @@ mod example {
                         .items
                         .iter()
                         .filter(|item| item.track_id.is_some())
-                        .copied()
+                        .cloned()
                         .collect();
                     continue;
                 }

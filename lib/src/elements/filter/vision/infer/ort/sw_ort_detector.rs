@@ -199,15 +199,41 @@ fn fitting(
     ),
     model: (u32, u32),
 ) -> std::result::Result<Fitting, OrtDetectorError> {
-    let (format, width, height, space, range) = from;
+    let (width, height) = (from.1, from.2);
     let letterbox = Letterbox::new((width, height), model);
+    let context = to_rgb24(from, letterbox.scaled)?;
+    Ok(Fitting {
+        from,
+        letterbox,
+        context,
+        scaled: ffmpeg::frame::Video::new(
+            ffmpeg::format::Pixel::RGB24,
+            letterbox.scaled.0,
+            letterbox.scaled.1,
+        ),
+    })
+}
+
+/// A conversion of pictures shaped `from` to RGB24 at `size`, by the
+/// colours they say they are in.
+pub(super) fn to_rgb24(
+    from: (
+        ffmpeg::format::Pixel,
+        u32,
+        u32,
+        ffmpeg::color::Space,
+        ffmpeg::color::Range,
+    ),
+    size: (u32, u32),
+) -> std::result::Result<ffmpeg::software::scaling::Context, OrtDetectorError> {
+    let (format, width, height, space, range) = from;
     let mut context = ffmpeg::software::scaling::Context::get(
         format,
         width,
         height,
         ffmpeg::format::Pixel::RGB24,
-        letterbox.scaled.0,
-        letterbox.scaled.1,
+        size.0,
+        size.1,
         ffmpeg::software::scaling::Flags::BILINEAR,
     )?;
     if !is_rgb(format) {
@@ -228,20 +254,11 @@ fn fitting(
             );
         }
     }
-    Ok(Fitting {
-        from,
-        letterbox,
-        context,
-        scaled: ffmpeg::frame::Video::new(
-            ffmpeg::format::Pixel::RGB24,
-            letterbox.scaled.0,
-            letterbox.scaled.1,
-        ),
-    })
+    Ok(context)
 }
 
 /// Whether `format` is a hardware frame's, whose pixels are not in it.
-fn is_hardware(format: ffmpeg::format::Pixel) -> bool {
+pub(super) fn is_hardware(format: ffmpeg::format::Pixel) -> bool {
     // SAFETY: a lookup in libavutil's static table of descriptors.
     unsafe {
         let descriptor = ffmpeg::ffi::av_pix_fmt_desc_get(format.into());

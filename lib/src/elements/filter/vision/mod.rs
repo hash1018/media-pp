@@ -33,7 +33,8 @@ pub use analytics::{AnalyticsOptions, Line, ObjectAnalytics, ObjectAnalyticsErro
 #[cfg(feature = "ort")]
 pub use infer::*;
 pub use meta::{
-    Analytics, COCO_CLASS_LABELS, Crossing, Detection, Detections, LineCount, ZoneCount,
+    Analytics, COCO_CLASS_LABELS, Classification, Crossing, Detection, Detections, LineCount,
+    ZoneCount,
 };
 pub use overlay::{
     BoxColors, DetectionOverlayOptions, LabelStyle, SwDetectionOverlay, SwDetectionOverlayError,

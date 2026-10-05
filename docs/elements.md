@@ -54,9 +54,11 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
 - **Analysis**: `SwOrtDetector`, `CudaOrtDetector` and `MetalOrtDetector`,
   filters that put what a YOLO model finds on each picture as `Detections`
-  metadata; `ObjectTracker`, which numbers each object across pictures and
-  fills in the pictures a detector let by; `ObjectAnalytics`, which counts
-  the objects in zones of the picture and across lines; `SwDetectionOverlay`,
+  metadata; `SwOrtClassifier` and `CudaOrtClassifier`, which name each
+  object found with a second model; `ObjectTracker`, which numbers each
+  object across pictures and fills in the pictures a detector let by;
+  `ObjectAnalytics`, which counts the objects in zones of the picture and
+  across lines; `SwDetectionOverlay`,
   `CudaDetectionOverlay` and `MetalDetectionOverlay`, which draw those boxes
   and labels onto the picture; `WhisperTranscriber`, `FrameCounter`,
   `PacketCounter`.

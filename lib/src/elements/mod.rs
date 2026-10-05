@@ -125,7 +125,7 @@ pub use filter::MetalOrtDetector;
 #[cfg(feature = "ort-tensorrt")]
 pub use filter::UseTensorRtPolicy;
 pub use filter::{
-    Analytics, AnalyticsOptions, BoxColors, COCO_CLASS_LABELS, Crossing, Detection,
+    Analytics, AnalyticsOptions, BoxColors, COCO_CLASS_LABELS, Classification, Crossing, Detection,
     DetectionOverlayOptions, Detections, LabelStyle, Line, LineCount, ObjectAnalytics,
     ObjectAnalyticsError, ObjectTracker, SwDetectionOverlay, SwDetectionOverlayError,
     TrackerOptions, Zone, ZoneCount,
@@ -141,7 +141,8 @@ pub use filter::{
 pub use filter::{CudaDetectionOverlay, CudaDetectionOverlayError};
 #[cfg(feature = "ort-cuda")]
 pub use filter::{
-    CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
+    RuntimeShortfall,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{
@@ -163,6 +164,11 @@ pub use filter::{
 pub use filter::{
     EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
 };
+#[cfg(feature = "ort")]
+pub use filter::{
+    InputScale, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtError,
+    SwOrtClassifier, SwOrtDetector,
+};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use filter::{
     MetalChromaKey, MetalChromaKeyError, MetalConverter, MetalConverterError, MetalScaler,
@@ -172,8 +178,6 @@ pub use filter::{
 pub use filter::{MetalDetectionOverlay, MetalDetectionOverlayError};
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
-#[cfg(feature = "ort")]
-pub use filter::{OrtDetectorError, OrtDetectorOptions, SwOrtDetector};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use filter::{
     VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDecoderError, VideoToolboxDownload,

@@ -276,6 +276,30 @@ compile error with no explanation.
   `Detections::attach_to`. Both are non-exhaustive, so that what a tracker
   or a second model learns of an object can be added to them later.
 
+- **`SwOrtClassifier` and `CudaOrtClassifier`: what a detector found,
+  named by a second model** — DeepStream's secondary inference. Each
+  object's box is cut from the picture and stretched to an image
+  classifier's input, objects classified together where the model's batch
+  is open, and each answer goes in the object's `Detection::classes` as a
+  `Classification`: the classifier, its class names, the class and the
+  score. After an `ObjectTracker`, a numbered object is classified once and
+  its answer kept on every picture it is followed through, those a detector
+  let by too, until `OrtClassifierOptions::reclassify` pictures have passed
+  — DeepStream's asynchronous mode; `classes` limits it to some of the
+  detector's classes, `min_size` to boxes big enough, `min_score` to
+  answers sure enough, and `InputScale` says whether the model wants 0 to 1
+  or ImageNet's normalisation. Raw scores are put through a softmax, and
+  probabilities taken as they are. The CUDA one cuts the boxes with the
+  detector's fitting kernels, pointed at each box, into one batch tensor in
+  device memory, normalised there by a kernel of its own, and runs on
+  ONNX Runtime's CUDA provider. On the same boxes of a 1080p picture,
+  MobileNetV2 on the GPU names five of six as it does on the CPU — two
+  electric guitars among them. The overlay labels an object with what was
+  said of it, `car #5 0.48 | minivan`, and `cuda_track --classifier` runs
+  the whole of detection, tracking, classification and drawing on the GPU.
+  `OrtDetectorError` is `OrtError`, the old name kept as an alias, since
+  the classifiers' errors are the same.
+
 - **`ObjectAnalytics`: objects counted in zones and across lines.**
   DeepStream's `nvdsanalytics`, on the `Detections` a picture carries: for
   each `Zone` — a polygon in fractions of the picture, of some classes or

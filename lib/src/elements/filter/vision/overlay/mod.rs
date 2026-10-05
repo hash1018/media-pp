@@ -281,7 +281,8 @@ pub(crate) fn text_color(background: Color) -> Color {
 
 /// What a label says: the class's name, or `class` and its number where
 /// the model names none; then the object's number where a tracker gave it
-/// one, and the score if asked for — `person #7 0.87`.
+/// one, the score if asked for, and what classifiers said of it —
+/// `car #7 0.87 | minivan`.
 pub(crate) fn label_text(detections: &Detections, detection: &Detection, score: bool) -> String {
     let mut text = match detections.label(detection) {
         Some(name) => name.to_owned(),
@@ -292,6 +293,12 @@ pub(crate) fn label_text(detections: &Detections, detection: &Detection, score: 
     }
     if score {
         text.push_str(&format!(" {:.2}", detection.score));
+    }
+    for class in &detection.classes {
+        match class.label() {
+            Some(label) => text.push_str(&format!(" | {label}")),
+            None => text.push_str(&format!(" | class {}", class.class_id)),
+        }
     }
     text
 }
@@ -515,6 +522,16 @@ mod tests {
         assert_eq!(label_text(&detections, &found, true), "person #12 0.88");
         found.class_id = 7;
         assert_eq!(label_text(&detections, &found, false), "class 7 #12");
+        found.classes.push(crate::elements::Classification::new(
+            "classifier",
+            Arc::from([Arc::from("minivan")]),
+            0,
+            0.7,
+        ));
+        assert_eq!(
+            label_text(&detections, &found, false),
+            "class 7 #12 | minivan"
+        );
     }
 
     #[test]

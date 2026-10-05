@@ -15,21 +15,26 @@ use thiserror::Error as ThisError;
 
 use crate::ffmpeg;
 
+mod classify;
 #[cfg(feature = "ort-cuda")]
 mod cuda;
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 mod metal;
+mod sw_ort_classifier;
 mod sw_ort_detector;
 mod yolo;
 
+pub use classify::{InputScale, OrtClassifierOptions};
 #[cfg(feature = "ort-tensorrt")]
 pub use cuda::UseTensorRtPolicy;
 #[cfg(feature = "ort-cuda")]
 pub use cuda::{
-    CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
+    RuntimeShortfall,
 };
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use metal::MetalOrtDetector;
+pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
 use yolo::{Letterbox, decode};
 
@@ -196,10 +201,11 @@ fn parse_names(names: &str) -> Vec<String> {
     labels
 }
 
-/// Why a detector could not be made or could not look at a picture.
+/// Why an ONNX Runtime element — a detector, a classifier — could not be
+/// made or could not look at a picture.
 #[derive(Debug, ThisError)]
 #[non_exhaustive]
-pub enum OrtDetectorError {
+pub enum OrtError {
     /// ONNX Runtime refused the model, the execution provider, or a run.
     #[error("onnxruntime error: {0}")]
     Ort(#[from] ort::Error),
@@ -265,6 +271,9 @@ pub enum OrtDetectorError {
         surface: (u32, u32),
     },
 }
+
+/// [`OrtError`]'s name from when the detectors were its only elements.
+pub type OrtDetectorError = OrtError;
 
 /// The model's input size, from its first input's `[1, 3, height, width]`;
 /// 640 for a side the model leaves open.

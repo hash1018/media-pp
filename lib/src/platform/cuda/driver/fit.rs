@@ -1,6 +1,7 @@
-//! What [`crate::elements::CudaOrtDetector`] asks of the driver: its own
-//! kernels, loaded only by it — see [`super::ptx::FIT_PTX`] — and the
-//! device buffer it fits each picture into.
+//! What [`crate::elements::CudaOrtDetector`] and
+//! [`crate::elements::CudaOrtClassifier`] ask of the driver: their own
+//! kernels, loaded only by them — see [`super::ptx::FIT_PTX`] — and the
+//! device buffer they fit pictures into.
 
 use std::ffi::c_void;
 
@@ -19,6 +20,7 @@ pub(crate) struct FitKernels {
     module: CUmodule,
     nv12: CUfunction,
     bgra: CUfunction,
+    scale: CUfunction,
 }
 
 // SAFETY: a module and two function handles in a context that is pushed
@@ -39,8 +41,8 @@ impl Drop for FitKernels {
     }
 }
 
-/// A device buffer of `f32`s a detector's input is fitted into: three
-/// planes, R, G and B, of the model's width by height.
+/// A device buffer of `f32`s a model's input is fitted into: three planes,
+/// R, G and B, of the model's width by height, for each picture of a batch.
 pub(crate) struct CudaTensor {
     ctx: CUcontext,
     pointer: CUdeviceptr,
@@ -93,19 +95,32 @@ impl CudaDriver {
         self.with_context(|| {
             // SAFETY: the context is current inside `with_context`, which is
             // `load_module`'s whole contract.
-            let (module, [nv12, bgra]) = unsafe { load_module(FIT_PTX, ["fit_nv12", "fit_bgra"])? };
+            let (module, [nv12, bgra, scale]) =
+                unsafe { load_module(FIT_PTX, ["fit_nv12", "fit_bgra", "scale_planes"])? };
             Ok(FitKernels {
                 ctx: self.ctx,
                 module,
                 nv12,
                 bgra,
+                scale,
             })
         })
     }
 
     /// A device buffer for a `width` by `height` model's input.
     pub(crate) fn tensor(&self, width: u32, height: u32) -> Result<CudaTensor, CudaDriverError> {
-        let floats = 3 * (width as usize) * (height as usize);
+        self.batch_tensor(width, height, 1)
+    }
+
+    /// A device buffer for `pictures` inputs of a `width` by `height` model,
+    /// one after another.
+    pub(crate) fn batch_tensor(
+        &self,
+        width: u32,
+        height: u32,
+        pictures: usize,
+    ) -> Result<CudaTensor, CudaDriverError> {
+        let floats = 3 * (width as usize) * (height as usize) * pictures.max(1);
         // SAFETY: `with_context` has the context current and the out-param is
         // a live local; a failure allocates nothing to leak.
         self.with_context(|| unsafe {
@@ -122,8 +137,9 @@ impl CudaDriver {
         })
     }
 
-    /// Fits an NV12 picture, `size` in pixels, into `tensor` as `fit` says,
-    /// made RGB by `colour`'s rows.
+    /// Fits an NV12 picture, `size` in pixels, into the `slot`th input of
+    /// `tensor` as `fit` says, made RGB by `colour`'s rows.
+    #[allow(clippy::too_many_arguments)]
     ///
     /// Launches asynchronously: [`CudaDriver::synchronize`] is what makes
     /// the tensor ready for anything outside this context's stream.
@@ -131,13 +147,13 @@ impl CudaDriver {
         &self,
         kernels: &FitKernels,
         tensor: &CudaTensor,
+        slot: usize,
         fit: Fit,
         source: Nv12Surface,
         size: (u32, u32),
         colour: &YuvToBgra,
     ) -> Result<(), CudaDriverError> {
-        let (grid, block) = grid(fit, tensor)?;
-        let mut dst = tensor.pointer;
+        let (grid, block, mut dst) = grid(fit, tensor, slot)?;
         let (mut model_w, mut model_h) = fit.model;
         let (mut offset_x, mut offset_y) = fit.offset;
         let (mut scaled_w, mut scaled_h) = fit.scaled;
@@ -177,12 +193,12 @@ impl CudaDriver {
         &self,
         kernels: &FitKernels,
         tensor: &CudaTensor,
+        slot: usize,
         fit: Fit,
         source: BgraSurface,
         size: (u32, u32),
     ) -> Result<(), CudaDriverError> {
-        let (grid, block) = grid(fit, tensor)?;
-        let mut dst = tensor.pointer;
+        let (grid, block, mut dst) = grid(fit, tensor, slot)?;
         let (mut model_w, mut model_h) = fit.model;
         let (mut offset_x, mut offset_y) = fit.offset;
         let (mut scaled_w, mut scaled_h) = fit.scaled;
@@ -211,17 +227,74 @@ impl CudaDriver {
     }
 }
 
-/// The launch shape for `fit` — a thread per input pixel — after checking
-/// `tensor` holds that many, which is what keeps the kernel's stores inside
-/// it.
-fn grid(fit: Fit, tensor: &CudaTensor) -> Result<((u32, u32), u32), CudaDriverError> {
+/// The launch shape for `fit` — a thread per input pixel — and where the
+/// `slot`th input starts, after checking `tensor` holds it, which is what
+/// keeps the kernel's stores inside it.
+fn grid(
+    fit: Fit,
+    tensor: &CudaTensor,
+    slot: usize,
+) -> Result<((u32, u32), u32, CUdeviceptr), CudaDriverError> {
     const BLOCK: u32 = 16;
     let (width, height) = fit.model;
-    if 3 * (width as usize) * (height as usize) > tensor.floats {
+    let input = 3 * (width as usize) * (height as usize);
+    if (slot + 1) * input > tensor.floats {
         return Err(CudaDriverError::KernelRejected(format!(
-            "a {width}x{height} input does not fit a tensor of {} floats",
+            "input {slot} of {width}x{height} does not fit a tensor of {} floats",
             tensor.floats
         )));
     }
-    Ok(((width.div_ceil(BLOCK), height.div_ceil(BLOCK)), BLOCK))
+    let start = tensor.pointer + (slot * input * size_of::<f32>()) as CUdeviceptr;
+    Ok((
+        (width.div_ceil(BLOCK), height.div_ceil(BLOCK)),
+        BLOCK,
+        start,
+    ))
+}
+
+impl CudaDriver {
+    /// Makes each float of the first `pictures` inputs of a `width` by
+    /// `height` model in `tensor` `x · scale + bias`, by its plane's
+    /// channel — a model's normalisation, applied after the fits.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn scale_planes(
+        &self,
+        kernels: &FitKernels,
+        tensor: &CudaTensor,
+        (width, height): (u32, u32),
+        pictures: usize,
+        scale: [f32; 3],
+        bias: [f32; 3],
+    ) -> Result<(), CudaDriverError> {
+        let plane = (width as usize) * (height as usize);
+        let total = 3 * plane * pictures;
+        if total > tensor.floats || total > u32::MAX as usize {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "{pictures} inputs of {width}x{height} do not fit a tensor of {} floats",
+                tensor.floats
+            )));
+        }
+        let mut data = tensor.pointer;
+        let (mut plane, mut total) = (plane as u32, total as u32);
+        let [mut sr, mut sg, mut sb] = scale;
+        let [mut br, mut bg, mut bb] = bias;
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut data),
+                arg(&mut plane),
+                arg(&mut total),
+                arg(&mut sr),
+                arg(&mut sg),
+                arg(&mut sb),
+                arg(&mut br),
+                arg(&mut bg),
+                arg(&mut bb),
+            ];
+            // SAFETY: one pointer per parameter `scale_planes` declares, in
+            // that order, each at a live local; the kernel reads and writes the
+            // first `total` floats of `tensor`, which the check above holds it
+            // to, and the context is current inside `with_context`.
+            unsafe { launch(kernels.scale, (total.div_ceil(256), 1), 16, &mut params) }
+        })
+    }
 }

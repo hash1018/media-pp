@@ -1130,3 +1130,51 @@ pub(crate) fn one_frame(
         _ => panic!("expected one picture from the filter"),
     }
 }
+
+/// The `n`th picture of `video`, from 1, as `format` in system memory,
+/// stamped `n`.
+#[cfg(feature = "ort-cuda")]
+pub(crate) fn nth_picture(
+    video: &str,
+    n: usize,
+    format: ffmpeg_next::format::Pixel,
+) -> ffmpeg_next::frame::Video {
+    use ffmpeg_next as ffmpeg;
+    let mut input = ffmpeg::format::input(video).expect("the video opens");
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .expect("a video stream");
+    let index = stream.index();
+    let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .and_then(|context| context.decoder().video())
+        .expect("a decoder");
+    let mut decoded = ffmpeg::frame::Video::empty();
+    let mut seen = 0;
+    for (stream, packet) in input.packets() {
+        if stream.index() != index {
+            continue;
+        }
+        decoder.send_packet(&packet).expect("decodes");
+        while decoder.receive_frame(&mut decoded).is_ok() {
+            seen += 1;
+            if seen == n {
+                let mut converted = ffmpeg::frame::Video::empty();
+                ffmpeg::software::scaling::Context::get(
+                    decoded.format(),
+                    decoded.width(),
+                    decoded.height(),
+                    format,
+                    decoded.width(),
+                    decoded.height(),
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                )
+                .and_then(|mut context| context.run(&decoded, &mut converted))
+                .expect("converts");
+                converted.set_pts(Some(n as i64));
+                return converted;
+            }
+        }
+    }
+    panic!("the video is shorter than {n} pictures");
+}

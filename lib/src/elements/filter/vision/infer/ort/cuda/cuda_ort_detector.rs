@@ -362,6 +362,7 @@ impl Detecting {
             self.driver.fit_nv12(
                 &self.kernels,
                 &self.tensor,
+                0,
                 fit,
                 source,
                 size,
@@ -370,7 +371,7 @@ impl Detecting {
         } else {
             let source = BgraSurface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?;
             self.driver
-                .fit_bgra(&self.kernels, &self.tensor, fit, source, size)?;
+                .fit_bgra(&self.kernels, &self.tensor, 0, fit, source, size)?;
         }
         // The kernel runs on this driver's context; the model reads the
         // tensor on ONNX Runtime's own stream. Waiting here is what puts the
@@ -530,47 +531,6 @@ mod tests {
         kept
     }
 
-    /// The 150th picture of `video`, as `format` in system memory.
-    fn picture(video: &str, format: ffmpeg::format::Pixel) -> ffmpeg::frame::Video {
-        let mut input = ffmpeg::format::input(video).expect("the video opens");
-        let stream = input
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .expect("a video stream");
-        let index = stream.index();
-        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .and_then(|context| context.decoder().video())
-            .expect("a decoder");
-        let mut decoded = ffmpeg::frame::Video::empty();
-        let mut seen = 0;
-        for (stream, packet) in input.packets() {
-            if stream.index() != index {
-                continue;
-            }
-            decoder.send_packet(&packet).expect("decodes");
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                seen += 1;
-                if seen == 150 {
-                    let mut converted = ffmpeg::frame::Video::empty();
-                    ffmpeg::software::scaling::Context::get(
-                        decoded.format(),
-                        decoded.width(),
-                        decoded.height(),
-                        format,
-                        decoded.width(),
-                        decoded.height(),
-                        ffmpeg::software::scaling::Flags::BILINEAR,
-                    )
-                    .and_then(|mut context| context.run(&decoded, &mut converted))
-                    .expect("converts");
-                    converted.set_pts(Some(150));
-                    return converted;
-                }
-            }
-        }
-        panic!("the video is shorter than 150 pictures");
-    }
-
     /// What `detector` found in `buf`, the picture it handed on checked to
     /// be the one it was given.
     fn found(detector: &mut dyn RawSinkAndPads, buf: MediaBuffer) -> Detections {
@@ -658,7 +618,11 @@ mod tests {
         let mut cpu = SwOrtDetector::new("cpu", &model, options.detector.clone()).expect("loads");
         let expected = found(
             &mut cpu,
-            MediaBuffer::video(picture(&video, ffmpeg::format::Pixel::NV12)),
+            MediaBuffer::video(crate::test_support::nth_picture(
+                &video,
+                150,
+                ffmpeg::format::Pixel::NV12,
+            )),
         );
         assert!(
             !expected.items.is_empty(),
@@ -672,7 +636,9 @@ mod tests {
             let mut upload = CudaUpload::new("upload", &device, format);
             let uploaded = capture(&mut upload);
             upload
-                .consume(MediaBuffer::video(picture(&video, layout)))
+                .consume(MediaBuffer::video(crate::test_support::nth_picture(
+                    &video, 150, layout,
+                )))
                 .expect("uploads");
             let on_gpu = uploaded.lock().unwrap().remove(0);
             let mut gpu = CudaOrtDetector::new("gpu", &device, &model, options.clone())

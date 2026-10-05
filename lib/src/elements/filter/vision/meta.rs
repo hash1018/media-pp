@@ -13,10 +13,10 @@ use crate::buffer::MediaBuffer;
 /// height for pixels — which holds whatever the picture is scaled to
 /// afterwards.
 ///
-/// Non-exhaustive, so that what later elements learn of an object — which
-/// track it belongs to, what a second model says it is — can be added to
-/// it; make one with [`Detection::new`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Non-exhaustive, so that what later elements learn of an object can be
+/// added to it — which track it belongs to, what a second model says it is;
+/// make one with [`Detection::new`].
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Detection {
     /// Index into the label set the model was trained on — see
@@ -37,6 +37,48 @@ pub struct Detection {
     /// same number on every picture the object is followed through. `None`
     /// before a tracker, and for what it is not yet sure is an object.
     pub track_id: Option<u64>,
+    /// What second models said of the object — a classifier's after a
+    /// detector, such as `SwOrtClassifier`'s with the `ort` feature, naming
+    /// a car's make or a shirt's colour: DeepStream's secondary inference.
+    /// One per classifier that had something to say, in the order they ran.
+    pub classes: Vec<Classification>,
+}
+
+/// What a classifier said of an object a detector found.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Classification {
+    /// The name of the element that said it.
+    pub classifier: Arc<str>,
+    /// The classifier's class names, indexed by `class_id` — shared by every
+    /// object it classifies.
+    pub labels: Arc<[Arc<str>]>,
+    /// The class it chose.
+    pub class_id: usize,
+    /// How sure it is, 0 to 1.
+    pub score: f32,
+}
+
+impl Classification {
+    /// `classifier`'s answer, class `class_id` of `labels` at `score`.
+    pub fn new(
+        classifier: impl Into<Arc<str>>,
+        labels: Arc<[Arc<str>]>,
+        class_id: usize,
+        score: f32,
+    ) -> Self {
+        Self {
+            classifier: classifier.into(),
+            labels,
+            class_id,
+            score,
+        }
+    }
+
+    /// What the class is called, where the classifier names its classes.
+    pub fn label(&self) -> Option<&str> {
+        self.labels.get(self.class_id).map(|label| &**label)
+    }
 }
 
 impl Detection {
@@ -51,6 +93,7 @@ impl Detection {
             width,
             height,
             track_id: None,
+            classes: Vec::new(),
         }
     }
 }

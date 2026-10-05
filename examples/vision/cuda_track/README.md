@@ -12,6 +12,22 @@ a colour of its own and labelled with its number, and encodes it on NVENC.
 second sighting, which a long interval needs. `--visual` follows each object
 by how it looks as well as by its motion (`TrackerOptions::visual`).
 
+`--classifier imagenet.onnx` puts a `CudaOrtClassifier` after the tracker —
+DeepStream's secondary inference — so that each object is also named by a
+second model, once per object it follows, and labelled with it:
+`car #5 0.48 | minivan`. `--classifier-labels` names its classes, one a line,
+and `--classify 2,5,7` limits it to the detector's classes listed. The
+classifier is taken for an ImageNet one, as the public models are, such as
+the ONNX model zoo's MobileNetV2 — which, trained on pictures from the side,
+names a car seen from above a minivan and a bicycle from above a shower cap:
+what a classifier says is only as good as what it was trained on.
+
+```sh
+cargo run --release -p cuda_track -- model.onnx video.mp4 --interval 2 --confirm 1 \
+  --classifier mobilenetv2-12.onnx --classifier-labels imagenet_classes.txt \
+  --classify 1,2,3,5,7 --out classified.mp4
+```
+
 `--eval 1,2,4,9` measures how good the filled-in pictures are: it runs the
 file with the detector on every picture as the reference, then once per
 interval with the tracker, and on each picture let by compares the boxes the

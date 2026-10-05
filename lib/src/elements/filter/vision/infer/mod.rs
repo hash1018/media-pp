@@ -10,6 +10,10 @@ pub use self::ort::MetalOrtDetector;
 pub use self::ort::UseTensorRtPolicy;
 #[cfg(feature = "ort-cuda")]
 pub use self::ort::{
-    CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
+    RuntimeShortfall,
 };
-pub use self::ort::{OrtDetectorError, OrtDetectorOptions, SwOrtDetector};
+pub use self::ort::{
+    InputScale, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtError,
+    SwOrtClassifier, SwOrtDetector,
+};

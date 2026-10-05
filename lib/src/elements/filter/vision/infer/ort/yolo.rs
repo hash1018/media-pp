@@ -183,7 +183,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(found.len(), 1, "the 0.1 row is below the threshold");
-        let car = found[0];
+        let car = &found[0];
         assert_eq!(car.class_id, 2);
         assert!((car.x - 0.5).abs() < 1e-6 && car.y.abs() < 1e-6, "{car:?}");
         assert!(

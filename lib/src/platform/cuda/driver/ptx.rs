@@ -1922,4 +1922,90 @@ FIT_BGRA_STORE:
 FIT_BGRA_DONE:
     ret;
 }
+
+// Each float of `total`, in planes of `plane` floats, R G B over and over,
+// becomes `x * scale + bias` by its plane's channel: a model's own
+// normalisation, ImageNet's mean and deviation, applied to inputs the fits
+// above wrote 0 to 1. A thread per float, a 16 by 16 block read as 256 in
+// a row. ASCII only, as everything ptxas reads must be.
+.visible .entry scale_planes(
+    .param .u64 data,
+    .param .u32 plane,
+    .param .u32 total,
+    .param .f32 scale_r,
+    .param .f32 scale_g,
+    .param .f32 scale_b,
+    .param .f32 bias_r,
+    .param .f32 bias_g,
+    .param .f32 bias_b
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b32   %r<12>;
+    .reg .f32   %f<12>;
+    .reg .b64   %rd<4>;
+
+    ld.param.u64    %rd1, [data];
+    ld.param.u32    %r1, [plane];
+    ld.param.u32    %r2, [total];
+
+    mov.u32         %r3, %ctaid.x;
+    mov.u32         %r4, %tid.y;
+    mov.u32         %r5, %tid.x;
+    shl.b32         %r6, %r3, 8;
+    shl.b32         %r7, %r4, 4;
+    add.s32         %r8, %r6, %r7;
+    add.s32         %r9, %r8, %r5;
+
+    setp.ge.u32     %p1, %r9, %r2;
+    @%p1 bra        SCALE_DONE;
+
+    div.u32         %r10, %r9, %r1;
+    rem.u32         %r11, %r10, 3;
+
+    ld.param.f32    %f1, [scale_r];
+    ld.param.f32    %f2, [scale_g];
+    ld.param.f32    %f3, [scale_b];
+    ld.param.f32    %f4, [bias_r];
+    ld.param.f32    %f5, [bias_g];
+    ld.param.f32    %f6, [bias_b];
+    setp.eq.u32     %p2, %r11, 1;
+    setp.eq.u32     %p3, %r11, 2;
+    selp.f32        %f7, %f2, %f1, %p2;
+    selp.f32        %f7, %f3, %f7, %p3;
+    selp.f32        %f8, %f5, %f4, %p2;
+    selp.f32        %f8, %f6, %f8, %p3;
+
+    mul.wide.u32    %rd2, %r9, 4;
+    add.s64         %rd3, %rd1, %rd2;
+    ld.global.f32   %f9, [%rd3];
+    fma.rn.f32      %f10, %f9, %f7, %f8;
+    st.global.f32   [%rd3], %f10;
+
+SCALE_DONE:
+    ret;
+}
 "#;
+
+#[cfg(test)]
+mod tests {
+    /// ptxas refuses a module with a character past ASCII anywhere in it —
+    /// a `·` in a comment included — and the refusal comes only when the
+    /// driver JIT-compiles it, on a machine with a GPU, as "a PTX JIT
+    /// compilation failed". Checked here instead, everywhere.
+    #[test]
+    fn every_module_is_ascii() {
+        #[allow(unused_mut)]
+        let mut modules = vec![
+            ("CONVERT_PTX", super::CONVERT_PTX),
+            ("BLEND_PTX", super::BLEND_PTX),
+        ];
+        #[cfg(feature = "ort-cuda")]
+        modules.push(("FIT_PTX", super::FIT_PTX));
+        for (name, module) in modules {
+            for (number, line) in module.lines().enumerate() {
+                assert!(line.is_ascii(), "{name}, line {}: {line}", number + 1);
+            }
+        }
+    }
+}
