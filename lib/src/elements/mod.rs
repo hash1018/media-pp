@@ -32,7 +32,12 @@ pub use crate::platform::cuda::{
     CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameError, CudaFrameFormat, CudaSurfaces,
 };
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
-pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
+pub use crate::platform::linux::v4l2::V4l2CaptureFormat;
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "v4l2-capture", feature = "v4l2-virtual-camera")
+))]
+pub use crate::platform::linux::v4l2::V4l2Device;
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub use crate::platform::linux::vulkan::{VulkanGpu, VulkanGpuError};
 #[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
@@ -202,6 +207,8 @@ pub use sink::{
 pub use sink::{MfVirtualCamera, MfVirtualCameraError};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
+#[cfg(all(target_os = "linux", feature = "v4l2-virtual-camera"))]
+pub use sink::{V4l2VirtualCamera, V4l2VirtualCameraError};
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
     all(target_os = "linux", feature = "vulkan"),

@@ -22,6 +22,7 @@ unprefixed type works the same on every platform.
 | `pipewire-audio-capture` | System, per-application and microphone audio capture | Linux |
 | `pipewire-audio-renderer` | Audio playback | Linux |
 | `v4l2-capture` | Camera capture through Video4Linux2 | Linux |
+| `v4l2-virtual-camera` | The pipeline's pictures as a camera other applications open, written into a v4l2loopback device; the module must be loaded | Linux |
 | `screencapturekit-capture` | Display and window capture through ScreenCaptureKit (macOS 12.3+) | macOS |
 | `avfoundation-capture` | Camera capture through AVFoundation | macOS |
 | `coreaudio-capture` | System, per-application and microphone audio capture; the first two need macOS 14.2 | macOS |

@@ -58,9 +58,9 @@ As CI runs them:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture -- -D warnings
+cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture,v4l2-virtual-camera -- -D warnings
 cargo clippy -p media-pp --all-targets --features vulkan,cuda -- -D warnings
-cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
+cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture,v4l2-virtual-camera
 cargo test -p media-pp --features vulkan
 ```
 

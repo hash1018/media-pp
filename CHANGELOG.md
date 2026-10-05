@@ -165,6 +165,20 @@ compile error with no explanation.
 
 ### Added
 
+- **`V4l2VirtualCamera`: a pipeline's pictures as a Linux camera**
+  (feature `v4l2-virtual-camera`). It writes into a v4l2loopback device,
+  which every application reading cameras through V4L2 — a browser, Zoom,
+  Discord, OBS Studio — lists under the label the module was loaded with,
+  for as long as the element holds the device. Each picture is written as
+  I420 at the size the element was made with, converted to BT.709 limited
+  range from any system-memory video, and the device is told the rate.
+  `V4l2VirtualCamera::list_devices` lists the loopback devices free to
+  write to — none where the module is not loaded, which is the system's
+  to do (`modprobe v4l2loopback exclusive_caps=1 card_label=…`); a device
+  another program writes to answers `V4l2VirtualCameraError::InUse`. The
+  `virtual_camera` example now runs on Linux too. `V4l2Device` is shared
+  with `v4l2-capture`, and is exported with either feature.
+
 - **`MfVirtualCamera`: a pipeline's pictures as a Windows camera**
   (feature `mf-virtual-camera`, Windows 11). Every application that lists
   cameras — Teams, Zoom, a browser, the Camera app — sees "… Windows

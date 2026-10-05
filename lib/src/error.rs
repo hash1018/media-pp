@@ -52,6 +52,8 @@ use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspMuxerError;
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 use crate::elements::V4l2CaptureSourceError;
+#[cfg(all(target_os = "linux", feature = "v4l2-virtual-camera"))]
+use crate::elements::V4l2VirtualCameraError;
 use crate::elements::VideoDecodeBinError;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
@@ -760,6 +762,11 @@ pub enum Error {
     #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
     #[error(transparent)]
     V4l2CaptureSourceError(#[from] V4l2CaptureSourceError),
+
+    /// The v4l2loopback virtual camera could not be made or fed.
+    #[cfg(all(target_os = "linux", feature = "v4l2-virtual-camera"))]
+    #[error(transparent)]
+    V4l2VirtualCameraError(#[from] V4l2VirtualCameraError),
 
     /// WASAPI audio capture failed.
     #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]

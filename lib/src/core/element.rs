@@ -249,6 +249,8 @@ pub enum ElementType {
     WasapiRenderer,
     /// Windows Media Foundation virtual camera sink.
     MfVirtualCamera,
+    /// Linux v4l2loopback virtual camera sink.
+    V4l2VirtualCamera,
     /// macOS Core Audio renderer sink.
     CoreAudioRenderer,
     /// macOS Metal video renderer sink, drawing into a window of its own or

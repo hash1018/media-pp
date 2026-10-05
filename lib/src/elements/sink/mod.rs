@@ -81,6 +81,8 @@ pub use renderer::{VulkanWindowRenderer, VulkanWindowRendererError, WindowSize};
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 #[cfg(all(target_os = "windows", feature = "mf-virtual-camera"))]
 pub use virtual_camera::{MfVirtualCamera, MfVirtualCameraError};
+#[cfg(all(target_os = "linux", feature = "v4l2-virtual-camera"))]
+pub use virtual_camera::{V4l2VirtualCamera, V4l2VirtualCameraError};
 #[cfg(feature = "whisper")]
 pub use whisper_transcriber::{
     ChunkPolicy, SAMPLE_RATE as WHISPER_SAMPLE_RATE, Segment, TokenTiming, WhisperTranscriber,

@@ -10,8 +10,9 @@ pub(crate) mod pipewire;
 #[cfg(all(feature = "pipewire-screen-capture", feature = "cuda"))]
 pub(crate) mod dmabuf_cuda;
 
-/// Camera enumeration, for `V4l2CaptureSource`'s own picker.
-#[cfg(feature = "v4l2-capture")]
+/// Camera enumeration, for `V4l2CaptureSource`'s own picker, and the
+/// writing end of a loopback device, for `V4l2VirtualCamera`.
+#[cfg(any(feature = "v4l2-capture", feature = "v4l2-virtual-camera"))]
 pub(crate) mod v4l2;
 
 /// The Vulkan device `VulkanWindowRenderer` draws with — see `VulkanGpu`.

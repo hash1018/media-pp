@@ -5,39 +5,15 @@
 //! through FFmpeg's `video4linux2` demuxer, which already owns the buffer
 //! negotiation, the mmap ring and the dequeue loop — see
 //! [`crate::elements::V4l2CaptureSource`]. Asking a device what it offers is
-//! the one thing that demuxer has no call for, so it is asked directly.
-//!
-//! # The request numbers
-//!
-//! An ioctl request encodes its direction, the size of the struct it carries,
-//! a type letter and an ordinal. They are computed here from those parts
-//! rather than pasted in as magic constants, so a struct whose layout is
-//! wrong shows up as a mismatched request number in a test rather than as a
-//! driver writing past the end of it.
+//! the one thing that demuxer has no call for, so it is asked directly —
+//! with the request numbers made as [`super::ioctl`] explains.
 
-use std::ffi::{OsStr, c_void};
-use std::fs;
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::os::fd::OwnedFd;
 
 use ffmpeg_next as ffmpeg;
 
-/// One camera the machine currently has.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct V4l2Device {
-    /// The device node, which is what a caller stores and opens by —
-    /// `/dev/video0` and the like.
-    ///
-    /// Not stable across replugging on its own: the kernel hands out the
-    /// lowest free number, so unplugging one camera can renumber another.
-    /// It is what V4L2 offers, and what every tool on the platform names a
-    /// camera by.
-    pub id: String,
-    /// What the driver calls the card, for a picker to show. Falls back to
-    /// the node when a driver reports nothing.
-    pub name: String,
-}
+use super::V4l2Device;
+use super::ioctl::{READ_WRITE, call, query_capability, request, video_nodes};
 
 /// One picture shape a camera offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,18 +34,12 @@ pub struct V4l2CaptureFormat {
 /// for its still-image path — and only the ones that say they capture video
 /// are offered.
 pub fn list_devices() -> std::io::Result<Vec<V4l2Device>> {
-    let mut nodes: Vec<PathBuf> = fs::read_dir("/dev")?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| is_video_node(path))
-        .collect();
-    nodes.sort();
-
-    Ok(nodes
+    Ok(video_nodes()?
         .into_iter()
         .filter_map(|path| {
             let file = std::fs::File::open(&path).ok()?;
             let capability = query_capability(&file).ok()?;
-            capability.captures_video().then(|| V4l2Device {
+            (capability.node_caps() & CAP_VIDEO_CAPTURE != 0).then(|| V4l2Device {
                 name: capability
                     .card()
                     .unwrap_or_else(|| path.display().to_string()),
@@ -186,25 +156,6 @@ pub fn list_formats(device: &str) -> std::io::Result<Vec<V4l2CaptureFormat>> {
     Ok(formats)
 }
 
-fn is_video_node(path: &Path) -> bool {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| {
-            name.strip_prefix("video").is_some_and(|rest| {
-                !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
-            })
-        })
-}
-
-fn query_capability(file: &std::fs::File) -> std::io::Result<Capability> {
-    let mut capability = Capability::default();
-    // SAFETY: the file is a live V4L2 node and `capability` is a live local
-    // of exactly the layout `VIDIOC_QUERYCAP`'s request number encodes — see
-    // this module's own docs and `the_request_numbers_match_the_kernels`.
-    call(file, VIDIOC_QUERYCAP, &mut capability)?;
-    Ok(capability)
-}
-
 fn pixel_formats(file: &std::fs::File) -> Vec<u32> {
     (0u32..)
         .map_while(|index| {
@@ -266,83 +217,16 @@ fn frame_rates(
         .collect()
 }
 
-fn call<T>(file: &std::fs::File, request: libc::c_ulong, argument: &mut T) -> std::io::Result<()> {
-    // SAFETY: `argument` is a live value of the layout this request number was
-    // computed from, and the descriptor belongs to `file` for the whole call.
-    let code = unsafe {
-        libc::ioctl(
-            file.as_raw_fd(),
-            request,
-            std::ptr::from_mut(argument).cast::<c_void>(),
-        )
-    };
-    if code < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// `_IOC`, as `linux/ioctl.h` defines it: direction, then the size of the
-/// struct that travels with the request, then the type letter and the
-/// ordinal.
-const fn request(direction: u32, ordinal: u32, size: usize) -> libc::c_ulong {
-    ((direction << 30) | ((size as u32) << 16) | (b'V' as u32) << 8 | ordinal) as libc::c_ulong
-}
-
-/// The driver writes, the caller does not.
-const READ: u32 = 2;
-/// Both, which every enumeration here is: the index goes in, the answer comes
-/// back in the same struct.
-const READ_WRITE: u32 = 3;
-
-const VIDIOC_QUERYCAP: libc::c_ulong = request(READ, 0, size_of::<Capability>());
 const VIDIOC_ENUM_FMT: libc::c_ulong = request(READ_WRITE, 2, size_of::<FmtDesc>());
 const VIDIOC_ENUM_FRAMESIZES: libc::c_ulong = request(READ_WRITE, 74, size_of::<FrameSizeEnum>());
 const VIDIOC_ENUM_FRAMEINTERVALS: libc::c_ulong =
     request(READ_WRITE, 75, size_of::<FrameIntervalEnum>());
 
 const BUF_TYPE_VIDEO_CAPTURE: u32 = 1;
+/// The node captures video.
 const CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
-const CAP_DEVICE_CAPS: u32 = 0x8000_0000;
 const FRMSIZE_TYPE_DISCRETE: u32 = 1;
 const FRMIVAL_TYPE_DISCRETE: u32 = 1;
-
-#[repr(C)]
-#[derive(Default)]
-struct Capability {
-    driver: [u8; 16],
-    card: [u8; 32],
-    bus_info: [u8; 32],
-    version: u32,
-    capabilities: u32,
-    device_caps: u32,
-    reserved: [u32; 3],
-}
-
-impl Capability {
-    /// Whether *this node* captures video, which is not the same question as
-    /// whether the device does: a camera's metadata node belongs to a device
-    /// whose `capabilities` says it captures, and answers nothing itself.
-    /// `device_caps` is the per-node answer, offered since Linux 3.3 and
-    /// flagged in `capabilities` when it is there.
-    fn captures_video(&self) -> bool {
-        let own = if self.capabilities & CAP_DEVICE_CAPS != 0 {
-            self.device_caps
-        } else {
-            self.capabilities
-        };
-        own & CAP_VIDEO_CAPTURE != 0
-    }
-
-    fn card(&self) -> Option<String> {
-        let end = self.card.iter().position(|byte| *byte == 0)?;
-        let name = OsStr::from_bytes(&self.card[..end])
-            .to_string_lossy()
-            .trim()
-            .to_owned();
-        (!name.is_empty()).then_some(name)
-    }
-}
 
 #[repr(C)]
 #[derive(Default)]
@@ -405,7 +289,6 @@ mod tests {
     /// every field of every struct at once.
     #[test]
     fn the_request_numbers_match_the_kernels() {
-        assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
         assert_eq!(VIDIOC_ENUM_FMT, 0xC040_5602);
         assert_eq!(VIDIOC_ENUM_FRAMESIZES, 0xC02C_564A);
         assert_eq!(VIDIOC_ENUM_FRAMEINTERVALS, 0xC034_564B);

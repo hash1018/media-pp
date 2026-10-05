@@ -46,8 +46,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `AudioWaveform`, `SwAudioEncoder`; playback through `WasapiRenderer`,
   `PipeWireAudioRenderer` and `CoreAudioRenderer`.
 - **Outputs**: `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`,
-  `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`, and
-  `MfVirtualCamera`, a Windows virtual camera.
+  `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`, and virtual
+  cameras: `MfVirtualCamera` on Windows, `V4l2VirtualCamera` on Linux.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
 - **Analysis**: `OrtDetector`, `WhisperTranscriber`, `FrameCounter`,

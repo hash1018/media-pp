@@ -240,7 +240,7 @@ jobs:
       # without the capture, and code the two share is only used by one.
       - name: Lint (Linux backends)
         run: |
-          cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture -- -D warnings
+          cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture,v4l2-virtual-camera -- -D warnings
           cargo clippy -p media-pp --all-targets --features pipewire-audio-renderer -- -D warnings
 
       # Linted but not run: hosted runners have no NVIDIA driver, so a test
@@ -276,7 +276,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc -p media-pp --no-deps
-          cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
+          cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture,v4l2-virtual-camera
           cargo doc -p media-pp --no-deps --features cuda
           cargo doc -p media-pp --no-deps --features vulkan
           cargo doc -p media-pp --no-deps --features vulkan,cuda
@@ -343,7 +343,7 @@ jobs:
       # no session to open; the screen-capture portal handshake itself is
       # only exercised by the `#[ignore]`d soak scenario, not by this suite.
       - name: Test (Linux backends)
-        run: cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
+        run: cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture,v4l2-virtual-camera
 
   macos:
     # Apple silicon, as every Mac this crate's macOS backend is for.
