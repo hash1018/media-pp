@@ -145,23 +145,11 @@ fn decode_one(
                 None => best.iter_mut().zip(row.iter()).for_each(&mut keep),
             }
         }
-        let mut candidates = Vec::new();
-        for (index, &(class_id, score)) in best.iter().enumerate() {
-            if score < options.conf_threshold {
-                continue;
-            }
+        let boxes = best.iter().enumerate().map(|(index, &(class_id, score))| {
             let at = |row: usize| output[[row, index]];
-            let (cx, cy, w, h) = (at(0), at(1), at(2), at(3));
-            candidates.push((
-                class_id,
-                score,
-                [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0],
-            ));
-        }
-        non_max_suppression(candidates, options.iou_threshold)
-            .into_iter()
-            .map(|(class_id, score, corners)| letterbox.detection(class_id, score, corners))
-            .collect()
+            ([at(0), at(1), at(2), at(3)], class_id, score)
+        });
+        suppressed(boxes, letterbox, options)
     } else {
         return Err(OrtDetectorError::UnsupportedModel(format!(
             "its output is {shape:?}, neither [batch, 4 + classes, boxes] nor [batch, boxes, 6]"
@@ -169,6 +157,62 @@ fn decode_one(
     };
     found.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(found)
+}
+
+/// [`decode_batch`] for a `[batch, 4 + classes, boxes]` output whose boxes'
+/// best classes were found where it is, on the GPU: six floats a box —
+/// centre, width and height, the best class's score, that class — `boxes`
+/// boxes a picture, one picture after another.
+#[cfg(feature = "ort-cuda")]
+pub(crate) fn decode_best(
+    best: &[f32],
+    boxes: usize,
+    letterboxes: &[Letterbox],
+    options: &OrtDetectorOptions,
+) -> Vec<Vec<Detection>> {
+    letterboxes
+        .iter()
+        .enumerate()
+        .map(|(picture, letterbox)| {
+            let rows = best
+                .get(picture * boxes * 6..(picture + 1) * boxes * 6)
+                .unwrap_or_default();
+            let boxes = rows
+                .as_chunks::<6>()
+                .0
+                .iter()
+                .map(|&[cx, cy, w, h, score, class]| {
+                    ([cx, cy, w, h], class.max(0.0) as usize, score)
+                });
+            let mut found = suppressed(boxes, letterbox, options);
+            found.sort_by(|a, b| b.score.total_cmp(&a.score));
+            found
+        })
+        .collect()
+}
+
+/// What a `[4 + classes, boxes]` output's boxes — each its centre and size
+/// in the model's input, its best class and that class's score — come to on
+/// the picture: those confident enough, less the duplicates.
+fn suppressed(
+    boxes: impl Iterator<Item = ([f32; 4], usize, f32)>,
+    letterbox: &Letterbox,
+    options: &OrtDetectorOptions,
+) -> Vec<Detection> {
+    let candidates = boxes
+        .filter(|(_, _, score)| *score >= options.conf_threshold)
+        .map(|([cx, cy, w, h], class_id, score)| {
+            (
+                class_id,
+                score,
+                [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0],
+            )
+        })
+        .collect();
+    non_max_suppression(candidates, options.iou_threshold)
+        .into_iter()
+        .map(|(class_id, score, corners)| letterbox.detection(class_id, score, corners))
+        .collect()
 }
 
 /// One candidate: class, score, corners in the model's input.
@@ -311,6 +355,55 @@ mod tests {
             )
             .is_err(),
             "two pictures' output for one letterbox"
+        );
+    }
+
+    /// The boxes' best classes found on the GPU — six floats a box, as
+    /// `best_class` writes them — read to what the whole output reads to on
+    /// the CPU, ties and all.
+    #[cfg(feature = "ort-cuda")]
+    #[test]
+    fn best_classes_found_on_the_gpu_read_as_the_whole_output_does() {
+        let letterboxes = [
+            Letterbox::new((1920, 1080), (640, 640)),
+            Letterbox::new((640, 640), (640, 640)),
+        ];
+        // Two pictures of three boxes: centre, size, then two classes.
+        let pictures = [
+            [
+                [100.0, 100.0, 50.0, 50.0, 0.9, 0.2],
+                [102.0, 101.0, 50.0, 50.0, 0.3, 0.8],
+                [400.0, 300.0, 80.0, 40.0, 0.1, 0.05],
+            ],
+            [
+                [320.0, 320.0, 100.0, 200.0, 0.6, 0.6],
+                [10.0, 10.0, 5.0, 5.0, 0.0, 0.0],
+                [500.0, 500.0, 60.0, 60.0, 0.2, 0.7],
+            ],
+        ];
+        let mut output = Array3::<f32>::zeros((2, 6, 3));
+        let mut best = Vec::new();
+        for (picture, boxes) in pictures.iter().enumerate() {
+            for (index, column) in boxes.iter().enumerate() {
+                for (row, value) in column.iter().enumerate() {
+                    output[[picture, row, index]] = *value;
+                }
+                let (class, score) = if column[5] > column[4] {
+                    (1.0, column[5])
+                } else {
+                    (0.0, column[4])
+                };
+                best.extend([column[0], column[1], column[2], column[3], score, class]);
+            }
+        }
+        let options = OrtDetectorOptions::default();
+        let whole = decode_batch(output.view().into_dyn(), &letterboxes, &options).unwrap();
+        assert_eq!(decode_best(&best, 3, &letterboxes, &options), whole);
+        assert!(
+            whole[1]
+                .iter()
+                .any(|found| found.score == 0.6 && found.class_id == 0),
+            "a tie is the first class's: {whole:?}"
         );
     }
 

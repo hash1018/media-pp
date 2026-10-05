@@ -6,14 +6,14 @@ use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
 
 use ffmpeg_next::{self as ffmpeg, ffi};
+use ndarray::{ArrayViewD, IxDyn};
 #[cfg(feature = "ort-tensorrt")]
 use ort::ep::TensorRT;
 use ort::{
     ep::CUDA,
-    inputs,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
-    value::{Shape, TensorRefMut},
+    value::{DynTensorValueType, Shape, TensorRefMut},
 };
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
@@ -25,7 +25,10 @@ use crate::{
     error::Result,
     platform::cuda::{
         CudaDevice,
-        driver::{BgraSurface, CudaDriver, CudaTensor, Fit, FitKernels, Nv12Surface, YuvToBgra},
+        driver::{
+            BgraSurface, CUdeviceptr, CudaDriver, CudaTensor, Fit, FitKernels, Nv12Surface,
+            YuvToBgra,
+        },
         frame::{self, CudaSurfaces},
     },
     platform::ffmpeg::AvBufferRef,
@@ -35,7 +38,8 @@ use crate::{
 use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
-    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode_batch, labels, model_input,
+    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode_batch, decode_best, labels,
+    model_input,
 };
 use super::runtime::{self, CudaRuntime};
 
@@ -187,6 +191,9 @@ struct Detecting {
     interval: Interval,
     /// How many pictures the tensor holds, and the model is run on at
     /// once.
+    /// The model's input and output, which a run binds by name.
+    input_name: String,
+    output_name: String,
     max_batch: usize,
     /// The pictures of the batch under way, in the order they came, each
     /// looked at fitted into the next slot of the tensor.
@@ -195,6 +202,11 @@ struct Detecting {
     /// go on in the same call.
     context: Option<Arc<Context>>,
     tensor: CudaTensor,
+    /// Each box's best class, found on the GPU, made at the first
+    /// `[batch, 4 + classes, boxes]` output.
+    best: Option<CudaTensor>,
+    /// What is copied down of each run's output.
+    host: Vec<f32>,
     kernels: FitKernels,
     driver: CudaDriver,
     memory: MemoryInfo<'static>,
@@ -317,6 +329,13 @@ impl CudaOrtDetector {
             .map_err(OrtDetectorError::from)?;
 
         let model = model_input(&session)?;
+        let input_name = session.inputs()[0].name().to_owned();
+        let output_name = session
+            .outputs()
+            .first()
+            .ok_or_else(|| OrtDetectorError::UnsupportedModel("the model has no output".into()))?
+            .name()
+            .to_owned();
         let labels = labels(options.detector.labels.as_deref(), &session);
         let driver = CudaDriver::retain_primary().map_err(OrtDetectorError::from)?;
         let kernels = driver.fit_kernels().map_err(OrtDetectorError::from)?;
@@ -380,6 +399,10 @@ impl CudaOrtDetector {
             max_batch,
             held: Vec::new(),
             context: None,
+            input_name,
+            output_name,
+            best: None,
+            host: Vec::new(),
         })))
     }
 }
@@ -522,9 +545,58 @@ impl Detecting {
                 shape,
             )?
         };
-        let outputs = self.session.run(inputs![input])?;
-        let output = outputs[0].try_extract_array::<f32>()?;
-        decode_batch(output, letterboxes, &self.options)
+        // The output is left where the model wrote it, on the GPU. Copied
+        // down whole, YOLO11's for a batch of eight is 22 MB, which took
+        // about a third of the run, and finding each box's best class in it
+        // was most of the CPU's work; both are done there instead, and six
+        // floats a box come down.
+        let mut binding = self.session.create_binding()?;
+        binding.bind_input(&self.input_name, &input)?;
+        binding.bind_output_to_device(&self.output_name, &self.memory)?;
+        let outputs = self.session.run_binding(&binding)?;
+        binding.synchronize_outputs()?;
+        let output = outputs[0].downcast_ref::<DynTensorValueType>()?;
+        let shape: Vec<usize> = output
+            .shape()
+            .iter()
+            .map(|&side| side.max(0) as usize)
+            .collect();
+        let pointer = output.data_ptr() as CUdeviceptr;
+        match *shape.as_slice() {
+            // `[batch, 4 + classes, boxes]`.
+            [batch, rows, boxes] if batch == pictures && boxes != 6 && rows > 4 => {
+                let room = self.max_batch * boxes * 6;
+                if self.best.as_ref().is_none_or(|best| best.floats() < room) {
+                    self.best = Some(self.driver.buffer(room)?);
+                }
+                let best = self.best.as_ref().expect("made above");
+                // SAFETY: `pointer` is the run's output on this device, of
+                // `shape`'s floats, written by a run that has finished —
+                // `synchronize_outputs` — and kept by `outputs` until the
+                // copy down below has returned.
+                unsafe {
+                    self.driver.best_class(
+                        &self.kernels,
+                        pointer,
+                        best,
+                        (pictures, rows, boxes),
+                    )?;
+                }
+                self.host.resize(pictures * boxes * 6, 0.0);
+                self.driver.download(best, &mut self.host)?;
+                Ok(decode_best(&self.host, boxes, letterboxes, &self.options))
+            }
+            // `[batch, boxes, 6]`, a few hundred boxes a picture, copied down
+            // as it is — or a shape the reading refuses.
+            _ => {
+                self.host.resize(shape.iter().product(), 0.0);
+                // SAFETY: as above, `shape`'s floats on this device.
+                unsafe { self.driver.download_from(pointer, &mut self.host)? };
+                let output = ArrayViewD::from_shape(IxDyn(&shape), &self.host)
+                    .map_err(|error| OrtDetectorError::UnsupportedModel(error.to_string()))?;
+                decode_batch(output, letterboxes, &self.options)
+            }
+        }
     }
 
     /// Runs the model on what is held, and hands every held picture on in

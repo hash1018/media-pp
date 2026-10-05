@@ -221,8 +221,10 @@ compile error with no explanation.
   the model at once — with TensorRT, an engine built for every batch up to
   it; a picture with no `BatchSlot` is a batch of its own, as before. The
   `cuda_multi_detect` example runs several files through one detector: on
-  an RTX 3050, eight streams went from 363 pictures a second with a
-  detector each to 523 batched.
+  an RTX 3050, eight streams went from 395 pictures a second with a
+  detector each to about 750 batched. A YOLOv8 or YOLO11 output stays on
+  the GPU, where each box's best class is found, and six floats a box are
+  copied down rather than every class's score.
   `MetalOrtDetectorOptions::max_batch` does the same through Core ML, the
   batch's pictures fitted in one Metal pass and the model's open batch
   fixed at that size; `MetalOrtDetector::new` takes those options in place

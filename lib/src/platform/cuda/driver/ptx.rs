@@ -1656,6 +1656,14 @@ BMDONE:
 /// handed, the same `(Y', Cb, Cr, 1)` rows `nv12_to_bgra` reads; a BGRA one
 /// is read as it is.
 ///
+/// `best_class` reads what a YOLOv8 or YOLO11 model made of a batch where
+/// it is, on the device — `rows` (four, then a score per class) by `boxes`
+/// floats a picture — and writes each box as six floats: its centre, width
+/// and height, and its best class's score and number. `selp` on a strict
+/// `setp.gt` keeps the first of equal scores, as the CPU's reading does. A
+/// thread a box, so neighbouring threads read neighbouring floats of each
+/// row; what is copied down is six floats a box rather than every class's.
+///
 /// Kept apart from [`CONVERT_PTX`], and loaded by the detector alone: every
 /// other CUDA element would otherwise pay for its JIT at construction.
 #[cfg(feature = "ort-cuda")]
@@ -1983,6 +1991,84 @@ FIT_BGRA_DONE:
     st.global.f32   [%rd3], %f10;
 
 SCALE_DONE:
+    ret;
+}
+
+.visible .entry best_class(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u32 rows,
+    .param .u32 boxes,
+    .param .u32 total
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b32   %r<20>;
+    .reg .f32   %f<8>;
+    .reg .b64   %rd<8>;
+
+    ld.param.u64    %rd1, [src];
+    ld.param.u64    %rd2, [dst];
+    ld.param.u32    %r1, [rows];
+    ld.param.u32    %r2, [boxes];
+    ld.param.u32    %r3, [total];
+
+    mov.u32         %r4, %ctaid.x;
+    mov.u32         %r5, %tid.y;
+    mov.u32         %r6, %tid.x;
+    shl.b32         %r7, %r4, 8;
+    shl.b32         %r8, %r5, 4;
+    add.s32         %r9, %r7, %r8;
+    add.s32         %r9, %r9, %r6;
+
+    setp.ge.u32     %p1, %r9, %r3;
+    @%p1 bra        BEST_DONE;
+
+    div.u32         %r10, %r9, %r2;
+    rem.u32         %r11, %r9, %r2;
+    mul.lo.u32      %r12, %r1, %r2;
+    mul.wide.u32    %rd3, %r10, %r12;
+    cvt.u64.u32     %rd4, %r11;
+    add.s64         %rd3, %rd3, %rd4;
+    shl.b64         %rd3, %rd3, 2;
+    add.s64         %rd3, %rd1, %rd3;
+    mul.wide.u32    %rd5, %r2, 4;
+
+    ld.global.f32   %f1, [%rd3];
+    add.s64         %rd6, %rd3, %rd5;
+    ld.global.f32   %f2, [%rd6];
+    add.s64         %rd6, %rd6, %rd5;
+    ld.global.f32   %f3, [%rd6];
+    add.s64         %rd6, %rd6, %rd5;
+    ld.global.f32   %f4, [%rd6];
+
+    mov.f32         %f5, 0fFF800000;
+    mov.u32         %r13, 0;
+    mov.u32         %r14, 0;
+    sub.u32         %r15, %r1, 4;
+BEST_LOOP:
+    setp.ge.u32     %p2, %r14, %r15;
+    @%p2 bra        BEST_WRITE;
+    add.s64         %rd6, %rd6, %rd5;
+    ld.global.f32   %f6, [%rd6];
+    setp.gt.f32     %p3, %f6, %f5;
+    selp.f32        %f5, %f6, %f5, %p3;
+    selp.b32        %r13, %r14, %r13, %p3;
+    add.u32         %r14, %r14, 1;
+    bra             BEST_LOOP;
+
+BEST_WRITE:
+    cvt.rn.f32.u32  %f7, %r13;
+    mul.wide.u32    %rd7, %r9, 24;
+    add.s64         %rd7, %rd2, %rd7;
+    st.global.f32   [%rd7], %f1;
+    st.global.f32   [%rd7+4], %f2;
+    st.global.f32   [%rd7+8], %f3;
+    st.global.f32   [%rd7+12], %f4;
+    st.global.f32   [%rd7+16], %f5;
+    st.global.f32   [%rd7+20], %f7;
+
+BEST_DONE:
     ret;
 }
 "#;

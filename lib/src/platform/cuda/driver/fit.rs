@@ -9,7 +9,7 @@ use super::ptx::FIT_PTX;
 use super::{
     BgraSurface, CUcontext, CUdeviceptr, CUfunction, CUmodule, CudaDriver, CudaDriverError,
     Nv12Surface, YuvToBgra, arg, check, cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cuMemAlloc_v2,
-    cuMemFree_v2, cuModuleUnload, launch, load_module,
+    cuMemFree_v2, cuMemcpyDtoH_v2, cuModuleUnload, launch, load_module,
 };
 
 /// The fitting kernels, JIT-compiled into the driver's context. Dropped
@@ -21,6 +21,7 @@ pub(crate) struct FitKernels {
     nv12: CUfunction,
     bgra: CUfunction,
     scale: CUfunction,
+    best: CUfunction,
 }
 
 // SAFETY: a module and two function handles in a context that is pushed
@@ -95,14 +96,19 @@ impl CudaDriver {
         self.with_context(|| {
             // SAFETY: the context is current inside `with_context`, which is
             // `load_module`'s whole contract.
-            let (module, [nv12, bgra, scale]) =
-                unsafe { load_module(FIT_PTX, ["fit_nv12", "fit_bgra", "scale_planes"])? };
+            let (module, [nv12, bgra, scale, best]) = unsafe {
+                load_module(
+                    FIT_PTX,
+                    ["fit_nv12", "fit_bgra", "scale_planes", "best_class"],
+                )?
+            };
             Ok(FitKernels {
                 ctx: self.ctx,
                 module,
                 nv12,
                 bgra,
                 scale,
+                best,
             })
         })
     }
@@ -115,7 +121,11 @@ impl CudaDriver {
         height: u32,
         pictures: usize,
     ) -> Result<CudaTensor, CudaDriverError> {
-        let floats = 3 * (width as usize) * (height as usize) * pictures.max(1);
+        self.buffer(3 * (width as usize) * (height as usize) * pictures.max(1))
+    }
+
+    /// A device buffer of `floats` `f32`s.
+    pub(crate) fn buffer(&self, floats: usize) -> Result<CudaTensor, CudaDriverError> {
         // SAFETY: `with_context` has the context current and the out-param is
         // a live local; a failure allocates nothing to leak.
         self.with_context(|| unsafe {
@@ -290,6 +300,96 @@ impl CudaDriver {
             // first `total` floats of `tensor`, which the check above holds it
             // to, and the context is current inside `with_context`.
             unsafe { launch(kernels.scale, (total.div_ceil(256), 1), 16, &mut params) }
+        })
+    }
+}
+
+impl CudaDriver {
+    /// Reads the `pictures` outputs of a YOLOv8-layout model at `src` on the
+    /// device — `rows` (four, then a score per class) by `boxes` floats each
+    /// — into `dst`, six floats a box: its centre, width and height, its
+    /// best class's score and that class.
+    ///
+    /// # Safety
+    ///
+    /// `src` must hold `pictures · rows · boxes` floats in this driver's
+    /// context, written by work this call is ordered after — ONNX Runtime's
+    /// run, which has finished when it returns — and stay allocated until
+    /// the next synchronous call on this context, the copy down, returns.
+    pub(crate) unsafe fn best_class(
+        &self,
+        kernels: &FitKernels,
+        src: CUdeviceptr,
+        dst: &CudaTensor,
+        (pictures, rows, boxes): (usize, usize, usize),
+    ) -> Result<(), CudaDriverError> {
+        let total = pictures * boxes;
+        if rows < 5
+            || total * 6 > dst.floats
+            || total > u32::MAX as usize
+            || rows * boxes > u32::MAX as usize
+        {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "{pictures} outputs of {rows} by {boxes} do not fit {} floats of six a box",
+                dst.floats
+            )));
+        }
+        let (mut src, mut data) = (src, dst.pointer);
+        let (mut rows, mut boxes, mut total) = (rows as u32, boxes as u32, total as u32);
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut src),
+                arg(&mut data),
+                arg(&mut rows),
+                arg(&mut boxes),
+                arg(&mut total),
+            ];
+            // SAFETY: one pointer per parameter `best_class` declares, in that
+            // order, each at a live local. It reads `pictures · rows · boxes`
+            // floats of `src`, the caller's promise, and writes six floats for
+            // each of `total` boxes into `dst`, which the check above holds it
+            // to; the context is current inside `with_context`.
+            unsafe { launch(kernels.best, (total.div_ceil(256), 1), 16, &mut params) }
+        })
+    }
+
+    /// Copies the first `into.len()` floats of `from` down, after the work
+    /// queued before it on the default stream.
+    pub(crate) fn download(
+        &self,
+        from: &CudaTensor,
+        into: &mut [f32],
+    ) -> Result<(), CudaDriverError> {
+        if into.len() > from.floats {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "{} floats out of {}",
+                into.len(),
+                from.floats
+            )));
+        }
+        // SAFETY: a copy of `into`'s own length from no further into `from`
+        // than the check above holds it to.
+        unsafe { self.download_from(from.pointer, into) }
+    }
+
+    /// Copies `into.len()` floats down from `from`, after the work queued
+    /// before it on the default stream.
+    ///
+    /// # Safety
+    ///
+    /// `from` must hold `into.len()` floats in this driver's context.
+    pub(crate) unsafe fn download_from(
+        &self,
+        from: CUdeviceptr,
+        into: &mut [f32],
+    ) -> Result<(), CudaDriverError> {
+        // SAFETY: the context is current; the copy writes `into`'s own length,
+        // read from an allocation the caller promises holds as much.
+        self.with_context(|| unsafe {
+            check(
+                "cuMemcpyDtoH",
+                cuMemcpyDtoH_v2(into.as_mut_ptr().cast(), from, std::mem::size_of_val(into)),
+            )
         })
     }
 }

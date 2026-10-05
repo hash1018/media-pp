@@ -42,12 +42,16 @@ and run time as [`cuda_detect`](../cuda_detect/README.md) does: on Linux
 where the linker and the loader find them, on Windows their DLLs on `PATH`.
 
 On an RTX 3050 under Windows, YOLO11n through TensorRT in half precision over
-copies of a 1080p H.264 file, decoding included, in pictures a second:
+copies of a 1080p H.264 file, decoding included, in pictures a second over
+several runs:
 
 | streams | a detector for each | one detector, batched |
 |---|---|---|
-| 4 | 403 | 476 (`--batch 4`) |
-| 8 | 363 | 523 (`--batch 8`) |
+| 4 | 436 | 630 (`--batch 4`) |
+| 8 | 395 | 740–770 (`--batch 8`) |
 
-One stream on its own goes faster without a mux — about 300 against 245 — as
-there is nothing to batch and the mux's pipeline is one more thread to pass.
+Eight streams batched spend nine tenths of their time running the model, and
+NVDEC decodes about 850 such pictures a second, so little is left to gain
+here. One stream on its own is faster without a mux — about 360 against 300 —
+as there is nothing to batch and the mux's pipeline is one more thread to
+pass.
