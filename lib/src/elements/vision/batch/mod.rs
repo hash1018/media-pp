@@ -33,7 +33,8 @@ use crate::{
 pub use demux::StreamDemuxHandle;
 pub use input::StreamMuxInput;
 pub use meta::{BatchSlot, StreamId, StreamOrigin};
-pub(crate) use per_stream::{PerStream, stream_of};
+#[cfg_attr(not(feature = "ort"), allow(unused_imports))]
+pub(crate) use per_stream::PerStream;
 
 /// Errors specific to [`StreamMux`]. Converts into the crate-wide `Error`
 /// via `?`.
