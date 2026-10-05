@@ -9,7 +9,7 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        AnyFilter, Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads, element_pp_log,
+        BoxFilter, Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads, element_pp_log,
     },
     error::Result,
     pad::SrcPad,
@@ -177,9 +177,9 @@ impl RackHandle {
     /// The elements are checked here rather than when they are installed, so
     /// a caller learns about a bad one at the call that handed it over
     /// instead of through a bus event one frame later.
-    pub fn replace(&self, elements: Vec<AnyFilter>) -> std::result::Result<(), RackError> {
+    pub fn replace(&self, elements: Vec<BoxFilter>) -> std::result::Result<(), RackError> {
         let mut elements: Vec<Box<dyn RawFilter>> =
-            elements.into_iter().map(AnyFilter::into_raw).collect();
+            elements.into_iter().map(BoxFilter::into_raw).collect();
         for element in &mut elements {
             let count = element.src_pads().len();
             if count != 1 {
@@ -512,7 +512,7 @@ mod tests {
         assert!(rack.ready_consume(), "empty, it is a wire");
         let ready = Arc::new(AtomicBool::new(false));
         handle
-            .replace(vec![crate::element::AnyFilter::new(Waiting {
+            .replace(vec![crate::element::BoxFilter::new(Waiting {
                 pp_log: element_pp_log(ElementType::Other, "waiting", None),
                 pad: SrcPad::new("waiting_src"),
                 ready: Arc::clone(&ready),
@@ -704,8 +704,8 @@ mod tests {
         let mut rig = rig();
         rig.handle
             .replace(vec![
-                crate::element::AnyFilter::new(Marker::new("first", 1, rig.controls.clone())),
-                crate::element::AnyFilter::new(Marker::new("second", 2, rig.controls.clone())),
+                crate::element::BoxFilter::new(Marker::new("first", 1, rig.controls.clone())),
+                crate::element::BoxFilter::new(Marker::new("second", 2, rig.controls.clone())),
             ])
             .expect("two ordinary filters");
 
@@ -724,7 +724,7 @@ mod tests {
     fn a_replacement_takes_effect_on_the_next_buffer() {
         let mut rig = rig();
         rig.handle
-            .replace(vec![crate::element::AnyFilter::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -733,7 +733,7 @@ mod tests {
         rig.rack.consume(frame(0)).expect("first line");
 
         rig.handle
-            .replace(vec![crate::element::AnyFilter::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "other",
                 3,
                 rig.controls.clone(),
@@ -781,7 +781,7 @@ mod tests {
     fn control_reaches_the_elements_inside_and_then_the_one_after() {
         let mut rig = rig();
         rig.handle
-            .replace(vec![crate::element::AnyFilter::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -846,7 +846,7 @@ mod tests {
         let rig = rig();
         let error = rig
             .handle
-            .replace(vec![crate::element::AnyFilter::new(TwoOut {
+            .replace(vec![crate::element::BoxFilter::new(TwoOut {
                 pp_log: element_pp_log(ElementType::Other, "two-out", None),
                 pads: vec![SrcPad::new("a"), SrcPad::new("b")],
             })])
@@ -862,7 +862,7 @@ mod tests {
     fn what_waits_on_the_clock_is_refused_and_what_was_held_stays() {
         let mut rig = rig();
         rig.handle
-            .replace(vec![crate::element::AnyFilter::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -873,8 +873,8 @@ mod tests {
         let error = rig
             .handle
             .replace(vec![
-                crate::element::AnyFilter::new(Marker::new("other", 3, rig.controls.clone())),
-                crate::element::AnyFilter::new(crate::elements::Pacer::new("pacer")),
+                crate::element::BoxFilter::new(Marker::new("other", 3, rig.controls.clone())),
+                crate::element::BoxFilter::new(crate::elements::Pacer::new("pacer")),
             ])
             .expect_err("a pacer cannot go in a rack");
         assert!(
@@ -956,8 +956,8 @@ mod tests {
         let mut rig = rig();
         rig.handle
             .replace(vec![
-                crate::element::AnyFilter::new(Marker::new("first", 1, rig.controls.clone())),
-                crate::element::AnyFilter::new(Boom::new("second")),
+                crate::element::BoxFilter::new(Marker::new("first", 1, rig.controls.clone())),
+                crate::element::BoxFilter::new(Boom::new("second")),
             ])
             .expect("two ordinary filters");
 
@@ -1011,7 +1011,7 @@ mod tests {
 
         let mut rig = rig();
         rig.handle
-            .replace(vec![crate::element::AnyFilter::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -1020,7 +1020,7 @@ mod tests {
         rig.rack.consume(frame(0)).expect("install the line");
 
         rig.handle
-            .replace(vec![crate::element::AnyFilter::new(Deaf {
+            .replace(vec![crate::element::BoxFilter::new(Deaf {
                 pp_log: element_pp_log(ElementType::Other, "deaf", None),
                 pad: SrcPad::new("deaf_src"),
             })])

@@ -17,7 +17,7 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        AnySink, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
+        BoxSink, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     error::Result,
@@ -325,7 +325,7 @@ impl PipelineBridgeHandle {
     ///
     /// Fails with [`PipelineBridgeError::Disconnected`] once the bridge's own
     /// pipeline has finished.
-    pub fn connect(&self) -> std::result::Result<AnySink, PipelineBridgeError> {
+    pub fn connect(&self) -> std::result::Result<BoxSink, PipelineBridgeError> {
         let shared = self
             .shared
             .upgrade()
@@ -349,7 +349,7 @@ impl PipelineBridgeHandle {
             state.input_ended = false;
         }
         shared.wake();
-        Ok(AnySink::new(PipelineBridgeSink {
+        Ok(BoxSink::new(PipelineBridgeSink {
             pp_log: element_pp_log(ElementType::Other, &self.name, None),
             name: self.name.clone(),
             id,

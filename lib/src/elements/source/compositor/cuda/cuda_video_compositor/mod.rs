@@ -312,7 +312,7 @@ impl CudaVideoCompositorHandle {
     ) -> std::result::Result<CudaVideoCompositorInput, CudaVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(CudaVideoCompositorInput {
-            sink: crate::element::AnySink::new(CudaVideoCompositorInputSink {
+            sink: crate::element::BoxSink::new(CudaVideoCompositorInputSink {
                 pp_log: element_pp_log(ElementType::CudaVideoCompositor, &layer.name, None),
                 name: layer.name.clone(),
                 id: layer.id,

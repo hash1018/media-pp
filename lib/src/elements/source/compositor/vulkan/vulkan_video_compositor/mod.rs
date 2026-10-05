@@ -334,7 +334,7 @@ impl VulkanVideoCompositorHandle {
     ) -> std::result::Result<VulkanVideoCompositorInput, VulkanVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(VulkanVideoCompositorInput {
-            sink: crate::element::AnySink::new(VulkanVideoCompositorInputSink {
+            sink: crate::element::BoxSink::new(VulkanVideoCompositorInputSink {
                 pp_log: element_pp_log(ElementType::VulkanVideoCompositor, &layer.name, None),
                 name: layer.name.clone(),
                 id: layer.id,

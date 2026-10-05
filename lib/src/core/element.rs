@@ -38,9 +38,9 @@ use crate::{
 pub use crate::produce::{
     AsRawSource, AsSource, IntoSource, ProduceError, Produced, Source, SourceStage, Wait,
 };
-pub use crate::render::{AnySink, AsAnySink, AsRawSink, AsSink, IntoTerminal, Sink};
+pub use crate::render::{AsBoxSink, AsRawSink, AsSink, BoxSink, IntoTerminal, Sink};
 pub use crate::transform::{
-    AnyFilter, AsAnyFilter, AsFilter, AsRawFilter, Filter, IntoFilter, Output,
+    AsBoxFilter, AsFilter, AsRawFilter, BoxFilter, Filter, IntoFilter, Output,
 };
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to

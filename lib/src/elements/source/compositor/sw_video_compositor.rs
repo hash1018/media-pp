@@ -267,7 +267,7 @@ impl SwVideoCompositorHandle {
     ) -> std::result::Result<SwVideoCompositorInput, SwVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(SwVideoCompositorInput {
-            sink: crate::element::AnySink::new(SwVideoCompositorInputSink {
+            sink: crate::element::BoxSink::new(SwVideoCompositorInputSink {
                 name: layer.name.clone(),
                 pp_log: element_pp_log(ElementType::SwVideoCompositor, &layer.name, None),
                 shared: self.shared.clone(),

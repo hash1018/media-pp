@@ -16,7 +16,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        AnySink, Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
+        BoxSink, Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     elements::AudioFormat,
@@ -378,7 +378,7 @@ impl MixerHandle {
     pub fn add_source(
         &self,
         name: impl Into<String>,
-    ) -> std::result::Result<AnySink, AudioMixerError> {
+    ) -> std::result::Result<BoxSink, AudioMixerError> {
         let shared = self.shared.upgrade().ok_or(AudioMixerError::Stopped)?;
         let name: Arc<str> = name.into().into();
         let id = shared.next_input_id.fetch_add(1, Ordering::Relaxed);
@@ -399,7 +399,7 @@ impl MixerHandle {
         );
         drop(inputs);
         shared.arrived.ring();
-        Ok(AnySink::new(MixerInputSink {
+        Ok(BoxSink::new(MixerInputSink {
             name: name.clone(),
             id,
             pp_log: element_pp_log(ElementType::AudioMixerInput, &name, None),

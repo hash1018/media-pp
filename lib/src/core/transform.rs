@@ -234,7 +234,7 @@ impl<T: Filter> RawSink for FilterStage<T> {
 }
 
 /// What can be put where a filter is asked for: a [`Filter`], which the
-/// framework makes one of, a [`RawFilter`] itself, or an [`AnyFilter`]
+/// framework makes one of, a [`RawFilter`] itself, or a [`BoxFilter`]
 /// holding either.
 ///
 /// `M` says which a type is, and the compiler works it out: nothing names
@@ -246,7 +246,7 @@ impl<T: Filter> RawSink for FilterStage<T> {
 )]
 pub trait IntoFilter<M>: sealed::Sealed<M> {
     /// The filter this is, whichever kind it is.
-    fn into_filter(self) -> AnyFilter;
+    fn into_filter(self) -> BoxFilter;
 }
 
 /// Says a type goes in as the [`RawFilter`] it is — see [`IntoFilter`].
@@ -255,37 +255,37 @@ pub enum AsRawFilter {}
 /// Says a type goes in as the [`Filter`] it is — see [`IntoFilter`].
 pub enum AsFilter {}
 
-/// Says an [`AnyFilter`] goes in as the filter it holds — see
+/// Says a [`BoxFilter`] goes in as the filter it holds — see
 /// [`IntoFilter`].
-pub enum AsAnyFilter {}
+pub enum AsBoxFilter {}
 
 impl<F: RawFilter + 'static> IntoFilter<AsRawFilter> for F {
-    fn into_filter(self) -> AnyFilter {
-        AnyFilter(Box::new(self))
+    fn into_filter(self) -> BoxFilter {
+        BoxFilter(Box::new(self))
     }
 }
 
 impl<T: Filter + 'static> IntoFilter<AsFilter> for T {
-    fn into_filter(self) -> AnyFilter {
-        AnyFilter(Box::new(FilterStage::new(self)))
+    fn into_filter(self) -> BoxFilter {
+        BoxFilter(Box::new(FilterStage::new(self)))
     }
 }
 
-impl IntoFilter<AsAnyFilter> for AnyFilter {
-    fn into_filter(self) -> AnyFilter {
+impl IntoFilter<AsBoxFilter> for BoxFilter {
+    fn into_filter(self) -> BoxFilter {
         self
     }
 }
 
 mod sealed {
-    use super::{AnyFilter, AsAnyFilter, AsFilter, AsRawFilter, Filter, RawFilter};
+    use super::{AsBoxFilter, AsFilter, AsRawFilter, BoxFilter, Filter, RawFilter};
 
     /// Keeps [`super::IntoFilter`] to the three ways in it has.
     pub trait Sealed<M> {}
 
     impl<F: RawFilter + 'static> Sealed<AsRawFilter> for F {}
     impl<T: Filter + 'static> Sealed<AsFilter> for T {}
-    impl Sealed<AsAnyFilter> for AnyFilter {}
+    impl Sealed<AsBoxFilter> for BoxFilter {}
 }
 
 /// A filter of any kind, which kind forgotten: what to hold where the
@@ -294,11 +294,11 @@ mod sealed {
 /// [`ChainBuilder::pipe`](crate::pipeline::ChainBuilder::pipe) takes one as
 /// it takes the filter it holds.
 ///
-/// Made with [`AnyFilter::new`] from a [`Filter`] or a [`RawFilter`] alike.
+/// Made with [`BoxFilter::new`] from a [`Filter`] or a [`RawFilter`] alike.
 /// It derefs to the filter inside, for what is asked of one directly.
-pub struct AnyFilter(Box<dyn RawFilter>);
+pub struct BoxFilter(Box<dyn RawFilter>);
 
-impl AnyFilter {
+impl BoxFilter {
     /// `filter`, whichever kind it is.
     pub fn new<M>(filter: impl IntoFilter<M>) -> Self {
         filter.into_filter()
@@ -310,7 +310,7 @@ impl AnyFilter {
     }
 }
 
-impl std::ops::Deref for AnyFilter {
+impl std::ops::Deref for BoxFilter {
     type Target = dyn RawFilter;
 
     fn deref(&self) -> &Self::Target {
@@ -318,15 +318,15 @@ impl std::ops::Deref for AnyFilter {
     }
 }
 
-impl std::ops::DerefMut for AnyFilter {
+impl std::ops::DerefMut for BoxFilter {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut *self.0
     }
 }
 
-impl std::fmt::Debug for AnyFilter {
+impl std::fmt::Debug for BoxFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("AnyFilter").field(&self.0.name()).finish()
+        f.debug_tuple("BoxFilter").field(&self.0.name()).finish()
     }
 }
 

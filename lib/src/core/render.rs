@@ -158,7 +158,7 @@ impl<R: Sink> RawSink for SinkStage<R> {
 }
 
 /// What can be put where a terminal is asked for: a [`Sink`], which the
-/// framework makes one of, a [`RawSink`] itself, or an [`AnySink`] holding
+/// framework makes one of, a [`RawSink`] itself, or a [`BoxSink`] holding
 /// either.
 ///
 /// `M` says which a type is, and the compiler works it out: nothing names
@@ -170,7 +170,7 @@ impl<R: Sink> RawSink for SinkStage<R> {
 )]
 pub trait IntoTerminal<M>: sealed::Sealed<M> {
     /// The terminal this is, whichever kind it is.
-    fn into_terminal(self) -> AnySink;
+    fn into_terminal(self) -> BoxSink;
 }
 
 /// Says a type goes in as the [`RawSink`] it is — see [`IntoTerminal`].
@@ -179,37 +179,37 @@ pub enum AsRawSink {}
 /// Says a type goes in as the [`Sink`] it is — see [`IntoTerminal`].
 pub enum AsSink {}
 
-/// Says an [`AnySink`] goes in as the terminal it holds — see
+/// Says a [`BoxSink`] goes in as the terminal it holds — see
 /// [`IntoTerminal`].
-pub enum AsAnySink {}
+pub enum AsBoxSink {}
 
 impl<S: RawSink + 'static> IntoTerminal<AsRawSink> for S {
-    fn into_terminal(self) -> AnySink {
-        AnySink(Box::new(self))
+    fn into_terminal(self) -> BoxSink {
+        BoxSink(Box::new(self))
     }
 }
 
 impl<R: Sink + 'static> IntoTerminal<AsSink> for R {
-    fn into_terminal(self) -> AnySink {
-        AnySink(Box::new(SinkStage::new(self)))
+    fn into_terminal(self) -> BoxSink {
+        BoxSink(Box::new(SinkStage::new(self)))
     }
 }
 
-impl IntoTerminal<AsAnySink> for AnySink {
-    fn into_terminal(self) -> AnySink {
+impl IntoTerminal<AsBoxSink> for BoxSink {
+    fn into_terminal(self) -> BoxSink {
         self
     }
 }
 
 mod sealed {
-    use super::{AnySink, AsAnySink, AsRawSink, AsSink, RawSink, Sink};
+    use super::{AsBoxSink, AsRawSink, AsSink, BoxSink, RawSink, Sink};
 
     /// Keeps [`super::IntoTerminal`] to the three ways in it has.
     pub trait Sealed<M> {}
 
     impl<S: RawSink + 'static> Sealed<AsRawSink> for S {}
     impl<R: Sink + 'static> Sealed<AsSink> for R {}
-    impl Sealed<AsAnySink> for AnySink {}
+    impl Sealed<AsBoxSink> for BoxSink {}
 }
 
 /// A terminal of any kind, which kind forgotten: what to hold where the
@@ -219,12 +219,12 @@ mod sealed {
 /// [`ChainBuilder::to`](crate::pipeline::ChainBuilder::to) ends a branch in
 /// one as in the terminal it holds.
 ///
-/// Made with [`AnySink::new`] from a [`Sink`] or a [`RawSink`] alike. It
+/// Made with [`BoxSink::new`] from a [`Sink`] or a [`RawSink`] alike. It
 /// derefs to the terminal inside, for what is asked of one directly — its
 /// name, or a buffer handed to it by hand.
-pub struct AnySink(Box<dyn RawSink>);
+pub struct BoxSink(Box<dyn RawSink>);
 
-impl AnySink {
+impl BoxSink {
     /// `terminal`, whichever kind it is.
     pub fn new<M>(terminal: impl IntoTerminal<M>) -> Self {
         terminal.into_terminal()
@@ -241,7 +241,7 @@ impl AnySink {
     }
 }
 
-impl std::ops::Deref for AnySink {
+impl std::ops::Deref for BoxSink {
     type Target = dyn RawSink;
 
     fn deref(&self) -> &Self::Target {
@@ -249,15 +249,15 @@ impl std::ops::Deref for AnySink {
     }
 }
 
-impl std::ops::DerefMut for AnySink {
+impl std::ops::DerefMut for BoxSink {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut *self.0
     }
 }
 
-impl std::fmt::Debug for AnySink {
+impl std::fmt::Debug for BoxSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("AnySink").field(&self.0.name()).finish()
+        f.debug_tuple("BoxSink").field(&self.0.name()).finish()
     }
 }
 

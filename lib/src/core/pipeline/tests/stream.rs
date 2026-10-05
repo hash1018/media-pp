@@ -146,7 +146,7 @@ fn every_element_begins_with_the_segment_its_buffers_are_on() {
     let (after, after_seen) = Watcher::new("after-the-rack");
     let (rack, rack_handle) = Rack::new("rack", InputContract::Unknown, OutputContract::Unknown);
     rack_handle
-        .replace(vec![crate::element::AnyFilter::new(inside)])
+        .replace(vec![crate::element::BoxFilter::new(inside)])
         .expect("one pad");
     let (pipeline, ()) = Pipeline::new("segments", small(), |source, ctx| {
         let tee = ctx
@@ -223,7 +223,7 @@ fn a_rack_filled_anew_hands_what_it_holds_the_segment_first() {
     let (after, after_seen) = Watcher::new("after");
     let (rack, rack_handle) = Rack::new("rack", InputContract::Unknown, OutputContract::Unknown);
     rack_handle
-        .replace(vec![crate::element::AnyFilter::new(first)])
+        .replace(vec![crate::element::BoxFilter::new(first)])
         .expect("one pad");
     let (pipeline, ()) = Pipeline::new("refilled", small(), |source, ctx| {
         let branch = ctx.branch().pipe(rack).to(after)?;
@@ -236,7 +236,7 @@ fn a_rack_filled_anew_hands_what_it_holds_the_segment_first() {
 
     let (second, second_seen) = Watcher::new("second");
     rack_handle
-        .replace(vec![crate::element::AnyFilter::new(second)])
+        .replace(vec![crate::element::BoxFilter::new(second)])
         .expect("one pad");
     wait_for_a_buffer("second", &second_seen);
     pipeline.stop();
