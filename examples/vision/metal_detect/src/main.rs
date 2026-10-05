@@ -11,7 +11,10 @@
 //! while the tracker puts where it expects each object on them —
 //! DeepStream's `interval`, as `cuda_track` measures it. `--confirm 1`
 //! numbers a new object when it is first seen rather than on its second
-//! sighting, which a long interval needs. Either implies `--track`.
+//! sighting, which a long interval needs. `--visual` follows each object by
+//! how it looks as well as by its motion — a correlation filter on the
+//! pixels around it, read from the VideoToolbox picture where it is
+//! (`TrackerOptions::visual`). Each implies `--track`.
 //!
 //! `--line X1,Y1,X2,Y2`, in fractions of the picture and as many times as
 //! there are lines, puts an `ObjectAnalytics` after the tracker that counts
@@ -36,7 +39,7 @@
 //! not take. `--pictures` stops it after about that many.
 //!
 //!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--track] [--interval N] [--confirm N] [--line X1,Y1,X2,Y2]... \
+//!         [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
 //!         [--out boxes.mp4] [--pictures N]
 
 #[cfg(not(target_os = "macos"))]
@@ -92,6 +95,7 @@ mod example {
         track: bool,
         interval: u32,
         confirm: u32,
+        visual: bool,
         lines: Vec<Line>,
         out: Option<String>,
         pictures: usize,
@@ -101,7 +105,8 @@ mod example {
         let usage = || -> ! {
             eprintln!(
                 "usage: metal_detect <model.onnx> <video.mp4> [--track] [--interval N] \
-                 [--confirm N] [--line X1,Y1,X2,Y2]... [--out boxes.mp4] [--pictures N]"
+                 [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... [--out boxes.mp4] \
+                 [--pictures N]"
             );
             std::process::exit(1);
         };
@@ -109,10 +114,15 @@ mod example {
         let (mut track, mut interval, mut out, mut pictures) = (false, 0, None, usize::MAX);
         let mut confirm = TrackerOptions::default().confirm_after;
         let mut lines = Vec::new();
+        let mut visual = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--track" => track = true,
+                "--visual" => {
+                    track = true;
+                    visual = true;
+                }
                 "--interval" => {
                     track = true;
                     interval = args
@@ -159,6 +169,7 @@ mod example {
             track,
             interval,
             confirm,
+            visual,
             lines,
             out,
             pictures,
@@ -178,6 +189,7 @@ mod example {
             track,
             interval,
             confirm,
+            visual,
             lines,
             out,
             pictures: limit,
@@ -347,6 +359,7 @@ mod example {
                     "tracker",
                     TrackerOptions {
                         confirm_after: confirm,
+                        visual,
                         ..TrackerOptions::default()
                     },
                 ));

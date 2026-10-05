@@ -48,7 +48,8 @@ const MAX_STEPS: u64 = 120;
 ///
 /// It goes after a detector: `Detector -> ObjectTracker -> Overlay`. It
 /// reads and writes metadata, and hands each picture on as it came, so it
-/// takes pictures wherever they live — system memory, CUDA, any GPU. With
+/// takes pictures wherever they live — system memory, CUDA, VideoToolbox,
+/// any GPU. With
 /// [`TrackerOptions::visual`] it also follows each object by how it looks,
 /// reading the pixels around it where it can. A picture before any
 /// detection has been seen goes on carrying nothing.
@@ -134,6 +135,11 @@ fn luma<'a>(
         // streams of the context; the copies wait for all of it.
         driver.synchronize().ok()?;
         return super::luma::CudaLuma::of(driver, frame)
+            .map(|luma| Box::new(luma) as Box<dyn Luma>);
+    }
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    if frame.format() == ffmpeg::format::Pixel::VIDEOTOOLBOX {
+        return super::luma::VideoToolboxLuma::of(frame)
             .map(|luma| Box::new(luma) as Box<dyn Luma>);
     }
     None
@@ -424,8 +430,15 @@ mod tests {
     }
 
     /// A grey 240 by 160 picture at `pts` with a textured block at `block`
-    /// on a textured background, carrying a detection of it where `detected`.
-    fn scene(pts: i64, block: [u32; 4], detected: bool) -> MediaBuffer {
+    /// on a textured background, made a buffer by `place` — put where it is
+    /// to be read from — and carrying a detection of the block where
+    /// `detected`.
+    fn scene(
+        pts: i64,
+        block: [u32; 4],
+        detected: bool,
+        place: &dyn Fn(ffmpeg::frame::Video) -> MediaBuffer,
+    ) -> MediaBuffer {
         let (w, h) = (240u32, 160u32);
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, w, h);
         frame.set_pts(Some(pts));
@@ -446,7 +459,7 @@ mod tests {
                 };
             }
         }
-        let buf = MediaBuffer::video(frame);
+        let buf = place(frame);
         if !detected {
             return buf;
         }
@@ -480,6 +493,11 @@ mod tests {
     /// How far the boxes the tracker put on the pictures let by are from
     /// the block, at worst, in pixels, detecting every tenth picture.
     fn worst_miss(visual: bool) -> f32 {
+        worst_miss_on(visual, &MediaBuffer::video)
+    }
+
+    /// [`worst_miss`], each picture put where `place` puts it.
+    fn worst_miss_on(visual: bool, place: &dyn Fn(ffmpeg::frame::Video) -> MediaBuffer) -> f32 {
         let options = TrackerOptions {
             visual,
             ..TrackerOptions::default()
@@ -488,7 +506,7 @@ mod tests {
         let kept = capture(&mut tracker);
         for n in 0..=34 {
             tracker
-                .consume(scene(i64::from(n) * 100, turning(n), n % 10 == 0))
+                .consume(scene(i64::from(n) * 100, turning(n), n % 10 == 0, place))
                 .expect("tracked");
         }
         let kept = kept.lock().unwrap();
@@ -524,6 +542,34 @@ mod tests {
             by_motion.is_infinite(),
             "by motion, {by_motion} pixels at worst"
         );
+    }
+
+    /// The same turn, on VideoToolbox pictures: the look is read where the
+    /// pictures are, and holds the block as it does in system memory.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn following_by_look_reads_videotoolbox_pictures() {
+        let Some(device) = crate::test_support::try_videotoolbox_device() else {
+            return;
+        };
+        let upload = |grey: ffmpeg::frame::Video| {
+            let (w, h) = (grey.width(), grey.height());
+            let mut nv12 = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, w, h);
+            nv12.set_pts(grey.pts());
+            let (from, to) = (grey.stride(0), nv12.stride(0));
+            for y in 0..h as usize {
+                let row = grey.data(0)[y * from..][..w as usize].to_vec();
+                nv12.data_mut(0)[y * to..][..w as usize].copy_from_slice(&row);
+            }
+            nv12.data_mut(1).fill(128);
+            let mut upload = crate::elements::VideoToolboxUpload::new("upload", &device);
+            let uploaded = capture(&mut upload);
+            upload.consume(MediaBuffer::video(nv12)).expect("uploaded");
+            uploaded.lock().unwrap().remove(0)
+        };
+        let by_look = worst_miss_on(true, &upload);
+        eprintln!("worst miss on VideoToolbox: by look {by_look}");
+        assert!(by_look < 16.0, "by look, {by_look} pixels at worst");
     }
 
     /// A gap of three pictures' time between two is three pictures of

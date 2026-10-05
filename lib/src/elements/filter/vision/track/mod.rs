@@ -57,9 +57,11 @@ pub struct TrackerOptions {
     /// matched.
     ///
     /// It reads the pixels around each object: of 8-bit YUV, grey and RGB
-    /// pictures in system memory, and with the `cuda` feature of NV12 and
-    /// BGRA CUDA pictures, copying down only those regions. Pictures it
-    /// cannot read are followed by motion alone.
+    /// pictures in system memory; with the `cuda` feature of NV12 and BGRA
+    /// CUDA pictures, copying down only those regions; and with `metal` of
+    /// NV12 and BGRA VideoToolbox pictures, read where they are, which the
+    /// CPU of an Apple silicon Mac shares with its GPU. Pictures it cannot
+    /// read are followed by motion alone.
     pub visual: bool,
 }
 

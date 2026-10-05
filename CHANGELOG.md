@@ -330,7 +330,9 @@ compile error with no explanation.
   It reads only the pixels around each object: 8-bit YUV, grey and RGB
   pictures in system memory in place, and with `cuda` NV12 and BGRA CUDA
   pictures by copying down those regions alone (`cuMemcpy2D`), with no
-  kernel; pictures it cannot read are followed by motion. What it finds is
+  kernel, and with `metal` NV12 and BGRA VideoToolbox pictures in place,
+  their pixel buffers locked for the CPU, which on Apple silicon shares the
+  GPU's memory; pictures it cannot read are followed by motion. What it finds is
   weighed against the motion in the Kalman filter, as a measurement three
   times as uncertain as a detection: taken at its word, the boxes were
   worse than motion alone over short gaps. Weighed, on 12 fps walking
@@ -338,7 +340,10 @@ compile error with no explanation.
   further on — detecting every fifth picture, 91% of objects covered by
   half or more against 87%; every tenth, 74% against 51%, and on people,
   bicycles and cars 73% against 29%. It costs CPU per object and picture:
-  a 1080p concert with a hundred people went from 8 to 24 seconds.
+  a 1080p concert with a hundred people went from 8 to 24 seconds. On an
+  M5, `metal_detect --visual --interval 9` over the same walking people
+  counts the seven crossing a line across the floor, net, where motion
+  alone counts four, and numbers 11 objects where motion alone numbers 19.
 
   `BoxColors::ByTrack` colours each object by its number, and a label shows
   the number — `person #7 0.87`; a class the model names none of is

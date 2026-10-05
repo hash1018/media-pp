@@ -63,6 +63,52 @@ impl Layout {
     }
 }
 
+/// A pixel buffer's first plane, locked for the CPU to read: its rows
+/// `stride` bytes apart, `width` pixels of `height` rows. Unlocked when
+/// dropped.
+#[cfg(feature = "metal")]
+pub(crate) struct ReadLock {
+    buffer: PixelBuffer,
+    base: Option<std::ptr::NonNull<u8>>,
+    stride: usize,
+    width: usize,
+    height: usize,
+}
+
+// SAFETY: the buffer is `Send`, and the plane is only ever read, through
+// `&self`, while the lock this holds keeps it where it is.
+#[cfg(feature = "metal")]
+unsafe impl Send for ReadLock {}
+
+#[cfg(feature = "metal")]
+impl ReadLock {
+    /// The plane's width and height, in pixels.
+    pub(crate) fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Row `y`'s first `bytes` bytes, where the row is there and that long.
+    pub(crate) fn row(&self, y: usize, bytes: usize) -> Option<&[u8]> {
+        let base = self.base?;
+        if y >= self.height || bytes > self.stride {
+            return None;
+        }
+        // SAFETY: the plane is locked for as long as `self` lives, and holds
+        // `height` rows `stride` bytes apart; `y` and `bytes` are within
+        // them, checked above.
+        Some(unsafe { std::slice::from_raw_parts(base.as_ptr().add(y * self.stride), bytes) })
+    }
+}
+
+#[cfg(feature = "metal")]
+impl Drop for ReadLock {
+    fn drop(&mut self) {
+        use objc2_core_video::{CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress};
+        // SAFETY: locked for reading when this was made, with the same flags.
+        unsafe { CVPixelBufferUnlockBaseAddress(&self.buffer.0, CVPixelBufferLockFlags::ReadOnly) };
+    }
+}
+
 /// One pixel buffer, held. A clone holds it too.
 #[derive(Clone)]
 pub(crate) struct PixelBuffer(CFRetained<CVPixelBuffer>);
@@ -119,6 +165,55 @@ impl PixelBuffer {
             CVPixelBufferGetWidth(&self.0) as u32,
             CVPixelBufferGetHeight(&self.0) as u32,
         )
+    }
+
+    /// Its first plane — NV12's luma, or the whole of a packed buffer —
+    /// locked for the CPU to read for as long as the [`ReadLock`] lives.
+    /// `None` where Core Video will not lock it or it has no such plane.
+    ///
+    /// On Apple silicon the CPU reads the pixels where the GPU wrote them;
+    /// the lock is what makes those writes visible.
+    #[cfg(feature = "metal")]
+    pub(crate) fn read_first_plane(self) -> Option<ReadLock> {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane,
+            CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane,
+            CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+        };
+
+        // SAFETY: a live pixel buffer, locked for reading; the lock is given
+        // back by `ReadLock`'s drop, or below where nothing is to be read.
+        let status =
+            unsafe { CVPixelBufferLockBaseAddress(&self.0, CVPixelBufferLockFlags::ReadOnly) };
+        if status != 0 {
+            return None;
+        }
+        let planar = CVPixelBufferGetPlaneCount(&self.0) > 0;
+        let (base, stride, width, height) = if planar {
+            (
+                CVPixelBufferGetBaseAddressOfPlane(&self.0, 0),
+                CVPixelBufferGetBytesPerRowOfPlane(&self.0, 0),
+                CVPixelBufferGetWidthOfPlane(&self.0, 0),
+                CVPixelBufferGetHeightOfPlane(&self.0, 0),
+            )
+        } else {
+            (
+                CVPixelBufferGetBaseAddress(&self.0),
+                CVPixelBufferGetBytesPerRow(&self.0),
+                CVPixelBufferGetWidth(&self.0),
+                CVPixelBufferGetHeight(&self.0),
+            )
+        };
+        // Made before anything can return, so the lock is let go of on
+        // every path from here.
+        let lock = ReadLock {
+            buffer: self,
+            base: std::ptr::NonNull::new(base.cast::<u8>()),
+            stride,
+            width,
+            height,
+        };
+        lock.base.is_some().then_some(lock)
     }
 
     #[cfg(any(feature = "avfoundation-capture", feature = "screencapturekit-capture"))]

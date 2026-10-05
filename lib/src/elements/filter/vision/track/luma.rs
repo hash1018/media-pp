@@ -1,6 +1,7 @@
 //! A picture's brightness, read a region at a time — all a visual tracker
 //! needs of it, wherever the picture lives: a plane read in place in system
-//! memory, a rectangle copied down from a CUDA surface.
+//! memory, a rectangle copied down from a CUDA surface, a VideoToolbox pixel
+//! buffer read in place by the CPU.
 
 use ffmpeg_next::{self as ffmpeg, format::Pixel};
 
@@ -257,6 +258,65 @@ impl Luma for CudaLuma<'_> {
     }
 }
 
+/// A VideoToolbox picture, read in place: its pixel buffer locked for the
+/// CPU, which on Apple silicon reads the memory the GPU wrote — nothing is
+/// copied but the regions asked for.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub(super) struct VideoToolboxLuma {
+    plane: crate::platform::macos::pixel_buffer::ReadLock,
+    bgra: bool,
+    size: (u32, u32),
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl VideoToolboxLuma {
+    /// `frame`'s brightness, where it is an NV12 or BGRA VideoToolbox
+    /// picture: NV12's luma plane, or the BGRA pixels. Locked until this is
+    /// dropped, which is the end of the one picture it is read for.
+    pub(super) fn of(frame: &ffmpeg::frame::Video) -> Option<Self> {
+        use crate::platform::macos::{pixel_buffer::PixelBuffer, videotoolbox::sw_format_of};
+        let bgra = match sw_format_of(frame).ok()? {
+            Pixel::NV12 => false,
+            Pixel::BGRA => true,
+            _ => return None,
+        };
+        let plane = PixelBuffer::of_frame(frame)?.read_first_plane()?;
+        // What the frame says it shows, never past what the buffer holds.
+        let (width, height) = plane.size();
+        let size = (
+            frame.width().min(width as u32),
+            frame.height().min(height as u32),
+        );
+        Some(Self { plane, bgra, size })
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl Luma for VideoToolboxLuma {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn read(&mut self, area: Area) -> Option<Region> {
+        let bytes = if self.bgra { 4 } else { 1 };
+        let (left, right) = (
+            area.x as usize * bytes,
+            (area.x + area.width) as usize * bytes,
+        );
+        let mut pixels = Vec::with_capacity((area.width * area.height) as usize);
+        for y in area.y..area.y + area.height {
+            let row = &self.plane.row(y as usize, right)?[left..];
+            if self.bgra {
+                let (row, _) = row.as_chunks::<4>();
+                pixels.extend(row.iter().map(|pixel| BGRA.luma(pixel)));
+            } else {
+                pixels.extend(row.iter().map(|&byte| f32::from(byte)));
+            }
+        }
+        Some(Region { area, pixels })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +345,49 @@ mod tests {
         assert_eq!(region.at(4.0, 1.5), 36.0);
         // Beyond the region, its edge.
         assert_eq!(region.at(0.0, 1.5), 21.0);
+    }
+
+    /// A VideoToolbox picture reads as the same picture in system memory
+    /// does, from NV12 and from BGRA alike, and within the size the frame
+    /// says.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn a_videotoolbox_picture_reads_as_it_does_in_system_memory() {
+        use crate::buffer::MediaBuffer;
+        use crate::element::{RawSink, SrcPads};
+        use crate::elements::VideoToolboxUpload;
+
+        let Some(device) = crate::test_support::try_videotoolbox_device() else {
+            return;
+        };
+        for format in [Pixel::NV12, Pixel::BGRA] {
+            let mut frame = ffmpeg::frame::Video::new(format, 64, 48);
+            for plane in 0..frame.planes() {
+                let stride = frame.stride(plane);
+                for (y, row) in frame.data_mut(plane).chunks_mut(stride).enumerate() {
+                    for (x, byte) in row.iter_mut().enumerate() {
+                        *byte = (x * 7 + y * 13) as u8;
+                    }
+                }
+            }
+            let area = Area {
+                x: 5,
+                y: 7,
+                width: 20,
+                height: 11,
+            };
+            let wanted = SystemLuma::of(&frame).unwrap().read(area).unwrap().pixels;
+
+            let mut upload = VideoToolboxUpload::new("upload", &device);
+            let uploaded = crate::test_support::capture(&mut upload as &mut dyn SrcPads);
+            upload.consume(MediaBuffer::video(frame)).expect("uploaded");
+            let MediaBuffer::Video(on_gpu) = uploaded.lock().unwrap().remove(0) else {
+                panic!("a picture");
+            };
+            let mut luma = VideoToolboxLuma::of(&on_gpu).expect("readable");
+            assert_eq!(luma.size(), (64, 48));
+            assert_eq!(luma.read(area).expect("read").pixels, wanted, "{format:?}");
+        }
     }
 
     #[test]

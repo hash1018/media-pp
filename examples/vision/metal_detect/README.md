@@ -13,7 +13,9 @@ detector lets N pictures by between two it looks at while the tracker puts
 where it expects each object on them — DeepStream's `interval`, as
 [`cuda_track`](../cuda_track) measures it. `--confirm 1` numbers a new object
 when it is first seen rather than on its second sighting, which a long
-interval needs. Either implies `--track`.
+interval needs. `--visual` follows each object by how it looks as well as by
+its motion — a correlation filter on the pixels around it, read from the
+VideoToolbox picture where it is. Each implies `--track`.
 
 `--line X1,Y1,X2,Y2`, in fractions of the picture and once per line, puts an
 `ObjectAnalytics` after the tracker that counts the objects crossing each line
@@ -35,7 +37,7 @@ them. It is built with `ort-coreml`, on an Apple silicon Mac.
 
 ```sh
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-  [--track] [--interval N] [--confirm N] [--line X1,Y1,X2,Y2]... \
+  [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
   [--out boxes.mp4] [--pictures N]
 ```
 
