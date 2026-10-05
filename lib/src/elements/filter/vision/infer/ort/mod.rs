@@ -69,16 +69,65 @@ pub struct OrtDetectorOptions {
     /// [`COCO_CLASS_LABELS`](crate::elements::COCO_CLASS_LABELS) are stock
     /// Ultralytics weights' classes.
     pub labels: Option<Vec<String>>,
+    /// How many pictures to let by unlooked-at between two it looks at: 0
+    /// looks at every one, 2 at every third. A picture let by carries no
+    /// [`Detections`](crate::elements::Detections) — which says it was not
+    /// looked at, where an empty list says nothing was found — and an
+    /// [`ObjectTracker`](crate::elements::ObjectTracker) after the detector
+    /// puts where it expects the objects to be on it instead: DeepStream's
+    /// `interval`, for a model too slow to look at every picture.
+    pub interval: u32,
 }
 
 impl Default for OrtDetectorOptions {
-    /// Ultralytics' own thresholds, and the model's own labels.
+    /// Ultralytics' own thresholds, the model's own labels, and every
+    /// picture looked at.
     fn default() -> Self {
         Self {
             conf_threshold: 0.25,
             iou_threshold: 0.45,
             labels: None,
+            interval: 0,
         }
+    }
+}
+
+/// Which pictures a detector looks at, by [`OrtDetectorOptions::interval`]:
+/// the first, then every `interval + 1`th after it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Interval {
+    interval: u32,
+    /// Pictures let by since the last one looked at; `None` before the
+    /// first.
+    since: Option<u32>,
+}
+
+impl Interval {
+    pub(crate) fn new(interval: u32) -> Self {
+        Self {
+            interval,
+            since: None,
+        }
+    }
+
+    /// Whether to look at the picture in hand.
+    pub(crate) fn look(&mut self) -> bool {
+        match self.since {
+            Some(since) if since < self.interval => {
+                self.since = Some(since + 1);
+                false
+            }
+            _ => {
+                self.since = Some(0);
+                true
+            }
+        }
+    }
+
+    /// Starts over, looking at the next picture: after a seek or a flush,
+    /// the first picture of what follows is the one to look at.
+    pub(crate) fn restart(&mut self) {
+        self.since = None;
     }
 }
 
@@ -240,6 +289,17 @@ pub(crate) fn model_input(session: &ort::session::Session) -> Result<(u32, u32),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_picture_is_looked_at_then_every_interval_plus_oneth() {
+        let mut every_third = Interval::new(2);
+        let looked: Vec<bool> = (0..7).map(|_| every_third.look()).collect();
+        assert_eq!(looked, [true, false, false, true, false, false, true]);
+        every_third.restart();
+        assert!(every_third.look(), "after a restart, the next one");
+        let mut every = Interval::new(0);
+        assert!((0..4).all(|_| every.look()));
+    }
 
     #[test]
     fn ultralytics_names_are_read_by_class_number() {

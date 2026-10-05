@@ -276,6 +276,35 @@ compile error with no explanation.
   `Detections::attach_to`. Both are non-exhaustive, so that what a tracker
   or a second model learns of an object can be added to them later.
 
+- **`ObjectTracker`: what a detector found, numbered across pictures.**
+  ByteTrack — a Kalman filter per object, and matching by overlap with the
+  Hungarian method, confident detections first and then the unconfident a
+  partly hidden object still gets — puts the same `Detection::track_id` on
+  an object in every picture it is followed through. It reads and writes
+  `Detections` alone, never a pixel, so one element takes pictures wherever
+  they live, and needs no feature. `TrackerOptions` holds ByteTrack's
+  thresholds, how many sightings confirm a new object, how long a lost one
+  is kept, and whether classes are matched apart.
+
+  With it a detector need not look at every picture:
+  `OrtDetectorOptions::interval` lets pictures by unlooked-at, carrying no
+  `Detections`, and the tracker puts on each where it expects the objects
+  to be, marked `Detections::predicted` — DeepStream's `interval`. Gaps are
+  told from the timestamps, so pictures a dropping queue removed are
+  carried through too. The filter follows a box's width and height rather
+  than ByteTrack's aspect ratio, which its fixed uncertainty all but freezes:
+  carried between detections on people walking, those boxes were half again
+  too wide, and worse than holding the last box still. The `cuda_track`
+  example records the tracking and measures the filled-in pictures against
+  detecting every one: at a detection every third picture of 12 fps
+  walking people, the expected boxes overlap the detector's by 0.78 on
+  average, against 0.73 for holding still; at every fifth, 0.71 against
+  0.63.
+
+  `BoxColors::ByTrack` colours each object by its number, and a label shows
+  the number — `person #7 0.87`; a class the model names none of is
+  labelled `class 3` rather than `#3`.
+
 - **`SwDetectionOverlay` and `CudaDetectionOverlay`: what was found, drawn
   onto the picture.** Each picture carrying `Detections` is handed on as a
   copy with a box around each object — and, given a font

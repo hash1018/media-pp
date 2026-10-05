@@ -126,7 +126,7 @@ pub use filter::MetalOrtDetector;
 pub use filter::UseTensorRtPolicy;
 pub use filter::{
     BoxColors, COCO_CLASS_LABELS, Detection, DetectionOverlayOptions, Detections, LabelStyle,
-    SwDetectionOverlay, SwDetectionOverlayError,
+    ObjectTracker, SwDetectionOverlay, SwDetectionOverlayError, TrackerOptions,
 };
 #[cfg(feature = "cuda")]
 pub use filter::{

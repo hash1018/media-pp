@@ -19,7 +19,9 @@ use crate::{
 
 use crate::elements::Detections;
 
-use super::{Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input};
+use super::{
+    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input,
+};
 
 /// The grey a fitted picture's margins are filled with, as Ultralytics
 /// trains on: 114 of 255.
@@ -51,6 +53,8 @@ struct Detecting {
     options: OrtDetectorOptions,
     labels: Arc<[Arc<str>]>,
     model: (u32, u32),
+    /// Which pictures it looks at.
+    interval: Interval,
     fitting: Option<Fitting>,
     /// The model's input, kept from one picture to the next.
     input: Array4<f32>,
@@ -106,6 +110,7 @@ impl SwOrtDetector {
                 "the model names no classes and none were given: detections carry class numbers only"
             );
         }
+        let interval = Interval::new(options.interval);
         Ok(Self(FilterStage::new(Detecting {
             name,
             pp_log,
@@ -115,6 +120,7 @@ impl SwOrtDetector {
             model,
             fitting: None,
             input: Array4::zeros((1, 3, model.1 as usize, model.0 as usize)),
+            interval,
         })))
     }
 }
@@ -173,11 +179,11 @@ impl Detecting {
         let output = outputs[0]
             .try_extract_array::<f32>()
             .map_err(OrtDetectorError::from)?;
-        Ok(Detections {
-            detector: Arc::clone(&self.name),
-            labels: Arc::clone(&self.labels),
-            items: decode(output, &letterbox, &self.options)?,
-        })
+        Ok(Detections::new(
+            Arc::clone(&self.name),
+            Arc::clone(&self.labels),
+            decode(output, &letterbox, &self.options)?,
+        ))
     }
 }
 
@@ -283,9 +289,18 @@ impl Filter for Detecting {
         if is_hardware(frame.format()) {
             return Err(refused("a hardware video frame").into());
         }
+        if !self.interval.look() {
+            // Let by unlooked-at, carrying nothing, which says so.
+            out.push(buf);
+            return Ok(());
+        }
         let detections = self.detect(frame)?;
         out.push(detections.attach_to(buf));
         Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.interval.restart();
     }
 }
 

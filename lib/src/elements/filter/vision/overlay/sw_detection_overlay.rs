@@ -306,7 +306,7 @@ impl Overlaying {
             let Some(placed) = canvas.place(detection) else {
                 continue;
             };
-            let color = box_color(self.options.colors, detection.class_id);
+            let color = box_color(self.options.colors, detection);
             for edge in canvas.edges(placed, self.options.line_width) {
                 if !edge.is_empty() {
                     paint(&mut copy, planes, edge, color, None);
@@ -434,18 +434,11 @@ mod tests {
     /// One detection of class 0, from (10, 4) to (30, 16) of a 40 by 20
     /// picture.
     fn found() -> Detections {
-        Detections {
-            detector: "test".into(),
-            labels: Arc::from(vec![Arc::<str>::from("thing")]),
-            items: vec![Detection {
-                class_id: 0,
-                score: 0.9,
-                x: 0.25,
-                y: 0.2,
-                width: 0.5,
-                height: 0.6,
-            }],
-        }
+        Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("thing")]),
+            vec![Detection::new(0, 0.9, 0.25, 0.2, 0.5, 0.6)],
+        )
     }
 
     fn carrying(frame: ffmpeg::frame::Video, detections: Detections) -> MediaBuffer {
@@ -468,7 +461,10 @@ mod tests {
         overlay.consume(input.clone()).expect("drawn");
 
         let output = kept.lock().unwrap().remove(0);
-        let (box_luma, _, _) = bt709_limited(box_color(super::super::BoxColors::ByClass, 0));
+        let (box_luma, _, _) = bt709_limited(box_color(
+            super::super::BoxColors::ByClass,
+            &found().items[0],
+        ));
         assert_eq!(luma(&output, 10, 4), box_luma, "the top-left corner");
         assert_eq!(luma(&output, 29, 15), box_luma, "the bottom-right corner");
         assert_eq!(luma(&output, 20, 10), 128, "inside the box");

@@ -285,6 +285,9 @@ pub enum ElementType {
     /// Draws a detector's boxes and labels onto VideoToolbox pictures, with
     /// Metal.
     MetalDetectionOverlay,
+    /// Numbers a detector's objects across pictures, and fills in the
+    /// pictures it let by.
+    ObjectTracker,
     /// Speech-to-text sink, through whisper.cpp.
     WhisperTranscriber,
     /// HTTP Live Streaming muxer sink.

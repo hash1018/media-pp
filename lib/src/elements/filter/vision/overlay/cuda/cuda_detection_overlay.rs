@@ -354,7 +354,7 @@ impl Overlaying {
             let Some(placed) = canvas.place(detection) else {
                 continue;
             };
-            let color = box_color(self.options.colors, detection.class_id);
+            let color = box_color(self.options.colors, detection);
             for edge in canvas.edges(placed, self.options.line_width) {
                 if !edge.is_empty() {
                     self.fill(surface, edge, color)?;
@@ -518,18 +518,11 @@ mod tests {
     /// One detection of class 0, from (16, 8) to (48, 24) of a 64 by 32
     /// picture.
     fn found() -> Detections {
-        Detections {
-            detector: "test".into(),
-            labels: Arc::from(vec![Arc::<str>::from("thing")]),
-            items: vec![Detection {
-                class_id: 0,
-                score: 0.9,
-                x: 0.25,
-                y: 0.25,
-                width: 0.5,
-                height: 0.5,
-            }],
-        }
+        Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("thing")]),
+            vec![Detection::new(0, 0.9, 0.25, 0.25, 0.5, 0.5)],
+        )
     }
 
     /// A grey `format` picture on the GPU, `width` by `height`, carrying

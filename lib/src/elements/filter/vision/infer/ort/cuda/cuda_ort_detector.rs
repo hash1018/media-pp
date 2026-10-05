@@ -33,7 +33,9 @@ use crate::{
 
 use crate::elements::Detections;
 
-use super::super::{Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input};
+use super::super::{
+    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input,
+};
 use super::runtime::{self, CudaRuntime};
 
 /// Whether a [`CudaOrtDetector`] runs its model through TensorRT, with
@@ -163,6 +165,8 @@ struct Detecting {
     options: OrtDetectorOptions,
     labels: Arc<[Arc<str>]>,
     model: (u32, u32),
+    /// Which pictures it looks at.
+    interval: Interval,
     tensor: CudaTensor,
     kernels: FitKernels,
     driver: CudaDriver,
@@ -303,6 +307,7 @@ impl CudaOrtDetector {
                 "the model names no classes and none were given: detections carry class numbers only"
             );
         }
+        let interval = Interval::new(options.detector.interval);
         Ok(Self(FilterStage::new(Detecting {
             name,
             pp_log,
@@ -316,6 +321,7 @@ impl CudaOrtDetector {
             memory,
             device_ctx,
             _hw_device_ctx: hw_device_ctx,
+            interval,
         })))
     }
 }
@@ -397,11 +403,11 @@ impl Detecting {
         );
         let outputs = self.session.run(inputs![input])?;
         let output = outputs[0].try_extract_array::<f32>()?;
-        Ok(Detections {
-            detector: Arc::clone(&self.name),
-            labels: Arc::clone(&self.labels),
-            items: decode(output, &letterbox, &self.options)?,
-        })
+        Ok(Detections::new(
+            Arc::clone(&self.name),
+            Arc::clone(&self.labels),
+            decode(output, &letterbox, &self.options)?,
+        ))
     }
 }
 
@@ -441,9 +447,18 @@ impl Filter for Detecting {
             }
             .into());
         };
+        if !self.interval.look() {
+            // Let by unlooked-at, carrying nothing, which says so.
+            out.push(buf);
+            return Ok(());
+        }
         let detections = self.detect(frame)?;
         out.push(detections.attach_to(buf));
         Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.interval.restart();
     }
 }
 

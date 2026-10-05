@@ -32,6 +32,11 @@ pub struct Detection {
     pub width: f32,
     /// Height, as a fraction of the picture's height.
     pub height: f32,
+    /// Which object this is across pictures, as an
+    /// [`ObjectTracker`](crate::elements::ObjectTracker) numbers them: the
+    /// same number on every picture the object is followed through. `None`
+    /// before a tracker, and for what it is not yet sure is an object.
+    pub track_id: Option<u64>,
 }
 
 impl Detection {
@@ -45,6 +50,7 @@ impl Detection {
             y,
             width,
             height,
+            track_id: None,
         }
     }
 }
@@ -71,6 +77,11 @@ pub struct Detections {
     pub labels: Arc<[Arc<str>]>,
     /// What it found, most confident first.
     pub items: Vec<Detection>,
+    /// Whether these are where a tracker expects the objects to be rather
+    /// than what a detector saw: a picture the detector did not look at —
+    /// see `OrtDetectorOptions::interval`, with the `ort` feature — carries
+    /// the tracker's, so that every picture has its boxes.
+    pub predicted: bool,
 }
 
 impl Detections {
@@ -85,6 +96,7 @@ impl Detections {
             detector: detector.into(),
             labels,
             items,
+            predicted: false,
         }
     }
 

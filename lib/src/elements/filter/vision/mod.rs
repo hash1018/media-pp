@@ -10,6 +10,9 @@
 //! - [`infer`] — models that look at pictures: ONNX Runtime's, with the
 //!   `ort` features, as `SwOrtDetector`, `CudaOrtDetector` and
 //!   `MetalOrtDetector`.
+//! - [`track`] — following what was found from picture to picture:
+//!   [`ObjectTracker`], which numbers each object and fills in the pictures
+//!   a detector let by.
 //! - [`overlay`] — drawing what was found onto the pictures:
 //!   [`SwDetectionOverlay`], `CudaDetectionOverlay` and
 //!   `MetalDetectionOverlay`.
@@ -21,6 +24,7 @@
 mod infer;
 mod meta;
 mod overlay;
+mod track;
 
 #[cfg(feature = "ort")]
 pub use infer::*;
@@ -32,3 +36,4 @@ pub use overlay::{
 pub use overlay::{CudaDetectionOverlay, CudaDetectionOverlayError};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use overlay::{MetalDetectionOverlay, MetalDetectionOverlayError};
+pub use track::{ObjectTracker, TrackerOptions};

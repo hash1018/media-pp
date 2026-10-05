@@ -68,6 +68,11 @@ pub enum BoxColors {
     ByClass,
     /// The same colour for every box.
     One(Color),
+    /// One of the same dozen, chosen by the number an
+    /// [`ObjectTracker`](crate::elements::ObjectTracker) gave the object, so
+    /// that one object is one colour throughout; by class where it has
+    /// none.
+    ByTrack,
 }
 
 /// How the label above each box is drawn: the class name, and the score
@@ -250,11 +255,15 @@ const PALETTE: [Color; 12] = [
     Color::new(198, 255, 0),
 ];
 
-/// The colour of a box for a detection of `class_id`.
-pub(crate) fn box_color(colors: BoxColors, class_id: usize) -> Color {
+/// The colour of `detection`'s box.
+pub(crate) fn box_color(colors: BoxColors, detection: &Detection) -> Color {
+    let by_class = PALETTE[detection.class_id % PALETTE.len()];
     match colors {
-        BoxColors::ByClass => PALETTE[class_id % PALETTE.len()],
+        BoxColors::ByClass => by_class,
         BoxColors::One(color) => color,
+        BoxColors::ByTrack => detection
+            .track_id
+            .map_or(by_class, |id| PALETTE[(id % PALETTE.len() as u64) as usize]),
     }
 }
 
@@ -270,18 +279,21 @@ pub(crate) fn text_color(background: Color) -> Color {
     }
 }
 
-/// What a label says: the class's name, or its number where the model
-/// names none, and the score if asked for.
+/// What a label says: the class's name, or `class` and its number where
+/// the model names none; then the object's number where a tracker gave it
+/// one, and the score if asked for — `person #7 0.87`.
 pub(crate) fn label_text(detections: &Detections, detection: &Detection, score: bool) -> String {
-    let name = match detections.label(detection) {
+    let mut text = match detections.label(detection) {
         Some(name) => name.to_owned(),
-        None => format!("#{}", detection.class_id),
+        None => format!("class {}", detection.class_id),
     };
-    if score {
-        format!("{name} {:.2}", detection.score)
-    } else {
-        name
+    if let Some(id) = detection.track_id {
+        text.push_str(&format!(" #{id}"));
     }
+    if score {
+        text.push_str(&format!(" {:.2}", detection.score));
+    }
+    text
 }
 
 /// The detections an overlay draws, most confident last so that it is drawn
@@ -340,14 +352,7 @@ mod tests {
     }
 
     fn detection(x: f32, y: f32, width: f32, height: f32) -> Detection {
-        Detection {
-            class_id: 0,
-            score: 0.9,
-            x,
-            y,
-            width,
-            height,
-        }
+        Detection::new(0, 0.9, x, y, width, height)
     }
 
     const RGB: Canvas = Canvas {
@@ -500,28 +505,42 @@ mod tests {
 
     #[test]
     fn a_label_says_the_class_and_score() {
-        let detections = Detections {
-            detector: "test".into(),
-            labels: Arc::from(vec![Arc::<str>::from("person")]),
-            items: vec![],
-        };
+        let detections =
+            Detections::new("test", Arc::from(vec![Arc::<str>::from("person")]), vec![]);
         let mut found = detection(0.0, 0.0, 0.1, 0.1);
         found.score = 0.876;
         assert_eq!(label_text(&detections, &found, true), "person 0.88");
         assert_eq!(label_text(&detections, &found, false), "person");
+        found.track_id = Some(12);
+        assert_eq!(label_text(&detections, &found, true), "person #12 0.88");
         found.class_id = 7;
-        assert_eq!(label_text(&detections, &found, false), "#7");
+        assert_eq!(label_text(&detections, &found, false), "class 7 #12");
     }
 
     #[test]
     fn classes_keep_their_colour_and_text_reads_on_it() {
+        let of_class = |class_id| Detection::new(class_id, 0.9, 0.0, 0.0, 0.1, 0.1);
         assert_eq!(
-            box_color(BoxColors::ByClass, 3),
-            box_color(BoxColors::ByClass, 15)
+            box_color(BoxColors::ByClass, &of_class(3)),
+            box_color(BoxColors::ByClass, &of_class(15))
         );
         assert_ne!(
-            box_color(BoxColors::ByClass, 0),
-            box_color(BoxColors::ByClass, 1)
+            box_color(BoxColors::ByClass, &of_class(0)),
+            box_color(BoxColors::ByClass, &of_class(1))
+        );
+        let tracked = |id| Detection {
+            track_id: Some(id),
+            ..of_class(0)
+        };
+        assert_ne!(
+            box_color(BoxColors::ByTrack, &tracked(1)),
+            box_color(BoxColors::ByTrack, &tracked(2)),
+            "two objects of one class"
+        );
+        assert_eq!(
+            box_color(BoxColors::ByTrack, &of_class(4)),
+            box_color(BoxColors::ByClass, &of_class(4)),
+            "by class where untracked"
         );
         assert_eq!(text_color(Color::new(255, 196, 0)), Color::BLACK);
         assert_eq!(text_color(Color::new(41, 121, 255)), Color::WHITE);

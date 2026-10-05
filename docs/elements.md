@@ -54,9 +54,11 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
 - **Analysis**: `SwOrtDetector`, `CudaOrtDetector` and `MetalOrtDetector`,
   filters that put what a YOLO model finds on each picture as `Detections`
-  metadata; `SwDetectionOverlay`, `CudaDetectionOverlay` and
-  `MetalDetectionOverlay`, which draw those boxes and labels onto the
-  picture; `WhisperTranscriber`, `FrameCounter`, `PacketCounter`.
+  metadata; `ObjectTracker`, which numbers each object across pictures and
+  fills in the pictures a detector let by; `SwDetectionOverlay`,
+  `CudaDetectionOverlay` and `MetalDetectionOverlay`, which draw those boxes
+  and labels onto the picture; `WhisperTranscriber`, `FrameCounter`,
+  `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 
 Elements of your own are a `Source`, a `Filter` or a `Sink`; the crate

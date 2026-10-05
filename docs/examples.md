@@ -14,7 +14,7 @@ so. Each has a README with its pipeline drawn out.
 | Directory | What is there |
 |---|---|
 | [`core`](../examples/core) | Decoding, queues, fan-out, dynamic tees, app sources and sinks, elements of your own, audio capture and playback, remuxing, GPU transcoding, HLS, RTMP, transcription, CPU compositing, a virtual camera |
-| [`cuda`](../examples/cuda) | Headless CUDA recording, GPU text compositing, and object detection on CUDA pictures through TensorRT, recorded with its boxes drawn on the GPU |
+| [`cuda`](../examples/cuda) | Headless CUDA recording, GPU text compositing, and object detection on CUDA pictures through TensorRT, recorded with its boxes drawn on the GPU, and objects tracked between detections |
 | [`render`](../examples/render/README.md) | `Player`, playback on every renderer, seeking, screen preview and recording, GPU scaling, keying, hardware encoding — with an index of its own |
 | [`rtsp`](../examples/rtsp) | Publishing to an RTSP server such as MediaMTX, seeking what is published, and receiving from one — this crate does not serve RTSP itself |
 | [`vision`](../examples/vision) | Scaling, and ONNX object detection with its boxes drawn, on the CPU and, on macOS, through Core ML and Metal |
