@@ -954,6 +954,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuda_multi_detect"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "cuda_record"
 version = "0.1.0"
 dependencies = [

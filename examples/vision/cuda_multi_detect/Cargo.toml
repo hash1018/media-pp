@@ -1,0 +1,8 @@
+[package]
+name = "cuda_multi_detect"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+media-pp = { path = "../../../lib", features = ["ort-tensorrt"] }

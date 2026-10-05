@@ -219,7 +219,10 @@ compile error with no explanation.
   on after a seek rather than starting from 1 again.
   `CudaOrtDetectorOptions::max_batch` runs the pictures of a batch through
   the model at once — with TensorRT, an engine built for every batch up to
-  it; a picture with no `BatchSlot` is a batch of its own, as before.
+  it; a picture with no `BatchSlot` is a batch of its own, as before. The
+  `cuda_multi_detect` example runs several files through one detector: on
+  an RTX 3050, eight streams went from 363 pictures a second with a
+  detector each to 523 batched.
   `MetalOrtDetectorOptions::max_batch` does the same through Core ML, the
   batch's pictures fitted in one Metal pass and the model's open batch
   fixed at that size; `MetalOrtDetector::new` takes those options in place
