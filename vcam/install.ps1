@@ -22,6 +22,15 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw "Run this from an elevated (administrator) PowerShell."
 }
 
+# regsvr32 is a windowed program: PowerShell neither waits for it nor sets
+# $LASTEXITCODE when it is called directly, so it is started and waited on.
+function Invoke-Regsvr32([string[]]$Arguments) {
+    $process = Start-Process regsvr32.exe -ArgumentList $Arguments -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "regsvr32 $($Arguments -join ' ') failed ($($process.ExitCode))"
+    }
+}
+
 $target = Join-Path $env:ProgramFiles "media-pp\vcam"
 $installed = Join-Path $target "media_pp_vcam.dll"
 
@@ -30,8 +39,7 @@ Stop-Service FrameServerMonitor -Force -ErrorAction SilentlyContinue
 
 if ($Uninstall) {
     if (Test-Path $installed) {
-        & regsvr32.exe /s /u $installed
-        if ($LASTEXITCODE -ne 0) { throw "regsvr32 /u failed ($LASTEXITCODE)" }
+        Invoke-Regsvr32 @("/s", "/u", "`"$installed`"")
         Remove-Item $target -Recurse -Force
     }
     "media-pp virtual camera removed"
@@ -43,6 +51,5 @@ if (-not (Test-Path $Dll)) {
 }
 New-Item -ItemType Directory -Force $target | Out-Null
 Copy-Item $Dll $installed -Force
-& regsvr32.exe /s $installed
-if ($LASTEXITCODE -ne 0) { throw "regsvr32 failed ($LASTEXITCODE)" }
+Invoke-Regsvr32 @("/s", "`"$installed`"")
 "media-pp virtual camera installed: $installed"
