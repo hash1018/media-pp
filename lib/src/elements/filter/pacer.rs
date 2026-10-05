@@ -569,7 +569,7 @@ mod tests {
         let mut packet = ffmpeg::Packet::empty();
         packet.set_pts(Some(pts));
         packet.set_time_base(ffmpeg::Rational::new(1, 1));
-        MediaBuffer::Packet(Arc::new(packet))
+        MediaBuffer::Packet(Arc::new(packet).into())
     }
 
     /// What an interrupted wait kept goes on at once when the end of the
@@ -677,7 +677,7 @@ mod tests {
             let mut frame = ffmpeg::frame::Audio::empty();
             frame.set_pts(Some(pts));
             crate::buffer::set_time_base(&mut frame, unit);
-            MediaBuffer::Audio(Arc::new(frame))
+            MediaBuffer::Audio(Arc::new(frame).into())
         };
 
         pacer
@@ -715,7 +715,7 @@ mod tests {
         let mut unitless = ffmpeg::frame::Audio::empty();
         unitless.set_pts(Some(10));
         let error = pacer
-            .consume(MediaBuffer::Audio(Arc::new(unitless)))
+            .consume(MediaBuffer::Audio(Arc::new(unitless).into()))
             .expect_err("no unit to read the pts in");
         assert!(matches!(
             error,
@@ -724,7 +724,9 @@ mod tests {
         assert!(pacer.pending.is_empty(), "and it is not left in `pending`");
 
         pacer
-            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .consume(MediaBuffer::Audio(
+                Arc::new(ffmpeg::frame::Audio::empty()).into(),
+            ))
             .expect("an untimed frame has nothing to wait for");
     }
 
@@ -748,13 +750,13 @@ mod tests {
             let mut frame = pool.get();
             frame.set_pts(Some(pts));
             crate::buffer::set_time_base(&mut frame, unit);
-            MediaBuffer::Video(Arc::new(frame))
+            MediaBuffer::Video(Arc::new(frame).into())
         };
         let sound = |pts: i64| {
             let mut frame = ffmpeg::frame::Audio::empty();
             frame.set_pts(Some(pts));
             crate::buffer::set_time_base(&mut frame, unit);
-            MediaBuffer::Audio(Arc::new(frame))
+            MediaBuffer::Audio(Arc::new(frame).into())
         };
         pacer.consume(picture(0)).expect("anchors");
         assert!(

@@ -317,7 +317,7 @@ impl Import {
         output.set_pts(pts);
         output.set_color_space(ffmpeg::color::Space::RGB);
         output.set_color_range(ffmpeg::color::Range::JPEG);
-        Ok(MediaBuffer::Video(Arc::new(output)))
+        Ok(MediaBuffer::Video(Arc::new(output).into()))
     }
 }
 
@@ -378,7 +378,7 @@ mod tests {
         let MediaBuffer::Video(video) = received.lock().unwrap().remove(0) else {
             panic!("a picture");
         };
-        video
+        video.into_payload()
     }
 
     /// The point of the element: what the producer drew is what a frame of

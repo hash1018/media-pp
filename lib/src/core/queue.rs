@@ -1353,7 +1353,7 @@ mod tests {
     }
 
     fn packet() -> MediaBuffer {
-        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
+        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()).into())
     }
 
     struct DropAwareSink {
@@ -2361,7 +2361,7 @@ mod tests {
     fn packet_at(pts: i64) -> MediaBuffer {
         let mut packet = ffmpeg_next::Packet::empty();
         packet.set_pts(Some(pts));
-        MediaBuffer::Packet(Arc::new(packet))
+        MediaBuffer::Packet(Arc::new(packet).into())
     }
 
     fn recording_queue(

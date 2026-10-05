@@ -186,7 +186,10 @@ impl Source for Reading {
                 if let Some(time_base) = self.stream(index).map(|stream| stream.time_base()) {
                     packet.set_time_base(time_base);
                 }
-                Ok(Produced::On(index, MediaBuffer::Packet(Arc::new(packet))))
+                Ok(Produced::On(
+                    index,
+                    MediaBuffer::Packet(Arc::new(packet).into()),
+                ))
             }
             // A real on-demand RTSP stream can send a clean EOF; a
             // live camera essentially never will, but treat it the

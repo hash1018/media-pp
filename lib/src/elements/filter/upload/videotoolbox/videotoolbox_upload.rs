@@ -297,7 +297,7 @@ impl Filter for Uploading {
             // uploading them again makes the pixel buffer already in hand.
             MediaBuffer::Video(frame) => {
                 let uploaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(uploaded));
+                out.push(MediaBuffer::Video(uploaded.into()));
                 Ok(())
             }
             other => Err(VideoToolboxUploadError::UnsupportedBuffer(other.kind()).into()),

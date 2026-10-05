@@ -1808,7 +1808,7 @@ impl Source for Capturing {
             return Ok(Produced::Nothing);
         }
         match self.emit_frame() {
-            Ok(frame) => Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame)))),
+            Ok(frame) => Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into()))),
             Err(error) => {
                 pp_error!(self, "emit_frame failed: {error}");
                 Err(error.into())

@@ -737,7 +737,7 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
         "av1-fixture-packets",
         move |buffer| {
             if let MediaBuffer::Packet(packet) = buffer {
-                written.lock().unwrap().push((*packet).clone());
+                written.lock().unwrap().push((**packet).clone());
             }
             Ok(())
         },
@@ -757,7 +757,7 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
         frame.set_pts(Some(index));
         crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, FIXTURE_FPS));
         encoder
-            .consume(MediaBuffer::Video(Arc::new(frame)))
+            .consume(MediaBuffer::Video(Arc::new(frame).into()))
             .expect("the AV1 encoder takes a frame");
     }
     encoder
@@ -1126,7 +1126,7 @@ pub(crate) fn one_frame(
     filter.consume(buf)?;
     let mut received = received.lock().unwrap();
     match (received.pop(), received.is_empty()) {
-        (Some(MediaBuffer::Video(frame)), true) => Ok(frame),
+        (Some(MediaBuffer::Video(frame)), true) => Ok(frame.into_payload()),
         _ => panic!("expected one picture from the filter"),
     }
 }

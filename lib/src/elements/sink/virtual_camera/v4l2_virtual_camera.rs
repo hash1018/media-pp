@@ -448,7 +448,7 @@ mod tests {
             ffmpeg::ChannelLayout::STEREO,
         );
         let error = element
-            .consume(MediaBuffer::Audio(Arc::new(sound)))
+            .consume(MediaBuffer::Audio(Arc::new(sound).into()))
             .expect_err("sound is not a picture");
         assert!(error.to_string().contains("system memory"), "{error}");
     }

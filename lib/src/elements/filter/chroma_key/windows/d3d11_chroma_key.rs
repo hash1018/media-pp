@@ -570,7 +570,7 @@ impl Filter for Keying {
                     return Ok(());
                 }
                 let keyed = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(keyed));
+                out.push(MediaBuffer::Video(keyed.into()));
                 Ok(())
             }
             // Nothing is buffered here — one `Draw` per frame, pushed
@@ -679,7 +679,7 @@ mod tests {
         let mut slot = pool.get();
         *slot = wrap_d3d11_texture(texture, width, height).unwrap();
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// Another `AVFrame` over the same picture, with its own timestamp —
@@ -696,7 +696,7 @@ mod tests {
             assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// The texture a frame's pixels live in.
@@ -1027,7 +1027,7 @@ mod tests {
         );
 
         let error = key
-            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(pool.get()).into()))
             .expect_err("a CPU BGRA frame must be rejected");
         assert!(
             matches!(
@@ -1173,7 +1173,9 @@ mod tests {
             .expect("D3d11ChromaKey::new should succeed");
 
         let error = key
-            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .consume(MediaBuffer::Audio(
+                Arc::new(ffmpeg::frame::Audio::empty()).into(),
+            ))
             .expect_err("an Audio buffer must be rejected");
         assert!(
             matches!(

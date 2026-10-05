@@ -928,7 +928,7 @@ mod tests {
         renderer.control(&ControlMsg::Flush).expect("flush");
         let sample = frame(renderer.0.inner.format, 480);
         renderer
-            .consume(MediaBuffer::Audio(Arc::new(sample)))
+            .consume(MediaBuffer::Audio(Arc::new(sample).into()))
             .expect("taken while paused");
         let _apartment = ComApartment::new().expect("COM for the query");
         // SAFETY: the initialized client returns its padding by value.

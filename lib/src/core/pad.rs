@@ -296,7 +296,7 @@ mod tests {
     }
 
     fn packet() -> MediaBuffer {
-        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
+        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()).into())
     }
 
     /// A stream ends once: an `Eos` after one that went, with nothing in

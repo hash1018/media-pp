@@ -546,13 +546,13 @@ impl Source for Capturing {
             self.next_look = None;
         }
         if let Some(frame) = self.next_packet()? {
-            return Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(frame))));
+            return Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(frame).into())));
         }
         let now = wait.now();
         self.next_look = Some(now + POLL_INTERVAL);
         Ok(
             match self.silence_owed(now.saturating_duration_since(started)) {
-                Some(frame) => Produced::Buffer(MediaBuffer::Audio(Arc::new(frame))),
+                Some(frame) => Produced::Buffer(MediaBuffer::Audio(Arc::new(frame).into())),
                 None => Produced::Nothing,
             },
         )

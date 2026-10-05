@@ -603,16 +603,18 @@ impl RawSink for SwVideoCompositorInputSink {
         };
         match (buf, &input.timed) {
             (MediaBuffer::Video(frame), None) => {
-                input.latest_frame.store(Some(frame));
+                input.latest_frame.store(Some(frame.into_payload()));
                 Ok(())
             }
-            (MediaBuffer::Video(frame), Some(timed)) => timed.push(frame).map_err(|untimed| {
-                SwVideoCompositorError::UntimedFrame(match untimed {
-                    Untimed::NoTimestamp => "timestamp",
-                    Untimed::NoTimeBase => "time base",
+            (MediaBuffer::Video(frame), Some(timed)) => {
+                timed.push(frame.into_payload()).map_err(|untimed| {
+                    SwVideoCompositorError::UntimedFrame(match untimed {
+                        Untimed::NoTimestamp => "timestamp",
+                        Untimed::NoTimeBase => "time base",
+                    })
+                    .into()
                 })
-                .into()
-            }),
+            }
             (MediaBuffer::Packet(_), _) => {
                 Err(SwVideoCompositorError::UnsupportedBuffer("Packet").into())
             }
@@ -1080,7 +1082,7 @@ impl Compositing {
         if let Some(ticks) = &self.ticks {
             ticks.made(composing.elapsed());
         }
-        Ok(MediaBuffer::Video(output))
+        Ok(MediaBuffer::Video(output.into()))
     }
 }
 
@@ -1487,7 +1489,7 @@ mod tests {
         // The bottom-right quadrant, which is the one nothing else is.
         layer.source = Some(VideoSourceRect::new(4, 4, 4, 4));
         let (mut sink, _) = input(&handle, "input", layer);
-        sink.consume(MediaBuffer::Video(quadrant_frame(8, 8)))
+        sink.consume(MediaBuffer::Video((quadrant_frame(8, 8)).into()))
             .unwrap();
 
         let frame = compositor.compositing().compose_frame().unwrap();
@@ -1511,8 +1513,10 @@ mod tests {
         layer.fit = VideoFit::Stretch;
         layer.source = Some(VideoSourceRect::new(64, 64, 4, 4));
         let (mut sink, _) = input(&handle, "input", layer);
-        sink.consume(MediaBuffer::Video(solid_frame(8, 8, Color::new(255, 0, 0))))
-            .unwrap();
+        sink.consume(MediaBuffer::Video(
+            (solid_frame(8, 8, Color::new(255, 0, 0))).into(),
+        ))
+        .unwrap();
 
         let frame = compositor.compositing().compose_frame().unwrap();
 
@@ -1567,10 +1571,14 @@ mod tests {
         overlay.fit = VideoFit::Stretch;
         let (mut blue_sink, _) = input(&handle, "blue", overlay);
         red_sink
-            .consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(255, 0, 0))))
+            .consume(MediaBuffer::Video(
+                (solid_frame(4, 4, Color::new(255, 0, 0))).into(),
+            ))
             .unwrap();
         blue_sink
-            .consume(MediaBuffer::Video(solid_frame(2, 2, Color::new(0, 0, 255))))
+            .consume(MediaBuffer::Video(
+                (solid_frame(2, 2, Color::new(0, 0, 255))).into(),
+            ))
             .unwrap();
 
         let frame = compositor.compositing().compose_frame().unwrap();
@@ -1591,8 +1599,10 @@ mod tests {
         let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
         layer.fit = VideoFit::Stretch;
         let (mut sink, _layer_handle) = input(&handle, "only", layer);
-        sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(255, 0, 0))))
-            .unwrap();
+        sink.consume(MediaBuffer::Video(
+            (solid_frame(4, 4, Color::new(255, 0, 0))).into(),
+        ))
+        .unwrap();
 
         // Composed, pushed, and consumed downstream: only the repeat below
         // still refers to this picture.
@@ -1605,8 +1615,10 @@ mod tests {
         // as fast as it can, which is exactly the case that would reuse the
         // picture the repeat above is still showing.
         for _ in 0..(OUTPUT_POOL_SIZE * 2 + 2) {
-            sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(0, 255, 0))))
-                .unwrap();
+            sink.consume(MediaBuffer::Video(
+                (solid_frame(4, 4, Color::new(0, 255, 0))).into(),
+            ))
+            .unwrap();
             let composed = compositor.compositing().compose_frame().unwrap();
             assert_ne!(
                 picture_id(&composed),
@@ -1631,8 +1643,10 @@ mod tests {
         let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
         layer.fit = VideoFit::Stretch;
         let (mut sink, layer_handle) = input(&handle, "only", layer);
-        sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(255, 0, 0))))
-            .unwrap();
+        sink.consume(MediaBuffer::Video(
+            (solid_frame(4, 4, Color::new(255, 0, 0))).into(),
+        ))
+        .unwrap();
 
         let composed = compositor.compositing().compose_frame().unwrap();
         let picture = picture_id(&composed);
@@ -1674,7 +1688,7 @@ mod tests {
         let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(3, 1)).unwrap();
         let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
         let (mut sink, layer_handle) = input(&handle, "white", layer);
-        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::WHITE)))
+        sink.consume(MediaBuffer::Video((solid_frame(1, 1, Color::WHITE)).into()))
             .unwrap();
 
         layer_handle.set_rect(VideoRect::new(1, 0, 1, 1)).unwrap();
@@ -1693,7 +1707,7 @@ mod tests {
     fn an_input_that_ends_is_shown_again() {
         let (_compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
         super::super::control::an_input_that_ends_is_shown_again(&handle, || {
-            MediaBuffer::Video(solid_frame(1, 1, Color::WHITE))
+            MediaBuffer::Video((solid_frame(1, 1, Color::WHITE)).into())
         });
     }
 
@@ -1705,10 +1719,14 @@ mod tests {
             "latest",
             VideoLayer::new(VideoRect::new(0, 0, 1, 1)),
         );
-        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(255, 0, 0))))
-            .unwrap();
-        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(0, 255, 0))))
-            .unwrap();
+        sink.consume(MediaBuffer::Video(
+            (solid_frame(1, 1, Color::new(255, 0, 0))).into(),
+        ))
+        .unwrap();
+        sink.consume(MediaBuffer::Video(
+            (solid_frame(1, 1, Color::new(0, 255, 0))).into(),
+        ))
+        .unwrap();
 
         let frame = compositor.compositing().compose_frame().unwrap();
         assert_eq!(pixel(&frame, 0, 0), [0, 255, 0, 255]);
@@ -1728,9 +1746,12 @@ mod tests {
         assert!(layer.latest_frame().is_none(), "nothing has arrived yet");
 
         let green = solid_frame(1, 1, Color::new(0, 255, 0));
-        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(255, 0, 0))))
+        sink.consume(MediaBuffer::Video(
+            (solid_frame(1, 1, Color::new(255, 0, 0))).into(),
+        ))
+        .unwrap();
+        sink.consume(MediaBuffer::Video(green.clone().into()))
             .unwrap();
-        sink.consume(MediaBuffer::Video(green.clone())).unwrap();
         let latest = layer.latest_frame().expect("the last frame handed over");
         assert!(
             Arc::ptr_eq(&latest, &green),
@@ -1759,11 +1780,11 @@ mod tests {
                 } else {
                     green.clone()
                 };
-                sink.consume(MediaBuffer::Video(frame)).unwrap();
+                sink.consume(MediaBuffer::Video(frame.into())).unwrap();
             }
             // Make the final observable value deterministic after the
             // concurrent replacement phase ends.
-            sink.consume(MediaBuffer::Video(green)).unwrap();
+            sink.consume(MediaBuffer::Video(green.into())).unwrap();
             producer_done.store(true, AtomicOrdering::Release);
         });
 
@@ -1790,10 +1811,14 @@ mod tests {
             Err(SwVideoCompositorError::SourceRemoved)
         ));
         old_sink
-            .consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(255, 0, 0))))
+            .consume(MediaBuffer::Video(
+                (solid_frame(1, 1, Color::new(255, 0, 0))).into(),
+            ))
             .unwrap();
         new_sink
-            .consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(0, 0, 255))))
+            .consume(MediaBuffer::Video(
+                (solid_frame(1, 1, Color::new(0, 0, 255))).into(),
+            ))
             .unwrap();
 
         let frame = compositor.compositing().compose_frame().unwrap();
@@ -1844,7 +1869,9 @@ mod tests {
             VideoLayer::new(VideoRect::new(0, 0, 1, 1)),
         );
         let error = sink
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .unwrap_err();
         assert!(matches!(
             error,
@@ -2210,7 +2237,7 @@ mod tests {
         crate::buffer::set_time_base(&mut frame, time_base);
         // SAFETY: a plain field of a frame this test owns outright.
         unsafe { (*frame.as_mut_ptr()).duration = duration };
-        MediaBuffer::Video(Arc::new(frame))
+        MediaBuffer::Video(Arc::new(frame).into())
     }
 
     fn offline(end: Option<Duration>, frame_rate: ffmpeg::Rational) -> VideoCompositorOptions {
@@ -2494,7 +2521,7 @@ mod tests {
             "input",
             VideoLayer::new(VideoRect::new(0, 0, 2, 2)),
         );
-        let untimed = MediaBuffer::Video(solid_frame(2, 2, RED));
+        let untimed = MediaBuffer::Video((solid_frame(2, 2, RED)).into());
         assert!(sink.consume(untimed).is_err());
 
         let received = Arc::new(StdMutex::new(Vec::new()));

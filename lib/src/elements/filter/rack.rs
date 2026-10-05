@@ -455,7 +455,7 @@ mod tests {
             let mut next = pool.get();
             *next = ffmpeg::frame::Video::empty();
             next.set_pts(Some(frame.pts().unwrap_or(0) * 10 + self.mark));
-            self.pad.push(MediaBuffer::Video(Arc::new(next)))
+            self.pad.push(MediaBuffer::Video(Arc::new(next).into()))
         }
 
         fn flow(&mut self, Flow(msg): Flow<'_>) -> Result<()> {
@@ -631,7 +631,7 @@ mod tests {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let mut slot = pool.get();
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     fn pts_of(buf: &MediaBuffer) -> i64 {

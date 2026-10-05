@@ -477,7 +477,7 @@ impl Filter for Applying {
                     return Ok(());
                 }
                 let drawn = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(drawn));
+                out.push(MediaBuffer::Video(drawn.into()));
                 Ok(())
             }
             // One `Draw` per frame, pushed before `consume` returns, so
@@ -574,7 +574,7 @@ mod tests {
         let mut slot = pool.get();
         *slot = wrap_d3d11_texture(texture, width, height).unwrap();
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     fn texture_of(buffer: &MediaBuffer) -> *mut c_void {
@@ -707,7 +707,7 @@ mod tests {
             unsafe {
                 assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), inner.as_ptr()) >= 0);
             }
-            MediaBuffer::Video(Arc::new(slot))
+            MediaBuffer::Video(Arc::new(slot).into())
         };
 
         element.consume(source.clone()).expect("first");
@@ -816,7 +816,7 @@ mod tests {
             |_| {},
         );
         assert!(matches!(
-            element.consume(MediaBuffer::Video(Arc::new(cpu.get()))),
+            element.consume(MediaBuffer::Video(Arc::new(cpu.get()).into())),
             Err(crate::error::Error::D3d11VideoEffectError(
                 D3d11VideoEffectError::UnsupportedFormat(ffmpeg::format::Pixel::BGRA)
             ))
@@ -863,7 +863,9 @@ mod tests {
         }
 
         assert!(matches!(
-            element.consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty()))),
+            element.consume(MediaBuffer::Audio(
+                Arc::new(ffmpeg::frame::Audio::empty()).into()
+            )),
             Err(crate::error::Error::D3d11VideoEffectError(
                 D3d11VideoEffectError::UnsupportedBuffer("Audio")
             ))

@@ -725,7 +725,7 @@ impl Filter for Scaling {
             }
             MediaBuffer::Video(frame) => {
                 let scaled = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(scaled));
+                out.push(MediaBuffer::Video(scaled.into()));
                 Ok(())
             }
             other => {
@@ -791,7 +791,7 @@ mod tests {
         let MediaBuffer::Video(out) = back.lock().unwrap().remove(0) else {
             panic!("a picture");
         };
-        Arc::try_unwrap(out)
+        Arc::try_unwrap(out.into_payload())
             .map(|pooled| (*pooled).clone())
             .unwrap_or_else(|shared| (**shared).clone())
     }
@@ -966,7 +966,7 @@ mod tests {
             VulkanScaler::new("scale", &device, 32, 16, VulkanScalerInterp::Lanczos).unwrap();
         let scaled = capture(&mut scaler);
         scaler
-            .consume(MediaBuffer::Video(Arc::clone(&frame)))
+            .consume(MediaBuffer::Video(Arc::clone(&frame).into()))
             .unwrap();
         let MediaBuffer::Video(out) = scaled.lock().unwrap().remove(0) else {
             panic!("a picture");

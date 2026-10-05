@@ -353,7 +353,7 @@ impl D3d11Decoder {
                         // Held as a copy; the surface goes back to the pool
                         // as `frame` is reused below.
                         let copy = self.copied(&frame)?;
-                        self.stretch.hold(MediaBuffer::Video(Arc::new(copy)));
+                        self.stretch.hold(MediaBuffer::Video(Arc::new(copy).into()));
                         frame = self.wrapper();
                         continue;
                     }
@@ -361,7 +361,7 @@ impl D3d11Decoder {
                     // returning its fixed-pool surface a whole branch earlier
                     // than dropping it downstream would.
                     self.preroll_gate
-                        .push_admitted(MediaBuffer::Video(Arc::new(frame)), &mut self.pad)?;
+                        .push_admitted(MediaBuffer::Video(Arc::new(frame).into()), &mut self.pad)?;
                     frame = self.wrapper();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -533,7 +533,7 @@ impl RawSink for D3d11Decoder {
                 self.preroll_gate.observe_packet(&packet);
                 self.qos.follow(&mut self.decoder, &self.pp_log);
                 self.decoder
-                    .send_packet(&*packet)
+                    .send_packet(&**packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                     .map_err(|error| self.decode_error(error))?;
                 self.drain()
@@ -722,7 +722,7 @@ mod tests {
                 continue;
             }
             decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("consume(Packet) failed");
         }
         crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos)
@@ -833,7 +833,7 @@ mod tests {
         let sent = packets.len();
         let decoded = (|| {
             for packet in packets {
-                decoder.consume(MediaBuffer::Packet(Arc::new(packet)))?;
+                decoder.consume(MediaBuffer::Packet(Arc::new(packet).into()))?;
             }
             crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos)
         })();
@@ -876,7 +876,7 @@ mod tests {
         )));
         for packet in packets {
             let error = decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect_err("the GPU has no VP9 profile 1");
             assert!(
                 matches!(
@@ -962,7 +962,7 @@ mod tests {
             .by_ref()
             .find_map(|packet| {
                 decoder
-                    .consume(MediaBuffer::Packet(Arc::clone(packet)))
+                    .consume(MediaBuffer::Packet(Arc::clone(packet).into()))
                     .err()
             })
             .expect("a pool with no room left for held frames runs out");
@@ -994,7 +994,7 @@ mod tests {
             .expect("flush");
         for packet in packets.iter().take(5) {
             decoder
-                .consume(MediaBuffer::Packet(Arc::clone(packet)))
+                .consume(MediaBuffer::Packet(Arc::clone(packet).into()))
                 .expect("with the frames let go, decoding carries on");
         }
         assert!(

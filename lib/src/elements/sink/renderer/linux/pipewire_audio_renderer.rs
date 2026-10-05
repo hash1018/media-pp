@@ -1641,7 +1641,7 @@ mod tests {
             frame.set_rate(format.sample_rate);
             frame.data_mut(0).fill(0);
             renderer
-                .consume(MediaBuffer::Audio(Arc::new(frame)))
+                .consume(MediaBuffer::Audio(Arc::new(frame).into()))
                 .expect("silence plays");
         }
         renderer.control(&ControlMsg::Pause).unwrap();

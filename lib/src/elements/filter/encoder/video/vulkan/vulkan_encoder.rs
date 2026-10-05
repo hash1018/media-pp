@@ -366,7 +366,7 @@ impl Encoding {
                     if owned.duration() == 0 && self.packet_duration > 0 {
                         owned.set_duration(self.packet_duration);
                     }
-                    out.push(MediaBuffer::Packet(Arc::new(owned)));
+                    out.push(MediaBuffer::Packet(Arc::new(owned).into()));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -551,7 +551,7 @@ mod tests {
         decoded
             .iter()
             .filter_map(|buffer| match buffer {
-                MediaBuffer::Video(frame) => Some(frame.clone()),
+                MediaBuffer::Video(frame) => Some(frame.payload().clone()),
                 _ => None,
             })
             .collect()
@@ -592,7 +592,7 @@ mod tests {
                 // freed after the encoder, one of those faulted.
                 // SAFETY: a live packet; only its pointers are compared.
                 let own = unsafe {
-                    let raw = ffmpeg::packet::Ref::as_ptr(&**packet);
+                    let raw = ffmpeg::packet::Ref::as_ptr(&***packet);
                     !(*raw).buf.is_null() && std::ptr::eq((*raw).data, (*(*raw).buf).data)
                 };
                 assert!(own, "a packet that is a view of the encoder's buffer");

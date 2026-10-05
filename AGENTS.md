@@ -111,6 +111,17 @@ final source of truth when documentation and implementation differ.
 - Match the `MediaBuffer` variant before reading it and return a typed error for
   incompatible input. Before FFI or GPU calls, validate format, dimensions,
   plane/stride bounds, texture array index, and device ownership as applicable.
+- Each variant holds a wrapper — `PacketBuffer`, `VideoBuffer`,
+  `AudioBuffer` — that dereferences to the payload's `Arc` and carries the
+  buffer's `Metadata`. Make one from its `Arc` with `.into()` (or
+  `MediaBuffer::video/packet/audio`); take the `Arc` out with `payload()` or
+  `into_payload()`. Forward the buffer you were handed, not a rewrap of its
+  payload, wherever the picture is unchanged, so what it carries goes on.
+- A `Filter`'s outputs at the input's timestamp, of the input's sort, are
+  given what the input carried; nothing is carried onto another timestamp or
+  sort. An element that stamps its outputs anew, or a direct `RawSink` that
+  makes a buffer from one it was handed, carries `Metadata` itself, as
+  `FrameRateLimiter` does — never onto a buffer made from another input.
 - A filter that makes each buffer into none, one or several is a
   `Filter`: its media work, with `drain` for what it still holds at the
   end, `reset` for what a `Flush` lets go of and `stopping` for what a

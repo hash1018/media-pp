@@ -734,7 +734,7 @@ impl Filter for Scaling {
             // see [`PerFrameTransform`], which is where that is decided.
             MediaBuffer::Video(frame) => {
                 let scaled = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(scaled));
+                out.push(MediaBuffer::Video(scaled.into()));
                 Ok(())
             }
             other => {
@@ -907,7 +907,7 @@ mod tests {
         let mut slot = pool.get();
         *slot = wrap_d3d11_texture(texture, width, height).unwrap();
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// Another `AVFrame` over the same picture, with its own timestamp —
@@ -924,7 +924,7 @@ mod tests {
             assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// The texture a frame's pixels live in.

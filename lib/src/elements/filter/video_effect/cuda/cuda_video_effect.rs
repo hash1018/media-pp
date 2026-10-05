@@ -324,7 +324,7 @@ impl Filter for Applying {
                     return Ok(());
                 }
                 let output = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(output));
+                out.push(MediaBuffer::Video(output.into()));
                 Ok(())
             }
             other => {

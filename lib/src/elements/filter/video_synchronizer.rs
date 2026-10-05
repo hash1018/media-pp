@@ -516,7 +516,7 @@ mod tests {
         let mut frame = pool.get();
         frame.set_pts(Some(pts));
         crate::buffer::set_time_base(&mut frame, unit);
-        MediaBuffer::Video(Arc::new(frame))
+        MediaBuffer::Video(Arc::new(frame).into())
     }
 
     /// Each frame is read in its own unit: the same count in milliseconds
@@ -562,13 +562,15 @@ mod tests {
     fn unschedulable_input_is_a_typed_error() {
         let (mut sync, _playback) = synchronizer();
         assert!(matches!(
-            sync.consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty()))),
+            sync.consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into()
+            )),
             Err(crate::error::Error::VideoSynchronizerError(_))
         ));
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         assert!(matches!(
-            sync.consume(MediaBuffer::Video(Arc::new(pool.get()))),
+            sync.consume(MediaBuffer::Video(Arc::new(pool.get()).into())),
             Err(crate::error::Error::VideoSynchronizerError(
                 VideoSynchronizerError::MissingPts
             ))
@@ -579,7 +581,7 @@ mod tests {
         let mut unitless = pool.get();
         unitless.set_pts(Some(10));
         assert!(matches!(
-            sync.consume(MediaBuffer::Video(Arc::new(unitless))),
+            sync.consume(MediaBuffer::Video(Arc::new(unitless).into())),
             Err(crate::error::Error::VideoSynchronizerError(
                 VideoSynchronizerError::NoTimeBase
             ))

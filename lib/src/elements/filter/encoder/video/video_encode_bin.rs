@@ -1232,8 +1232,9 @@ mod tests {
                     unreachable!()
                 };
                 MediaBuffer::Video(
-                    crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
-                        .expect("the frame uploads"),
+                    (crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
+                        .expect("the frame uploads"))
+                    .into(),
                 )
             })
         }
@@ -1351,8 +1352,12 @@ mod tests {
                             unreachable!()
                         };
                         MediaBuffer::Video(
-                            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
-                                .expect("the frame uploads"),
+                            (crate::test_support::one_frame(
+                                &mut upload,
+                                MediaBuffer::Video(frame),
+                            )
+                            .expect("the frame uploads"))
+                            .into(),
                         )
                     });
                     let input = EncodeInput::Cuda {
@@ -1402,8 +1407,12 @@ mod tests {
                             unreachable!()
                         };
                         MediaBuffer::Video(
-                            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
-                                .expect("the frame uploads"),
+                            (crate::test_support::one_frame(
+                                &mut upload,
+                                MediaBuffer::Video(frame),
+                            )
+                            .expect("the frame uploads"))
+                            .into(),
                         )
                     });
                     let input = EncodeInput::Vulkan {
@@ -1482,8 +1491,12 @@ mod tests {
                             unreachable!()
                         };
                         MediaBuffer::Video(
-                            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame))
-                                .expect("the frame uploads"),
+                            (crate::test_support::one_frame(
+                                &mut upload,
+                                MediaBuffer::Video(frame),
+                            )
+                            .expect("the frame uploads"))
+                            .into(),
                         )
                     });
                     let input = EncodeInput::VideoToolbox {

@@ -711,7 +711,7 @@ mod tests {
     fn packet(pts: i64) -> MediaBuffer {
         let mut packet = ffmpeg_next::Packet::empty();
         packet.set_pts(Some(pts));
-        MediaBuffer::Packet(Arc::new(packet))
+        MediaBuffer::Packet(Arc::new(packet).into())
     }
 
     /// The downstream pipeline, running, with the bridge as its source.

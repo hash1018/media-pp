@@ -198,7 +198,7 @@ impl Filter for Downloading {
             // reading it back again makes the frame already in hand.
             MediaBuffer::Video(frame) => {
                 let downloaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(downloaded));
+                out.push(MediaBuffer::Video(downloaded.into()));
                 Ok(())
             }
             other => Err(VideoToolboxDownloadError::UnsupportedBuffer(other.kind()).into()),

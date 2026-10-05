@@ -464,7 +464,7 @@ mod tests {
             }),
         );
         renderer
-            .consume(MediaBuffer::Video(texture))
+            .consume(MediaBuffer::Video(texture.into()))
             .expect("the frame is presented");
         assert_eq!(
             *color.lock().unwrap(),

@@ -82,7 +82,7 @@ pub fn spawn_feeder(
             thread::sleep(next_due.saturating_duration_since(Instant::now()));
             let mut frame = pool.get();
             fill_test_frame(&mut frame, index, width);
-            handle.push(MediaBuffer::Video(Arc::new(frame)))?;
+            handle.push(MediaBuffer::Video(Arc::new(frame).into()))?;
 
             next_due += frame_interval;
             let now = Instant::now();

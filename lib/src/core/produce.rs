@@ -994,9 +994,9 @@ mod tests {
             }
             self.next = Some(next + every);
             self.left -= 1;
-            Ok(Produced::Buffer(MediaBuffer::Packet(Arc::new(
-                ffmpeg::Packet::copy(&[self.left as u8]),
-            ))))
+            Ok(Produced::Buffer(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::copy(&[self.left as u8])).into(),
+            )))
         }
     }
 
@@ -1332,7 +1332,7 @@ mod tests {
     }
 
     fn packet(byte: u8) -> MediaBuffer {
-        MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[byte])))
+        MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[byte])).into())
     }
 
     /// Runs `script` to its end with each output logged, answering both

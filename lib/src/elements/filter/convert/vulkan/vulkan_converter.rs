@@ -176,7 +176,7 @@ impl Filter for Converting {
         match buf {
             MediaBuffer::Video(frame) => {
                 let converted = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(converted));
+                out.push(MediaBuffer::Video(converted.into()));
                 Ok(())
             }
             other => {

@@ -170,7 +170,7 @@ fn rewritten_packet(packet: &ffmpeg::Packet, payload: &[u8]) -> MediaBuffer {
     rewritten.set_stream(packet.stream());
     rewritten.set_flags(packet.flags());
     rewritten.set_duration(packet.duration());
-    MediaBuffer::Packet(Arc::new(rewritten))
+    MediaBuffer::Packet(Arc::new(rewritten).into())
 }
 
 /// The endpoints a track actually has, which is exactly what its
@@ -778,10 +778,10 @@ impl WebRtcTrackSink {
                 .checked_add(offset)
                 .ok_or(WebRtcError::PacketTimestampNormalizationOverflow { value, offset })
         };
-        let mut normalized = (*packet).clone();
+        let mut normalized = (**packet).clone();
         normalized.set_pts(Some(shifted(pts)?));
         normalized.set_dts(packet.dts().map(shifted).transpose()?);
-        Ok(MediaBuffer::Packet(Arc::new(normalized)))
+        Ok(MediaBuffer::Packet(Arc::new(normalized).into()))
     }
 }
 

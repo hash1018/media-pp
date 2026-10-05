@@ -625,7 +625,7 @@ impl Capturing {
                     .map_err(AvFoundationCaptureSourceError::from)?;
                 frame.set_pts(Some(pts));
                 crate::buffer::set_time_base(&mut frame, self.format.time_base);
-                Ok(MediaBuffer::Video(Arc::new(frame)))
+                Ok(MediaBuffer::Video(Arc::new(frame).into()))
             }
             #[cfg(feature = "videotoolbox")]
             Output::VideoToolbox { device, frames } => {

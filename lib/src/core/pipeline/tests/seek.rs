@@ -178,8 +178,9 @@ impl RawSource for SeekLoopSource {
                 return Ok(());
             }
             if self.pad.ready_consume() {
-                self.pad
-                    .push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))?;
+                self.pad.push(MediaBuffer::Packet(
+                    Arc::new(ffmpeg_next::Packet::empty()).into(),
+                ))?;
             }
             thread::sleep(Duration::from_millis(1));
         }
@@ -786,8 +787,9 @@ impl RawSource for MuteAfterSeekSource {
                 return Ok(());
             }
             if !self.sought.load(Ordering::Acquire) && self.pad.ready_consume() {
-                self.pad
-                    .push(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))?;
+                self.pad.push(MediaBuffer::Packet(
+                    Arc::new(ffmpeg::Packet::empty()).into(),
+                ))?;
             }
             thread::yield_now();
         }
@@ -1000,8 +1002,9 @@ impl RawSource for EndingSource {
             if self.owed {
                 self.owed = false;
                 for _ in 0..self.buffers {
-                    self.pad
-                        .push(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))?;
+                    self.pad.push(MediaBuffer::Packet(
+                        Arc::new(ffmpeg::Packet::empty()).into(),
+                    ))?;
                 }
                 self.pad.push_eos(&self.pp_log)?;
             }
@@ -1654,8 +1657,9 @@ impl RawSource for UnpausingSource {
                     return Ok(());
                 }
             }
-            self.pad
-                .push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))?;
+            self.pad.push(MediaBuffer::Packet(
+                Arc::new(ffmpeg_next::Packet::empty()).into(),
+            ))?;
         }
     }
 
@@ -2008,7 +2012,8 @@ impl RawSource for ReadingOnSource {
             packet.set_pts(Some(self.at_ms));
             packet.set_time_base(ffmpeg_next::Rational::new(1, 1000));
             self.at_ms += 1;
-            self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+            self.pad
+                .push(MediaBuffer::Packet(Arc::new(packet).into()))?;
         }
     }
 

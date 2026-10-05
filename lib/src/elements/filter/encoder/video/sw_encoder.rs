@@ -447,7 +447,7 @@ impl Encoding {
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
-                    out.push(MediaBuffer::Packet(Arc::new(packet)));
+                    out.push(MediaBuffer::Packet(Arc::new(packet).into()));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -652,7 +652,7 @@ mod tests {
     impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = buf {
-                self.packets.lock().unwrap().push(packet);
+                self.packets.lock().unwrap().push(packet.into_payload());
             }
             Ok(())
         }

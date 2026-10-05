@@ -70,7 +70,7 @@ mod example {
             let mut input = ffmpeg::format::input(&path)?;
             for (stream, packet) in input.packets() {
                 if stream.index() == video_index {
-                    handle.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    handle.push(MediaBuffer::Packet(Arc::new(packet).into()))?;
                 }
             }
             handle.finish()

@@ -482,7 +482,7 @@ impl Clip {
             let mut rebased = (*packet).clone();
             rebased.set_pts(packet.pts().map(moved));
             rebased.set_dts(packet.dts().map(moved));
-            sinks[track].consume(MediaBuffer::Packet(Arc::new(rebased)))?;
+            sinks[track].consume(MediaBuffer::Packet(Arc::new(rebased).into()))?;
         }
         // Every track, whatever the first one says: the trailer is written
         // once the last of them reports done.
@@ -600,11 +600,11 @@ impl RawSink for ReplayTrackSink {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
-                self.shared
-                    .window
-                    .lock()
-                    .unwrap()
-                    .push(self.track, packet, self.shared.length);
+                self.shared.window.lock().unwrap().push(
+                    self.track,
+                    packet.into_payload(),
+                    self.shared.length,
+                );
                 Ok(())
             }
             other => {
@@ -709,7 +709,7 @@ mod tests {
     ) {
         for (track, packet) in packets {
             sinks[*track]
-                .consume(MediaBuffer::Packet(Arc::new(packet.clone())))
+                .consume(MediaBuffer::Packet(Arc::new(packet.clone()).into()))
                 .expect("a packet is taken");
         }
     }
@@ -1141,7 +1141,8 @@ mod tests {
                 InputContract::Fixed(PortContract::packet(kind))
             );
         }
-        let frame = crate::buffer::MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty()));
+        let frame =
+            crate::buffer::MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty()).into());
         assert!(matches!(
             sinks[0].consume(frame),
             Err(Error::ReplayBufferError(

@@ -470,12 +470,9 @@ mod tests {
 
         for tick in 0..ticks {
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48_000,
-                    1,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48_000, 1, 960, tick * 960)).into(),
+                ))
                 .expect("encoding and muxing must succeed");
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
@@ -653,20 +650,14 @@ mod tests {
 
         for tick in 0..60i64 {
             encoder_a
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48_000,
-                    1,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48_000, 1, 960, tick * 960)).into(),
+                ))
                 .unwrap();
             encoder_b
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48_000,
-                    1,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48_000, 1, 960, tick * 960)).into(),
+                ))
                 .unwrap();
         }
 
@@ -680,12 +671,9 @@ mod tests {
 
         for tick in 60..80i64 {
             encoder_b
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48_000,
-                    1,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48_000, 1, 960, tick * 960)).into(),
+                ))
                 .unwrap();
         }
         crate::stream::deliver(&mut encoder_b, &crate::stream::StreamEvent::Eos).unwrap();

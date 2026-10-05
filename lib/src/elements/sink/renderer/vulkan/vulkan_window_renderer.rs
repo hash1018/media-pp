@@ -2537,7 +2537,7 @@ mod tests {
             frame.data_mut(1).fill(128);
             let started = Instant::now();
             renderer
-                .consume(MediaBuffer::Video(Arc::new(frame)))
+                .consume(MediaBuffer::Video(Arc::new(frame).into()))
                 .expect("the frame draws");
             started.elapsed()
         };
@@ -2620,7 +2620,7 @@ mod tests {
                             frame.data_mut(0).fill(luma * 10);
                             frame.data_mut(1).fill(128);
                             renderer
-                                .consume(MediaBuffer::Video(Arc::new(frame)))
+                                .consume(MediaBuffer::Video(Arc::new(frame).into()))
                                 .expect("the frame draws");
                         }
                         both.wait();

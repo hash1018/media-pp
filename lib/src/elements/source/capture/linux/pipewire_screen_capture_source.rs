@@ -1250,7 +1250,7 @@ impl Source for Capturing {
         // the next would be due at once.
         self.ticked = true;
         Ok(self.emit_frame().map_or(Produced::Nothing, |frame| {
-            Produced::Buffer(MediaBuffer::Video(Arc::new(frame)))
+            Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into()))
         }))
     }
 }

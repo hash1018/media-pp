@@ -279,7 +279,7 @@ impl<M: Muxer> RawSink for TrackSink<M> {
                 // Cloned, not changed in place: the `Arc<Packet>` may be
                 // shared with another branch off the same `Tee`, which must
                 // not see this track's timestamps or stream index.
-                let mut packet = (*packet).clone();
+                let mut packet = (**packet).clone();
                 let unit = packet.time_base();
                 let from = if unit.numerator() > 0 && unit.denominator() > 0 {
                     unit
@@ -482,7 +482,7 @@ mod tests {
             crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 48_000));
             frame.data_mut(0).fill(0);
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(frame)))
+                .consume(MediaBuffer::Audio(Arc::new(frame).into()))
                 .unwrap();
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();
@@ -493,11 +493,11 @@ mod tests {
             let MediaBuffer::Packet(packet) = buffer else {
                 continue;
             };
-            let mut restated = (**packet).clone();
+            let mut restated = (***packet).clone();
             restated.rescale_ts(packet.time_base(), finer);
             restated.set_time_base(finer);
             expected.push((packet.pts(), packet.time_base()));
-            sink.consume(MediaBuffer::Packet(Arc::new(restated)))
+            sink.consume(MediaBuffer::Packet(Arc::new(restated).into()))
                 .unwrap();
         }
         assert!(!expected.is_empty(), "the encoder produced packets");

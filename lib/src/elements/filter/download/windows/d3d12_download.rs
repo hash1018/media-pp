@@ -212,7 +212,7 @@ impl Filter for Downloading {
             // — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
                 let downloaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(downloaded));
+                out.push(MediaBuffer::Video(downloaded.into()));
                 Ok(())
             }
             other => {
@@ -293,7 +293,7 @@ mod tests {
         unsafe { (*source.as_mut_ptr()).duration = 3 };
 
         upload
-            .consume(MediaBuffer::Video(Arc::new(source)))
+            .consume(MediaBuffer::Video(Arc::new(source).into()))
             .expect("D3D12 upload/download should succeed");
 
         let received = received.lock().unwrap();
@@ -349,7 +349,7 @@ mod tests {
             let mut source = pool.get();
             *source = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
             upload
-                .consume(MediaBuffer::Video(Arc::new(source)))
+                .consume(MediaBuffer::Video(Arc::new(source).into()))
                 .expect("a D3D12 round trip at this size");
         }
 
@@ -379,12 +379,14 @@ mod tests {
             |_| {},
         );
         let error = download
-            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(pool.get()).into()))
             .expect_err("a CPU frame must be rejected");
         assert!(error.to_string().contains("only accepts Pixel::D3D12"));
 
         let error = download
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .expect_err("a packet must be rejected");
         assert!(error.to_string().contains("only accepts Video buffers"));
     }

@@ -333,7 +333,7 @@ impl RawSink for SwDecoder {
                     Kind::Video(decoder) => {
                         self.qos.follow(decoder, &self.pp_log);
                         decoder
-                            .send_packet(&*packet)
+                            .send_packet(&**packet)
                             .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                             .map_err(SwDecoderError::from)?;
                         drain_video(
@@ -346,7 +346,7 @@ impl RawSink for SwDecoder {
                     }
                     Kind::Audio(decoder) => {
                         decoder
-                            .send_packet(&*packet)
+                            .send_packet(&**packet)
                             .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                             .map_err(SwDecoderError::from)?;
                         drain_audio(decoder, &mut self.pad, &mut self.preroll_gate)
@@ -436,7 +436,7 @@ fn drain_video(
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                let buffer = MediaBuffer::Video(Arc::new(frame));
+                let buffer = MediaBuffer::Video(Arc::new(frame).into());
                 if stretch.holding() {
                     stretch.hold(buffer);
                 } else {
@@ -475,7 +475,7 @@ fn drain_audio(
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                gate.push_admitted(MediaBuffer::Audio(Arc::new(frame)), pad)?;
+                gate.push_admitted(MediaBuffer::Audio(Arc::new(frame).into()), pad)?;
                 frame = ffmpeg::frame::Audio::empty();
             }
             Err(error) if is_codec_drain_boundary(&error) => break,
@@ -636,7 +636,9 @@ mod tests {
         let received = link_capture(&mut decoder);
 
         decoder
-            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .consume(MediaBuffer::Audio(
+                Arc::new(ffmpeg::frame::Audio::empty()).into(),
+            ))
             .expect("an unrelated buffer must not fail the decoder");
 
         assert!(
@@ -673,7 +675,7 @@ mod tests {
                 continue;
             }
             decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("decode failed");
             sent += 1;
             if sent >= 30 {
@@ -762,7 +764,7 @@ mod tests {
             let received = link_capture(&mut decoder);
             for packet in packets {
                 decoder
-                    .consume(MediaBuffer::Packet(Arc::new(packet)))
+                    .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                     .expect("decodes");
             }
             let before = received.lock().unwrap().buffers.len();

@@ -388,8 +388,8 @@ impl Filter for Gating {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
-                let frame = self.process(frame)?;
-                out.push(MediaBuffer::Audio(frame));
+                let frame = self.process(frame.into_payload())?;
+                out.push(MediaBuffer::Audio(frame.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => Err(AudioGateError::UnsupportedBuffer("Packet").into()),
@@ -449,11 +449,9 @@ mod tests {
     ) -> Vec<f32> {
         received.lock().unwrap().clear();
         for chunk in signal.chunks(480) {
-            gate.consume(MediaBuffer::Audio(frame(
-                &[chunk.to_vec()],
-                RATE,
-                Type::Packed,
-            )))
+            gate.consume(MediaBuffer::Audio(
+                (frame(&[chunk.to_vec()], RATE, Type::Packed)).into(),
+            ))
             .unwrap();
         }
         received
@@ -610,11 +608,9 @@ mod tests {
         let quiet = tone(-40.0, 0.1);
         for packing in [Type::Packed, Type::Planar] {
             received.lock().unwrap().clear();
-            gate.consume(MediaBuffer::Audio(frame(
-                &[loud.clone(), quiet.clone()],
-                RATE,
-                packing,
-            )))
+            gate.consume(MediaBuffer::Audio(
+                (frame(&[loud.clone(), quiet.clone()], RATE, packing)).into(),
+            ))
             .unwrap();
             let received = received.lock().unwrap();
             let MediaBuffer::Audio(out) = &received[0] else {
@@ -650,7 +646,7 @@ mod tests {
         );
         wrong.set_rate(RATE);
         let error = gate
-            .consume(MediaBuffer::Audio(Arc::new(wrong)))
+            .consume(MediaBuffer::Audio(Arc::new(wrong).into()))
             .unwrap_err();
         assert!(matches!(
             error,
@@ -659,7 +655,9 @@ mod tests {
         assert!(received.lock().unwrap().is_empty());
 
         let error = gate
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .unwrap_err();
         assert!(matches!(
             error,

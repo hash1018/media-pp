@@ -76,11 +76,11 @@ fn download(
     let mut download = CudaDownload::new("download", device, CudaFrameFormat::Nv12);
     let received = capture(&mut download);
     download
-        .consume(MediaBuffer::Video(Arc::new(frame)))
+        .consume(MediaBuffer::Video(Arc::new(frame).into()))
         .expect("download");
     let buf = received.lock().unwrap().remove(0);
     match buf {
-        MediaBuffer::Video(frame) => frame,
+        MediaBuffer::Video(frame) => frame.into_payload(),
         other => panic!("expected a Video buffer, got {}", other.kind()),
     }
 }
@@ -94,11 +94,11 @@ fn download_bgra(
     let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra);
     let received = capture(&mut download);
     download
-        .consume(MediaBuffer::Video(Arc::new(frame)))
+        .consume(MediaBuffer::Video(Arc::new(frame).into()))
         .expect("download");
     let buf = received.lock().unwrap().remove(0);
     match buf {
-        MediaBuffer::Video(frame) => frame,
+        MediaBuffer::Video(frame) => frame.into_payload(),
         _ => panic!("expected a video frame"),
     }
 }
@@ -962,7 +962,7 @@ fn the_canvas_says_it_is_bt709_and_reads_back_as_the_colour_it_was_filled_with()
     );
     let received = capture(&mut scaler);
     scaler
-        .consume(MediaBuffer::Video(downloaded))
+        .consume(MediaBuffer::Video(downloaded.into()))
         .expect("scale");
     let MediaBuffer::Video(rgb) = received.lock().unwrap().remove(0) else {
         panic!("expected a Video buffer");
@@ -1397,7 +1397,7 @@ fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
             let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
             let received = capture(&mut download);
             download
-                .consume(MediaBuffer::Video(frame))
+                .consume(MediaBuffer::Video(frame.into()))
                 .expect("download");
             let MediaBuffer::Video(frame) = received.lock().unwrap().remove(0) else {
                 panic!("expected a video frame");
@@ -1487,13 +1487,13 @@ fn the_backend_independent_traits_drive_it() {
         unreachable!()
     };
     assert!(
-        crate::elements::VideoLayerControl::set_frame(&still, in_memory).is_err(),
+        crate::elements::VideoLayerControl::set_frame(&still, in_memory.into_payload()).is_err(),
         "a frame in system memory is refused"
     );
     let Some(MediaBuffer::Video(picture)) = cuda_frame(&device, 64, 64, 200) else {
         return;
     };
-    crate::elements::VideoLayerControl::set_frame(&still, picture).unwrap();
+    crate::elements::VideoLayerControl::set_frame(&still, picture.into_payload()).unwrap();
     let out = download(
         &device,
         compositor.compositing().compose_frame().expect("compose"),

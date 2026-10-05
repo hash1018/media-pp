@@ -326,7 +326,7 @@ impl Filter for Downloading {
             // — see [`PerFrameTransform`], which is where that is decided.
             MediaBuffer::Video(frame) => {
                 let downloaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(downloaded));
+                out.push(MediaBuffer::Video(downloaded.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => {
@@ -554,10 +554,10 @@ mod tests {
         }));
 
         download
-            .consume(MediaBuffer::Video(source))
+            .consume(MediaBuffer::Video(source.into()))
             .expect("download the first frame");
         download
-            .consume(MediaBuffer::Video(Arc::new(repeat)))
+            .consume(MediaBuffer::Video(Arc::new(repeat).into()))
             .expect("download the repeat");
 
         let received = received.lock().unwrap();
@@ -607,8 +607,9 @@ mod tests {
         .expect("the frame uploads");
 
         let mut download = D3d11Download::new("download", &gpu).unwrap();
-        let back = crate::test_support::one_frame(&mut download, MediaBuffer::Video(texture))
-            .expect("the texture downloads");
+        let back =
+            crate::test_support::one_frame(&mut download, MediaBuffer::Video(texture.into()))
+                .expect("the texture downloads");
         assert_eq!(back.format(), ffmpeg::format::Pixel::NV12);
         assert_eq!((back.width(), back.height()), (width, height));
         assert!(back.data(0)[..width as usize].iter().all(|&y| y == 72));
@@ -684,7 +685,7 @@ mod tests {
         let mut source_pooled = source_pool.get();
         *source_pooled = source_frame;
         download
-            .consume(MediaBuffer::Video(Arc::new(source_pooled)))
+            .consume(MediaBuffer::Video(Arc::new(source_pooled).into()))
             .expect("download consume should succeed");
 
         let received = received.lock().unwrap();
@@ -746,7 +747,7 @@ mod tests {
             };
             let mut frame = pool.get();
             *frame = wrap_d3d11_texture(texture, width, height).unwrap();
-            MediaBuffer::Video(Arc::new(frame))
+            MediaBuffer::Video(Arc::new(frame).into())
         };
 
         let mut download =
@@ -844,7 +845,7 @@ mod tests {
         let mut source_pooled = source_pool.get();
         *source_pooled = source_frame;
         download
-            .consume(MediaBuffer::Video(Arc::new(source_pooled)))
+            .consume(MediaBuffer::Video(Arc::new(source_pooled).into()))
             .expect("download consume should succeed");
 
         let received = received.lock().unwrap();

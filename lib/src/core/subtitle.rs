@@ -188,7 +188,7 @@ impl Codec {
         packet.set_pts(Some(pts));
         packet.set_dts(Some(pts));
         packet.set_duration(duration);
-        MediaBuffer::Packet(Arc::new(packet))
+        MediaBuffer::Packet(Arc::new(packet).into())
     }
 }
 

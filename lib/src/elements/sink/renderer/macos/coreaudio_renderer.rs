@@ -1204,7 +1204,7 @@ mod tests {
         let format = renderer.format();
         let samples = format.sample_rate as usize / 10;
         renderer
-            .consume(MediaBuffer::Audio(Arc::new(frame(format, samples))))
+            .consume(MediaBuffer::Audio(Arc::new(frame(format, samples)).into()))
             .expect("silence plays");
         assert!(renderer.0.inner.running, "a full ring starts the device");
 
@@ -1229,7 +1229,7 @@ mod tests {
         let format = renderer.format();
         renderer.control(&ControlMsg::Pause).expect("pause");
         renderer
-            .consume(MediaBuffer::Audio(Arc::new(frame(format, 480))))
+            .consume(MediaBuffer::Audio(Arc::new(frame(format, 480)).into()))
             .expect("taken while paused");
         assert!(!renderer.0.inner.shared.ring.is_empty(), "held in the ring");
         assert!(!renderer.0.inner.running, "and not played while paused");
@@ -1257,7 +1257,7 @@ mod tests {
         let samples = format.sample_rate as usize * 3 / 10;
         let started = Instant::now();
         renderer
-            .consume(MediaBuffer::Audio(Arc::new(frame(format, samples))))
+            .consume(MediaBuffer::Audio(Arc::new(frame(format, samples)).into()))
             .expect("silence plays");
         renderer
             .stream_event(&StreamEvent::Eos)
@@ -1283,10 +1283,9 @@ mod tests {
         };
         let format = renderer.format();
         renderer
-            .consume(MediaBuffer::Audio(Arc::new(frame(
-                format,
-                format.sample_rate as usize / 10,
-            ))))
+            .consume(MediaBuffer::Audio(
+                Arc::new(frame(format, format.sample_rate as usize / 10)).into(),
+            ))
             .expect("silence plays");
         renderer.control(&ControlMsg::Pause).unwrap();
         renderer.control(&ControlMsg::Flush).unwrap();
@@ -1317,7 +1316,7 @@ mod tests {
             let mut frame = frame(format, samples);
             frame.set_pts(Some((index * samples) as i64));
             renderer
-                .consume(MediaBuffer::Audio(Arc::new(frame)))
+                .consume(MediaBuffer::Audio(Arc::new(frame).into()))
                 .expect("silence plays");
         }
 

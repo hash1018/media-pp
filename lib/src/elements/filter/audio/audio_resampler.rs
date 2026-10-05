@@ -242,7 +242,7 @@ impl Resampling {
             frame.set_pts(Some(*pts));
             crate::buffer::set_time_base(&mut frame, time_base);
             *pts += frame.samples() as i64;
-            out.push(MediaBuffer::Audio(Arc::new(frame)));
+            out.push(MediaBuffer::Audio(Arc::new(frame).into()));
         }
         Ok(())
     }
@@ -332,7 +332,7 @@ mod tests {
         frame.set_pts(Some(pts));
         crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, rate as i32));
         frame.data_mut(0).fill(0);
-        MediaBuffer::Audio(Arc::new(frame))
+        MediaBuffer::Audio(Arc::new(frame).into())
     }
 
     fn new_resampler(target: AudioFormat) -> (AudioResampler, Arc<Mutex<Vec<MediaBuffer>>>) {
@@ -399,7 +399,7 @@ mod tests {
     /// Takes the frame out of a buffer `f32_packed_frame` made, to restamp.
     fn unwrapped(buffer: MediaBuffer) -> ffmpeg::frame::Audio {
         match buffer {
-            MediaBuffer::Audio(frame) => Arc::try_unwrap(frame).expect("not shared"),
+            MediaBuffer::Audio(frame) => Arc::try_unwrap(frame.into_payload()).expect("not shared"),
             _ => unreachable!("f32_packed_frame makes audio"),
         }
     }
@@ -413,7 +413,7 @@ mod tests {
         let mut frame = unwrapped(f32_packed_frame(48_000, 2, 960, 1_000));
         crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 1_000));
         resampler
-            .consume(MediaBuffer::Audio(Arc::new(frame)))
+            .consume(MediaBuffer::Audio(Arc::new(frame).into()))
             .unwrap();
         crate::stream::deliver(&mut resampler, &crate::stream::StreamEvent::Eos).unwrap();
 
@@ -444,7 +444,7 @@ mod tests {
         unsafe { (*unitless.as_mut_ptr()).time_base = ffmpeg::ffi::AVRational { num: 0, den: 1 } };
 
         let error = resampler
-            .consume(MediaBuffer::Audio(Arc::new(unitless)))
+            .consume(MediaBuffer::Audio(Arc::new(unitless).into()))
             .expect_err("no unit to read the pts in");
         assert!(matches!(
             error,
@@ -476,7 +476,9 @@ mod tests {
         let target = AudioFormat::new(ffmpeg::format::Sample::F32(Type::Packed), 48_000, 2);
         let (mut resampler, _) = new_resampler(target);
         let error = resampler
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .unwrap_err();
         assert!(matches!(
             error,

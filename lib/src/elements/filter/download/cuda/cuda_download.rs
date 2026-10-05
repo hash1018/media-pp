@@ -249,7 +249,7 @@ impl Filter for Downloading {
             // — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
                 let downloaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(downloaded));
+                out.push(MediaBuffer::Video(downloaded.into()));
                 Ok(())
             }
             other => Err(CudaDownloadError::UnsupportedBuffer(other.kind()).into()),
@@ -640,7 +640,7 @@ mod tests {
                 continue;
             }
             decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("decode failed");
             if received.lock().unwrap().len() >= 3 {
                 break;

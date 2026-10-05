@@ -423,7 +423,7 @@ impl Filter for Converting {
             // see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
                 let converted = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(converted));
+                out.push(MediaBuffer::Video(converted.into()));
                 Ok(())
             }
             other => Err(CudaConverterError::UnsupportedBuffer(other.kind()).into()),
@@ -513,7 +513,7 @@ mod tests {
             assert!(ffi::av_frame_ref(slot.as_mut_ptr(), frame.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     fn video(buffer: &MediaBuffer) -> &ffmpeg::frame::Video {
@@ -608,7 +608,7 @@ mod tests {
             }
             slot.set_color_space(space);
             converter
-                .consume(MediaBuffer::Video(Arc::new(slot)))
+                .consume(MediaBuffer::Video(Arc::new(slot).into()))
                 .expect("convert");
             let out = received.lock().unwrap().remove(0);
             let MediaBuffer::Video(frame) = out else {
@@ -828,7 +828,7 @@ mod tests {
 
         let converted = capture(&mut converter);
         converter
-            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .consume(MediaBuffer::Video(Arc::new(slot).into()))
             .expect("convert");
 
         let received = converted.lock().unwrap();

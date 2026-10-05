@@ -300,7 +300,7 @@ impl RawSink for D3d12WindowRenderer {
         let MediaBuffer::Video(frame) = buf else {
             return Ok(());
         };
-        self.draw(frame)
+        self.draw(frame.into_payload())
             .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
         let change = self.presenter.state.lock().ok().and_then(|mut state| {
             let (delay, source) = state.timing.delay.take_change()?;

@@ -690,7 +690,7 @@ impl Source for Capturing {
         let frame = self
             .emit_frame(&latest, width, height)
             .inspect_err(|error| pp_error!(self, "emit frame failed: {error}"))?;
-        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame))))
+        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into())))
     }
 }
 

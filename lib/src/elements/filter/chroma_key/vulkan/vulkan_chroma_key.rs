@@ -226,7 +226,7 @@ impl Filter for Keying {
                     return Ok(());
                 }
                 let keyed = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(keyed));
+                out.push(MediaBuffer::Video(keyed.into()));
                 Ok(())
             }
             other => {

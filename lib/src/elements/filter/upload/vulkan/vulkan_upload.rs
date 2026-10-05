@@ -305,7 +305,7 @@ impl Filter for Uploading {
             // uploading them again makes the image already on the GPU.
             MediaBuffer::Video(frame) => {
                 let uploaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(uploaded));
+                out.push(MediaBuffer::Video(uploaded.into()));
                 Ok(())
             }
             other => Err(VulkanUploadError::UnsupportedBuffer(other.kind()).into()),

@@ -166,7 +166,9 @@ mod tests {
         });
 
         let error = sink
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .unwrap_err();
 
         assert!(error.to_string().contains("closure failed"));
@@ -202,8 +204,10 @@ mod tests {
             },
         );
 
-        sink.consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
-            .unwrap();
+        sink.consume(MediaBuffer::Audio(
+            Arc::new(ffmpeg::frame::Audio::empty()).into(),
+        ))
+        .unwrap();
         let error = sink.stream_event(&StreamEvent::Eos).unwrap_err();
 
         assert_eq!(&*seen.lock().unwrap(), &["buffer", "end"]);

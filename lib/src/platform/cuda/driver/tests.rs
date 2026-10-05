@@ -39,7 +39,7 @@ fn download(
     download.consume(frame).expect("download");
     let buf = received.lock().unwrap().remove(0);
     match buf {
-        MediaBuffer::Video(frame) => frame,
+        MediaBuffer::Video(frame) => frame.into_payload(),
         other => panic!("expected a Video buffer, got {}", other.kind()),
     }
 }
@@ -54,7 +54,7 @@ fn download_bgra(
     download.consume(frame).expect("download");
     let buf = received.lock().unwrap().remove(0);
     match buf {
-        MediaBuffer::Video(frame) => frame,
+        MediaBuffer::Video(frame) => frame.into_payload(),
         other => panic!("expected a Video buffer, got {}", other.kind()),
     }
 }

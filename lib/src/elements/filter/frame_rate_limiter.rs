@@ -241,7 +241,11 @@ impl Filter for Limiting {
         stamped.set_pts(Some(self.forwarded));
         crate::buffer::set_time_base(&mut stamped, self.time_base());
         self.forwarded += 1;
-        out.push(MediaBuffer::Video(Arc::new(stamped)));
+        // Carried by hand: the framework carries what a buffer carries only
+        // onto an output at its timestamp, and this one is stamped anew.
+        let mut forwarded = MediaBuffer::Video(Arc::new(stamped).into());
+        forwarded.set_metadata(buf.metadata_arc().cloned());
+        out.push(forwarded);
         Ok(())
     }
 
@@ -320,6 +324,34 @@ mod tests {
 
     fn sixty_into(rate: i32) -> FrameRateLimiter {
         FrameRateLimiter::new("limit", ffmpeg::Rational::new(rate, 1))
+    }
+
+    /// Each frame is stamped anew, which the framework does not carry
+    /// metadata onto, so the limiter carries it by hand: a kept frame keeps
+    /// what its source frame carried.
+    #[test]
+    fn a_kept_frame_keeps_what_it_carried() {
+        #[derive(Debug, PartialEq)]
+        struct Mark(i64);
+
+        let mut limiter = sixty_into(30);
+        let received = capture(&mut limiter);
+        for pts in 0..4 {
+            let marked =
+                frame(Some(pts)).with_metadata(crate::buffer::Metadata::new().with(Mark(pts)));
+            limiter.consume(marked).unwrap();
+        }
+        let marks: Vec<_> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|buf| {
+                buf.metadata()
+                    .and_then(|metadata| metadata.get::<Mark>())
+                    .map(|mark| mark.0)
+            })
+            .collect();
+        assert_eq!(marks, vec![Some(0), Some(2)]);
     }
 
     /// The whole point: half the frames out, and the ones kept are evenly

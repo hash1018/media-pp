@@ -287,7 +287,7 @@ impl Filter for Scaling {
             // one on every tick of a still screen.
             MediaBuffer::Video(frame) => {
                 let scaled = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(scaled));
+                out.push(MediaBuffer::Video(scaled.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => {
@@ -558,7 +558,7 @@ mod tests {
         );
         let mut frame = pool.get();
         frame.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(frame))
+        MediaBuffer::Video(Arc::new(frame).into())
     }
 
     fn new_scaler(
@@ -612,7 +612,7 @@ mod tests {
             assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// A capture of a still screen re-emits the picture it already has, and
@@ -668,7 +668,7 @@ mod tests {
         frame.set_color_space(space);
         frame.set_color_range(range);
         frame.set_pts(Some(0));
-        MediaBuffer::Video(Arc::new(frame))
+        MediaBuffer::Video(Arc::new(frame).into())
     }
 
     fn scaled_once(scaler_format: ffmpeg::format::Pixel, input: MediaBuffer) -> MediaBuffer {
@@ -855,13 +855,13 @@ mod tests {
     fn rejects_packet_and_audio_buffers_with_a_clean_error_instead_of_scaling_garbage() {
         let (mut scaler, _received) = new_scaler(ffmpeg::format::Pixel::RGB24, 80, 60);
 
-        let packet = MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty()));
+        let packet = MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty()).into());
         assert!(
             scaler.consume(packet).is_err(),
             "Packet must be rejected, not silently accepted"
         );
 
-        let audio = MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty()));
+        let audio = MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty()).into());
         assert!(
             scaler.consume(audio).is_err(),
             "Audio must be rejected, not silently accepted"

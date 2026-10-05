@@ -124,13 +124,13 @@ fn download_frame(
         pp_log: element_pp_log(ElementType::Other, "capture", None),
     }));
     download
-        .consume(MediaBuffer::Video(composed))
+        .consume(MediaBuffer::Video(composed.into()))
         .expect("download consume should succeed");
     let mut received = received.lock().unwrap();
     let MediaBuffer::Video(frame) = received.remove(0) else {
         panic!("expected a Video buffer");
     };
-    frame
+    frame.into_payload()
 }
 
 fn pixel(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> [u8; 4] {
@@ -1310,7 +1310,8 @@ fn a_system_memory_frame_goes_in_through_an_upload() {
             unreachable!()
         };
         MediaBuffer::Video(
-            crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame)).unwrap(),
+            (crate::test_support::one_frame(&mut upload, MediaBuffer::Video(frame)).unwrap())
+                .into(),
         )
     };
     background.consume(uploaded(bgra)).unwrap();
@@ -1462,7 +1463,7 @@ fn the_backend_independent_traits_drive_it() {
     else {
         unreachable!()
     };
-    crate::elements::VideoLayerControl::set_frame(&still, picture).unwrap();
+    crate::elements::VideoLayerControl::set_frame(&still, picture.into_payload()).unwrap();
     let composed = compositor.compositing().compose_frame(&test_bus()).unwrap();
     let downloaded = download_frame(&gpu, composed);
     assert_eq!(pixel(&downloaded, 0, 0), [255, 0, 0, 255]);

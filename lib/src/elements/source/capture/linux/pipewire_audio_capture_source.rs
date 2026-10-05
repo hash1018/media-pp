@@ -589,7 +589,7 @@ impl Source for Capturing {
         }
 
         let frame = build_frame(&self.format, &packet);
-        Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(frame))))
+        Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(frame).into())))
     }
 }
 
@@ -1166,7 +1166,7 @@ mod tests {
                     }
                 }
                 renderer
-                    .consume(MediaBuffer::Audio(Arc::new(frame)))
+                    .consume(MediaBuffer::Audio(Arc::new(frame).into()))
                     .expect("the renderer takes what it is given");
             }
         };

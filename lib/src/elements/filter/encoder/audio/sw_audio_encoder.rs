@@ -373,7 +373,7 @@ impl Encoding {
                     // from a packet's own declared time_base. `pts` above is
                     // already expressed in this same `1/sample_rate` unit.
                     packet.set_time_base(self.time_base());
-                    out.push(MediaBuffer::Packet(Arc::new(packet)));
+                    out.push(MediaBuffer::Packet(Arc::new(packet).into()));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -695,9 +695,9 @@ mod tests {
 
         for _ in 0..20 {
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
-                    0.1, 960, 48000,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(constant_stereo_frame(0.1, 960, 48000)).into(),
+                ))
                 .expect("consume should succeed");
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
@@ -736,7 +736,7 @@ mod tests {
     impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = buf {
-                self.packets.lock().unwrap().push(packet);
+                self.packets.lock().unwrap().push(packet.into_payload());
             }
             Ok(())
         }
@@ -773,9 +773,9 @@ mod tests {
 
         for _ in 0..20 {
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
-                    0.1, 960, 48000,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(constant_stereo_frame(0.1, 960, 48000)).into(),
+                ))
                 .expect("consume should succeed");
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
@@ -824,9 +824,9 @@ mod tests {
 
         for _ in 0..20 {
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
-                    0.1, 960, 48000,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(constant_stereo_frame(0.1, 960, 48000)).into(),
+                ))
                 .expect("consume should succeed");
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)

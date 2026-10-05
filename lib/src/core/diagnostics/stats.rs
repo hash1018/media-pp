@@ -548,14 +548,18 @@ mod tests {
     fn a_pad_counts_the_bytes_of_the_packets_it_pushes_and_nothing_else() {
         let mut pad = SrcPad::new("out");
         for size in [100, 250] {
-            pad.push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::new(
-                size,
-            ))))
+            pad.push(MediaBuffer::Packet(
+                Arc::new(ffmpeg_next::Packet::new(size)).into(),
+            ))
             .expect("an unlinked pad takes anything");
         }
-        pad.push(MediaBuffer::Video(Arc::new(
-            crate::pool::UnboundObjectPool::new(1, ffmpeg_next::frame::Video::empty, |_| {}).get(),
-        )))
+        pad.push(MediaBuffer::Video(
+            Arc::new(
+                crate::pool::UnboundObjectPool::new(1, ffmpeg_next::frame::Video::empty, |_| {})
+                    .get(),
+            )
+            .into(),
+        ))
         .expect("an unlinked pad takes anything");
         pad.push_event(&crate::stream::StreamEvent::Eos)
             .expect("an unlinked pad takes anything");

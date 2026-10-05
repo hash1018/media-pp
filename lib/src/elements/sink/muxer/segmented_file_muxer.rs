@@ -332,7 +332,7 @@ impl GroupState {
             self.segment_origin = Some((track, dts));
         }
         let packet = SegmentGroup::rebase(self, track, packet);
-        self.current_sinks[track].consume(MediaBuffer::Packet(packet))
+        self.current_sinks[track].consume(MediaBuffer::Packet(packet.into()))
     }
 
     /// Writes, in the order they arrived, the waiting packets `release`
@@ -624,7 +624,7 @@ impl RawSink for SegmentedTrackSink {
         match buf {
             MediaBuffer::Packet(packet) => {
                 self.group
-                    .consume_packet(self.track_index, packet, &self.pp_log)
+                    .consume_packet(self.track_index, packet.into_payload(), &self.pp_log)
             }
             // The `FileMuxer` each rotated segment wraps already rejects
             // this — matching its own track sinks' `consume` here
@@ -1023,7 +1023,7 @@ mod tests {
             .collect();
         for (_, track, packet) in packets {
             sinks[track]
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("a packet is written");
         }
         for sink in &mut sinks {
@@ -1140,7 +1140,9 @@ mod tests {
             .expect("the muxer's own track");
 
         let error = sink
-            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .consume(MediaBuffer::Audio(
+                Arc::new(ffmpeg::frame::Audio::empty()).into(),
+            ))
             .expect_err("an Audio buffer must be rejected, not silently dropped");
         assert!(
             matches!(

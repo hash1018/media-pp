@@ -317,8 +317,8 @@ impl Filter for Compressing {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
-                let frame = self.process(frame)?;
-                out.push(MediaBuffer::Audio(frame));
+                let frame = self.process(frame.into_payload())?;
+                out.push(MediaBuffer::Audio(frame.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => Err(AudioCompressorError::UnsupportedBuffer("Packet").into()),
@@ -379,11 +379,9 @@ mod tests {
         received.lock().unwrap().clear();
         for chunk in signal.chunks(480) {
             compressor
-                .consume(MediaBuffer::Audio(frame(
-                    &[chunk.to_vec()],
-                    RATE,
-                    Type::Packed,
-                )))
+                .consume(MediaBuffer::Audio(
+                    (frame(&[chunk.to_vec()], RATE, Type::Packed)).into(),
+                ))
                 .unwrap();
         }
         received
@@ -524,7 +522,7 @@ mod tests {
         );
         wrong.set_rate(RATE);
         let error = compressor
-            .consume(MediaBuffer::Audio(Arc::new(wrong)))
+            .consume(MediaBuffer::Audio(Arc::new(wrong).into()))
             .unwrap_err();
         assert!(matches!(
             error,

@@ -226,7 +226,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
         frame.data_mut(2).fill(128);
         let mut slot = pool.get();
         *slot = frame;
-        feed.push(MediaBuffer::Video(Arc::new(slot)))
+        feed.push(MediaBuffer::Video(Arc::new(slot).into()))
             .expect("push a frame");
     }
 

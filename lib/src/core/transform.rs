@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, Metadata},
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads},
@@ -38,6 +38,25 @@ use crate::{
 /// one. Implement this or [`RawSink`] and [`SrcPads`], not both: a filter that
 /// routes the stream itself — splits it, holds it back, waits on a clock —
 /// is written the direct way.
+///
+/// # Metadata
+///
+/// What a buffer carries — its [`Metadata`](crate::buffer::Metadata) — goes
+/// on with what the filter makes of it: a buffer pushed while `transform`
+/// handles it that is of the same sort, at the same timestamp, and carries
+/// nothing of its own is given the input's. A buffer with no timestamp
+/// cannot be told apart from one held from earlier, so nothing is carried
+/// from or onto one. That is a picture scaled,
+/// converted, keyed, uploaded or downloaded.
+///
+/// Nothing is carried onto another sort — an encoder's packet from a
+/// picture — nor onto a buffer at another timestamp, which is what a filter
+/// handing on later what it held from earlier pushes: the input in hand is
+/// not what that output was made from, and metadata on the wrong picture
+/// is worse than none. A filter that stamps its outputs anew and knows
+/// which input each came from carries it itself, as
+/// [`FrameRateLimiter`](crate::elements::FrameRateLimiter) does; one that
+/// sets its own on a buffer it pushes keeps that.
 pub trait Filter: Element {
     /// Makes what `buf` answers to, into `out` — nothing, one buffer, or
     /// several. Never handed the end of the stream: that is `drain`'s.
@@ -90,6 +109,49 @@ impl Output {
     /// Hands `buf` on, after whatever was put here before it.
     pub fn push(&mut self, buf: MediaBuffer) {
         self.made.push(buf);
+    }
+
+    /// Gives what `input` carries to every buffer made from it — of its
+    /// sort, at its timestamp — that carries none of its own: see
+    /// [`Filter`]'s section on metadata.
+    fn carry(&mut self, input: &Carried) {
+        for buf in &mut self.made {
+            if std::mem::discriminant(buf) == input.sort
+                && input.pts.is_some()
+                && pts_of(buf) == input.pts
+                && buf.metadata().is_none()
+            {
+                buf.set_metadata(Some(Arc::clone(&input.metadata)));
+            }
+        }
+    }
+}
+
+/// What a buffer handed to a filter carried, and what an output must share
+/// with it to be given that.
+struct Carried {
+    sort: std::mem::Discriminant<MediaBuffer>,
+    pts: Option<i64>,
+    metadata: Arc<Metadata>,
+}
+
+impl Carried {
+    /// `None` where `buf` carries nothing.
+    fn of(buf: &MediaBuffer) -> Option<Self> {
+        Some(Self {
+            sort: std::mem::discriminant(buf),
+            pts: pts_of(buf),
+            metadata: Arc::clone(buf.metadata_arc()?),
+        })
+    }
+}
+
+/// A buffer's presentation timestamp.
+fn pts_of(buf: &MediaBuffer) -> Option<i64> {
+    match buf {
+        MediaBuffer::Packet(packet) => packet.pts(),
+        MediaBuffer::Video(frame) => frame.pts(),
+        MediaBuffer::Audio(frame) => frame.pts(),
     }
 }
 
@@ -187,7 +249,11 @@ impl<T: Filter> RawSink for FilterStage<T> {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let mut out = Output::default();
+        let carried = Carried::of(&buf);
         self.inner.transform(buf, &mut out)?;
+        if let Some(carried) = &carried {
+            out.carry(carried);
+        }
         self.hand_on(out)
     }
 
@@ -408,7 +474,7 @@ mod tests {
     };
 
     fn packet(tag: u8) -> MediaBuffer {
-        MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[tag])))
+        MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[tag])).into())
     }
 
     /// The tag of each packet in `buffers`.
@@ -845,5 +911,175 @@ mod tests {
             tags(&received.lock().unwrap()),
             [Some(1), Some(101), Some(2), Some(102)]
         );
+    }
+
+    /// Keeps every buffer it takes, to be looked at whole.
+    struct Kept(PpLog, Arc<Mutex<Vec<MediaBuffer>>>);
+
+    impl Element for Kept {
+        fn name(&self) -> Arc<str> {
+            "kept".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.0
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.0
+        }
+    }
+
+    impl RawSink for Kept {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.1.lock().unwrap().push(buf);
+            Ok(())
+        }
+    }
+
+    fn keep<T: Filter>(stage: &mut FilterStage<T>) -> Arc<Mutex<Vec<MediaBuffer>>> {
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        stage.src_pads()[0].link(Box::new(Kept(
+            element_pp_log(ElementType::Other, "kept", None),
+            Arc::clone(&kept),
+        )));
+        kept
+    }
+
+    /// A packet tagged `tag`, at `pts`.
+    fn packet_at(tag: u8, pts: i64) -> MediaBuffer {
+        let mut packet = ffmpeg::Packet::copy(&[tag]);
+        packet.set_pts(Some(pts));
+        MediaBuffer::packet(packet)
+    }
+
+    /// What a test puts on a buffer.
+    #[derive(Debug, PartialEq)]
+    struct Seen(&'static str);
+
+    fn seen(buf: &MediaBuffer) -> Option<&'static str> {
+        buf.metadata()?.get::<Seen>().map(|seen| seen.0)
+    }
+
+    fn marked(buf: MediaBuffer, mark: &'static str) -> MediaBuffer {
+        buf.with_metadata(Metadata::new().with(Seen(mark)))
+    }
+
+    /// Makes a packet of its own for each it takes: the same bytes, at the
+    /// same timestamp, or `shift` later — or a picture, where `to_picture`.
+    struct Remake {
+        pp_log: PpLog,
+        shift: i64,
+        to_picture: bool,
+        own: Option<&'static str>,
+    }
+
+    impl Remake {
+        fn new() -> Self {
+            Self {
+                pp_log: element_pp_log(ElementType::Other, "remake", None),
+                shift: 0,
+                to_picture: false,
+                own: None,
+            }
+        }
+    }
+
+    impl Element for Remake {
+        fn name(&self) -> Arc<str> {
+            "remake".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Filter for Remake {
+        fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
+            let MediaBuffer::Packet(packet) = &buf else {
+                unreachable!("only packets are handed in here");
+            };
+            let pts = packet.pts().map(|pts| pts + self.shift);
+            let mut made = if self.to_picture {
+                let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 2, 2);
+                frame.set_pts(pts);
+                MediaBuffer::video(frame)
+            } else {
+                let mut remade = ffmpeg::Packet::copy(packet.data().expect("a payload"));
+                remade.set_pts(pts);
+                MediaBuffer::packet(remade)
+            };
+            if let Some(own) = self.own {
+                made = marked(made, own);
+            }
+            out.push(made);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn what_a_buffer_carries_goes_on_to_what_is_made_from_it() {
+        let mut stage = FilterStage::new(Remake::new());
+        let kept = keep(&mut stage);
+        stage.consume(marked(packet_at(1, 10), "found")).unwrap();
+        stage.consume(packet_at(2, 11)).unwrap();
+        let kept = kept.lock().unwrap();
+        assert_eq!(seen(&kept[0]), Some("found"));
+        assert_eq!(seen(&kept[1]), None, "a buffer that carried nothing");
+    }
+
+    #[test]
+    fn nothing_is_carried_onto_another_timestamp_or_another_sort() {
+        let mut later = Remake::new();
+        later.shift = 1;
+        let mut stage = FilterStage::new(later);
+        let kept = keep(&mut stage);
+        stage.consume(marked(packet_at(1, 10), "found")).unwrap();
+        assert_eq!(seen(&kept.lock().unwrap()[0]), None, "another timestamp");
+
+        let mut picture = Remake::new();
+        picture.to_picture = true;
+        let mut stage = FilterStage::new(picture);
+        let kept = keep(&mut stage);
+        stage.consume(marked(packet_at(1, 10), "found")).unwrap();
+        assert_eq!(seen(&kept.lock().unwrap()[0]), None, "another sort");
+    }
+
+    /// The case the timestamp is there for: a filter handing on a buffer it
+    /// held from earlier must not be given what the one in hand carries.
+    #[test]
+    fn a_buffer_held_from_earlier_is_not_given_what_the_next_carries() {
+        let (delay, _) = Delay::new();
+        let mut stage = FilterStage::new(delay);
+        let kept = keep(&mut stage);
+        stage.consume(packet_at(1, 10)).unwrap();
+        stage.consume(marked(packet_at(2, 11), "found")).unwrap();
+        stage.consume(packet_at(3, 12)).unwrap();
+        let kept = kept.lock().unwrap();
+        assert_eq!(seen(&kept[0]), None, "the first carried nothing");
+        assert_eq!(seen(&kept[1]), Some("found"), "the second its own");
+    }
+
+    #[test]
+    fn what_a_filter_puts_on_a_buffer_itself_is_kept() {
+        let mut own = Remake::new();
+        own.own = Some("own");
+        let mut stage = FilterStage::new(own);
+        let kept = keep(&mut stage);
+        stage.consume(marked(packet_at(1, 10), "found")).unwrap();
+        assert_eq!(seen(&kept.lock().unwrap()[0]), Some("own"));
     }
 }

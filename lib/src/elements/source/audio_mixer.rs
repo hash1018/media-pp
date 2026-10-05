@@ -941,7 +941,7 @@ impl Mixing {
             return Produced::Nothing;
         }
         match self.mix_tick(wait.now().saturating_duration_since(started)) {
-            Some(frame) => Produced::Buffer(MediaBuffer::Audio(Arc::new(frame))),
+            Some(frame) => Produced::Buffer(MediaBuffer::Audio(Arc::new(frame).into())),
             None => Produced::Nothing,
         }
     }
@@ -1053,7 +1053,7 @@ impl Mixing {
                 upstream.wake();
             }
         }
-        Produced::Buffer(MediaBuffer::Audio(Arc::new(frame)))
+        Produced::Buffer(MediaBuffer::Audio(Arc::new(frame).into()))
     }
 
     /// Ends an offline mix at mix position `at`: an `Eos` after the last
@@ -1320,12 +1320,12 @@ mod tests {
         let feeder_stop = stop.clone();
         let feeder = std::thread::spawn(move || {
             while !feeder_stop.load(Ordering::Relaxed) {
-                let _ = input_a.consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
-                    0.2, -0.1, 480, 48000,
-                ))));
-                let _ = input_b.consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
-                    0.1, -0.2, 480, 48000,
-                ))));
+                let _ = input_a.consume(MediaBuffer::Audio(
+                    Arc::new(constant_stereo_frame(0.2, -0.1, 480, 48000)).into(),
+                ));
+                let _ = input_b.consume(MediaBuffer::Audio(
+                    Arc::new(constant_stereo_frame(0.1, -0.2, 480, 48000)).into(),
+                ));
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
@@ -1391,12 +1391,12 @@ mod tests {
         let feeder_stop = stop.clone();
         let feeder = std::thread::spawn(move || {
             while !feeder_stop.load(Ordering::Relaxed) {
-                let _ = input_a.consume(MediaBuffer::Audio(Arc::new(constant_frame(
-                    0.6, 480, 48000,
-                ))));
-                let _ = input_b.consume(MediaBuffer::Audio(Arc::new(constant_frame(
-                    0.6, 480, 48000,
-                ))));
+                let _ = input_a.consume(MediaBuffer::Audio(
+                    Arc::new(constant_frame(0.6, 480, 48000)).into(),
+                ));
+                let _ = input_b.consume(MediaBuffer::Audio(
+                    Arc::new(constant_frame(0.6, 480, 48000)).into(),
+                ));
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
@@ -1450,9 +1450,9 @@ mod tests {
 
         let mut input_a = handle.add_source("a").unwrap();
         input_a
-            .consume(MediaBuffer::Audio(Arc::new(constant_frame(
-                0.5, 480, 48000,
-            ))))
+            .consume(MediaBuffer::Audio(
+                Arc::new(constant_frame(0.5, 480, 48000)).into(),
+            ))
             .unwrap();
         std::thread::sleep(Duration::from_millis(100));
         handle.remove_source("a");
@@ -1553,9 +1553,9 @@ mod tests {
 
         let mut input_a = handle.add_source("a").unwrap();
         input_a
-            .consume(MediaBuffer::Audio(Arc::new(constant_frame(
-                0.5, 480, 48000,
-            ))))
+            .consume(MediaBuffer::Audio(
+                Arc::new(constant_frame(0.5, 480, 48000)).into(),
+            ))
             .unwrap();
         assert_eq!(handle.source_count(), 1);
 
@@ -1623,9 +1623,9 @@ mod tests {
         assert_eq!(handle.source_count(), 1);
 
         stale
-            .consume(MediaBuffer::Audio(Arc::new(constant_frame(
-                0.75, 480, 48000,
-            ))))
+            .consume(MediaBuffer::Audio(
+                Arc::new(constant_frame(0.75, 480, 48000)).into(),
+            ))
             .unwrap();
         stale
             .stream_event(&crate::stream::StreamEvent::Eos)
@@ -1651,9 +1651,9 @@ mod tests {
         // The current sink still owns the registration and therefore
         // remains fully functional.
         current
-            .consume(MediaBuffer::Audio(Arc::new(constant_frame(
-                0.25, 480, 48000,
-            ))))
+            .consume(MediaBuffer::Audio(
+                Arc::new(constant_frame(0.25, 480, 48000)).into(),
+            ))
             .unwrap();
         current
             .stream_event(&crate::stream::StreamEvent::Eos)
@@ -1687,7 +1687,9 @@ mod tests {
         let mut input = handle.add_source("a").expect("mixer still alive");
 
         let error = input
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .expect_err("a Packet buffer must be rejected, not silently dropped");
         assert!(
             matches!(
@@ -2165,7 +2167,7 @@ mod tests {
         let mut frame = constant_frame(value, samples, rate);
         frame.set_pts(Some(pts));
         crate::buffer::set_time_base(&mut frame, time_base);
-        MediaBuffer::Audio(Arc::new(frame))
+        MediaBuffer::Audio(Arc::new(frame).into())
     }
 
     fn offline(end: Option<Duration>) -> AudioMixerOptions {
@@ -2390,7 +2392,7 @@ mod tests {
             Err(AudioMixerError::FixedMixFormat)
         ));
         let mut sink = handle.add_source("input").unwrap();
-        let untimed = MediaBuffer::Audio(Arc::new(constant_frame(0.5, 480, 48_000)));
+        let untimed = MediaBuffer::Audio(Arc::new(constant_frame(0.5, 480, 48_000)).into());
         assert!(sink.consume(untimed).is_err());
 
         let (live, _) = AudioMixer::new(

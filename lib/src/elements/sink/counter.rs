@@ -45,7 +45,9 @@ mod tests {
         let clone = count.clone();
         for _ in 0..3 {
             counter
-                .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+                .consume(MediaBuffer::Packet(
+                    Arc::new(ffmpeg::Packet::empty()).into(),
+                ))
                 .expect("a packet counts");
         }
         counter

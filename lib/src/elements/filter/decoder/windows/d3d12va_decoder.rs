@@ -269,7 +269,7 @@ impl D3d12Decoder {
                         // Held as a copy; the surface goes back to the pool
                         // as `frame` is reused below.
                         let copy = self.copied(&frame)?;
-                        self.stretch.hold(MediaBuffer::Video(Arc::new(copy)));
+                        self.stretch.hold(MediaBuffer::Video(Arc::new(copy).into()));
                         frame = self.pool.get();
                         continue;
                     }
@@ -277,7 +277,7 @@ impl D3d12Decoder {
                     // returning its fixed-pool surface a whole branch earlier
                     // than dropping it downstream would.
                     self.preroll_gate
-                        .push_admitted(MediaBuffer::Video(Arc::new(frame)), &mut self.pad)?;
+                        .push_admitted(MediaBuffer::Video(Arc::new(frame).into()), &mut self.pad)?;
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -342,7 +342,7 @@ impl RawSink for D3d12Decoder {
                 self.preroll_gate.observe_packet(&packet);
                 self.qos.follow(&mut self.decoder, &self.pp_log);
                 self.decoder
-                    .send_packet(&*packet)
+                    .send_packet(&**packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                     .map_err(|error| self.decode_error(error))?;
                 self.drain()
@@ -544,7 +544,7 @@ mod tests {
         let sent = packets.len();
         let decoded = (|| {
             for packet in packets {
-                decoder.consume(MediaBuffer::Packet(Arc::new(packet)))?;
+                decoder.consume(MediaBuffer::Packet(Arc::new(packet).into()))?;
             }
             crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos)
         })();
@@ -587,7 +587,7 @@ mod tests {
         )));
         for packet in packets {
             let error = decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect_err("the GPU has no VP9 profile 1");
             assert!(
                 matches!(

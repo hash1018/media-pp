@@ -560,7 +560,7 @@ impl WebRtcPeer {
                     }
                     match track
                         .data_tx
-                        .try_send(MediaBuffer::Packet(Arc::new(packet)))
+                        .try_send(MediaBuffer::Packet(Arc::new(packet).into()))
                     {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {

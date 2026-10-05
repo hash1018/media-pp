@@ -214,7 +214,7 @@ impl Suppressing {
             // `AudioVolume`.
             let mut frame = Arc::try_unwrap(frame).unwrap_or_else(|shared| shared.as_ref().clone());
             audio_f32::write(&mut frame, &denoised);
-            out.push(MediaBuffer::Audio(Arc::new(frame)));
+            out.push(MediaBuffer::Audio(Arc::new(frame).into()));
         }
         Ok(())
     }
@@ -297,7 +297,7 @@ impl Filter for Suppressing {
 
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Audio(frame) => self.process(frame, out),
+            MediaBuffer::Audio(frame) => self.process(frame.into_payload(), out),
             MediaBuffer::Packet(_) => Err(NoiseSuppressorError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(NoiseSuppressorError::UnsupportedBuffer("Video").into()),
         }
@@ -345,7 +345,7 @@ mod tests {
             let mut frame = Arc::try_unwrap(frame(&[chunk.to_vec()], RATE, Type::Packed)).unwrap();
             frame.set_pts(Some((index * size) as i64));
             suppressor
-                .consume(MediaBuffer::Audio(Arc::new(frame)))
+                .consume(MediaBuffer::Audio(Arc::new(frame).into()))
                 .unwrap();
         }
         crate::stream::deliver(suppressor, &crate::stream::StreamEvent::Eos).unwrap();
@@ -462,7 +462,7 @@ mod tests {
             expected.push((Some(pts), size));
             pts += size as i64;
             suppressor
-                .consume(MediaBuffer::Audio(Arc::new(frame)))
+                .consume(MediaBuffer::Audio(Arc::new(frame).into()))
                 .unwrap();
             // Held back until RNNoise has given back what they need.
             assert!(received.lock().unwrap().len() <= index);
@@ -482,16 +482,16 @@ mod tests {
     fn a_new_channel_count_drains_the_old_one_first() {
         let (mut suppressor, received) = suppressor();
         suppressor
-            .consume(MediaBuffer::Audio(frame(
-                &[noise(0.01, 480)],
-                RATE,
-                Type::Packed,
-            )))
+            .consume(MediaBuffer::Audio(
+                (frame(&[noise(0.01, 480)], RATE, Type::Packed)).into(),
+            ))
             .unwrap();
         assert!(received.lock().unwrap().is_empty(), "held back a block");
         let stereo = vec![noise(0.01, 480), noise(0.01, 480)];
         suppressor
-            .consume(MediaBuffer::Audio(frame(&stereo, RATE, Type::Packed)))
+            .consume(MediaBuffer::Audio(
+                (frame(&stereo, RATE, Type::Packed)).into(),
+            ))
             .unwrap();
         let received = received.lock().unwrap();
         let MediaBuffer::Audio(first) = &received[0] else {
@@ -507,11 +507,9 @@ mod tests {
     fn a_flush_drops_what_was_held() {
         let (mut suppressor, received) = suppressor();
         suppressor
-            .consume(MediaBuffer::Audio(frame(
-                &[noise(0.01, 480)],
-                RATE,
-                Type::Packed,
-            )))
+            .consume(MediaBuffer::Audio(
+                (frame(&[noise(0.01, 480)], RATE, Type::Packed)).into(),
+            ))
             .unwrap();
         suppressor.control(&ControlMsg::Flush).unwrap();
         crate::stream::deliver(&mut suppressor, &crate::stream::StreamEvent::Eos).unwrap();
@@ -525,11 +523,9 @@ mod tests {
     fn a_frame_at_another_rate_or_format_is_an_error_and_changes_nothing() {
         let (mut suppressor, received) = suppressor();
         let error = suppressor
-            .consume(MediaBuffer::Audio(frame(
-                &[vec![0.0; 441]],
-                44_100,
-                Type::Packed,
-            )))
+            .consume(MediaBuffer::Audio(
+                (frame(&[vec![0.0; 441]], 44_100, Type::Packed)).into(),
+            ))
             .unwrap_err();
         assert!(matches!(
             error,
@@ -542,7 +538,7 @@ mod tests {
         );
         integers.set_rate(RATE);
         let error = suppressor
-            .consume(MediaBuffer::Audio(Arc::new(integers)))
+            .consume(MediaBuffer::Audio(Arc::new(integers).into()))
             .unwrap_err();
         assert!(matches!(
             error,

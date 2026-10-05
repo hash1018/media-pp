@@ -223,7 +223,7 @@ impl Filter for Applying {
                     return Ok(());
                 }
                 let output = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(output));
+                out.push(MediaBuffer::Video(output.into()));
                 Ok(())
             }
             other => {
@@ -373,7 +373,7 @@ mod tests {
         }));
         handle.set_enabled(false);
         element
-            .consume(MediaBuffer::Video(Arc::clone(&sent)))
+            .consume(MediaBuffer::Video(Arc::clone(&sent).into()))
             .unwrap();
         let out = out.lock().unwrap();
         for buffer in out.iter() {

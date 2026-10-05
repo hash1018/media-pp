@@ -415,7 +415,7 @@ impl Filter for Scaling {
             // see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
                 let scaled = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(scaled));
+                out.push(MediaBuffer::Video(scaled.into()));
                 Ok(())
             }
             other => {
@@ -586,7 +586,7 @@ mod tests {
         }
         repeat.set_pts(Some(200));
 
-        let result = upload.consume(MediaBuffer::Video(source));
+        let result = upload.consume(MediaBuffer::Video(source.into()));
         if let Err(error) = &result
             && error.to_string().contains("does not support D3D12 NV12")
         {
@@ -595,7 +595,7 @@ mod tests {
         }
         result.expect("the first pass should succeed");
         upload
-            .consume(MediaBuffer::Video(Arc::new(repeat)))
+            .consume(MediaBuffer::Video(Arc::new(repeat).into()))
             .expect("the repeat should succeed");
 
         let received = received.lock().unwrap();
@@ -666,7 +666,7 @@ mod tests {
         // its plain duration metadata before publishing it.
         unsafe { (*source.as_mut_ptr()).duration = 3 };
 
-        let result = upload.consume(MediaBuffer::Video(Arc::new(source)));
+        let result = upload.consume(MediaBuffer::Video(Arc::new(source).into()));
         if let Err(error) = &result
             && error.to_string().contains("does not support D3D12 NV12")
         {
@@ -732,12 +732,14 @@ mod tests {
             |_| {},
         );
         let error = scaler
-            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(pool.get()).into()))
             .expect_err("a CPU frame must be rejected");
         assert!(error.to_string().contains("only accepts Pixel::D3D12"));
 
         let error = scaler
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .expect_err("a packet must be rejected");
         assert!(error.to_string().contains("only accepts Video buffers"));
     }
@@ -770,7 +772,7 @@ mod tests {
             |_| {},
         );
         let error = upload
-            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(pool.get()).into()))
             .expect_err("a foreign-device texture must be rejected");
         assert!(error.to_string().contains("different device"));
     }

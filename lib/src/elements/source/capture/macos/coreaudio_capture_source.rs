@@ -768,7 +768,7 @@ impl Source for Capturing {
     /// the device captured it; with none yet, a look again
     /// [`POLL_INTERVAL`] later — and for a quiet tap, the silence it owes.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        let audio = |frame| Produced::Buffer(MediaBuffer::Audio(Arc::new(frame)));
+        let audio = |frame| Produced::Buffer(MediaBuffer::audio(frame));
         self.started.get_or_insert(wait.now());
         if let Some(frame) = self.next_frame(wait.now())? {
             return Ok(audio(frame));

@@ -136,7 +136,7 @@ fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
     packet.set_pts(Some(0));
 
     let error = sink
-        .consume(MediaBuffer::Packet(Arc::new(packet)))
+        .consume(MediaBuffer::Packet(Arc::new(packet).into()))
         .expect_err("a remote endpoint must not guess its outbound payload type");
 
     assert!(matches!(
@@ -192,7 +192,7 @@ fn video_packet(payload: &[u8], key: bool) -> MediaBuffer {
     if key {
         packet.set_flags(ffmpeg::packet::Flags::KEY);
     }
-    MediaBuffer::Packet(Arc::new(packet))
+    MediaBuffer::Packet(Arc::new(packet).into())
 }
 
 /// An encoder that keeps its SPS/PPS in `parameters()` sends a bitstream with
@@ -646,7 +646,7 @@ fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() 
         packet.set_time_base(ffmpeg::Rational::new(1, 48_000));
         packet.set_pts(Some(pts));
         packet.set_dts(Some(pts));
-        sink.consume(MediaBuffer::Packet(Arc::new(packet)))
+        sink.consume(MediaBuffer::Packet(Arc::new(packet).into()))
             .expect("negative encoder delay should be normalized before RTP");
     }
 
@@ -690,7 +690,7 @@ fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
     let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
     packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
     packet.set_pts(Some(0));
-    sink.consume(MediaBuffer::Packet(Arc::new(packet)))
+    sink.consume(MediaBuffer::Packet(Arc::new(packet).into()))
         .expect("the previous VP8 selection should still be usable");
     let Command::Push(TrackId(7), codec, _) = command_rx.recv().expect("packet should be queued")
     else {
@@ -1018,7 +1018,7 @@ fn push_packets(sink: &mut WebRtcTrackSink) {
         let mut packet = ffmpeg::Packet::copy(payload);
         packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
         packet.set_pts(Some(i * 3_000));
-        sink.consume(MediaBuffer::Packet(Arc::new(packet)))
+        sink.consume(MediaBuffer::Packet(Arc::new(packet).into()))
             .expect("push");
     }
 }
@@ -1791,7 +1791,7 @@ fn a_peer_that_dies_notifies_the_surviving_peer_on_both_endpoints() {
             packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
             packet.set_pts(Some(0));
             sink_errored = sink_a
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .is_err();
         }
         while let Some(event) = track_pipeline_a.bus().try_recv() {

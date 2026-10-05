@@ -63,8 +63,9 @@ impl RawSource for EndingSource {
             if self.owed {
                 self.owed = false;
                 for _ in 0..self.buffers {
-                    self.pad
-                        .push(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))?;
+                    self.pad.push(MediaBuffer::Packet(
+                        Arc::new(ffmpeg::Packet::empty()).into(),
+                    ))?;
                 }
                 self.pad.push_eos(&self.pp_log)?;
             }

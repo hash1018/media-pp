@@ -392,7 +392,7 @@ mod tests {
         let inner = Arc::new(RecordingRenderer::default());
         let mut renderer = CudaRenderer::new("cuda-renderer", &device, Box::new(inner.clone()));
         renderer
-            .consume(MediaBuffer::Video(uploaded))
+            .consume(MediaBuffer::Video(uploaded.into()))
             .expect("the frame is presented");
         assert_eq!(
             *inner.color.lock().unwrap(),
@@ -486,7 +486,7 @@ mod tests {
                 continue;
             }
             decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("decode failed");
             if received.lock().unwrap().len() >= 3 {
                 break;

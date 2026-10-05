@@ -122,7 +122,7 @@ mod tests {
     };
 
     fn packet(tag: u8) -> MediaBuffer {
-        MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[tag])))
+        MediaBuffer::Packet(Arc::new(ffmpeg::Packet::copy(&[tag])).into())
     }
 
     /// Takes what it is handed while its gate is open, writing down each

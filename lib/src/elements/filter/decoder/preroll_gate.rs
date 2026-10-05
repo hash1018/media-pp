@@ -334,7 +334,7 @@ mod tests {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let mut frame = pool.get();
         frame.set_pts(Some(pts));
-        MediaBuffer::Video(std::sync::Arc::new(frame))
+        MediaBuffer::Video(std::sync::Arc::new(frame).into())
     }
 
     /// The segment an accurate seek to `at` begins: what is shown begins at
@@ -722,7 +722,7 @@ mod tests {
 
         assert!(
             matches!(
-                gate.admit(MediaBuffer::Audio(std::sync::Arc::new(frame))),
+                gate.admit(MediaBuffer::Audio(std::sync::Arc::new(frame).into())),
                 [None, Some(MediaBuffer::Audio(_))]
             ),
             "0..21.3ms audio covers a 10ms target"

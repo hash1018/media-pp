@@ -290,7 +290,7 @@ impl Drawing {
         let per_sample = ffmpeg::Rational::new(1, sample_rate as i32);
         frame.set_pts(Some(at.rescale(per_sample, time_base)));
         set_time_base(&mut frame, time_base);
-        MediaBuffer::Video(Arc::new(frame))
+        MediaBuffer::Video(Arc::new(frame).into())
     }
 }
 
@@ -376,7 +376,7 @@ mod tests {
                 }
                 frame.set_pts(Some(start + offset as i64));
                 set_time_base(&mut frame, ffmpeg::Rational::new(1, RATE as i32));
-                MediaBuffer::Audio(Arc::new(frame))
+                MediaBuffer::Audio(Arc::new(frame).into())
             })
             .collect()
     }
@@ -395,7 +395,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(|buffer| match buffer {
-                MediaBuffer::Video(frame) => Some(frame.clone()),
+                MediaBuffer::Video(frame) => Some(frame.payload().clone()),
                 _ => None,
             })
             .collect()
@@ -485,7 +485,7 @@ mod tests {
         );
         frame.set_rate(RATE);
         assert!(matches!(
-            waveform.consume(MediaBuffer::Audio(Arc::new(frame))),
+            waveform.consume(MediaBuffer::Audio(Arc::new(frame).into())),
             Err(crate::Error::AudioWaveformError(
                 AudioWaveformError::UnsupportedSampleFormat(_)
             ))

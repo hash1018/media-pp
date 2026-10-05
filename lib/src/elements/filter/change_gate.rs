@@ -227,7 +227,7 @@ mod tests {
             assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), frame.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     fn timestamps(received: &Arc<Mutex<Vec<MediaBuffer>>>) -> Vec<Option<i64>> {
@@ -278,7 +278,7 @@ mod tests {
         let produce = |pts: i64| {
             let mut slot = pool.get();
             slot.set_pts(Some(pts));
-            MediaBuffer::Video(Arc::new(slot))
+            MediaBuffer::Video(Arc::new(slot).into())
         };
 
         // Forwarded, then consumed downstream — nothing but the gate is left

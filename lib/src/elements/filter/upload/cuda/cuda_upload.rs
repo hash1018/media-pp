@@ -330,7 +330,7 @@ impl Filter for Uploading {
             // the GPU — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
                 let uploaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(uploaded));
+                out.push(MediaBuffer::Video(uploaded.into()));
                 Ok(())
             }
             other => Err(CudaUploadError::UnsupportedBuffer(other.kind()).into()),
@@ -407,7 +407,7 @@ mod tests {
             assert!(ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// A capture of a still screen re-emits the picture it already has, and

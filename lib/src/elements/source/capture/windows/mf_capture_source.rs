@@ -683,7 +683,7 @@ impl Source for Capturing {
         let mut frame = self.build_frame(&sample)?;
         frame.set_pts(Some(self.stamp(sample_time)));
         crate::buffer::set_time_base(&mut frame, self.time_base());
-        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame))))
+        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into())))
     }
 }
 

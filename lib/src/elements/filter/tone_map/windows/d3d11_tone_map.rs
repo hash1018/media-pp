@@ -414,7 +414,7 @@ impl Filter for Mapping {
         match buf {
             MediaBuffer::Video(frame) => {
                 let drawn = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(drawn));
+                out.push(MediaBuffer::Video(drawn.into()));
                 Ok(())
             }
             // One `Draw` per frame, pushed before `consume` returns, so
@@ -519,7 +519,7 @@ mod tests {
             },
         )));
         tone_map.src_pads()[0].link(Box::new(download));
-        if let Err(error) = tone_map.consume(MediaBuffer::Video(Arc::new(slot))) {
+        if let Err(error) = tone_map.consume(MediaBuffer::Video(Arc::new(slot).into())) {
             return Some(Err(error));
         }
         let received = received.lock().unwrap();
@@ -636,7 +636,7 @@ mod tests {
             let mut slot = pool.get();
             *slot = frame;
             element
-                .consume(MediaBuffer::Video(Arc::new(slot)))
+                .consume(MediaBuffer::Video(Arc::new(slot).into()))
                 .expect("draw");
         };
 

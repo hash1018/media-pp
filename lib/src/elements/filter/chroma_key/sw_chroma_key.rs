@@ -215,7 +215,7 @@ impl Filter for Keying {
                     return Ok(());
                 }
                 let keyed = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(keyed));
+                out.push(MediaBuffer::Video(keyed.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => {
@@ -383,7 +383,7 @@ mod tests {
             }
         }
         frame.set_pts(Some(7));
-        MediaBuffer::Video(Arc::new(frame))
+        MediaBuffer::Video(Arc::new(frame).into())
     }
 
     fn pixel(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> [u8; 4] {
@@ -413,7 +413,7 @@ mod tests {
             assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// A capture of a still screen re-emits the picture it already has, and
@@ -565,7 +565,7 @@ mod tests {
             move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 4, 4),
             |_| {},
         );
-        let frame = MediaBuffer::Video(Arc::new(pool.get()));
+        let frame = MediaBuffer::Video(Arc::new(pool.get()).into());
 
         let error = key.consume(frame).expect_err("YUV420P must be rejected");
         assert!(matches!(
@@ -581,7 +581,9 @@ mod tests {
         let (mut key, _handle, _received) = new_chroma_key(default_options());
 
         let error = key
-            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .consume(MediaBuffer::Audio(
+                Arc::new(ffmpeg::frame::Audio::empty()).into(),
+            ))
             .expect_err("an Audio buffer must be rejected");
         assert!(matches!(
             error,

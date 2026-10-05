@@ -350,7 +350,7 @@ impl Scaling {
             .scale(frame, frames_ctx, width, height)
             .inspect_err(|error| pp_error!(self, "scale failed: {error}"))?;
         for output in scaled {
-            out.push(MediaBuffer::Video(Arc::new(output)));
+            out.push(MediaBuffer::Video(Arc::new(output).into()));
         }
         Ok(())
     }
@@ -402,7 +402,7 @@ impl Filter for Scaling {
             .flush()
             .inspect_err(|error| pp_error!(self, "failed to flush the graph: {error}"))?;
         for output in drained {
-            out.push(MediaBuffer::Video(Arc::new(output)));
+            out.push(MediaBuffer::Video(Arc::new(output).into()));
         }
         Ok(())
     }
@@ -807,7 +807,7 @@ mod tests {
         let decoded = capture(&mut decoder);
         for packet in packets {
             decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("decode");
         }
         crate::stream::deliver(&mut decoder, &crate::stream::StreamEvent::Eos).expect("drain");
@@ -1022,7 +1022,7 @@ mod tests {
                 continue;
             }
             decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("decode failed");
             if received.lock().unwrap().len() >= 3 {
                 break;

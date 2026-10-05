@@ -282,8 +282,8 @@ impl Filter for Limiting {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
-                let frame = self.process(frame)?;
-                out.push(MediaBuffer::Audio(frame));
+                let frame = self.process(frame.into_payload())?;
+                out.push(MediaBuffer::Audio(frame.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => Err(AudioLimiterError::UnsupportedBuffer("Packet").into()),
@@ -339,7 +339,9 @@ mod tests {
                 .map(|channel| channel[start..end].to_vec())
                 .collect();
             limiter
-                .consume(MediaBuffer::Audio(frame(&chunk, RATE, Type::Planar)))
+                .consume(MediaBuffer::Audio(
+                    (frame(&chunk, RATE, Type::Planar)).into(),
+                ))
                 .unwrap();
         }
         let mut out = vec![Vec::new(); channels.len()];
@@ -435,7 +437,7 @@ mod tests {
         );
         wrong.set_rate(RATE);
         let error = limiter
-            .consume(MediaBuffer::Audio(Arc::new(wrong)))
+            .consume(MediaBuffer::Audio(Arc::new(wrong).into()))
             .unwrap_err();
         assert!(matches!(
             error,

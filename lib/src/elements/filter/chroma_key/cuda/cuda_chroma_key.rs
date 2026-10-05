@@ -386,7 +386,7 @@ impl Filter for Keying {
                     return Ok(());
                 }
                 let keyed = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(keyed));
+                out.push(MediaBuffer::Video(keyed.into()));
                 Ok(())
             }
             other => Err(CudaChromaKeyError::UnsupportedBuffer(other.kind()).into()),
@@ -465,7 +465,7 @@ mod tests {
         let received = capture(&mut download);
         download.consume(buffer).expect("download");
         match received.lock().unwrap().remove(0) {
-            MediaBuffer::Video(frame) => frame,
+            MediaBuffer::Video(frame) => frame.into_payload(),
             other => panic!("expected a Video buffer, got {}", other.kind()),
         }
     }
@@ -495,7 +495,7 @@ mod tests {
             assert!(ffi::av_frame_ref(slot.as_mut_ptr(), frame.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// The whole contract in one pass: the key colour goes transparent, a
@@ -677,7 +677,7 @@ mod tests {
             || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 4, 2),
             |_| {},
         );
-        let frame = MediaBuffer::Video(Arc::new(pool.get()));
+        let frame = MediaBuffer::Video(Arc::new(pool.get()).into());
 
         let error = key
             .consume(frame)

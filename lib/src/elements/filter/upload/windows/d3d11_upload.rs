@@ -334,7 +334,7 @@ impl Filter for Uploading {
             // decided.
             MediaBuffer::Video(frame) => {
                 let uploaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(uploaded));
+                out.push(MediaBuffer::Video(uploaded.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => {
@@ -445,7 +445,7 @@ mod tests {
             assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
         }
         slot.set_pts(Some(pts));
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
     }
 
     /// The texture a frame's pixels live in.
@@ -610,7 +610,7 @@ mod tests {
         frame.set_pts(Some(42));
 
         upload
-            .consume(MediaBuffer::Video(Arc::new(frame)))
+            .consume(MediaBuffer::Video(Arc::new(frame).into()))
             .expect("CPU BGRA -> GPU D3D11 upload should succeed on a working device");
 
         let received = received.lock().unwrap();
@@ -673,7 +673,7 @@ mod tests {
         frame.data_mut(0).fill(16);
         frame.data_mut(1).fill(128);
         upload
-            .consume(MediaBuffer::Video(Arc::new(frame)))
+            .consume(MediaBuffer::Video(Arc::new(frame).into()))
             .expect("CPU NV12 -> GPU D3D11 upload should succeed on a working device");
 
         let received = received.lock().unwrap();
@@ -755,7 +755,7 @@ mod tests {
             |_| {},
         );
         let error = upload
-            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(pool.get()).into()))
             .expect_err("RGB24 must be rejected");
         assert!(
             matches!(

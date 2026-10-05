@@ -335,7 +335,7 @@ mod windows_example {
                 fill_green_screen_frame(&mut frame);
                 frame.set_pts(Some(index));
                 media_pp::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
-                handle.push(MediaBuffer::Video(Arc::new(frame)))?;
+                handle.push(MediaBuffer::Video(Arc::new(frame).into()))?;
 
                 index += 1;
                 next_due += frame_interval;

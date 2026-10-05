@@ -157,7 +157,7 @@ impl TestVideoSource {
     /// written as fast as it encodes, stamped as a paced run stamps it.
     #[cfg(test)]
     pub(crate) fn next_frame(&mut self) -> MediaBuffer {
-        MediaBuffer::Video(Arc::new(self.0.inner_mut().generate_frame()))
+        MediaBuffer::Video(Arc::new(self.0.inner_mut().generate_frame()).into())
     }
 }
 
@@ -252,7 +252,7 @@ impl Source for Generating {
         }
         let frame = self.generate_frame();
         self.ticked = true;
-        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame))))
+        Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into())))
     }
 }
 

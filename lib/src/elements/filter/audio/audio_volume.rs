@@ -359,8 +359,8 @@ impl Filter for Adjusting {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
-                let frame = self.process_audio(frame)?;
-                out.push(MediaBuffer::Audio(frame));
+                let frame = self.process_audio(frame.into_payload())?;
+                out.push(MediaBuffer::Audio(frame.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => Err(AudioVolumeError::UnsupportedBuffer("Packet").into()),
@@ -558,11 +558,15 @@ mod tests {
         let (mut volume, handle, received) = new_volume(options);
         handle.set_muted(true);
         volume
-            .consume(MediaBuffer::Audio(f32_packed_frame(&[1.0; 10], 1_000, 1)))
+            .consume(MediaBuffer::Audio(
+                (f32_packed_frame(&[1.0; 10], 1_000, 1)).into(),
+            ))
             .unwrap();
         handle.set_muted(false);
         volume
-            .consume(MediaBuffer::Audio(f32_packed_frame(&[1.0; 10], 1_000, 1)))
+            .consume(MediaBuffer::Audio(
+                (f32_packed_frame(&[1.0; 10], 1_000, 1)).into(),
+            ))
             .unwrap();
 
         let fade_out = captured_f32(&received, 0);
@@ -586,11 +590,9 @@ mod tests {
         let (mut volume, handle, received) = new_volume(options);
         handle.set_gain_db(-6.0).unwrap();
         volume
-            .consume(MediaBuffer::Audio(f32_packed_frame(
-                &[1.0, -1.0, 0.5, -0.5],
-                48_000,
-                2,
-            )))
+            .consume(MediaBuffer::Audio(
+                (f32_packed_frame(&[1.0, -1.0, 0.5, -0.5], 48_000, 2)).into(),
+            ))
             .unwrap();
 
         let gain = 10.0_f32.powf(-6.0 / 20.0);
@@ -622,10 +624,9 @@ mod tests {
         };
         let (mut volume, _handle, received) = new_volume(options);
         volume
-            .consume(MediaBuffer::Audio(f32_planar_frame(
-                &[&[1.0, -1.0], &[0.5, -0.5]],
-                48_000,
-            )))
+            .consume(MediaBuffer::Audio(
+                (f32_planar_frame(&[&[1.0, -1.0], &[0.5, -0.5]], 48_000)).into(),
+            ))
             .unwrap();
 
         let received = received.lock().unwrap();
@@ -646,7 +647,7 @@ mod tests {
         let (mut volume, _, received) = new_volume(options);
         let original = f32_packed_frame(&[1.0], 48_000, 1);
         volume
-            .consume(MediaBuffer::Audio(original.clone()))
+            .consume(MediaBuffer::Audio(original.clone().into()))
             .unwrap();
 
         assert_eq!(original.plane::<f32>(0)[0], 1.0);
@@ -680,7 +681,9 @@ mod tests {
         {
             *destination = value.to_ne_bytes();
         }
-        volume.consume(MediaBuffer::Audio(Arc::new(frame))).unwrap();
+        volume
+            .consume(MediaBuffer::Audio(Arc::new(frame).into()))
+            .unwrap();
 
         let received = received.lock().unwrap();
         let MediaBuffer::Audio(frame) = &received[0] else {
@@ -709,7 +712,9 @@ mod tests {
 
         let (mut volume, _) = AudioVolume::new("volume");
         let error = volume
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg::Packet::empty()).into(),
+            ))
             .unwrap_err();
         assert!(matches!(
             error,

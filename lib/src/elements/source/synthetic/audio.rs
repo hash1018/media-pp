@@ -130,7 +130,7 @@ impl TestAudioSource {
     /// stamps them.
     #[cfg(test)]
     pub(crate) fn next_samples(&mut self, count: usize) -> MediaBuffer {
-        MediaBuffer::Audio(Arc::new(self.0.inner_mut().generate_frame(count)))
+        MediaBuffer::Audio(Arc::new(self.0.inner_mut().generate_frame(count)).into())
     }
 }
 
@@ -218,9 +218,9 @@ impl Source for Generating {
         if needed == 0 {
             return Ok(Produced::Nothing);
         }
-        Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(
-            self.generate_frame(needed),
-        ))))
+        Ok(Produced::Buffer(MediaBuffer::Audio(
+            Arc::new(self.generate_frame(needed)).into(),
+        )))
     }
 }
 

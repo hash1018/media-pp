@@ -79,8 +79,9 @@ impl RawSource for BurstSource {
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         for _ in 0..self.buffers {
-            self.pad
-                .push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))?;
+            self.pad.push(MediaBuffer::Packet(
+                Arc::new(ffmpeg_next::Packet::empty()).into(),
+            ))?;
         }
         self.ready.store(true, Ordering::Release);
         loop {

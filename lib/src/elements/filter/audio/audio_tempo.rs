@@ -106,7 +106,7 @@ impl Stretching {
             .as_ref()
             .is_some_and(|state| state.is_prerolling())
         {
-            out.push(MediaBuffer::Audio(frame));
+            out.push(MediaBuffer::Audio(frame.into()));
             return Ok(());
         }
         let rate = self.rate();
@@ -116,7 +116,7 @@ impl Stretching {
             .is_none_or(|(_, _, stretcher)| stretcher.passes(rate))
             && rate == 1.0
         {
-            out.push(MediaBuffer::Audio(frame));
+            out.push(MediaBuffer::Audio(frame.into()));
             return Ok(());
         }
         let (sample_rate, channels) = (frame.rate(), frame.channels());
@@ -164,7 +164,7 @@ impl Stretching {
             match piece {
                 Piece::AsIs => {
                     if let Some(frame) = frame.take() {
-                        out.push(MediaBuffer::Audio(frame));
+                        out.push(MediaBuffer::Audio(frame.into()));
                     }
                 }
                 Piece::Stretched {
@@ -177,7 +177,7 @@ impl Stretching {
                         media_ns.rescale(ffmpeg::Rational::new(1, 1_000_000_000), base),
                     ));
                     crate::buffer::set_time_base(&mut frame, base);
-                    out.push(MediaBuffer::Audio(Arc::new(frame)));
+                    out.push(MediaBuffer::Audio(Arc::new(frame).into()));
                 }
             }
         }
@@ -235,7 +235,7 @@ impl Filter for Stretching {
 
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         match buf {
-            MediaBuffer::Audio(frame) => self.stretch(frame, out),
+            MediaBuffer::Audio(frame) => self.stretch(frame.into_payload(), out),
             MediaBuffer::Packet(_) => Err(AudioTempoError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(AudioTempoError::UnsupportedBuffer("Video").into()),
         }
@@ -315,7 +315,7 @@ mod tests {
         let (mut tempo, _clock, out) = tempo();
         let frame = tenth(0);
         tempo
-            .consume(MediaBuffer::Audio(Arc::clone(&frame)))
+            .consume(MediaBuffer::Audio(Arc::clone(&frame).into()))
             .expect("consume");
         let out = out.lock().unwrap();
         let [MediaBuffer::Audio(went)] = out.as_slice() else {
@@ -333,7 +333,7 @@ mod tests {
         clock.set_rate(2.0);
         for at in 10..30 {
             tempo
-                .consume(MediaBuffer::Audio(tenth(at)))
+                .consume(MediaBuffer::Audio(tenth(at).into()))
                 .expect("consume");
         }
         crate::stream::deliver(&mut tempo, &crate::stream::StreamEvent::Eos).expect("eos");
@@ -361,7 +361,7 @@ mod tests {
         let (mut tempo, clock, out) = tempo();
         clock.set_rate(2.0);
         tempo
-            .consume(MediaBuffer::Audio(tenth(0)))
+            .consume(MediaBuffer::Audio(tenth(0).into()))
             .expect("consume");
         tempo.control(&ControlMsg::Flush).expect("flush");
         let before = out.lock().unwrap().len();

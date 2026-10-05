@@ -196,7 +196,7 @@ impl Filter for Uploading {
             // the GPU — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
                 let uploaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(uploaded));
+                out.push(MediaBuffer::Video(uploaded.into()));
                 Ok(())
             }
             MediaBuffer::Packet(_) => {

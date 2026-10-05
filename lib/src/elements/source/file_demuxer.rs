@@ -669,7 +669,7 @@ impl Demuxing {
         (index, time_base, mut packet): (usize, ffmpeg::Rational, ffmpeg::Packet),
     ) -> Produced {
         packet.set_time_base(time_base);
-        Produced::On(index, MediaBuffer::Packet(Arc::new(packet)))
+        Produced::On(index, MediaBuffer::Packet(Arc::new(packet).into()))
     }
 
     /// Puts a freshly read packet on this source's output timeline, and

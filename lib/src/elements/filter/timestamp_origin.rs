@@ -186,7 +186,7 @@ impl Filter for Rebasing {
         if let Some(dts) = packet.dts() {
             rebased.set_dts(Some(dts - origin));
         }
-        out.push(MediaBuffer::Packet(Arc::new(rebased)));
+        out.push(MediaBuffer::Packet(Arc::new(rebased).into()));
         Ok(())
     }
 
@@ -225,7 +225,7 @@ mod tests {
         let mut packet = ffmpeg::Packet::new(4);
         packet.set_pts(pts);
         packet.set_dts(dts);
-        MediaBuffer::Packet(Arc::new(packet))
+        MediaBuffer::Packet(Arc::new(packet).into())
     }
 
     /// `(pts, dts)` of everything that reached the sink.

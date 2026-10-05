@@ -724,7 +724,7 @@ impl Encoding {
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
-                    out.push(MediaBuffer::Packet(Arc::new(packet)));
+                    out.push(MediaBuffer::Packet(Arc::new(packet).into()));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -1065,7 +1065,7 @@ mod tests {
                 frame.set_pts(Some(index));
                 crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
                 encoder
-                    .consume(MediaBuffer::Video(Arc::new(frame)))
+                    .consume(MediaBuffer::Video(Arc::new(frame).into()))
                     .unwrap_or_else(|error| {
                         panic!("{codec:?}/{input_format:?} frame {index}: {error}")
                     });
@@ -1272,7 +1272,7 @@ mod tests {
             frame.set_pts(Some(index));
             crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
             scaler
-                .consume(MediaBuffer::Video(Arc::new(frame)))
+                .consume(MediaBuffer::Video(Arc::new(frame).into()))
                 .expect("a frame is converted and encoded");
         }
         crate::stream::deliver(&mut scaler, &crate::stream::StreamEvent::Eos)
@@ -1394,7 +1394,7 @@ mod tests {
             |_| {},
         );
         let error = encoder
-            .consume(MediaBuffer::Video(Arc::new(foreign_pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(foreign_pool.get()).into()))
             .expect_err("a foreign-device texture must be rejected");
         assert!(matches!(
             error,
@@ -1410,7 +1410,7 @@ mod tests {
             |_| {},
         );
         let error = encoder
-            .consume(MediaBuffer::Video(Arc::new(small_pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(small_pool.get()).into()))
             .expect_err("a too-small backing texture must be rejected");
         assert!(matches!(
             error,
@@ -1434,7 +1434,7 @@ mod tests {
             (*invalid_slice.as_mut_ptr()).data[1] = std::ptr::dangling_mut::<u8>();
         }
         let error = encoder
-            .consume(MediaBuffer::Video(Arc::new(invalid_slice)))
+            .consume(MediaBuffer::Video(Arc::new(invalid_slice).into()))
             .expect_err("an out-of-range texture-array slice must be rejected");
         assert!(matches!(
             error,
@@ -1469,7 +1469,7 @@ mod tests {
         padded.set_pts(Some(0));
         crate::buffer::set_time_base(&mut padded, ffmpeg::Rational::new(1, 30));
         encoder
-            .consume(MediaBuffer::Video(Arc::new(padded)))
+            .consume(MediaBuffer::Video(Arc::new(padded).into()))
             .expect("a padded texture containing the visible frame must encode");
 
         let valid_device = device.clone();
@@ -1483,7 +1483,7 @@ mod tests {
             frame.set_pts(Some(index));
             crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
             encoder
-                .consume(MediaBuffer::Video(Arc::new(frame)))
+                .consume(MediaBuffer::Video(Arc::new(frame).into()))
                 .unwrap_or_else(|error| panic!("valid frame {index}: {error}"));
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("valid Eos");
@@ -1521,7 +1521,7 @@ mod tests {
             |_| {},
         );
         let error = encoder
-            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(pool.get()).into()))
             .expect_err("a CPU NV12 frame is not a Pixel::D3D11 frame");
         assert!(
             error.to_string().contains("Pixel::D3D11"),
@@ -1599,7 +1599,7 @@ mod tests {
                 frame.set_pts(Some(index));
                 crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
                 encoder
-                    .consume(MediaBuffer::Video(Arc::new(frame)))
+                    .consume(MediaBuffer::Video(Arc::new(frame).into()))
                     .unwrap_or_else(|error| panic!("frame {index}: {error}"));
             }
             crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("Eos");

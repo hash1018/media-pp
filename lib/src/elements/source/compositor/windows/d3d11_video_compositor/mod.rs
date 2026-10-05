@@ -608,10 +608,10 @@ impl RawSink for D3d11VideoCompositorInputSink {
                     return Err(D3d11VideoCompositorError::UnsupportedFormat(frame.format()).into());
                 }
                 let Some(timed) = &input.timed else {
-                    input.latest_frame.store(Some(frame));
+                    input.latest_frame.store(Some(frame.into_payload()));
                     return Ok(());
                 };
-                timed.push(frame).map_err(|untimed| {
+                timed.push(frame.into_payload()).map_err(|untimed| {
                     D3d11VideoCompositorError::UntimedFrame(match untimed {
                         Untimed::NoTimestamp => "timestamp",
                         Untimed::NoTimeBase => "time base",
@@ -1436,7 +1436,7 @@ impl Compositing {
         if let Some(ticks) = &self.ticks {
             ticks.made(composing.elapsed());
         }
-        Ok(MediaBuffer::Video(output))
+        Ok(MediaBuffer::Video(output.into()))
     }
 }
 

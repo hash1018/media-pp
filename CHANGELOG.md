@@ -12,6 +12,25 @@ compile error with no explanation.
 
 ### Breaking
 
+- **Each `MediaBuffer` variant holds a wrapper that carries metadata.**
+  `MediaBuffer::Packet`, `Video` and `Audio` hold `PacketBuffer`,
+  `VideoBuffer` and `AudioBuffer` in place of the bare `Arc`, each the
+  `Arc` beside the buffer's `Metadata` (see Added). The wrapper
+  dereferences to the `Arc`, so matching and reading are unchanged —
+  `MediaBuffer::Video(frame) => frame.width()` still compiles — and what
+  changes is making one and taking the `Arc` out:
+
+  | 0.3 | Now |
+  |---|---|
+  | `MediaBuffer::Video(Arc::new(frame))` | `MediaBuffer::Video(Arc::new(frame).into())`, or `MediaBuffer::video(frame)` |
+  | `MediaBuffer::Packet(Arc::new(packet))` | `MediaBuffer::packet(packet)` |
+  | `MediaBuffer::Audio(Arc::new(frame))` | `MediaBuffer::audio(frame)` |
+  | `frame.clone()` for the `Arc` | `frame.payload().clone()`, or `frame.into_payload()` |
+  | `&*packet` for the `ffmpeg::Packet` | `&**packet` |
+
+  A wrapper is `DerefMut` too, so `Arc::get_mut(frame)` on a buffer this
+  element alone holds still writes through it.
+
 - **The traits an element implements are renamed, so the plain names are
   the ones you write.** `Source`, `Filter` and `Sink` are now the traits an
   element of your own implements — a source asked for the next thing, a
@@ -164,6 +183,19 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`Metadata`: what an element found out about a buffer, carried with
+  it.** Every buffer can carry one — `MediaBuffer::metadata`,
+  `with_metadata`, `set_metadata` — holding one value per type, so an
+  element defines the type of what it finds and another reads it by that
+  type (`metadata.get::<T>()`). It sits behind an `Arc` and is never
+  changed in place: a buffer a `Tee` shared keeps what it had in every
+  other branch. A `Filter` needs no code for it: its outputs of the
+  input's sort at the input's timestamp — a picture scaled, converted,
+  uploaded or downloaded — are given what the input carried, and nothing
+  is carried onto another sort or timestamp, where it would describe the
+  wrong picture. `FrameRateLimiter`, which stamps its outputs anew,
+  carries it by hand. This is what a detector's results will travel in.
 
 - **`V4l2VirtualCamera`: a pipeline's pictures as a Linux camera**
   (feature `v4l2-virtual-camera`). It writes into a v4l2loopback device,

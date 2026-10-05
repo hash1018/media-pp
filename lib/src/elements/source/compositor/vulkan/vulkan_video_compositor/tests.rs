@@ -78,10 +78,10 @@ fn download(
     let mut download = VulkanDownload::new("download", device);
     let received = capture(&mut download);
     download
-        .consume(MediaBuffer::Video(Arc::new(frame)))
+        .consume(MediaBuffer::Video(Arc::new(frame).into()))
         .expect("download");
     match received.lock().unwrap().remove(0) {
-        MediaBuffer::Video(frame) => frame,
+        MediaBuffer::Video(frame) => frame.into_payload(),
         other => panic!("expected a Video buffer, got {}", other.kind()),
     }
 }
@@ -541,7 +541,7 @@ fn decoded_pictures_are_composited() {
         if stream.index() != index {
             continue;
         }
-        match decoder.consume(MediaBuffer::Packet(Arc::new(packet))) {
+        match decoder.consume(MediaBuffer::Packet(Arc::new(packet).into())) {
             Err(crate::error::Error::VulkanDecoderError(
                 crate::elements::VulkanDecoderError::HwAccelUnavailable,
             )) => return,
@@ -565,7 +565,9 @@ fn decoded_pictures_are_composited() {
     let read_back = |frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>| {
         let mut download = VulkanDownload::new("download", &device);
         let received = capture(&mut download);
-        download.consume(MediaBuffer::Video(frame.clone())).unwrap();
+        download
+            .consume(MediaBuffer::Video(frame.clone().into()))
+            .unwrap();
         match received.lock().unwrap().remove(0) {
             MediaBuffer::Video(frame) => frame,
             _ => panic!("a picture"),
@@ -620,7 +622,7 @@ fn the_backend_independent_traits_drive_it() {
     let MediaBuffer::Video(frame) = nv12_frame(&device, 32, 32, 200) else {
         panic!("a frame");
     };
-    VideoLayerControl::set_frame(&still, frame).unwrap();
+    VideoLayerControl::set_frame(&still, frame.into_payload()).unwrap();
     let out = download(&device, compositor.compositing().compose_frame().unwrap());
     near(
         luma_at(&out, 32, 32),
@@ -732,7 +734,7 @@ fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
             let pts = frame.pts().unwrap();
             let mut download = VulkanDownload::new("download", &device);
             let back = capture(&mut download);
-            download.consume(MediaBuffer::Video(frame)).unwrap();
+            download.consume(MediaBuffer::Video(frame.into())).unwrap();
             let MediaBuffer::Video(frame) = back.lock().unwrap().remove(0) else {
                 panic!("a picture");
             };
@@ -809,7 +811,7 @@ fn a_composition_encodes_without_leaving_the_gpu() {
             .unwrap();
         let composed = compositor.compositing().compose_frame().expect("compose");
         encoder
-            .consume(MediaBuffer::Video(Arc::new(composed)))
+            .consume(MediaBuffer::Video(Arc::new(composed).into()))
             .expect("the composition encodes");
     }
     crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).unwrap();

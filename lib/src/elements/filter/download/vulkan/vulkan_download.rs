@@ -215,7 +215,7 @@ impl Filter for Downloading {
             // back again makes the frame already in hand.
             MediaBuffer::Video(frame) => {
                 let downloaded = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(downloaded));
+                out.push(MediaBuffer::Video(downloaded.into()));
                 Ok(())
             }
             other => Err(VulkanDownloadError::UnsupportedBuffer(other.kind()).into()),

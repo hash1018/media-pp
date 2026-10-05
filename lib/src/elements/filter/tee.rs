@@ -833,7 +833,7 @@ mod tests {
     use crate::{bus::Bus, graph::PipelineGraph};
 
     fn packet() -> MediaBuffer {
-        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
+        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()).into())
     }
 
     struct CountingSink {
@@ -1816,7 +1816,7 @@ mod tests {
         let packet_at = |pts: i64| {
             let mut packet = ffmpeg_next::Packet::empty();
             packet.set_pts(Some(pts));
-            MediaBuffer::Packet(Arc::new(packet))
+            MediaBuffer::Packet(Arc::new(packet).into())
         };
 
         // A preroll in which the early branch already has its sample.
@@ -1985,7 +1985,7 @@ mod tests {
             .state
             .enter(crate::playback_state::Phase::Prerolling(preroll));
         upstream
-            .push(MediaBuffer::Packet(Arc::new(packet)))
+            .push(MediaBuffer::Packet(Arc::new(packet).into()))
             .unwrap();
         upstream.push_event(&StreamEvent::Eos).unwrap();
         assert!(seen.lock().unwrap().is_empty(), "held by the preroll");

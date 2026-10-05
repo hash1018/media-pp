@@ -5,7 +5,13 @@
 //! collapsing them would only mean unwrapping again downstream. Its own
 //! documentation covers why each payload is shared rather than copied, and
 //! why a video frame arrives through a pool reference.
+//!
+//! Every buffer can carry [`Metadata`]: what an element found out about it,
+//! such as the objects a detector saw in a picture.
 
+use std::any::{Any, TypeId};
+use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use ffmpeg_next::{self as ffmpeg, ffi};
@@ -29,13 +35,19 @@ use crate::pool::{UnboundObjectPool, UnboundObjectPoolRef};
 /// (see [`crate::pool::UnboundObjectPool`], owned as that element's own
 /// struct field) get the underlying buffer back automatically once every
 /// `Arc` clone downstream has been dropped, instead of it just being freed.
+///
+/// Each payload sits in a wrapper — [`PacketBuffer`], [`VideoBuffer`],
+/// [`AudioBuffer`] — beside the buffer's [`Metadata`], and the wrapper
+/// dereferences to the payload's `Arc`: `MediaBuffer::Video(frame) =>
+/// frame.width()` reads the picture as it always has. A wrapper is made
+/// from its `Arc` with `.into()`.
 #[derive(Clone)]
 pub enum MediaBuffer {
     /// Encoded media packet produced by a demuxer or encoder.
     ///
     /// Its PTS, DTS, duration, stream index, and time base remain part of the
     /// packet contract while it travels through packet-level elements.
-    Packet(Arc<ffmpeg::Packet>),
+    Packet(PacketBuffer),
 
     /// Decoded video frame whose backing storage returns to its producer's
     /// [`crate::pool::UnboundObjectPool`] after the last `Arc` clone drops.
@@ -44,14 +56,14 @@ pub enum MediaBuffer {
     /// a replacement frame and preserves PTS, its [time base](time_base),
     /// duration, and color metadata unless it intentionally establishes a new
     /// timeline — in which case it sets the time base of that timeline.
-    Video(Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>),
+    Video(VideoBuffer),
 
     /// Decoded audio frame shared immutably between downstream branches.
     ///
     /// Sample format, sample rate, channel layout, PTS, its
     /// [time base](time_base), and duration describe the audio contract a
     /// transforming element must either preserve or deliberately replace.
-    Audio(Arc<ffmpeg::frame::Audio>),
+    Audio(AudioBuffer),
 }
 
 impl MediaBuffer {
@@ -62,15 +74,25 @@ impl MediaBuffer {
     /// Nothing recycles it: its buffers are freed once the last clone
     /// downstream is dropped. Something that makes frames over and over
     /// keeps an [`UnboundObjectPool`] of its own and sends
-    /// `MediaBuffer::Video(Arc::new(pool.get()))`, so each frame goes back
-    /// to be drawn into again.
+    /// `MediaBuffer::Video(Arc::new(pool.get()).into())`, so each frame goes
+    /// back to be drawn into again.
     pub fn video(frame: ffmpeg::frame::Video) -> Self {
         // A pool of zero keeps nothing: the one frame taken from it is
         // dropped, not returned, when its last reference goes.
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let mut slot = pool.get();
         *slot = frame;
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::Video(Arc::new(slot).into())
+    }
+
+    /// A packet as a [`MediaBuffer::Packet`].
+    pub fn packet(packet: ffmpeg::Packet) -> Self {
+        MediaBuffer::Packet(Arc::new(packet).into())
+    }
+
+    /// A sound as a [`MediaBuffer::Audio`].
+    pub fn audio(frame: ffmpeg::frame::Audio) -> Self {
+        MediaBuffer::Audio(Arc::new(frame).into())
     }
 
     /// Stable, human-readable variant name for diagnostics emitted when
@@ -81,6 +103,235 @@ impl MediaBuffer {
             MediaBuffer::Video(_) => "Video",
             MediaBuffer::Audio(_) => "Audio",
         }
+    }
+
+    /// What has been found out about this buffer, if anything has.
+    pub fn metadata(&self) -> Option<&Metadata> {
+        self.metadata_arc().map(Arc::as_ref)
+    }
+
+    /// The same, shared — for an element handing it on to a buffer of its
+    /// own making.
+    pub fn metadata_arc(&self) -> Option<&Arc<Metadata>> {
+        match self {
+            MediaBuffer::Packet(buffer) => buffer.metadata.as_ref(),
+            MediaBuffer::Video(buffer) => buffer.metadata.as_ref(),
+            MediaBuffer::Audio(buffer) => buffer.metadata.as_ref(),
+        }
+    }
+
+    /// This buffer carrying `metadata` in place of whatever it carried. The
+    /// payload is shared, not copied.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: impl Into<Arc<Metadata>>) -> Self {
+        self.set_metadata(Some(metadata.into()));
+        self
+    }
+
+    /// Replaces what this buffer carries — `None` takes it away.
+    pub fn set_metadata(&mut self, metadata: Option<Arc<Metadata>>) {
+        match self {
+            MediaBuffer::Packet(buffer) => buffer.metadata = metadata,
+            MediaBuffer::Video(buffer) => buffer.metadata = metadata,
+            MediaBuffer::Audio(buffer) => buffer.metadata = metadata,
+        }
+    }
+}
+
+/// Makes a payload wrapper: the `Arc` beside the buffer's metadata, read
+/// through as the `Arc` it holds.
+macro_rules! payload_buffer {
+    ($(#[$doc:meta])* $name:ident, $payload:ty) => {
+        $(#[$doc])*
+        #[derive(Clone)]
+        pub struct $name {
+            payload: Arc<$payload>,
+            metadata: Option<Arc<Metadata>>,
+        }
+
+        impl $name {
+            /// `payload`, carrying nothing yet.
+            pub fn new(payload: Arc<$payload>) -> Self {
+                Self {
+                    payload,
+                    metadata: None,
+                }
+            }
+
+            /// The payload's `Arc`, to keep or hand on.
+            pub fn payload(&self) -> &Arc<$payload> {
+                &self.payload
+            }
+
+            /// The payload's `Arc`, the wrapper let go of.
+            pub fn into_payload(self) -> Arc<$payload> {
+                self.payload
+            }
+
+            /// What has been found out about this buffer, if anything has.
+            pub fn metadata(&self) -> Option<&Metadata> {
+                self.metadata.as_deref()
+            }
+
+            /// The same, shared.
+            pub fn metadata_arc(&self) -> Option<&Arc<Metadata>> {
+                self.metadata.as_ref()
+            }
+
+            /// This buffer carrying `metadata` in place of whatever it
+            /// carried.
+            #[must_use]
+            pub fn with_metadata(mut self, metadata: impl Into<Arc<Metadata>>) -> Self {
+                self.metadata = Some(metadata.into());
+                self
+            }
+        }
+
+        impl Deref for $name {
+            type Target = Arc<$payload>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.payload
+            }
+        }
+
+        /// Lets an element that holds the only reference write through it,
+        /// with `Arc::get_mut`, or put another payload in its place; what
+        /// the buffer carries stays.
+        impl DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.payload
+            }
+        }
+
+        impl From<Arc<$payload>> for $name {
+            fn from(payload: Arc<$payload>) -> Self {
+                Self::new(payload)
+            }
+        }
+    };
+}
+
+payload_buffer!(
+    /// What [`MediaBuffer::Packet`] holds: the packet, and its
+    /// [`Metadata`].
+    PacketBuffer,
+    ffmpeg::Packet
+);
+
+payload_buffer!(
+    /// What [`MediaBuffer::Video`] holds: the pooled frame, and its
+    /// [`Metadata`].
+    VideoBuffer,
+    UnboundObjectPoolRef<ffmpeg::frame::Video>
+);
+
+payload_buffer!(
+    /// What [`MediaBuffer::Audio`] holds: the frame, and its [`Metadata`].
+    AudioBuffer,
+    ffmpeg::frame::Audio
+);
+
+/// What has been found out about a buffer, one value per type.
+///
+/// Open rather than a fixed set of fields, so an element defines the type
+/// of what it finds — a detector its detections, a tracker its tracks — and
+/// reads another's by asking for that type. One value of a type at a time:
+/// putting a second replaces the first.
+///
+/// A buffer holds it behind an `Arc` and never changes it in place: an
+/// element adding to it makes a copy with [`Self::with`] and puts that on
+/// the buffer it hands on, so a buffer a [`crate::elements::Tee`] shared
+/// keeps what it had in every other branch.
+///
+/// A [`crate::element::Filter`] that makes a buffer of the same sort from
+/// the one it was handed — a picture from a picture — finds this carried
+/// across by the framework; see that trait.
+#[derive(Clone, Default)]
+pub struct Metadata {
+    entries: Vec<Entry>,
+}
+
+#[derive(Clone)]
+struct Entry {
+    type_id: TypeId,
+    type_name: &'static str,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl Metadata {
+    /// Nothing found yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The value of type `T`, where there is one.
+    pub fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.entries
+            .iter()
+            .find(|entry| entry.type_id == TypeId::of::<T>())
+            .and_then(|entry| entry.value.downcast_ref::<T>())
+    }
+
+    /// Whether there is a value of type `T`.
+    pub fn contains<T: Any + Send + Sync>(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.type_id == TypeId::of::<T>())
+    }
+
+    /// Puts `value` in, in place of any value of its type, and says what it
+    /// replaced.
+    pub fn insert<T: Any + Send + Sync>(&mut self, value: T) -> Option<Arc<dyn Any + Send + Sync>> {
+        let entry = Entry {
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+            value: Arc::new(value),
+        };
+        match self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.type_id == entry.type_id)
+        {
+            Some(existing) => Some(std::mem::replace(existing, entry).value),
+            None => {
+                self.entries.push(entry);
+                None
+            }
+        }
+    }
+
+    /// This, with `value` in place of any value of its type.
+    #[must_use]
+    pub fn with<T: Any + Send + Sync>(mut self, value: T) -> Self {
+        self.insert(value);
+        self
+    }
+
+    /// Takes the value of type `T` out, and says whether there was one.
+    pub fn remove<T: Any + Send + Sync>(&mut self) -> bool {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| entry.type_id != TypeId::of::<T>());
+        self.entries.len() != before
+    }
+
+    /// How many values there are.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl fmt::Debug for Metadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set()
+            .entries(self.entries.iter().map(|entry| entry.type_name))
+            .finish()
     }
 }
 
@@ -250,11 +501,11 @@ mod tests {
     #[test]
     fn kind_reports_each_variant() {
         assert_eq!(
-            MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())).kind(),
+            MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty()).into()).kind(),
             "Packet"
         );
         assert_eq!(
-            MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())).kind(),
+            MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty()).into()).kind(),
             "Audio"
         );
     }
@@ -292,5 +543,68 @@ mod tests {
         carry_timing(&mut carried, &source);
         assert_eq!(carried.pts(), Some(441));
         assert_eq!(time_base(&carried), Some(ffmpeg::Rational::new(1, 44_100)));
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Detected(u32);
+
+    #[derive(Debug, PartialEq)]
+    struct Tracked(&'static str);
+
+    #[test]
+    fn metadata_holds_one_value_of_each_type() {
+        let metadata = Metadata::new().with(Detected(1)).with(Tracked("car"));
+        assert_eq!(metadata.get::<Detected>(), Some(&Detected(1)));
+        assert_eq!(metadata.get::<Tracked>(), Some(&Tracked("car")));
+        assert_eq!(metadata.get::<u8>(), None);
+        assert_eq!(metadata.len(), 2);
+
+        let metadata = metadata.with(Detected(2));
+        assert_eq!(metadata.get::<Detected>(), Some(&Detected(2)), "replaced");
+        assert_eq!(metadata.len(), 2);
+
+        let mut metadata = metadata;
+        assert!(metadata.remove::<Tracked>());
+        assert!(!metadata.remove::<Tracked>());
+        assert!(!metadata.contains::<Tracked>());
+        assert!(format!("{metadata:?}").contains("Detected"), "{metadata:?}");
+    }
+
+    /// A buffer a `Tee` shared keeps what it carried in every other branch:
+    /// putting metadata on one copy changes that copy alone, and the
+    /// payload stays the one both share.
+    #[test]
+    fn metadata_put_on_a_copy_leaves_the_shared_buffer_as_it_was() {
+        let shared = MediaBuffer::packet(ffmpeg::Packet::copy(&[7]));
+        let copy = shared
+            .clone()
+            .with_metadata(Metadata::new().with(Detected(3)));
+        assert!(shared.metadata().is_none());
+        assert_eq!(
+            copy.metadata()
+                .and_then(|metadata| metadata.get::<Detected>()),
+            Some(&Detected(3))
+        );
+        let (MediaBuffer::Packet(shared), MediaBuffer::Packet(copy)) = (&shared, &copy) else {
+            unreachable!("both are packets");
+        };
+        assert!(Arc::ptr_eq(shared.payload(), copy.payload()), "one payload");
+    }
+
+    /// The wrapper reads as the payload it holds, which is what keeps
+    /// `MediaBuffer::Video(frame) => frame.width()` working.
+    #[test]
+    fn a_wrapper_reads_as_its_payload() {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 4, 2);
+        frame.set_pts(Some(5));
+        let buffer = MediaBuffer::video(frame).with_metadata(Metadata::new().with(Detected(1)));
+        let MediaBuffer::Video(frame) = &buffer else {
+            unreachable!("a picture");
+        };
+        assert_eq!(
+            (frame.width(), frame.height(), frame.pts()),
+            (4, 2, Some(5))
+        );
+        assert_eq!(buffer.kind(), "Video");
     }
 }

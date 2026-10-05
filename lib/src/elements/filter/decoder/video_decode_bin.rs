@@ -1423,7 +1423,7 @@ mod tests {
         let collected = Arc::clone(&frames);
         let collector: Box<dyn RawSink> = Box::new(AppSink::new("out", move |buffer| {
             if let MediaBuffer::Video(frame) = buffer {
-                collected.lock().unwrap().push(frame);
+                collected.lock().unwrap().push(frame.into_payload());
             }
             Ok(())
         }));
@@ -1447,7 +1447,7 @@ mod tests {
     ) -> Result<Frames> {
         let frames = collect(&mut bin, after);
         for packet in packets {
-            bin.consume(MediaBuffer::Packet(Arc::new(packet)))?;
+            bin.consume(MediaBuffer::Packet(Arc::new(packet).into()))?;
         }
         crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos)?;
         drop(bin);
@@ -1538,7 +1538,7 @@ mod tests {
             if !bin.ready_consume() {
                 break;
             }
-            bin.consume(MediaBuffer::Packet(Arc::new(packet)))
+            bin.consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("decodes");
             fed += 1;
         }
@@ -1614,7 +1614,8 @@ mod tests {
                 VideoDecodeBin::open("h264", params, DecodeTarget::System, threading).unwrap();
             let frames = collect(&mut bin, None);
             for packet in packets {
-                bin.consume(MediaBuffer::Packet(Arc::new(packet))).unwrap();
+                bin.consume(MediaBuffer::Packet(Arc::new(packet).into()))
+                    .unwrap();
             }
             let before = frames.lock().unwrap().len();
             crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos).unwrap();
@@ -2240,7 +2241,8 @@ mod tests {
             context.state.observe(&preroll);
             bin.control(&preroll).unwrap();
             for packet in packets {
-                bin.consume(MediaBuffer::Packet(Arc::new(packet))).unwrap();
+                bin.consume(MediaBuffer::Packet(Arc::new(packet).into()))
+                    .unwrap();
             }
             crate::stream::deliver(&mut bin, &crate::stream::StreamEvent::Eos).unwrap();
             assert_eq!(

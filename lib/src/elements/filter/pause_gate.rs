@@ -310,7 +310,7 @@ impl RawSink for PauseGate {
                 // buffer handed to this call, a different frame from it.
                 unsafe { reference(wrapper.as_mut_ptr(), source) }?;
                 wrapper.set_pts(Some(moved));
-                MediaBuffer::Video(Arc::new(wrapper))
+                MediaBuffer::Video(Arc::new(wrapper).into())
             }
             Wrappers::Audio => {
                 let mut wrapper = ffmpeg::frame::Audio::empty();
@@ -318,7 +318,7 @@ impl RawSink for PauseGate {
                 // named nowhere else.
                 unsafe { reference(wrapper.as_mut_ptr(), source) }?;
                 wrapper.set_pts(Some(moved));
-                MediaBuffer::Audio(Arc::new(wrapper))
+                MediaBuffer::Audio(Arc::new(wrapper).into())
             }
         };
         self.pad.push(forwarded)
@@ -469,7 +469,7 @@ mod tests {
             // The value stands in for "which buffer this is", so the frames
             // either side of the pause can be told apart.
             audio.plane_mut::<f32>(0)[0] = pts as f32;
-            MediaBuffer::Audio(Arc::new(audio))
+            MediaBuffer::Audio(Arc::new(audio).into())
         };
 
         for tick in 0..4 {

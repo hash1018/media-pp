@@ -184,7 +184,7 @@ impl Filter for Applying {
                     return Ok(());
                 }
                 let output = PerFrameTransform::transform(self, &frame)?;
-                out.push(MediaBuffer::Video(output));
+                out.push(MediaBuffer::Video(output.into()));
                 Ok(())
             }
             other => {
@@ -313,7 +313,7 @@ mod tests {
             }
         }
         frame.set_pts(Some(7));
-        MediaBuffer::Video(Arc::new(frame))
+        MediaBuffer::Video(Arc::new(frame).into())
     }
 
     fn first_pixel(buffer: &MediaBuffer) -> [u8; 4] {
@@ -413,7 +413,7 @@ mod tests {
             |_| {},
         );
         let error = element
-            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .consume(MediaBuffer::Video(Arc::new(pool.get()).into()))
             .expect_err("YUV420P must be refused");
         assert!(matches!(
             error,
@@ -427,7 +427,9 @@ mod tests {
     fn audio_is_refused() {
         let (mut element, _handle, received) = new_effect(brighter());
         let error = element
-            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .consume(MediaBuffer::Audio(
+                Arc::new(ffmpeg::frame::Audio::empty()).into(),
+            ))
             .expect_err("audio must be refused");
         assert!(matches!(
             error,

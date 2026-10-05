@@ -309,7 +309,7 @@ impl Capturing {
             let mut converted = self.pool.get();
             self.convert(&decoded, &mut converted)?;
             self.ready
-                .push_back(MediaBuffer::Video(Arc::new(converted)));
+                .push_back(MediaBuffer::Video(Arc::new(converted).into()));
         }
         Ok(())
     }

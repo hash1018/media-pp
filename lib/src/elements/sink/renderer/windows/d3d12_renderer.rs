@@ -282,7 +282,7 @@ impl RawSink for D3d12Renderer {
             return Ok(());
         };
 
-        self.submit_d3d12_frame(frame)
+        self.submit_d3d12_frame(frame.into_payload())
             .inspect_err(|error| pp_error!(self, "submit_d3d12_frame failed: {error}"))
     }
 }

@@ -201,7 +201,7 @@ impl VideoToolboxDecoder {
                         pp_error!(self, "decoder did not select the VideoToolbox pixel format");
                         return Err(VideoToolboxDecoderError::HwAccelUnavailable.into());
                     }
-                    let buffer = MediaBuffer::Video(Arc::new(frame));
+                    let buffer = MediaBuffer::Video(Arc::new(frame).into());
                     if self.stretch.holding() {
                         self.stretch.hold(buffer);
                     } else {
@@ -266,7 +266,7 @@ impl RawSink for VideoToolboxDecoder {
                 self.preroll_gate.observe_packet(&packet);
                 self.qos.follow(&mut self.decoder, &self.pp_log);
                 self.decoder
-                    .send_packet(&*packet)
+                    .send_packet(&**packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                     .map_err(|error| self.decode_error(error))?;
                 self.drain()
@@ -424,7 +424,7 @@ mod tests {
         let received = capture(&mut decoder);
         let sent = packets.len();
         for packet in packets {
-            match decoder.consume(MediaBuffer::Packet(Arc::new(packet))) {
+            match decoder.consume(MediaBuffer::Packet(Arc::new(packet).into())) {
                 Err(crate::error::Error::VideoToolboxDecoderError(
                     VideoToolboxDecoderError::HwAccelUnavailable,
                 )) => {
@@ -507,7 +507,7 @@ mod tests {
             .map_or(packets.len(), |at| at + 1);
         decoder.begin_stretch().unwrap();
         for packet in packets.into_iter().take(next_key) {
-            match decoder.consume(MediaBuffer::Packet(Arc::new(packet))) {
+            match decoder.consume(MediaBuffer::Packet(Arc::new(packet).into())) {
                 Err(crate::error::Error::VideoToolboxDecoderError(
                     VideoToolboxDecoderError::HwAccelUnavailable,
                 )) => {

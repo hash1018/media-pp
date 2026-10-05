@@ -1113,7 +1113,9 @@ mod tests {
         state.enter(Phase::Prerolling(Arc::clone(&context)));
 
         first_terminal
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg_next::Packet::empty()).into(),
+            ))
             .expect("consume first terminal sample");
         assert!(
             !first_terminal.ready_consume(),
@@ -1126,7 +1128,9 @@ mod tests {
         assert!(!context.is_complete());
 
         second_terminal
-            .consume(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))
+            .consume(MediaBuffer::Packet(
+                Arc::new(ffmpeg_next::Packet::empty()).into(),
+            ))
             .expect("consume second terminal sample");
         assert!(context.is_complete());
         assert!(!first_terminal.ready_consume());

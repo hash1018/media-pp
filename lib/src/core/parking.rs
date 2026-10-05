@@ -313,7 +313,7 @@ mod tests {
         packet.set_pts(Some(ms));
         packet.set_dts(Some(ms));
         packet.set_time_base(ffmpeg::Rational::new(1, 1000));
-        MediaBuffer::Packet(Arc::new(packet))
+        MediaBuffer::Packet(Arc::new(packet).into())
     }
 
     fn pads(count: usize) -> Vec<SrcPad> {

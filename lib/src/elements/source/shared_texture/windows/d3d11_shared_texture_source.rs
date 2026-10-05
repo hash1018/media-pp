@@ -385,7 +385,7 @@ impl Import {
         let mut pooled = self.pool.get();
         *pooled = wrap_d3d11_texture(copy, self.width, self.height)?;
         pooled.set_pts(pts);
-        Ok(MediaBuffer::Video(Arc::new(pooled)))
+        Ok(MediaBuffer::Video(Arc::new(pooled).into()))
     }
 
     /// Opens the producer's handle on this pipeline's device. See the

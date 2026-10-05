@@ -374,12 +374,9 @@ mod tests {
 
         for tick in 0..20i64 {
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48000,
-                    1,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48000, 1, 960, tick * 960)).into(),
+                ))
                 .expect("consume must succeed");
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
@@ -463,12 +460,9 @@ mod tests {
 
         for tick in 0..10i64 {
             encoder_a
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48000,
-                    2,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48000, 2, 960, tick * 960)).into(),
+                ))
                 .expect("consume must succeed");
         }
         // Track `a` finishes here — well before track `b` has written
@@ -478,12 +472,9 @@ mod tests {
 
         for tick in 0..10i64 {
             encoder_b
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    44100,
-                    1,
-                    882,
-                    tick * 882,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(44100, 1, 882, tick * 882)).into(),
+                ))
                 .expect("consume must succeed");
         }
         crate::stream::deliver(&mut encoder_b, &crate::stream::StreamEvent::Eos)
@@ -543,12 +534,9 @@ mod tests {
 
         for tick in 0..20i64 {
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48000,
-                    1,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48000, 1, 960, tick * 960)).into(),
+                ))
                 .expect("consume must succeed");
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
@@ -662,12 +650,9 @@ mod tests {
 
         for tick in 0..20i64 {
             encoder
-                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
-                    48_000,
-                    2,
-                    960,
-                    tick * 960,
-                ))))
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48_000, 2, 960, tick * 960)).into(),
+                ))
                 .expect("consume must succeed");
         }
         crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
@@ -1056,7 +1041,7 @@ mod tests {
         );
 
         for (stream, packet) in input.packets() {
-            let buffer = MediaBuffer::Packet(Arc::new(packet));
+            let buffer = MediaBuffer::Packet(Arc::new(packet).into());
             if stream.index() == video_index {
                 video_sink.consume(buffer).expect("video packet");
             } else if stream.index() == audio_index {

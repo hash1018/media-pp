@@ -201,7 +201,7 @@ mod example {
             let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
             packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
             packet.set_pts(Some(i * 3_000));
-            sink.consume(MediaBuffer::Packet(Arc::new(packet)))
+            sink.consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("push");
         }
     }

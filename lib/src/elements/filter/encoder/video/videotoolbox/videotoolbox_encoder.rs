@@ -400,7 +400,7 @@ impl Encoding {
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
-                    out.push(MediaBuffer::Packet(Arc::new(packet)));
+                    out.push(MediaBuffer::Packet(Arc::new(packet).into()));
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -565,7 +565,7 @@ mod tests {
         decoded
             .iter()
             .filter_map(|buffer| match buffer {
-                MediaBuffer::Video(frame) => Some(frame.clone()),
+                MediaBuffer::Video(frame) => Some(frame.payload().clone()),
                 _ => None,
             })
             .collect()
@@ -751,7 +751,7 @@ mod tests {
             }
             packet.set_time_base(time_base);
             decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
                 .expect("decode");
             sent += 1;
             for frame in decoded.lock().unwrap().drain(..) {
