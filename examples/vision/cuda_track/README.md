@@ -43,6 +43,10 @@ LD_LIBRARY_PATH=/path/to/cuda13-cudnn9-tensorrt10/lib \
   cargo run --release -p cuda_track -- model.onnx video.mp4 --eval 1,2,4,9 --confirm 1
 ```
 
+On Windows, as for [`cuda_detect`](../cuda_detect/README.md): nothing NVIDIA's
+to build, and to run, the directories holding the DLLs on `PATH` — those it
+names, and cuFFT's `bin\x64` beside them.
+
 Measured with YOLOv10n on an RTX 3050, `--confirm 1`, as mean IoU and the
 share of reference objects overlapped by half or more, on the pictures let
 by — the tracker by motion alone against holding still:

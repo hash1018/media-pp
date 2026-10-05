@@ -3,8 +3,10 @@
 //! transforms cuFFT makes between them, and the device memory every
 //! object's correlation filter and every picture's samples live in.
 //!
-//! cuFFT is linked, by build.rs, with the `cuda-visual-tracking` feature:
-//! the program does not start without it, as it does not without FFmpeg.
+//! cuFFT is linked with the `cuda-visual-tracking` feature — by build.rs on
+//! Linux, and on Windows by naming its DLL below (`raw-dylib`), as
+//! `ort-cuda` names its libraries: the program does not start without it,
+//! as it does not without FFmpeg.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -25,8 +27,9 @@ const CUFFT_FORWARD: i32 = -1;
 /// `CUFFT_INVERSE`.
 const CUFFT_INVERSE: i32 = 1;
 
-// cuFFT's C ABI, from cufft.h, linked by build.rs. Every call checks the
-// `cufftResult` it returns.
+// cuFFT's C ABI, from cufft.h. Every call checks the `cufftResult` it
+// returns.
+#[cfg_attr(windows, link(name = "cufft64_12", kind = "raw-dylib"))]
 unsafe extern "C" {
     fn cufftPlanMany(
         plan: *mut CufftHandle,

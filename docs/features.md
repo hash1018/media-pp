@@ -64,10 +64,15 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
   itself is part of macOS.
 - **`ort-cuda`, `ort-tensorrt`**: CUDA 13's runtime, cuBLAS and cuRAND,
   and cuDNN 9 — and with `ort-tensorrt`, TensorRT 10 — are linked into the
-  program, so building needs them where the linker finds them
-  (`MEDIA_PP_NVIDIA_LIB_DIRS`, `LD_LIBRARY_PATH` or `LIB`, the CUDA
-  installation, or the system's directories), and the program does not
-  start without them, as it does not without FFmpeg. At run time it also
+  program, which does not start without them, as it does not without
+  FFmpeg. On Linux building needs them where the linker finds them
+  (`MEDIA_PP_NVIDIA_LIB_DIRS`, `LD_LIBRARY_PATH`, the CUDA installation, or
+  the system's directories). On Windows building needs none of them — the
+  program names each DLL itself — and running needs the directories that
+  hold them on `PATH`. None needs an NVIDIA account: CUDA's and cuDNN's
+  redistributable archives are at developer.download.nvidia.com, and
+  TensorRT's libraries are NVIDIA's pip wheels (`tensorrt-cu13-libs`), which
+  are zip files, at pypi.nvidia.com. At run time it also
   needs a driver for CUDA 13.0 and at least the CUDA 13.2 runtime, cuDNN
   9.23 and TensorRT 10.15; `CudaOrtDetector::runtime` says what falls
   short.

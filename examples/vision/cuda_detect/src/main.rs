@@ -14,23 +14,28 @@
 //! YOLOv10 and YOLO26. The first run builds a TensorRT engine for the model
 //! and this GPU, which takes minutes; later runs load it from the cache in
 //! under a second. Built with `ort-tensorrt`, which links CUDA 13, cuDNN 9
-//! and TensorRT 10 into it: building and running need them where the
-//! linker and the loader find them — `LD_LIBRARY_PATH` pointing at them.
+//! and TensorRT 10 into it: on Linux building and running need them where
+//! the linker and the loader find them — `LD_LIBRARY_PATH` pointing at
+//! them; on Windows building needs none of them, and running their DLLs on
+//! `PATH`.
 //!
 //!     cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
 //!         [--out boxes.mp4] [--pictures N]
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
-    eprintln!("{} example only supports Linux", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} example only supports Linux and Windows",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn main() -> impl std::process::Termination {
     example::run()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod example {
     use std::sync::{
         Arc,
@@ -53,10 +58,11 @@ mod example {
     };
 
     /// Where the labels' font is looked for; without one, boxes alone.
-    const FONTS: [&str; 3] = [
+    const FONTS: [&str; 4] = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
     ];
 
     struct Args {

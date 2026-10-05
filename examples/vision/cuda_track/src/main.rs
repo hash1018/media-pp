@@ -18,17 +18,20 @@
 //!     cargo run --release -p cuda_track -- model.onnx video.mp4 [--interval N] [--out tracked.mp4]
 //!     cargo run --release -p cuda_track -- model.onnx video.mp4 --eval 1,2,4,9
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
-    eprintln!("{} example only supports Linux", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} example only supports Linux and Windows",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn main() -> impl std::process::Termination {
     example::run()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod example {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
@@ -50,10 +53,11 @@ mod example {
     };
 
     /// Where the labels' font is looked for; without one, boxes alone.
-    const FONTS: [&str; 3] = [
+    const FONTS: [&str; 4] = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
     ];
 
     /// A reference detection counts from this score: what a viewer would

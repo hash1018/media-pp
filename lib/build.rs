@@ -196,39 +196,35 @@ mod vulkan {
 mod nvidia {
     use std::path::PathBuf;
 
-    /// Each library as the linker looks for it on Linux — the versioned
-    /// name, since NVIDIA's pip wheels ship no unversioned one — and on
-    /// Windows, as its import library.
+    /// Each library as the linker looks for it on Linux: the versioned name,
+    /// since NVIDIA's pip wheels ship no unversioned one.
     #[cfg(feature = "ort-cuda")]
-    const CUDA: &[(&str, &str)] = &[
-        ("libcudart.so.13", "cudart"),
-        ("libcublasLt.so.13", "cublasLt"),
-        ("libcublas.so.13", "cublas"),
-        ("libcurand.so.10", "curand"),
-        ("libcudnn.so.9", "cudnn"),
+    const CUDA: &[&str] = &[
+        "libcudart.so.13",
+        "libcublasLt.so.13",
+        "libcublas.so.13",
+        "libcurand.so.10",
+        "libcudnn.so.9",
     ];
     #[cfg(feature = "ort-tensorrt")]
-    const TENSORRT: &[(&str, &str)] = &[
-        ("libnvinfer.so.10", "nvinfer_10"),
-        ("libnvonnxparser.so.10", "nvonnxparser_10"),
-    ];
+    const TENSORRT: &[&str] = &["libnvinfer.so.10", "libnvonnxparser.so.10"];
     #[cfg(feature = "cuda-visual-tracking")]
-    const CUFFT: &[(&str, &str)] = &[("libcufft.so.12", "cufft")];
+    const CUFFT: &[&str] = &["libcufft.so.12"];
 
     pub(super) fn link() {
-        let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
-        for variable in [
-            "MEDIA_PP_NVIDIA_LIB_DIRS",
-            "LD_LIBRARY_PATH",
-            "LIB",
-            "PATH",
-            "CUDA_PATH",
-        ] {
+        // On Windows the extern blocks name each DLL themselves
+        // (`raw-dylib`): NVIDIA's wheels there carry the DLLs and no import
+        // libraries, so there is nothing for a linker to find, and nothing
+        // has to be there to build — only, as here, to run.
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            return;
+        }
+        for variable in ["MEDIA_PP_NVIDIA_LIB_DIRS", "LD_LIBRARY_PATH", "CUDA_PATH"] {
             println!("cargo:rerun-if-env-changed={variable}");
         }
 
         #[allow(unused_mut)]
-        let mut libraries: Vec<(&str, &str)> = Vec::new();
+        let mut libraries: Vec<&str> = Vec::new();
         #[cfg(feature = "ort-cuda")]
         libraries.extend_from_slice(CUDA);
         #[cfg(feature = "ort-tensorrt")]
@@ -236,25 +232,16 @@ mod nvidia {
         #[cfg(feature = "cuda-visual-tracking")]
         libraries.extend_from_slice(CUFFT);
 
-        let places = places(windows);
+        let places = places();
         let mut found: Vec<&PathBuf> = Vec::new();
         let mut missing = Vec::new();
-        for &(linux, import) in &libraries {
-            let file = if windows {
-                format!("{import}.lib")
-            } else {
-                linux.to_owned()
-            };
-            match places.iter().find(|dir| dir.join(&file).is_file()) {
+        for library in libraries {
+            match places.iter().find(|dir| dir.join(library).is_file()) {
                 Some(dir) if !found.contains(&dir) => found.push(dir),
                 Some(_) => {}
-                None => missing.push(file),
+                None => missing.push(library),
             }
-            if windows {
-                println!("cargo:rustc-link-lib=dylib={import}");
-            } else {
-                println!("cargo:rustc-link-lib=dylib:+verbatim={linux}");
-            }
+            println!("cargo:rustc-link-lib=dylib:+verbatim={library}");
         }
         for dir in found {
             println!("cargo:rustc-link-search=native={}", dir.display());
@@ -270,26 +257,17 @@ mod nvidia {
     /// Where to look, in order: what the builder named, where the loader
     /// will look, the CUDA installation, and the system's directories —
     /// the last only for a build for this machine.
-    fn places(windows: bool) -> Vec<PathBuf> {
+    fn places() -> Vec<PathBuf> {
         let mut places = Vec::new();
-        let mut list = |variable: &str| {
+        for variable in ["MEDIA_PP_NVIDIA_LIB_DIRS", "LD_LIBRARY_PATH"] {
             if let Some(value) = std::env::var_os(variable) {
                 places.extend(std::env::split_paths(&value));
             }
-        };
-        list("MEDIA_PP_NVIDIA_LIB_DIRS");
-        if windows {
-            list("LIB");
-            list("PATH");
-        } else {
-            list("LD_LIBRARY_PATH");
         }
         if let Some(cuda) = std::env::var_os("CUDA_PATH") {
-            let cuda = PathBuf::from(cuda);
-            places.extend([cuda.join("lib").join("x64"), cuda.join("lib64")]);
+            places.push(PathBuf::from(cuda).join("lib64"));
         }
-        let native = std::env::var("HOST").ok() == std::env::var("TARGET").ok();
-        if native && !windows {
+        if std::env::var("HOST").ok() == std::env::var("TARGET").ok() {
             places.extend(
                 [
                     "/usr/local/cuda/lib64",

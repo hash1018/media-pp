@@ -2,13 +2,18 @@
 //! this machine has of them — see [`CudaOrtDetector::runtime`].
 //!
 //! CUDA's runtime, cuBLAS, cuRAND and cuDNN — and with `ort-tensorrt`,
-//! TensorRT and its ONNX parser — are linked into the executable, by
-//! build.rs: a program built with the feature does not start without them,
-//! as it does not without FFmpeg, and the providers find them already open
-//! under the names they ask for. What linking leaves to run time is their
-//! versions, which only they can say, and the driver, which is the
-//! system's and is opened here rather than linked, so that a build machine
-//! needs no driver.
+//! TensorRT and its ONNX parser — are linked into the executable: a program
+//! built with the feature does not start without them, as it does not
+//! without FFmpeg, and the providers find them already open under the names
+//! they ask for. What linking leaves to run time is their versions, which
+//! only they can say, and the driver, which is the system's and is opened
+//! here rather than linked, so that a build machine needs no driver.
+//!
+//! On Linux build.rs links each by its versioned file name, which is how
+//! NVIDIA's pip wheels ship them. On Windows each block below names its DLL
+//! itself (`raw-dylib`): the wheels there carry the DLLs and no import
+//! libraries, and these few calls are all this crate makes of them, so
+//! nothing has to be there to build — only, as on Linux, to run.
 //!
 //! The link keeps a library only while something in the program calls it —
 //! rustc passes `--as-needed` — so each is called here, for its version.
@@ -19,24 +24,47 @@ use std::fmt;
 
 use libloading::Library;
 
+#[cfg_attr(windows, link(name = "cudart64_13", kind = "raw-dylib"))]
 unsafe extern "C" {
     /// `cudaError_t cudaRuntimeGetVersion(int *)`, in the CUDA runtime.
     fn cudaRuntimeGetVersion(version: *mut i32) -> i32;
+}
+
+#[cfg_attr(windows, link(name = "cublas64_13", kind = "raw-dylib"))]
+unsafe extern "C" {
     /// `cublasStatus_t cublasGetProperty(libraryPropertyType, int *)`, in
     /// cuBLAS: the major, minor and patch level for 0, 1 and 2.
     fn cublasGetProperty(property: i32, value: *mut i32) -> i32;
+}
+
+#[cfg_attr(windows, link(name = "cublasLt64_13", kind = "raw-dylib"))]
+unsafe extern "C" {
     /// `size_t cublasLtGetVersion(void)`, in cuBLASLt.
     fn cublasLtGetVersion() -> usize;
+}
+
+#[cfg_attr(windows, link(name = "curand64_10", kind = "raw-dylib"))]
+unsafe extern "C" {
     /// `curandStatus_t curandGetVersion(int *)`, in cuRAND.
     fn curandGetVersion(version: *mut i32) -> i32;
+}
+
+#[cfg_attr(windows, link(name = "cudnn64_9", kind = "raw-dylib"))]
+unsafe extern "C" {
     /// `size_t cudnnGetVersion(void)`, in cuDNN.
     fn cudnnGetVersion() -> usize;
 }
 
 #[cfg(feature = "ort-tensorrt")]
+#[cfg_attr(windows, link(name = "nvinfer_10", kind = "raw-dylib"))]
 unsafe extern "C" {
     /// `int32_t getInferLibVersion(void)`, in TensorRT.
     fn getInferLibVersion() -> i32;
+}
+
+#[cfg(feature = "ort-tensorrt")]
+#[cfg_attr(windows, link(name = "nvonnxparser_10", kind = "raw-dylib"))]
+unsafe extern "C" {
     /// `int getNvOnnxParserVersion(void)`, in TensorRT's ONNX parser.
     fn getNvOnnxParserVersion() -> i32;
 }

@@ -898,6 +898,15 @@ compile error with no explanation.
 
 ### Changed
 
+- **`ort-cuda`, `ort-tensorrt` and `cuda-visual-tracking` build on Windows
+  with nothing of NVIDIA's installed.** The few calls this crate makes into
+  CUDA's runtime, cuBLAS, cuRAND, cuFFT, cuDNN and TensorRT name each DLL
+  themselves (`raw-dylib`), so no import library is looked for — NVIDIA's
+  pip wheels, which is how TensorRT comes without an account, carry none.
+  Running needs the DLLs on `PATH`, as it needed them before. Linux is
+  unchanged. The `cuda_detect` and `cuda_track` examples run on Windows
+  too.
+
 - **The macOS API is documented too, beside the Windows one.** docs.rs
   builds on Linux only, so both are built on a runner of their own platform
   and published together: the Windows documentation moved from
