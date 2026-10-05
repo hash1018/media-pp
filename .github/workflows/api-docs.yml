@@ -65,7 +65,7 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
-        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,vulkan,webrtc,ort,whisper,rnnoise
+        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,mf-virtual-camera,wasapi-capture,wasapi-renderer,vulkan,webrtc,ort,whisper,rnnoise
 
       # Pages will not serve the `.lock` cargo leaves behind.
       - name: Drop the build lock

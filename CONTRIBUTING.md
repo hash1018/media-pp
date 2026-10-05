@@ -93,7 +93,7 @@ To build either locally, labelled by feature:
 
 ```powershell
 $env:RUSTDOCFLAGS = "--cfg docsrs"
-cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc
+cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,mf-virtual-camera,wasapi-capture,wasapi-renderer,webrtc
 ```
 
 ```sh
