@@ -20,7 +20,8 @@ pub use metal::{MetalScaler, MetalScalerError, MetalScalerInterp};
 pub use sw_scaler::{SwScaler, SwScalerError};
 #[cfg(any(
     all(target_os = "windows", feature = "mf-virtual-camera"),
-    all(target_os = "linux", feature = "v4l2-virtual-camera")
+    all(target_os = "linux", feature = "v4l2-virtual-camera"),
+    feature = "ort"
 ))]
 pub(crate) use sw_scaler::{is_rgb, matrix};
 #[cfg(feature = "vulkan")]

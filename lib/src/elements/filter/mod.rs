@@ -27,6 +27,8 @@ mod download;
 mod encoder;
 mod frame_rate_limiter;
 mod line;
+#[cfg(feature = "ort")]
+mod ort_detector;
 mod pacer;
 mod pause_gate;
 mod rack;
@@ -110,6 +112,12 @@ pub use encoder::{
 #[cfg(feature = "vulkan")]
 pub use encoder::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};
 pub use frame_rate_limiter::{FrameRateLimiter, FrameRateLimiterError};
+#[cfg(feature = "ort")]
+pub use ort_detector::{
+    COCO_CLASS_LABELS, Detection, Detections, OrtDetectorError, OrtDetectorOptions, SwOrtDetector,
+};
+#[cfg(feature = "ort-cuda")]
+pub use ort_detector::{CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, UseTensorRtPolicy};
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};
 pub use rack::{Rack, RackError, RackHandle};

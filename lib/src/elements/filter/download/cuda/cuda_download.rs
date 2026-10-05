@@ -53,7 +53,7 @@ pub enum CudaDownloadError {
 /// This is what makes a CUDA frame reach anything other than
 /// [`crate::elements::CudaEncoder`] or [`crate::elements::CudaRenderer`]:
 /// [`crate::elements::SwScaler`], [`crate::elements::SwEncoder`],
-/// `OrtDetector`, [`crate::elements::SwVideoCompositor`],
+/// `SwOrtDetector`, [`crate::elements::SwVideoCompositor`],
 /// and [`crate::elements::AppSink`] all read pixel bytes, which a CUDA frame
 /// does not expose. So NVDEC decode plus CPU-side work — inference on a
 /// hardware-decoded stream, for instance — goes
@@ -488,7 +488,7 @@ mod tests {
 
     /// The point of the element: real NVDEC output becomes readable CPU
     /// pixels, which is what lets a hardware-decoded stream reach a `SwScaler`,
-    /// `SwEncoder`, or `OrtDetector` at all.
+    /// `SwEncoder`, or `SwOrtDetector` at all.
     #[test]
     fn decoded_nvdec_frames_become_readable_cpu_frames() {
         let Some((device, _cuda_lock)) = try_cuda_device() else {

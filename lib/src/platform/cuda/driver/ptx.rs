@@ -1641,3 +1641,285 @@ BMDONE:
     ret;
 }
 "#;
+
+/// What [`crate::elements::CudaOrtDetector`] runs to fit a picture into a
+/// detector's input: each thread one pixel of the model's `width` by
+/// `height` input, writing it to three float planes — R, then G, then B,
+/// each 0 to 1, as a YOLO model reads them.
+///
+/// The picture sits scaled inside the input at `offset`, `scaled` in size,
+/// proportions kept; a pixel outside it is the grey Ultralytics trains on,
+/// 114 of 255 (`0f3EE4E4E5`). Inside, each pixel takes the source sample at
+/// its centre — nearest rather than filtered: a detector fed a third of a
+/// 1080p picture finds the same objects either way, and this is one load
+/// a pixel. An NV12 sample is made RGB by the three rows `fit_nv12` is
+/// handed, the same `(Y', Cb, Cr, 1)` rows `nv12_to_bgra` reads; a BGRA one
+/// is read as it is.
+///
+/// Kept apart from [`CONVERT_PTX`], and loaded by the detector alone: every
+/// other CUDA element would otherwise pay for its JIT at construction.
+#[cfg(feature = "ort-cuda")]
+pub(super) const FIT_PTX: &str = r#"
+.version 6.0
+.target sm_50
+.address_size 64
+
+.visible .entry fit_nv12(
+    .param .u64 dst,
+    .param .u32 model_w,
+    .param .u32 model_h,
+    .param .u32 offset_x,
+    .param .u32 offset_y,
+    .param .u32 scaled_w,
+    .param .u32 scaled_h,
+    .param .u64 luma,
+    .param .u32 luma_pitch,
+    .param .u64 chroma,
+    .param .u32 chroma_pitch,
+    .param .u32 src_w,
+    .param .u32 src_h,
+    .param .f32 red_y,
+    .param .f32 red_cb,
+    .param .f32 red_cr,
+    .param .f32 red_offset,
+    .param .f32 green_y,
+    .param .f32 green_cb,
+    .param .f32 green_cr,
+    .param .f32 green_offset,
+    .param .f32 blue_y,
+    .param .f32 blue_cb,
+    .param .f32 blue_cr,
+    .param .f32 blue_offset
+)
+{
+    .reg .pred  %p<6>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<40>;
+    .reg .f32   %f<32>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u32    %r1, [model_w];
+    ld.param.u32    %r2, [model_h];
+
+    mov.u32         %r6, %ctaid.x;
+    mov.u32         %r7, %ntid.x;
+    mov.u32         %r8, %tid.x;
+    mad.lo.s32      %r9, %r6, %r7, %r8;
+    mov.u32         %r10, %ctaid.y;
+    mov.u32         %r11, %ntid.y;
+    mov.u32         %r12, %tid.y;
+    mad.lo.s32      %r13, %r10, %r11, %r12;
+
+    setp.ge.u32     %p1, %r9, %r1;
+    @%p1 bra        FIT_NV12_DONE;
+    setp.ge.u32     %p2, %r13, %r2;
+    @%p2 bra        FIT_NV12_DONE;
+
+    // The margin's grey, unless the pixel is inside the picture.
+    mov.f32         %f4, 0f3EE4E4E5;
+    mov.f32         %f5, 0f3EE4E4E5;
+    mov.f32         %f6, 0f3EE4E4E5;
+
+    // dx, dy into the scaled picture; a pixel before its corner wraps round
+    // to a huge value, which the one comparison each also refuses.
+    ld.param.u32    %r3, [offset_x];
+    ld.param.u32    %r4, [offset_y];
+    ld.param.u32    %r5, [scaled_w];
+    ld.param.u32    %r14, [scaled_h];
+    sub.s32         %r15, %r9, %r3;
+    sub.s32         %r16, %r13, %r4;
+    setp.ge.u32     %p3, %r15, %r5;
+    @%p3 bra        FIT_NV12_STORE;
+    setp.ge.u32     %p4, %r16, %r14;
+    @%p4 bra        FIT_NV12_STORE;
+
+    // The source sample at the pixel's centre: (2d + 1) * src / (2 * scaled).
+    ld.param.u32    %r17, [src_w];
+    ld.param.u32    %r18, [src_h];
+    shl.b32         %r19, %r15, 1;
+    add.s32         %r19, %r19, 1;
+    mul.lo.s32      %r19, %r19, %r17;
+    shl.b32         %r20, %r5, 1;
+    div.u32         %r21, %r19, %r20;
+    shl.b32         %r22, %r16, 1;
+    add.s32         %r22, %r22, 1;
+    mul.lo.s32      %r22, %r22, %r18;
+    shl.b32         %r23, %r14, 1;
+    div.u32         %r24, %r22, %r23;
+
+    ld.param.u64    %rd1, [luma];
+    ld.param.u32    %r25, [luma_pitch];
+    ld.param.u64    %rd2, [chroma];
+    ld.param.u32    %r26, [chroma_pitch];
+
+    mad.lo.s32      %r27, %r24, %r25, %r21;
+    cvt.u64.u32     %rd3, %r27;
+    add.s64         %rd4, %rd1, %rd3;
+    ld.global.u8    %rs1, [%rd4];
+
+    shr.u32         %r28, %r24, 1;
+    shr.u32         %r29, %r21, 1;
+    shl.b32         %r29, %r29, 1;
+    mad.lo.s32      %r30, %r28, %r26, %r29;
+    cvt.u64.u32     %rd5, %r30;
+    add.s64         %rd6, %rd2, %rd5;
+    ld.global.u8    %rs2, [%rd6];
+    ld.global.u8    %rs3, [%rd6+1];
+
+    cvt.u32.u16     %r31, %rs1;
+    cvt.rn.f32.u32  %f1, %r31;
+    mul.f32         %f1, %f1, 0f3B808081;
+    cvt.u32.u16     %r32, %rs2;
+    cvt.rn.f32.u32  %f2, %r32;
+    mul.f32         %f2, %f2, 0f3B808081;
+    cvt.u32.u16     %r33, %rs3;
+    cvt.rn.f32.u32  %f3, %r33;
+    mul.f32         %f3, %f3, 0f3B808081;
+
+    ld.param.f32    %f10, [red_y];
+    ld.param.f32    %f11, [red_cb];
+    ld.param.f32    %f12, [red_cr];
+    ld.param.f32    %f13, [red_offset];
+    ld.param.f32    %f14, [green_y];
+    ld.param.f32    %f15, [green_cb];
+    ld.param.f32    %f16, [green_cr];
+    ld.param.f32    %f17, [green_offset];
+    ld.param.f32    %f18, [blue_y];
+    ld.param.f32    %f19, [blue_cb];
+    ld.param.f32    %f20, [blue_cr];
+    ld.param.f32    %f21, [blue_offset];
+
+    fma.rn.f32      %f4, %f10, %f1, %f13;
+    fma.rn.f32      %f4, %f11, %f2, %f4;
+    fma.rn.f32      %f4, %f12, %f3, %f4;
+    fma.rn.f32      %f5, %f14, %f1, %f17;
+    fma.rn.f32      %f5, %f15, %f2, %f5;
+    fma.rn.f32      %f5, %f16, %f3, %f5;
+    fma.rn.f32      %f6, %f18, %f1, %f21;
+    fma.rn.f32      %f6, %f19, %f2, %f6;
+    fma.rn.f32      %f6, %f20, %f3, %f6;
+    add.sat.f32     %f4, %f4, 0f00000000;
+    add.sat.f32     %f5, %f5, 0f00000000;
+    add.sat.f32     %f6, %f6, 0f00000000;
+
+FIT_NV12_STORE:
+    // R at y * model_w + x, G a plane later, B two.
+    ld.param.u64    %rd7, [dst];
+    mad.lo.s32      %r34, %r13, %r1, %r9;
+    mul.wide.u32    %rd8, %r34, 4;
+    add.s64         %rd9, %rd7, %rd8;
+    mul.lo.s32      %r35, %r1, %r2;
+    mul.wide.u32    %rd10, %r35, 4;
+    st.global.f32   [%rd9], %f4;
+    add.s64         %rd9, %rd9, %rd10;
+    st.global.f32   [%rd9], %f5;
+    add.s64         %rd9, %rd9, %rd10;
+    st.global.f32   [%rd9], %f6;
+
+FIT_NV12_DONE:
+    ret;
+}
+
+.visible .entry fit_bgra(
+    .param .u64 dst,
+    .param .u32 model_w,
+    .param .u32 model_h,
+    .param .u32 offset_x,
+    .param .u32 offset_y,
+    .param .u32 scaled_w,
+    .param .u32 scaled_h,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u32 src_w,
+    .param .u32 src_h
+)
+{
+    .reg .pred  %p<6>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<40>;
+    .reg .f32   %f<8>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u32    %r1, [model_w];
+    ld.param.u32    %r2, [model_h];
+
+    mov.u32         %r6, %ctaid.x;
+    mov.u32         %r7, %ntid.x;
+    mov.u32         %r8, %tid.x;
+    mad.lo.s32      %r9, %r6, %r7, %r8;
+    mov.u32         %r10, %ctaid.y;
+    mov.u32         %r11, %ntid.y;
+    mov.u32         %r12, %tid.y;
+    mad.lo.s32      %r13, %r10, %r11, %r12;
+
+    setp.ge.u32     %p1, %r9, %r1;
+    @%p1 bra        FIT_BGRA_DONE;
+    setp.ge.u32     %p2, %r13, %r2;
+    @%p2 bra        FIT_BGRA_DONE;
+
+    mov.f32         %f4, 0f3EE4E4E5;
+    mov.f32         %f5, 0f3EE4E4E5;
+    mov.f32         %f6, 0f3EE4E4E5;
+
+    ld.param.u32    %r3, [offset_x];
+    ld.param.u32    %r4, [offset_y];
+    ld.param.u32    %r5, [scaled_w];
+    ld.param.u32    %r14, [scaled_h];
+    sub.s32         %r15, %r9, %r3;
+    sub.s32         %r16, %r13, %r4;
+    setp.ge.u32     %p3, %r15, %r5;
+    @%p3 bra        FIT_BGRA_STORE;
+    setp.ge.u32     %p4, %r16, %r14;
+    @%p4 bra        FIT_BGRA_STORE;
+
+    ld.param.u32    %r17, [src_w];
+    ld.param.u32    %r18, [src_h];
+    shl.b32         %r19, %r15, 1;
+    add.s32         %r19, %r19, 1;
+    mul.lo.s32      %r19, %r19, %r17;
+    shl.b32         %r20, %r5, 1;
+    div.u32         %r21, %r19, %r20;
+    shl.b32         %r22, %r16, 1;
+    add.s32         %r22, %r22, 1;
+    mul.lo.s32      %r22, %r22, %r18;
+    shl.b32         %r23, %r14, 1;
+    div.u32         %r24, %r22, %r23;
+
+    ld.param.u64    %rd1, [src];
+    ld.param.u32    %r25, [src_pitch];
+    shl.b32         %r26, %r21, 2;
+    mad.lo.s32      %r27, %r24, %r25, %r26;
+    cvt.u64.u32     %rd2, %r27;
+    add.s64         %rd3, %rd1, %rd2;
+    ld.global.u8    %rs1, [%rd3];
+    ld.global.u8    %rs2, [%rd3+1];
+    ld.global.u8    %rs3, [%rd3+2];
+
+    // B, G, R in memory; R, G, B out.
+    cvt.u32.u16     %r28, %rs3;
+    cvt.rn.f32.u32  %f4, %r28;
+    mul.f32         %f4, %f4, 0f3B808081;
+    cvt.u32.u16     %r29, %rs2;
+    cvt.rn.f32.u32  %f5, %r29;
+    mul.f32         %f5, %f5, 0f3B808081;
+    cvt.u32.u16     %r30, %rs1;
+    cvt.rn.f32.u32  %f6, %r30;
+    mul.f32         %f6, %f6, 0f3B808081;
+
+FIT_BGRA_STORE:
+    ld.param.u64    %rd7, [dst];
+    mad.lo.s32      %r34, %r13, %r1, %r9;
+    mul.wide.u32    %rd8, %r34, 4;
+    add.s64         %rd9, %rd7, %rd8;
+    mul.lo.s32      %r35, %r1, %r2;
+    mul.wide.u32    %rd10, %r35, 4;
+    st.global.f32   [%rd9], %f4;
+    add.s64         %rd9, %rd9, %rd10;
+    st.global.f32   [%rd9], %f5;
+    add.s64         %rd9, %rd9, %rd10;
+    st.global.f32   [%rd9], %f6;
+
+FIT_BGRA_DONE:
+    ret;
+}
+"#;

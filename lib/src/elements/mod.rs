@@ -115,6 +115,10 @@ pub use filter::{
     SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, TimestampOrigin, VideoCodec,
     VideoSynchronizer, VideoSynchronizerError,
 };
+#[cfg(feature = "ort")]
+pub use filter::{
+    COCO_CLASS_LABELS, Detection, Detections, OrtDetectorError, OrtDetectorOptions, SwOrtDetector,
+};
 pub use filter::{
     ColorCorrection, LumaKey, SwVideoEffect, SwVideoEffectError, VideoEffect, VideoEffectHandle,
 };
@@ -125,6 +129,8 @@ pub use filter::{
     CudaEncoderOptions, CudaScaler, CudaScalerError, CudaScalerInterp, CudaUpload, CudaUploadError,
     CudaVideoEffect, CudaVideoEffectError,
 };
+#[cfg(feature = "ort-cuda")]
+pub use filter::{CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, UseTensorRtPolicy};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{
     D3d11ChromaKey, D3d11ChromaKeyError, D3d11Decoder, D3d11DecoderError, D3d11Download,
@@ -171,8 +177,6 @@ pub use sink::{
     PacketCounter, ReplayBuffer, ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError,
     RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError, TrackFormat,
 };
-#[cfg(feature = "ort")]
-pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 #[cfg(feature = "whisper")]
 pub use sink::{
     ChunkPolicy, Segment, TokenTiming, WHISPER_SAMPLE_RATE, WhisperTranscriber,

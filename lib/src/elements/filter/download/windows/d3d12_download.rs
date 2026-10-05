@@ -53,7 +53,7 @@ pub enum D3d12DownloadError {
 ///
 /// This is the exit from a D3D12VA pipeline for CPU-only stages such as
 /// [`crate::elements::SwScaler`], [`crate::elements::SwEncoder`],
-/// `OrtDetector`, and [`crate::elements::AppSink`]:
+/// `SwOrtDetector`, and [`crate::elements::AppSink`]:
 /// `D3d12Decoder -> D3d12Download -> SwScaler -> ...`.
 ///
 /// A D3D12 device is deliberately not a constructor argument. The source

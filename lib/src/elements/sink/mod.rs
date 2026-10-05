@@ -19,8 +19,6 @@ mod app_sink;
 mod counter;
 mod frame_counter;
 mod muxer;
-#[cfg(feature = "ort")]
-mod ort_detector;
 mod packet_counter;
 mod renderer;
 mod virtual_camera;
@@ -36,8 +34,6 @@ pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError, TrackFormat};
 pub use muxer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use muxer::{RtmpMuxer, RtmpMuxerError};
 pub use muxer::{RtspMuxer, RtspMuxerError};
-#[cfg(feature = "ort")]
-pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;
 pub use renderer::SubmitError;
 #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]

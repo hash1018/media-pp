@@ -1,12 +1,17 @@
-//! FileDemuxer -> SwDecoder -> Queue -> SwScaler (640x640 RGB24) ->
-//! OrtDetector, drawing every detection straight onto the same 640x640 frame
-//! `OrtDetector` saw and presenting it in a plain window. The boxes are drawn
-//! on the CPU and blitted into a `winit` window through `softbuffer`; no GPU
-//! renderer is involved.
+//! FileDemuxer -> SwDecoder -> Queue -> SwOrtDetector -> SwScaler (960x540
+//! RGB24) -> AppSink, drawing what the detector found onto each picture and
+//! presenting it in a plain window. The boxes are drawn on the CPU and
+//! blitted into a `winit` window through `softbuffer`; no GPU renderer is
+//! involved.
 //!
-//! The model is an Ultralytics YOLOv8 or YOLOv11 ONNX export with a 640x640
-//! input. No `Pacer` in this pipeline, so frames show up as fast as decode +
-//! inference allow, not at real playback speed.
+//! The detector hands each decoded picture on as it came, carrying the
+//! `Detections` it found as metadata; the scaler after it carries them on,
+//! and the sink reads them off the picture it draws. Their boxes are
+//! fractions of the picture, so they fit it at whatever size it is shown.
+//!
+//! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
+//! YOLOv10 and YOLO26. No `Pacer` in this pipeline, so frames show up as
+//! fast as decode + inference allow, not at real playback speed.
 //!
 //!     cargo run -p detect -- path/to/model.onnx path/to/video.mp4
 
@@ -20,8 +25,12 @@ mod example {
     use media_pp::ffmpeg::{format::Pixel, frame::Video, media, software::scaling::Flags};
     use media_pp::{
         Result,
+        buffer::MediaBuffer,
         bus::BusEvent,
-        elements::{COCO_CLASS_LABELS, Detection, FileDemuxer, OrtDetector, SwDecoder, SwScaler},
+        elements::{
+            AppSink, COCO_CLASS_LABELS, Detection, Detections, FileDemuxer, OrtDetectorOptions,
+            SwDecoder, SwOrtDetector, SwScaler,
+        },
         pipeline::Pipeline,
     };
     use softbuffer::{Context, Surface};
@@ -34,8 +43,8 @@ mod example {
     };
 
     const DST_FORMAT: Pixel = Pixel::RGB24;
-    const DST_WIDTH: u32 = 640;
-    const DST_HEIGHT: u32 = 640;
+    const DST_WIDTH: u32 = 960;
+    const DST_HEIGHT: u32 = 540;
     const CONF_THRESHOLD: f32 = 0.5;
     const IOU_THRESHOLD: f32 = 0.7;
     const BOX_COLOR: u32 = 0x00ff00; // XRGB8888 — softbuffer's pixel format
@@ -72,7 +81,7 @@ mod example {
     }
 
     enum AppEvent {
-        /// One rendered 640x640 XRGB8888 frame, ready to blit straight into the
+        /// One rendered 960x540 XRGB8888 frame, ready to blit straight into the
         /// surface — see `render_frame`.
         Frame(Box<[u32]>),
         Done,
@@ -101,7 +110,7 @@ mod example {
                         Window::default_attributes()
                             .with_title("media-pp detect")
                             .with_inner_size(LogicalSize::new(DST_WIDTH, DST_HEIGHT))
-                            // Fixed to the model's own input size — no resize handling below.
+                            // Fixed to the scaler's size — no resize handling below.
                             .with_resizable(false),
                     )
                     .expect("failed to create window"),
@@ -181,34 +190,51 @@ mod example {
             let decoder = SwDecoder::new("decoder", params)?;
             let scaler =
                 SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
-            let render_proxy = proxy.clone();
-            let detector = OrtDetector::new(
+            let detector = SwOrtDetector::new(
                 "detector",
                 model_path,
-                CONF_THRESHOLD,
-                IOU_THRESHOLD,
-                move |frame, detections| {
-                    for detection in detections {
-                        let label = COCO_CLASS_LABELS
-                            .get(detection.class_id)
-                            .copied()
-                            .unwrap_or("unknown");
-                        println!("{label} ({:.0}%)", detection.score * 100.0);
-                    }
-                    // A closed window (event loop already exited) just means
-                    // there's nothing left to draw into — not a pipeline error.
-                    let _ =
-                        render_proxy.send_event(AppEvent::Frame(render_frame(frame, detections)));
-                    Ok(())
+                OrtDetectorOptions {
+                    conf_threshold: CONF_THRESHOLD,
+                    iou_threshold: IOU_THRESHOLD,
+                    // The model's own class names, which an Ultralytics
+                    // export carries.
+                    labels: None,
                 },
             )?;
+            let render_proxy = proxy.clone();
+            let sink = AppSink::new("draw", move |buf| {
+                let MediaBuffer::Video(frame) = &buf else {
+                    return Ok(());
+                };
+                let Some(found) = buf
+                    .metadata()
+                    .and_then(|metadata| metadata.get::<Detections>())
+                else {
+                    return Ok(());
+                };
+                let detections = found.items.as_slice();
+                for detection in detections {
+                    // A model that names no classes is taken for stock COCO
+                    // weights, as most exports without names are.
+                    let label = found
+                        .label(detection)
+                        .or_else(|| COCO_CLASS_LABELS.get(detection.class_id).copied())
+                        .unwrap_or("unknown");
+                    println!("{label} ({:.0}%)", detection.score * 100.0);
+                }
+                // A closed window (event loop already exited) just means
+                // there's nothing left to draw into — not a pipeline error.
+                let _ = render_proxy.send_event(AppEvent::Frame(render_frame(frame, detections)));
+                Ok(())
+            });
 
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
-                .queue("frames", 8) // scaler/detector run on their own thread
+                .queue("frames", 8) // detector/scaler run on their own thread
+                .pipe(detector)
                 .pipe(scaler)
-                .to(detector)?;
+                .to(sink)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;
@@ -225,11 +251,10 @@ mod example {
         Ok(())
     }
 
-    /// Blits `frame`'s packed RGB24 bytes into a 640x640 XRGB8888 buffer
-    /// (softbuffer's own pixel format — skipping `stride`'s per-row padding,
-    /// same as `OrtDetector::detect`'s own tensor conversion), then draws every
-    /// detection's box directly on top — no rescaling needed, since `frame` is
-    /// the exact same pixel space `detections`' coordinates are already in.
+    /// Blits `frame`'s packed RGB24 bytes into an XRGB8888 buffer
+    /// (softbuffer's own pixel format — skipping `stride`'s per-row padding),
+    /// then draws every detection's box on top, its fractions of the picture
+    /// taken of this picture's size.
     fn render_frame(frame: &Video, detections: &[Detection]) -> Box<[u32]> {
         let width = frame.width() as usize;
         let height = frame.height() as usize;
@@ -254,10 +279,11 @@ mod example {
     }
 
     fn draw_box(pixels: &mut [u32], width: usize, height: usize, detection: &Detection) {
-        let x0 = detection.x.max(0.0) as usize;
-        let y0 = detection.y.max(0.0) as usize;
-        let x1 = ((detection.x + detection.width).max(0.0) as usize).min(width.saturating_sub(1));
-        let y1 = ((detection.y + detection.height).max(0.0) as usize).min(height.saturating_sub(1));
+        let (w, h) = (width as f32, height as f32);
+        let x0 = (detection.x * w) as usize;
+        let y0 = (detection.y * h) as usize;
+        let x1 = (((detection.x + detection.width) * w) as usize).min(width.saturating_sub(1));
+        let y1 = (((detection.y + detection.height) * h) as usize).min(height.saturating_sub(1));
 
         for x in x0..=x1 {
             for t in 0..BOX_THICKNESS {

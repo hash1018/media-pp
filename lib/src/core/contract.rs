@@ -345,7 +345,7 @@ impl fmt::Display for MemoryDomainSet {
 /// that stated it would take every unnamed format at once, whatever it is
 /// actually built for, and would be refused nothing; an element built for a
 /// format with no layout here gets one added instead, as `Rgb24` was for
-/// `OrtDetector`.
+/// `SwOrtDetector`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelLayout {
     /// 8-bit 4:2:0, a luma plane and an interleaved chroma plane.

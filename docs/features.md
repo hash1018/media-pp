@@ -27,7 +27,8 @@ unprefixed type works the same on every platform.
 | `avfoundation-capture` | Camera capture through AVFoundation | macOS |
 | `coreaudio-capture` | System, per-application and microphone audio capture; the first two need macOS 14.2 | macOS |
 | `coreaudio-renderer` | Audio playback | macOS |
-| `ort` | ONNX Runtime object detection (YOLOv8/v11 layout) | All |
+| `ort` | ONNX Runtime object detection on the CPU, `SwOrtDetector` | All |
+| `ort-cuda` | Object detection on CUDA pictures through TensorRT, `CudaOrtDetector`; enables `ort` and `cuda` | Linux, Windows |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All |
@@ -53,7 +54,10 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
 - **`whisper-vulkan`**: the Vulkan SDK's shader compiler at build time; on
   Windows also long paths and a short target directory — see
   [`transcribe`](../examples/core/transcribe/README.md).
-- **`ort`**: a model in the YOLOv8/v11 output layout.
+- **`ort`**: a YOLO model exported to ONNX — YOLOv8 and YOLO11, or YOLOv10
+  and YOLO26.
+- **`ort-cuda`**: CUDA 13, cuDNN 9 and TensorRT 10 at run time, where the
+  loader finds them.
 
 What an element needs at run time — one shared `D3d11Gpu`, one `CudaDevice`
 per process, a portal for screen capture on Linux, a server to publish RTSP

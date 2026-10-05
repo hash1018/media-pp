@@ -270,8 +270,11 @@ pub enum ElementType {
     RtspMuxer,
     /// Application callback or channel sink.
     AppSink,
-    /// ONNX Runtime object-detection sink.
-    OrtDetector,
+    /// ONNX Runtime object-detection filter, on the CPU.
+    SwOrtDetector,
+    /// ONNX Runtime object-detection filter on CUDA pictures, through
+    /// TensorRT.
+    CudaOrtDetector,
     /// Speech-to-text sink, through whisper.cpp.
     WhisperTranscriber,
     /// HTTP Live Streaming muxer sink.

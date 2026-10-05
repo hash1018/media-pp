@@ -12,7 +12,27 @@ compile error with no explanation.
 
 ### Breaking
 
-- **Each `MediaBuffer` variant holds a wrapper that carries metadata.**
+- **`OrtDetector` is `SwOrtDetector`, a filter that hands each picture on
+  with what it found.** Renamed as the scalers are named, beside the new
+  `CudaOrtDetector` (see Added). It was a sink that called a closure; it
+  now passes every picture through
+  unchanged, carrying a `Detections` as its metadata (see Added), so what
+  it found reaches whatever comes after it. It takes system-memory video of
+  any format and size and fits each picture to the model itself, so no
+  `SwScaler` is needed in front of it, and it reads YOLOv10 and YOLO26
+  outputs (`[1, boxes, 6]`) as well as YOLOv8 and YOLO11's. A
+  `Detection`'s box is now fractions of the picture rather than pixels of
+  the model's input. It moved from `elements::sink` to `elements::filter`,
+  under the same `elements::` path.
+
+  | 0.3 | Now |
+  |---|---|
+  | `OrtDetector::new(name, model, conf, iou, \|frame, found\| ..)` as the branch's end | `SwOrtDetector::new(name, model, OrtDetectorOptions { conf_threshold, iou_threshold, labels: None })` piped, then read `buffer.metadata()?.get::<Detections>()` downstream — an `AppSink` does what the closure did |
+  | `COCO_CLASS_LABELS[detection.class_id]` | `detections.label(&detection)` |
+  | `SwScaler` to 640x640 RGB24 before it | nothing |
+  | `detection.x` in model pixels | `detection.x * picture_width` |
+
+
   `MediaBuffer::Packet`, `Video` and `Audio` hold `PacketBuffer`,
   `VideoBuffer` and `AudioBuffer` in place of the bare `Arc`, each the
   `Arc` beside the buffer's `Metadata` (see Added). The wrapper
@@ -183,6 +203,43 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **`CudaOrtDetector`: detection on CUDA pictures, through TensorRT**
+  (feature `ort-cuda`). What `SwOrtDetector` does, with the picture never
+  leaving the GPU: a kernel fits each NV12 or BGRA CUDA picture into the
+  model's input in device memory, and ONNX Runtime's TensorRT provider
+  reads it there, with CUDA as its fallback. The engine TensorRT builds for
+  a model and GPU — minutes, once — is kept in the user's cache directory
+  (`CudaOrtDetectorOptions::engine_cache`). Needs CUDA 13, cuDNN 9 and
+  TensorRT 10 at run time. On an RTX 3050 a 1080p file is decoded by NVDEC
+  and run through YOLOv10n at about 530 pictures a second. The
+  `cuda_detect` example runs it over a file.
+
+  `CudaOrtDetector::runtime` says what a machine can run one on —
+  `CudaRuntime::TensorRt`, `CudaOnly` or `Missing`, naming the libraries
+  the loader could not open — without a model or a session, in under a
+  millisecond where nothing is installed and about 140 ms where everything
+  is: for an application deciding at start whether to offer detection on
+  the GPU. `new` asks it first, refusing with
+  `OrtDetectorError::CudaRuntimeMissing` where CUDA or cuDNN is missing.
+  Where TensorRT is, `CudaOrtDetectorOptions::tensorrt` decides: the default
+  `UseTensorRtPolicy::Preferred` runs on CUDA alone with a warning,
+  `Required` refuses with `OrtDetectorError::TensorRtMissing` — and with the
+  provider's own error where TensorRT is present but cannot start, rather
+  than ONNX Runtime passing over it to CUDA — and `Off` never uses it. On
+  the same RTX 3050 and file, CUDA alone runs at about 190 pictures a
+  second.
+
+- **`Detections`: what a detector found in a picture, as its metadata.**
+  `SwOrtDetector` puts one on every picture it hands on — the detector's name,
+  the model's class names, and a `Detection` per object, most confident
+  first, each box in fractions of the picture so it fits the picture at any
+  size it is scaled to; `Detections::label` names a detection's class. An
+  empty list means it looked and found nothing. `OrtDetectorOptions` holds
+  the confidence and overlap thresholds and the class names, which by
+  default are read from the model's own `names` metadata, as Ultralytics
+  exports carry them, so a detector of any classes names them without the
+  caller knowing what they are.
 
 - **`Metadata`: what an element found out about a buffer, carried with
   it.** Every buffer can carry one — `MediaBuffer::metadata`,

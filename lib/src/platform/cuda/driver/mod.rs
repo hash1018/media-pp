@@ -22,12 +22,17 @@ use thiserror::Error as ThisError;
 
 use crate::color::Color;
 
+#[cfg(feature = "ort-cuda")]
+mod fit;
 /// What a graphics API needs from CUDA to show a CUDA frame — see
 /// `crate::elements::VulkanWindowRenderer`.
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub(crate) mod interop;
 mod load;
 mod ptx;
+
+#[cfg(feature = "ort-cuda")]
+pub(crate) use fit::{CudaTensor, Fit, FitKernels};
 
 use ptx::{BLEND_PTX, CONVERT_PTX};
 
