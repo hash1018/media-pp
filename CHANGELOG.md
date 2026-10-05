@@ -256,6 +256,29 @@ compile error with no explanation.
   exports carry them, so a detector of any classes names them without the
   caller knowing what they are.
 
+  `Detections` and `Detection` need no feature: they are what any detector
+  writes, this crate's or an application's, which makes them with
+  `Detections::new` and `Detection::new` and puts them on a picture with
+  `Detections::attach_to`. Both are non-exhaustive, so that what a tracker
+  or a second model learns of an object can be added to them later.
+
+- **`SwDetectionOverlay` and `CudaDetectionOverlay`: what was found, drawn
+  onto the picture.** Each picture carrying `Detections` is handed on as a
+  copy with a box around each object — and, given a font
+  (`DetectionOverlayOptions::labels`), its class and score on a band above
+  it — and the same `Detections` still on it. The software one draws on
+  NV12, YUV 4:2:0, RGB24 and BGRA pictures; the CUDA one on NV12 and BGRA
+  CUDA pictures without them leaving the GPU, so a detector's pictures go
+  on to an encoder, a renderer or a compositor with their boxes. Each draws
+  on a copy, never on the picture it was handed, so a Tee in front of one
+  shares no boxes with its other branches, and a picture with nothing to
+  draw is handed on as it came. Colours follow the class, or one colour for
+  all (`BoxColors`); lines and labels fall on whole 2x2 blocks of an NV12
+  or YUV picture, so their colour does not bleed. Neither needs a feature
+  beyond `cuda` for the CUDA one. On the RTX 3050, `cuda_detect --out`
+  decodes, detects, draws and encodes a 1080p file at about 420 pictures a
+  second.
+
 - **`Metadata`: what an element found out about a buffer, carried with
   it.** Every buffer can carry one — `MediaBuffer::metadata`,
   `with_metadata`, `set_metadata` — holding one value per type, so an

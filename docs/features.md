@@ -27,7 +27,7 @@ unprefixed type works the same on every platform.
 | `avfoundation-capture` | Camera capture through AVFoundation | macOS |
 | `coreaudio-capture` | System, per-application and microphone audio capture; the first two need macOS 14.2 | macOS |
 | `coreaudio-renderer` | Audio playback | macOS |
-| `ort` | ONNX Runtime object detection on the CPU, `SwOrtDetector` | All |
+| `ort` | ONNX Runtime object detection on the CPU, `SwOrtDetector`; `Detections` and the detection overlays need no feature | All |
 | `ort-cuda` | Object detection on CUDA pictures, `CudaOrtDetector`, on ONNX Runtime's CUDA provider; links CUDA and cuDNN; enables `ort` and `cuda` | Linux, Windows |
 | `ort-tensorrt` | `CudaOrtDetector` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |

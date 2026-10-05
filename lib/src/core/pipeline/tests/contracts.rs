@@ -1440,3 +1440,35 @@ fn yuv420p_uploaded_to_d3d11_links_to_what_takes_nv12() {
         "and NV12 is not BGRA"
     );
 }
+
+/// A detection overlay hands on the format it was handed, so what came
+/// before it still meets what comes after: NV12 from a scaler reaches a
+/// sink taking NV12 alone. Declaring every format it can draw on instead
+/// refused exactly this link, a CUDA decoder's pictures through the CUDA
+/// overlay into an NV12 encoder.
+#[test]
+fn a_detection_overlay_keeps_the_format_it_was_handed() {
+    let overlay = crate::elements::SwDetectionOverlay::new(
+        "overlay",
+        crate::elements::DetectionOverlayOptions::default(),
+    )
+    .expect("an overlay without labels");
+    contract_context()
+        .branch()
+        .pipe(crate::elements::SwScaler::new(
+            "scaler",
+            ffmpeg::format::Pixel::NV12,
+            64,
+            64,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        ))
+        .pipe(overlay)
+        .to(DeclaringSink::boxed(
+            "encoder",
+            InputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(PixelLayoutSet::NV12),
+            ),
+        ))
+        .expect("NV12 through an overlay into an NV12-only sink");
+}

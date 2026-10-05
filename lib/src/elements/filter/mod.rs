@@ -27,8 +27,6 @@ mod download;
 mod encoder;
 mod frame_rate_limiter;
 mod line;
-#[cfg(feature = "ort")]
-mod ort_detector;
 mod pacer;
 mod pause_gate;
 mod rack;
@@ -40,6 +38,7 @@ mod tone_map;
 pub(crate) mod upload;
 mod video_effect;
 mod video_synchronizer;
+mod vision;
 
 pub use audio::{
     AudioCompressor, AudioCompressorError, AudioCompressorHandle, AudioCompressorOptions,
@@ -112,16 +111,6 @@ pub use encoder::{
 #[cfg(feature = "vulkan")]
 pub use encoder::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};
 pub use frame_rate_limiter::{FrameRateLimiter, FrameRateLimiterError};
-#[cfg(feature = "ort-tensorrt")]
-pub use ort_detector::UseTensorRtPolicy;
-#[cfg(feature = "ort")]
-pub use ort_detector::{
-    COCO_CLASS_LABELS, Detection, Detections, OrtDetectorError, OrtDetectorOptions, SwOrtDetector,
-};
-#[cfg(feature = "ort-cuda")]
-pub use ort_detector::{
-    CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
-};
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};
 pub use rack::{Rack, RackError, RackHandle};
@@ -175,6 +164,7 @@ fn is_codec_drain_boundary(error: &ffmpeg_next::Error) -> bool {
     }
 }
 
+pub use vision::*;
 #[cfg(test)]
 mod codec_error_tests {
     use super::*;

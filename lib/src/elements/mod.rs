@@ -102,8 +102,6 @@ pub use driver::{
     AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
     WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
 };
-#[cfg(feature = "ort-tensorrt")]
-pub use filter::UseTensorRtPolicy;
 pub use filter::{
     AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,
     AudioCompressorOptions, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions,
@@ -117,12 +115,16 @@ pub use filter::{
     SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, TimestampOrigin, VideoCodec,
     VideoSynchronizer, VideoSynchronizerError,
 };
-#[cfg(feature = "ort")]
-pub use filter::{
-    COCO_CLASS_LABELS, Detection, Detections, OrtDetectorError, OrtDetectorOptions, SwOrtDetector,
-};
 pub use filter::{
     ColorCorrection, LumaKey, SwVideoEffect, SwVideoEffectError, VideoEffect, VideoEffectHandle,
+};
+// Video analysis: the data every detector writes, and the overlays, for
+// any build; inference with the runtime its feature brings.
+#[cfg(feature = "ort-tensorrt")]
+pub use filter::UseTensorRtPolicy;
+pub use filter::{
+    BoxColors, COCO_CLASS_LABELS, Detection, DetectionOverlayOptions, Detections, LabelStyle,
+    SwDetectionOverlay, SwDetectionOverlayError,
 };
 #[cfg(feature = "cuda")]
 pub use filter::{
@@ -131,6 +133,8 @@ pub use filter::{
     CudaEncoderOptions, CudaScaler, CudaScalerError, CudaScalerInterp, CudaUpload, CudaUploadError,
     CudaVideoEffect, CudaVideoEffectError,
 };
+#[cfg(feature = "cuda")]
+pub use filter::{CudaDetectionOverlay, CudaDetectionOverlayError};
 #[cfg(feature = "ort-cuda")]
 pub use filter::{
     CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
@@ -162,6 +166,8 @@ pub use filter::{
 };
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
+#[cfg(feature = "ort")]
+pub use filter::{OrtDetectorError, OrtDetectorOptions, SwOrtDetector};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use filter::{
     VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDecoderError, VideoToolboxDownload,

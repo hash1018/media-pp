@@ -17,10 +17,9 @@ use crate::{
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use super::{
-    Detections, Letterbox, OrtDetectorError, OrtDetectorOptions, attach, decode, labels,
-    model_input,
-};
+use crate::elements::Detections;
+
+use super::{Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input};
 
 /// The grey a fitted picture's margins are filled with, as Ultralytics
 /// trains on: 114 of 255.
@@ -32,7 +31,7 @@ const MARGIN: f32 = 114.0 / 255.0;
 ///
 /// It takes decoded video in system memory, any pixel format and size: each
 /// picture is fitted to the model's input inside the element (see
-/// [`Detections`] for the models it reads and how), and the
+/// [`OrtDetectorOptions`] for the models it reads and how), and the
 /// boxes are mapped back onto the picture as fractions of it. What goes on
 /// is the picture it was handed, not the fitted copy.
 ///
@@ -285,7 +284,7 @@ impl Filter for Detecting {
             return Err(refused("a hardware video frame").into());
         }
         let detections = self.detect(frame)?;
-        out.push(attach(buf, detections));
+        out.push(detections.attach_to(buf));
         Ok(())
     }
 }
@@ -334,7 +333,10 @@ mod tests {
             panic!("a picture goes on");
         };
         assert_eq!((out.width(), out.height(), out.pts()), (1280, 720, Some(7)));
-        let found = super::super::detections_of(&kept[0]).expect("carries Detections");
+        let found = kept[0]
+            .metadata()
+            .and_then(|metadata| metadata.get::<Detections>())
+            .expect("carries Detections");
         assert_eq!(&*found.detector, "detector");
     }
 

@@ -19,6 +19,8 @@ use crate::element::ElementType;
 use crate::elements::CoreAudioCaptureSourceError;
 #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
 use crate::elements::CoreAudioRendererError;
+#[cfg(feature = "cuda")]
+use crate::elements::CudaDetectionOverlayError;
 #[cfg(all(
     target_os = "linux",
     feature = "pipewire-screen-capture",
@@ -50,6 +52,7 @@ use crate::elements::PipeWireDeviceError;
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspMuxerError;
+use crate::elements::SwDetectionOverlayError;
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 use crate::elements::V4l2CaptureSourceError;
 #[cfg(all(target_os = "linux", feature = "v4l2-virtual-camera"))]
@@ -802,6 +805,15 @@ pub enum Error {
     #[cfg(feature = "ort")]
     #[error(transparent)]
     OrtDetectorError(#[from] OrtDetectorError),
+
+    /// Drawing detections onto a picture in system memory failed.
+    #[error(transparent)]
+    SwDetectionOverlayError(#[from] SwDetectionOverlayError),
+
+    /// Drawing detections onto a CUDA picture failed.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaDetectionOverlayError(#[from] CudaDetectionOverlayError),
 
     /// Loading a speech model, or transcribing with it, failed.
     #[cfg(feature = "whisper")]

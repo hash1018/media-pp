@@ -101,6 +101,7 @@ pub use compositor::{
     MetalVideoCompositorHandle, MetalVideoCompositorInput, MetalVideoCompositorInputSink,
     MetalVideoLayerHandle,
 };
+pub(in crate::elements) use compositor::{TextFontError, TextMask, load_font, rasterize_coverage};
 #[cfg(feature = "vulkan")]
 pub use compositor::{
     VulkanFrameFormat, VulkanTextLayerHandle, VulkanVideoCompositor, VulkanVideoCompositorError,

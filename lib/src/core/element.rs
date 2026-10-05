@@ -272,9 +272,13 @@ pub enum ElementType {
     AppSink,
     /// ONNX Runtime object-detection filter, on the CPU.
     SwOrtDetector,
-    /// ONNX Runtime object-detection filter on CUDA pictures, through
-    /// TensorRT.
+    /// ONNX Runtime object-detection filter on CUDA pictures, on CUDA or
+    /// through TensorRT.
     CudaOrtDetector,
+    /// Draws a detector's boxes and labels onto pictures in system memory.
+    SwDetectionOverlay,
+    /// Draws a detector's boxes and labels onto CUDA pictures.
+    CudaDetectionOverlay,
     /// Speech-to-text sink, through whisper.cpp.
     WhisperTranscriber,
     /// HTTP Live Streaming muxer sink.

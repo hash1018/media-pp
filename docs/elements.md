@@ -50,8 +50,10 @@ Each type's own documentation says what it accepts, owns and how it fails.
   cameras: `MfVirtualCamera` on Windows, `V4l2VirtualCamera` on Linux.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
-- **Analysis**: `SwOrtDetector`, a filter that puts what a YOLO model finds on
-  each picture as `Detections` metadata, `WhisperTranscriber`, `FrameCounter`,
+- **Analysis**: `SwOrtDetector` and `CudaOrtDetector`, filters that put what a
+  YOLO model finds on each picture as `Detections` metadata;
+  `SwDetectionOverlay` and `CudaDetectionOverlay`, which draw those boxes and
+  labels onto the picture; `WhisperTranscriber`, `FrameCounter`,
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 

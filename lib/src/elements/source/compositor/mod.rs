@@ -34,6 +34,9 @@ mod vulkan;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use macos::*;
 pub use text_layer::TextLayer;
+// What the detection overlays draw their labels with, which rasterize as a
+// compositor's text layers do.
+pub(in crate::elements) use text_layer::{TextFontError, TextMask, load_font, rasterize_coverage};
 pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect};
 #[cfg(feature = "vulkan")]
 pub use vulkan::*;

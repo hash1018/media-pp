@@ -31,10 +31,9 @@ use crate::{
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use super::super::{
-    Detections, Letterbox, OrtDetectorError, OrtDetectorOptions, attach, decode, labels,
-    model_input,
-};
+use crate::elements::Detections;
+
+use super::super::{Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input};
 use super::runtime::{self, CudaRuntime};
 
 /// Whether a [`CudaOrtDetector`] runs its model through TensorRT, with
@@ -131,7 +130,8 @@ impl Default for CudaOrtDetectorOptions {
 /// It takes NV12 or BGRA CUDA pictures of any size from the same
 /// [`CudaDevice`] as the rest of the pipeline — a decoder's, a compositor's
 /// — and the boxes it finds are fractions of each picture, as
-/// [`Detections`] describes.
+/// [`Detection`](crate::elements::Detection) describes. The models it
+/// reads are those [`OrtDetectorOptions`] describes.
 ///
 /// # Requirements
 ///
@@ -442,7 +442,7 @@ impl Filter for Detecting {
             .into());
         };
         let detections = self.detect(frame)?;
-        out.push(attach(buf, detections));
+        out.push(detections.attach_to(buf));
         Ok(())
     }
 }

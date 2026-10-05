@@ -1,13 +1,14 @@
 //! FileDemuxer -> SwDecoder -> Queue -> SwOrtDetector -> SwScaler (960x540
-//! RGB24) -> AppSink, drawing what the detector found onto each picture and
-//! presenting it in a plain window. The boxes are drawn on the CPU and
-//! blitted into a `winit` window through `softbuffer`; no GPU renderer is
-//! involved.
+//! RGB24) -> SwDetectionOverlay -> AppSink, drawing what the detector found
+//! onto each picture and presenting it in a plain window. Everything is on
+//! the CPU, blitted into a `winit` window through `softbuffer`; no GPU
+//! renderer is involved.
 //!
 //! The detector hands each decoded picture on as it came, carrying the
 //! `Detections` it found as metadata; the scaler after it carries them on,
-//! and the sink reads them off the picture it draws. Their boxes are
-//! fractions of the picture, so they fit it at whatever size it is shown.
+//! and the overlay draws them onto the scaled picture — their boxes are
+//! fractions of the picture, so they fit it at whatever size it is. Labels
+//! are drawn where a system font is found.
 //!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26. No `Pacer` in this pipeline, so frames show up as
@@ -28,8 +29,8 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            AppSink, COCO_CLASS_LABELS, Detection, Detections, FileDemuxer, OrtDetectorOptions,
-            SwDecoder, SwOrtDetector, SwScaler,
+            AppSink, COCO_CLASS_LABELS, DetectionOverlayOptions, Detections, FileDemuxer,
+            LabelStyle, OrtDetectorOptions, SwDecoder, SwDetectionOverlay, SwOrtDetector, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -47,8 +48,14 @@ mod example {
     const DST_HEIGHT: u32 = 540;
     const CONF_THRESHOLD: f32 = 0.5;
     const IOU_THRESHOLD: f32 = 0.7;
-    const BOX_COLOR: u32 = 0x00ff00; // XRGB8888 — softbuffer's pixel format
-    const BOX_THICKNESS: usize = 2;
+    /// Where the labels' font is looked for; without one, boxes alone.
+    const FONTS: [&str; 5] = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ];
 
     pub(super) fn run() {
         let mut args = std::env::args().skip(1);
@@ -201,6 +208,16 @@ mod example {
                     labels: None,
                 },
             )?;
+            let overlay = SwDetectionOverlay::new(
+                "overlay",
+                DetectionOverlayOptions {
+                    labels: FONTS
+                        .iter()
+                        .find_map(|path| std::fs::read(path).ok())
+                        .map(LabelStyle::new),
+                    ..DetectionOverlayOptions::default()
+                },
+            )?;
             let render_proxy = proxy.clone();
             let sink = AppSink::new("draw", move |buf| {
                 let MediaBuffer::Video(frame) = &buf else {
@@ -212,8 +229,7 @@ mod example {
                 else {
                     return Ok(());
                 };
-                let detections = found.items.as_slice();
-                for detection in detections {
+                for detection in &found.items {
                     // A model that names no classes is taken for stock COCO
                     // weights, as most exports without names are.
                     let label = found
@@ -224,7 +240,7 @@ mod example {
                 }
                 // A closed window (event loop already exited) just means
                 // there's nothing left to draw into — not a pipeline error.
-                let _ = render_proxy.send_event(AppEvent::Frame(render_frame(frame, detections)));
+                let _ = render_proxy.send_event(AppEvent::Frame(render_frame(frame)));
                 Ok(())
             });
 
@@ -234,6 +250,7 @@ mod example {
                 .queue("frames", 8) // detector/scaler run on their own thread
                 .pipe(detector)
                 .pipe(scaler)
+                .pipe(overlay)
                 .to(sink)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
@@ -251,11 +268,10 @@ mod example {
         Ok(())
     }
 
-    /// Blits `frame`'s packed RGB24 bytes into an XRGB8888 buffer
-    /// (softbuffer's own pixel format — skipping `stride`'s per-row padding),
-    /// then draws every detection's box on top, its fractions of the picture
-    /// taken of this picture's size.
-    fn render_frame(frame: &Video, detections: &[Detection]) -> Box<[u32]> {
+    /// Blits `frame`'s packed RGB24 bytes, boxes already drawn on them, into
+    /// an XRGB8888 buffer — softbuffer's own pixel format — skipping
+    /// `stride`'s per-row padding.
+    fn render_frame(frame: &Video) -> Box<[u32]> {
         let width = frame.width() as usize;
         let height = frame.height() as usize;
         let stride = frame.stride(0);
@@ -270,38 +286,6 @@ mod example {
                     ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32;
             }
         }
-
-        for detection in detections {
-            draw_box(&mut pixels, width, height, detection);
-        }
-
         pixels
-    }
-
-    fn draw_box(pixels: &mut [u32], width: usize, height: usize, detection: &Detection) {
-        let (w, h) = (width as f32, height as f32);
-        let x0 = (detection.x * w) as usize;
-        let y0 = (detection.y * h) as usize;
-        let x1 = (((detection.x + detection.width) * w) as usize).min(width.saturating_sub(1));
-        let y1 = (((detection.y + detection.height) * h) as usize).min(height.saturating_sub(1));
-
-        for x in x0..=x1 {
-            for t in 0..BOX_THICKNESS {
-                set_pixel(pixels, width, height, x, y0 + t);
-                set_pixel(pixels, width, height, x, y1.saturating_sub(t));
-            }
-        }
-        for y in y0..=y1 {
-            for t in 0..BOX_THICKNESS {
-                set_pixel(pixels, width, height, x0 + t, y);
-                set_pixel(pixels, width, height, x1.saturating_sub(t), y);
-            }
-        }
-    }
-
-    fn set_pixel(pixels: &mut [u32], width: usize, height: usize, x: usize, y: usize) {
-        if x < width && y < height {
-            pixels[y * width + x] = BOX_COLOR;
-        }
     }
 }
