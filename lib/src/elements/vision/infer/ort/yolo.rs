@@ -63,15 +63,52 @@ pub(crate) fn decode(
     letterbox: &Letterbox,
     options: &OrtDetectorOptions,
 ) -> Result<Vec<Detection>, OrtDetectorError> {
+    Ok(
+        decode_batch(output, std::slice::from_ref(letterbox), options)?
+            .pop()
+            .expect("one picture"),
+    )
+}
+
+/// [`decode`] for a batch: the model's output for as many pictures as
+/// `letterboxes` fitted, one after another, read into what each was found
+/// to hold.
+pub(crate) fn decode_batch(
+    output: ArrayViewD<'_, f32>,
+    letterboxes: &[Letterbox],
+    options: &OrtDetectorOptions,
+) -> Result<Vec<Vec<Detection>>, OrtDetectorError> {
     let shape = output.shape().to_vec();
-    let output = match shape.as_slice() {
-        [1, _, _] => output.index_axis(Axis(0), 0),
+    match shape.as_slice() {
+        [pictures, _, _] if *pictures == letterboxes.len() => {}
         other => {
             return Err(OrtDetectorError::UnsupportedModel(format!(
-                "its output is {other:?}, not [1, rows, columns]"
+                "its output is {other:?}, not [{}, rows, columns]",
+                letterboxes.len()
             )));
         }
-    };
+    }
+    letterboxes
+        .iter()
+        .enumerate()
+        .map(|(picture, letterbox)| {
+            decode_one(
+                output.index_axis(Axis(0), picture),
+                &shape,
+                letterbox,
+                options,
+            )
+        })
+        .collect()
+}
+
+/// One picture's rows of an output of `shape`.
+fn decode_one(
+    output: ArrayViewD<'_, f32>,
+    shape: &[usize],
+    letterbox: &Letterbox,
+    options: &OrtDetectorOptions,
+) -> Result<Vec<Detection>, OrtDetectorError> {
     let mut found: Vec<Detection> = if shape[2] == 6 {
         // `[boxes, 6]`: corners, score, class — already suppressed.
         output
@@ -112,7 +149,7 @@ pub(crate) fn decode(
             .collect()
     } else {
         return Err(OrtDetectorError::UnsupportedModel(format!(
-            "its output is {shape:?}, neither [1, 4 + classes, boxes] nor [1, boxes, 6]"
+            "its output is {shape:?}, neither [batch, 4 + classes, boxes] nor [batch, boxes, 6]"
         )));
     };
     found.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -220,6 +257,46 @@ mod tests {
             .map(|found| (found.class_id, found.score))
             .collect();
         assert_eq!(classes, vec![(0, 0.9), (1, 0.7)]);
+    }
+
+    /// A batch's output is read a picture at a time, each through its own
+    /// letterbox: the same box of the input is a different size on a wide
+    /// picture and on a tall one.
+    #[test]
+    fn each_picture_of_a_batch_is_read_through_its_own_letterbox() {
+        let wide = Letterbox::new((1920, 1080), (640, 640));
+        let tall = Letterbox::new((1080, 1920), (640, 640));
+        let mut output = Array3::<f32>::zeros((2, 1, 6));
+        for picture in 0..2 {
+            output
+                .slice_mut(ndarray::s![picture, 0, ..])
+                .assign(&ndarray::arr1(&[320.0, 320.0, 400.0, 400.0, 0.9, 0.0]));
+        }
+        let found = decode_batch(
+            output.view().into_dyn(),
+            &[wide, tall],
+            &OrtDetectorOptions::default(),
+        )
+        .unwrap();
+        let one = |n: usize| {
+            decode(
+                output.slice(ndarray::s![n..n + 1, .., ..]).into_dyn(),
+                &[wide, tall][n],
+                &OrtDetectorOptions::default(),
+            )
+            .unwrap()
+        };
+        assert_eq!(found, vec![one(0), one(1)]);
+        assert_ne!(found[0][0].width, found[1][0].width, "{found:?}");
+        assert!(
+            decode_batch(
+                output.view().into_dyn(),
+                &[wide],
+                &OrtDetectorOptions::default()
+            )
+            .is_err(),
+            "two pictures' output for one letterbox"
+        );
     }
 
     #[test]

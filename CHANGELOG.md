@@ -216,8 +216,10 @@ compile error with no explanation.
   keep what they keep for each stream, and a seek of one stream starts only
   that one over; `AnalyticsOptions::streams` gives a stream zones and lines
   of its own. The tracker's numbers are unique across the streams, and go
-  on after a seek rather than starting from 1 again. Running a batch
-  through a model at once comes next.
+  on after a seek rather than starting from 1 again.
+  `CudaOrtDetectorOptions::max_batch` runs the pictures of a batch through
+  the model at once — with TensorRT, an engine built for every batch up to
+  it; a picture with no `BatchSlot` is a batch of its own, as before.
 
 - **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
   TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`

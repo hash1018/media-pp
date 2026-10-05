@@ -16,11 +16,12 @@ use ort::{
     value::{Shape, TensorRefMut},
 };
 
-use crate::pp_log::{PpLog, pp_info, pp_warn};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
+    bus::BusEvent,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Context, Element, ElementType, element_pp_log},
     error::Result,
     platform::cuda::{
         CudaDevice,
@@ -31,10 +32,10 @@ use crate::{
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use crate::elements::Detections;
+use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
-    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input,
+    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode_batch, labels, model_input,
 };
 use super::runtime::{self, CudaRuntime};
 
@@ -91,10 +92,24 @@ fn choose(
 /// How a [`CudaOrtDetector`] runs its model, beside what every detector is
 /// told.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(feature = "ort-tensorrt"), derive(Default))]
 pub struct CudaOrtDetectorOptions {
     /// Thresholds and labels, as every detector takes them.
     pub detector: OrtDetectorOptions,
+    /// The most pictures the model is run on at once: the pictures of a
+    /// [`StreamMux`](crate::elements::StreamMux)'s batch, up to this many,
+    /// go through it together — DeepStream's `batch-size`. A small model
+    /// leaves most of the GPU idle on one picture, and a batch fills it:
+    /// on an RTX 3050, YOLO11n through TensorRT ran about 460 pictures a
+    /// second one at a time and 880 eight at a time. Give it the mux's
+    /// `max_batch`; a larger batch is run in parts this size.
+    ///
+    /// It takes a model whose batch is left open, as an Ultralytics export
+    /// with `dynamic=True` is; a model made for one picture at a time —
+    /// the YOLOv10n release — is run so, with a warning. With TensorRT the
+    /// engine is built for every batch from 1 to this, and built again —
+    /// minutes — when this changes. The default, 1, is a detector of one
+    /// picture at a time.
+    pub max_batch: usize,
     /// Whether TensorRT runs the model, and what happens where it cannot.
     #[cfg(feature = "ort-tensorrt")]
     pub tensorrt: UseTensorRtPolicy,
@@ -110,13 +125,16 @@ pub struct CudaOrtDetectorOptions {
     pub engine_cache: Option<PathBuf>,
 }
 
-#[cfg(feature = "ort-tensorrt")]
 impl Default for CudaOrtDetectorOptions {
     fn default() -> Self {
         Self {
             detector: OrtDetectorOptions::default(),
+            max_batch: 1,
+            #[cfg(feature = "ort-tensorrt")]
             tensorrt: UseTensorRtPolicy::default(),
+            #[cfg(feature = "ort-tensorrt")]
             fp16: true,
+            #[cfg(feature = "ort-tensorrt")]
             engine_cache: None,
         }
     }
@@ -167,6 +185,15 @@ struct Detecting {
     model: (u32, u32),
     /// Which pictures it looks at.
     interval: Interval,
+    /// How many pictures the tensor holds, and the model is run on at
+    /// once.
+    max_batch: usize,
+    /// The pictures of the batch under way, in the order they came, each
+    /// looked at fitted into the next slot of the tensor.
+    held: Vec<Held>,
+    /// The pipeline's, to report a picture's failure on where others must
+    /// go on in the same call.
+    context: Option<Arc<Context>>,
     tensor: CudaTensor,
     kernels: FitKernels,
     driver: CudaDriver,
@@ -211,6 +238,9 @@ impl CudaOrtDetector {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaOrtDetector, &name, None);
         let path = model_path.as_ref().display().to_string();
+        if options.max_batch == 0 {
+            return Err(OrtDetectorError::ZeroMaxBatch.into());
+        }
 
         let linked = runtime::Linked::ask();
         let runtime = runtime::runtime(&linked);
@@ -240,14 +270,27 @@ impl CudaOrtDetector {
             }
             // Device 0 for both providers: the one `CudaDevice` opens, which
             // takes no ordinal, and so where every incoming picture is.
-            let provider = TensorRT::default()
+            let mut provider = TensorRT::default()
                 .with_device_id(0)
                 .with_fp16(options.fp16)
                 .with_engine_cache(true)
                 .with_engine_cache_path(cache.display())
                 .with_timing_cache(true)
-                .with_timing_cache_path(cache.display())
-                .build();
+                .with_timing_cache_path(cache.display());
+            // TensorRT builds an engine for the shapes it is told of, and
+            // builds it again for a batch outside them: told every batch up
+            // to `max_batch`, a short batch costs no rebuild.
+            if options.max_batch > 1
+                && let Some(input) = batch_input(model_path.as_ref())?
+            {
+                let (w, h) = (input.width, input.height);
+                let shape = |batch| format!("{}:{batch}x3x{h}x{w}", input.name);
+                provider = provider
+                    .with_profile_min_shapes(shape(1))
+                    .with_profile_opt_shapes(shape(options.max_batch))
+                    .with_profile_max_shapes(shape(options.max_batch));
+            }
+            let provider = provider.build();
             // ONNX Runtime passes over a provider that fails to register and
             // tries the next, which would be CUDA running in TensorRT's place.
             providers.push(if options.tensorrt == UseTensorRtPolicy::Required {
@@ -277,8 +320,20 @@ impl CudaOrtDetector {
         let labels = labels(options.detector.labels.as_deref(), &session);
         let driver = CudaDriver::retain_primary().map_err(OrtDetectorError::from)?;
         let kernels = driver.fit_kernels().map_err(OrtDetectorError::from)?;
+        let max_batch = if open_batch(&session) {
+            options.max_batch
+        } else {
+            if options.max_batch > 1 {
+                pp_warn!(
+                    pp_log: &pp_log,
+                    "the model takes one picture at a time: a max_batch of {} is run one by one",
+                    options.max_batch
+                );
+            }
+            1
+        };
         let tensor = driver
-            .tensor(model.0, model.1)
+            .batch_tensor(model.0, model.1, max_batch)
             .map_err(OrtDetectorError::from)?;
         let memory = MemoryInfo::new(
             AllocationDevice::CUDA,
@@ -296,7 +351,7 @@ impl CudaOrtDetector {
 
         pp_info!(
             pp_log: &pp_log,
-            "model loaded: path={path}, input={}x{}, {} labels, on {provider}; {linked}",
+            "model loaded: path={path}, input={}x{}, batches of up to {max_batch}, {} labels, on {provider}; {linked}",
             model.0,
             model.1,
             labels.len()
@@ -322,8 +377,54 @@ impl CudaOrtDetector {
             device_ctx,
             _hw_device_ctx: hw_device_ctx,
             interval,
+            max_batch,
+            held: Vec::new(),
+            context: None,
         })))
     }
+}
+
+/// A picture of the batch under way: how it was fitted into the tensor,
+/// where it is looked at, or `None` where it is let by.
+struct Held {
+    buf: MediaBuffer,
+    letterbox: Option<Letterbox>,
+}
+
+/// Whether `session`'s first input leaves its batch open, so that the model
+/// can be run on several pictures at once.
+fn open_batch(session: &Session) -> bool {
+    session
+        .inputs()
+        .first()
+        .and_then(|input| input.dtype().tensor_shape())
+        .and_then(|shape| shape.iter().next().copied())
+        .is_some_and(|batch| batch < 0)
+}
+
+/// What TensorRT's profile names: the model's first input.
+#[cfg(feature = "ort-tensorrt")]
+struct BatchInput {
+    name: String,
+    width: u32,
+    height: u32,
+}
+
+/// The model's first input, where its batch is left open — read by loading
+/// the model on the CPU first, as TensorRT has to be told it before the
+/// session that runs the model is made.
+#[cfg(feature = "ort-tensorrt")]
+fn batch_input(model: &Path) -> std::result::Result<Option<BatchInput>, OrtDetectorError> {
+    let probe = Session::builder()?.commit_from_file(model)?;
+    if !open_batch(&probe) {
+        return Ok(None);
+    }
+    let (width, height) = model_input(&probe)?;
+    Ok(Some(BatchInput {
+        name: probe.inputs()[0].name().to_owned(),
+        width,
+        height,
+    }))
 }
 
 /// `$XDG_CACHE_HOME/media-pp/tensorrt`, or the platform's own cache
@@ -339,10 +440,13 @@ fn default_engine_cache() -> PathBuf {
 }
 
 impl Detecting {
-    /// Fits `frame` into the device tensor and says how it was fitted.
+    /// Fits `frame` into the `slot`th input of the device tensor and says
+    /// how it was fitted. The kernel is launched, not waited for: the run
+    /// waits once for every picture of its batch.
     fn fit(
         &mut self,
         frame: &ffmpeg::frame::Video,
+        slot: usize,
     ) -> std::result::Result<Letterbox, OrtDetectorError> {
         let surface = frame::validate(
             frame,
@@ -362,7 +466,7 @@ impl Detecting {
             self.driver.fit_nv12(
                 &self.kernels,
                 &self.tensor,
-                0,
+                slot,
                 fit,
                 source,
                 size,
@@ -371,25 +475,45 @@ impl Detecting {
         } else {
             let source = BgraSurface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?;
             self.driver
-                .fit_bgra(&self.kernels, &self.tensor, 0, fit, source, size)?;
+                .fit_bgra(&self.kernels, &self.tensor, slot, fit, source, size)?;
         }
-        // The kernel runs on this driver's context; the model reads the
-        // tensor on ONNX Runtime's own stream. Waiting here is what puts the
-        // fitted picture before the read.
-        self.driver.synchronize()?;
         Ok(letterbox)
     }
 
-    /// Looks at `frame`, and says what it found.
+    /// How many of the held pictures are fitted into the tensor.
+    fn fitted(&self) -> usize {
+        self.held
+            .iter()
+            .filter(|held| held.letterbox.is_some())
+            .count()
+    }
+
+    /// Runs the model on the pictures fitted into the first `letterboxes`
+    /// inputs of the tensor, and says what it found in each.
     fn detect(
         &mut self,
-        frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<Detections, OrtDetectorError> {
-        let letterbox = self.fit(frame)?;
-        let shape = Shape::new([1, 3, i64::from(self.model.1), i64::from(self.model.0)]);
+        letterboxes: &[Letterbox],
+    ) -> std::result::Result<Vec<Vec<Detection>>, OrtDetectorError> {
+        // The kernels ran on this driver's context; the model reads the
+        // tensor on ONNX Runtime's own stream. Waiting here is what puts
+        // every fitted picture before the read.
+        self.driver.synchronize()?;
+        let pictures = letterboxes.len();
+        let shape = Shape::new([
+            pictures as i64,
+            3,
+            i64::from(self.model.1),
+            i64::from(self.model.0),
+        ]);
+        debug_assert!(
+            pictures <= self.max_batch
+                && self.tensor.floats()
+                    == 3 * (self.model.0 * self.model.1) as usize * self.max_batch
+        );
         // SAFETY: the pointer is this element's own device allocation of
-        // `tensor.floats()` floats — exactly `shape` — in the primary context
-        // ONNX Runtime's CUDA provider also runs in; it outlives the run, the
+        // `tensor.floats()` floats — room for `max_batch` inputs, of which
+        // `shape` takes the first `pictures` — in the primary context ONNX
+        // Runtime's CUDA provider also runs in; it outlives the run, the
         // view being dropped before this returns.
         let input = unsafe {
             TensorRefMut::<f32>::from_raw(
@@ -398,21 +522,60 @@ impl Detecting {
                 shape,
             )?
         };
-        debug_assert_eq!(
-            self.tensor.floats(),
-            3 * (self.model.0 * self.model.1) as usize
-        );
         let outputs = self.session.run(inputs![input])?;
         let output = outputs[0].try_extract_array::<f32>()?;
-        Ok(Detections::new(
-            Arc::clone(&self.name),
-            Arc::clone(&self.labels),
-            decode(output, &letterbox, &self.options)?,
-        ))
+        decode_batch(output, letterboxes, &self.options)
+    }
+
+    /// Runs the model on what is held, and hands every held picture on in
+    /// the order it came — those looked at carrying what was found in them.
+    /// Where the run fails, the pictures it was for go with it.
+    fn run_held(&mut self, out: &mut Output) -> std::result::Result<(), OrtDetectorError> {
+        let held = std::mem::take(&mut self.held);
+        let letterboxes: Vec<Letterbox> = held.iter().filter_map(|held| held.letterbox).collect();
+        let mut found = if letterboxes.is_empty() {
+            Vec::new()
+        } else {
+            self.detect(&letterboxes)?
+        }
+        .into_iter();
+        for Held { buf, letterbox } in held {
+            let items = letterbox.and_then(|_| found.next());
+            match items {
+                Some(items) => {
+                    let detections =
+                        Detections::new(Arc::clone(&self.name), Arc::clone(&self.labels), items);
+                    out.push(detections.attach_to(buf));
+                }
+                // Let by unlooked-at, carrying nothing, which says so.
+                None => out.push(buf),
+            }
+        }
+        Ok(())
+    }
+
+    /// Puts `error` — one picture's, where the others of its batch go on in
+    /// the same call — on the pipeline's bus.
+    fn report(&self, error: OrtDetectorError) {
+        match &self.context {
+            Some(context) => context.bus.post(
+                &self.pp_log,
+                BusEvent::Error {
+                    element_type: ElementType::CudaOrtDetector,
+                    name: Arc::clone(&self.name),
+                    error: error.into(),
+                },
+            ),
+            None => pp_error!(pp_log: &self.pp_log, "{error}"),
+        }
     }
 }
 
 impl Element for Detecting {
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        self.context = Some(Arc::clone(context));
+    }
+
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -439,6 +602,10 @@ impl Filter for Detecting {
         ))
     }
 
+    /// A picture with no [`BatchSlot`] is a batch of its own, run at once.
+    /// The pictures of a batch are held, each fitted as it comes, and run
+    /// together when its last has come, or as soon as `max_batch` of them
+    /// are.
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         let MediaBuffer::Video(frame) = &buf else {
             return Err(OrtDetectorError::UnsupportedBuffer {
@@ -448,17 +615,56 @@ impl Filter for Detecting {
             }
             .into());
         };
-        if !self.interval.look(&buf) {
-            // Let by unlooked-at, carrying nothing, which says so.
-            out.push(buf);
-            return Ok(());
+        let slot = buf
+            .metadata()
+            .and_then(|metadata| metadata.get::<BatchSlot>())
+            .copied();
+        // What is held is of another batch, whose last picture never came:
+        // it is run as it is rather than kept waiting.
+        let held_batch = self.held.first().and_then(|held| {
+            held.buf
+                .metadata()
+                .and_then(|metadata| metadata.get::<BatchSlot>())
+                .map(|slot| slot.batch)
+        });
+        if !self.held.is_empty() && held_batch != slot.map(|slot| slot.batch) {
+            self.run_held(out)?;
         }
-        let detections = self.detect(frame)?;
-        out.push(detections.attach_to(buf));
+        let last = slot.is_none_or(|slot| slot.is_last());
+
+        let letterbox = if self.interval.look(&buf) {
+            match self.fit(frame, self.fitted()) {
+                Ok(letterbox) => Some(letterbox),
+                // This picture alone failed. Where nothing else is to go on
+                // from this call, the failure is this call's; where the
+                // batch it closes is, the batch goes on and the failure is
+                // reported beside it.
+                Err(error) if !(last && !self.held.is_empty()) => return Err(error.into()),
+                Err(error) => {
+                    self.report(error);
+                    self.run_held(out)?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        self.held.push(Held { buf, letterbox });
+        // A full tensor is run at once: what it holds need not wait for the
+        // rest of a batch larger than it.
+        if last || self.fitted() == self.max_batch {
+            self.run_held(out)?;
+        }
         Ok(())
     }
 
+    /// The end of the stream: a batch cut short is run as it is.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        Ok(self.run_held(out)?)
+    }
+
     fn reset(&mut self) {
+        self.held.clear();
         self.interval.restart();
     }
 }
@@ -657,5 +863,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A picture `n` of `video`, on the GPU, as the `index`th of a batch of
+    /// `size` a mux handed on.
+    fn in_batch(
+        device: &CudaDevice,
+        video: &str,
+        n: usize,
+        index: usize,
+        size: usize,
+    ) -> MediaBuffer {
+        use crate::buffer::Metadata;
+        use crate::elements::vision::batch::{StreamId, StreamOrigin};
+        let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
+        let uploaded = capture(&mut upload);
+        upload
+            .consume(MediaBuffer::video(crate::test_support::nth_picture(
+                video,
+                n,
+                ffmpeg::format::Pixel::NV12,
+            )))
+            .expect("uploads");
+        let buf = uploaded.lock().unwrap().remove(0);
+        buf.with_metadata(
+            Metadata::default()
+                .with(StreamOrigin {
+                    id: StreamId(index as u64),
+                    name: Arc::from(format!("camera {index}")),
+                    generation: 0,
+                })
+                .with(BatchSlot {
+                    batch: 0,
+                    index,
+                    size,
+                }),
+        )
+    }
+
+    /// The pictures of a batch are held until its last has come, then run
+    /// through the model at once and handed on in order, each carrying what
+    /// one picture at a time finds in it; a batch cut short by the end of
+    /// the stream is run as it is. Needs a model whose batch is left open —
+    /// YOLO11n exported with `dynamic=True` — a video, CUDA and the runtime
+    /// libraries; skipped, saying so, without them.
+    #[test]
+    fn a_batch_finds_what_one_picture_at_a_time_finds() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Ok(device) = CudaDevice::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        if let CudaRuntime::Unavailable { cuda } = CudaOrtDetector::runtime() {
+            eprintln!("skipping: the CUDA runtime cannot be used ({cuda})");
+            return;
+        }
+        let probe = Session::builder()
+            .and_then(|mut builder| builder.commit_from_file(&model))
+            .expect("loads");
+        if !open_batch(&probe) {
+            eprintln!("skipping: {model} takes one picture at a time");
+            return;
+        }
+        let options = |max_batch| CudaOrtDetectorOptions {
+            max_batch,
+            #[cfg(feature = "ort-tensorrt")]
+            tensorrt: UseTensorRtPolicy::Off,
+            ..CudaOrtDetectorOptions::default()
+        };
+        let pictures = [100, 150, 200];
+        let found_in = |buf: &MediaBuffer| -> Vec<(usize, f32, f32)> {
+            buf.metadata()
+                .and_then(|metadata| metadata.get::<Detections>())
+                .expect("carries Detections")
+                .items
+                .iter()
+                .filter(|item| item.score > 0.5)
+                .map(|item| (item.class_id, item.x, item.y))
+                .collect()
+        };
+
+        let mut alone = CudaOrtDetector::new("alone", &device, &model, options(1)).expect("loads");
+        let one_at_a_time = capture(&mut alone);
+        for (index, n) in pictures.into_iter().enumerate() {
+            alone
+                .consume(in_batch(&device, &video, n, index, pictures.len()))
+                .expect("detects");
+            assert_eq!(
+                one_at_a_time.lock().unwrap().len(),
+                index + 1,
+                "one at a time, each goes on at once"
+            );
+        }
+
+        let mut batched =
+            CudaOrtDetector::new("batched", &device, &model, options(4)).expect("loads");
+        let together = capture(&mut batched);
+        for (index, n) in pictures.into_iter().enumerate() {
+            batched
+                .consume(in_batch(&device, &video, n, index, pictures.len()))
+                .expect("detects");
+            let handed_on = together.lock().unwrap().len();
+            let last = index + 1 == pictures.len();
+            assert_eq!(
+                handed_on,
+                if last { pictures.len() } else { 0 },
+                "held to the last"
+            );
+        }
+        let one_at_a_time = one_at_a_time.lock().unwrap();
+        let together = together.lock().unwrap();
+        for (index, (alone, batched)) in one_at_a_time.iter().zip(together.iter()).enumerate() {
+            let MediaBuffer::Video(frame) = batched else {
+                panic!("a picture goes on");
+            };
+            assert_eq!(
+                batched
+                    .metadata()
+                    .and_then(|m| m.get::<BatchSlot>())
+                    .map(|s| s.index),
+                Some(index),
+                "in the order they came"
+            );
+            let (alone, batched) = (found_in(alone), found_in(batched));
+            assert!(!alone.is_empty(), "picture {index} has something in it");
+            assert_eq!(alone.len(), batched.len(), "picture {index}");
+            for (a, b) in alone.iter().zip(&batched) {
+                assert_eq!(a.0, b.0, "picture {index}");
+                assert!(
+                    (a.1 - b.1).abs() < 0.01 && (a.2 - b.2).abs() < 0.01,
+                    "picture {index} ({}x{}): {a:?} against {b:?}",
+                    frame.width(),
+                    frame.height()
+                );
+            }
+        }
+        drop(together);
+
+        // Two of a batch of three, then the end: both go on, looked at.
+        let mut cut =
+            CudaOrtDetector::new("cut short", &device, &model, options(4)).expect("loads");
+        let ended = capture(&mut cut);
+        for (index, n) in pictures.into_iter().take(2).enumerate() {
+            cut.consume(in_batch(&device, &video, n, index, 3))
+                .expect("detects");
+        }
+        assert!(ended.lock().unwrap().is_empty(), "waiting for the third");
+        cut.stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("drained");
+        let ended = ended.lock().unwrap();
+        assert_eq!(ended.len(), 2);
+        assert!(ended.iter().all(|buf| !found_in(buf).is_empty()));
     }
 }

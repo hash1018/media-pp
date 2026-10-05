@@ -107,11 +107,6 @@ impl CudaDriver {
         })
     }
 
-    /// A device buffer for a `width` by `height` model's input.
-    pub(crate) fn tensor(&self, width: u32, height: u32) -> Result<CudaTensor, CudaDriverError> {
-        self.batch_tensor(width, height, 1)
-    }
-
     /// A device buffer for `pictures` inputs of a `width` by `height` model,
     /// one after another.
     pub(crate) fn batch_tensor(

@@ -37,6 +37,8 @@ pub use cuda::{
 pub use metal::{MetalOrtClassifier, MetalOrtDetector};
 pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
+#[cfg(feature = "ort-cuda")]
+use yolo::decode_batch;
 use yolo::{Letterbox, decode};
 
 /// How a detector decides what counts as found, and what it calls it.
@@ -247,6 +249,10 @@ pub enum OrtError {
     #[cfg(feature = "ort-cuda")]
     #[error("a CUDA picture has no surface")]
     MissingSurface,
+    /// A detector asked to take no pictures at a time.
+    #[cfg(feature = "ort-cuda")]
+    #[error("max_batch is 0: a detector takes one picture at a time or more")]
+    ZeroMaxBatch,
     /// The driver is missing, or it, the CUDA runtime or cuDNN is too old
     /// for the CUDA provider.
     #[cfg(feature = "ort-cuda")]
