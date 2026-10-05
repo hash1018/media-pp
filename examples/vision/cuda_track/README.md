@@ -10,7 +10,9 @@ where it expects each object on the rest — DeepStream's `interval`.
 a colour of its own and labelled with its number, and encodes it on NVENC.
 `--confirm 1` numbers a new object when it is first seen rather than on its
 second sighting, which a long interval needs. `--visual` follows each object
-by how it looks as well as by its motion (`TrackerOptions::visual`).
+by how it looks as well as by its motion (`TrackerOptions::visual`), on the
+GPU: the example is built with `cuda-visual-tracking`, which links cuFFT 12
+beside the libraries `ort-tensorrt` links.
 
 `--classifier imagenet.onnx` puts a `CudaOrtClassifier` after the tracker —
 DeepStream's secondary inference — so that each object is also named by a

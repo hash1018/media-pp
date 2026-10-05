@@ -114,6 +114,46 @@ struct Tracking {
     driver: Option<crate::platform::cuda::driver::CudaDriver>,
     /// Whether it has said that it cannot read a picture's pixels.
     unreadable_said: bool,
+    /// The filters of objects followed on CUDA pictures, on the GPU, made at
+    /// the first such picture.
+    #[cfg(feature = "cuda-visual-tracking")]
+    gpu: Option<super::gpu::GpuLooks>,
+    /// Whether the GPU's filters could not be made, and CUDA pictures are
+    /// read down to the CPU's instead.
+    #[cfg(feature = "cuda-visual-tracking")]
+    gpu_failed: bool,
+}
+
+#[cfg(feature = "cuda-visual-tracking")]
+impl Tracking {
+    /// Where `frame`'s brightness is on the device, with the GPU's filters
+    /// ready, where it is a CUDA picture they can follow on.
+    fn on_gpu(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Option<crate::platform::cuda::driver::DcfSource> {
+        let source = super::gpu::GpuLooks::source(frame)?;
+        if self.gpu.is_none() && !self.gpu_failed {
+            match super::gpu::GpuLooks::new() {
+                Ok(gpu) => {
+                    pp_info!(
+                        pp_log: &self.pp_log,
+                        "following by look on the GPU, cuFFT {}",
+                        super::gpu::GpuLooks::cufft()
+                    );
+                    self.gpu = Some(gpu);
+                }
+                Err(error) => {
+                    pp_warn!(
+                        pp_log: &self.pp_log,
+                        "cannot follow by look on the GPU ({error}): reading CUDA pictures down instead"
+                    );
+                    self.gpu_failed = true;
+                }
+            }
+        }
+        self.gpu.as_ref().map(|_| source)
+    }
 }
 
 /// `frame`'s brightness, where it can be read.
@@ -190,6 +230,10 @@ impl ObjectTracker {
             #[cfg(feature = "cuda")]
             driver: None,
             unreadable_said: false,
+            #[cfg(feature = "cuda-visual-tracking")]
+            gpu: None,
+            #[cfg(feature = "cuda-visual-tracking")]
+            gpu_failed: false,
         }))
     }
 }
@@ -239,7 +283,15 @@ impl Filter for Tracking {
         }
 
         self.tracker.advance(steps);
-        let mut pixels = if self.options.visual {
+        #[cfg(feature = "cuda-visual-tracking")]
+        let gpu_source = if self.options.visual {
+            self.on_gpu(frame)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "cuda-visual-tracking"))]
+        let gpu_source: Option<()> = None;
+        let mut pixels = if self.options.visual && gpu_source.is_none() {
             luma(
                 frame,
                 #[cfg(feature = "cuda")]
@@ -248,7 +300,8 @@ impl Filter for Tracking {
         } else {
             None
         };
-        if self.options.visual && pixels.is_none() && !self.unreadable_said {
+        if self.options.visual && gpu_source.is_none() && pixels.is_none() && !self.unreadable_said
+        {
             pp_warn!(
                 pp_log: &self.pp_log,
                 "cannot read the pixels of {:?} pictures: following by motion alone",
@@ -262,6 +315,16 @@ impl Filter for Tracking {
         let expected = match pixels.as_deref_mut() {
             Some(luma) => follow_by_look(&mut self.tracker, &mut self.filters, luma),
             None => self.tracker.expected(),
+        };
+        #[cfg(feature = "cuda-visual-tracking")]
+        let expected = match (gpu_source, self.gpu.as_mut()) {
+            (Some(source), Some(gpu)) => gpu
+                .follow(&mut self.tracker, source, MIN_PSR, LOOK_DOUBT)
+                .unwrap_or_else(|error| {
+                    pp_warn!(pp_log: &self.pp_log, "following by look on the GPU failed: {error}");
+                    expected
+                }),
+            _ => expected,
         };
 
         let Some(mut found) = found else {
@@ -329,6 +392,17 @@ impl Filter for Tracking {
             let alive = self.tracker.ids();
             self.filters.retain(|id, _| alive.contains(id));
         }
+        #[cfg(feature = "cuda-visual-tracking")]
+        if let (Some(source), Some(gpu)) = (gpu_source, self.gpu.as_mut()) {
+            let matched: Vec<(u64, [f64; 4])> = seen
+                .iter()
+                .zip(&ids)
+                .filter_map(|(seen, id)| Some(((*id)?, seen.tlwh)))
+                .collect();
+            if let Err(error) = gpu.detected(source, &matched, &self.tracker.ids()) {
+                pp_warn!(pp_log: &self.pp_log, "learning on the GPU failed: {error}");
+            }
+        }
         drop(pixels);
         for (item, id) in found.items.iter_mut().zip(ids) {
             item.track_id = id;
@@ -347,6 +421,10 @@ impl Filter for Tracking {
         self.pace = Pace::default();
         self.last = None;
         self.filters.clear();
+        #[cfg(feature = "cuda-visual-tracking")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.clear();
+        }
     }
 }
 
@@ -570,6 +648,45 @@ mod tests {
         let by_look = worst_miss_on(true, &upload);
         eprintln!("worst miss on VideoToolbox: by look {by_look}");
         assert!(by_look < 16.0, "by look, {by_look} pixels at worst");
+    }
+
+    /// The same turn on NV12 CUDA pictures: the look is read where they
+    /// are — copied down region by region, or with `cuda-visual-tracking`
+    /// followed on the GPU — and holds the block as the CPU's does, to
+    /// within a pixel or two.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn following_by_look_reads_cuda_pictures() {
+        let Some((device, _serial)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let upload = |grey: ffmpeg::frame::Video| {
+            let (w, h) = (grey.width(), grey.height());
+            let mut nv12 = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, w, h);
+            nv12.set_pts(grey.pts());
+            let (from, to) = (grey.stride(0), nv12.stride(0));
+            for y in 0..h as usize {
+                let row = grey.data(0)[y * from..][..w as usize].to_vec();
+                nv12.data_mut(0)[y * to..][..w as usize].copy_from_slice(&row);
+            }
+            nv12.data_mut(1).fill(128);
+            let mut upload = crate::elements::CudaUpload::new(
+                "upload",
+                &device,
+                crate::platform::cuda::CudaFrameFormat::Nv12,
+            );
+            let uploaded = capture(&mut upload);
+            upload.consume(MediaBuffer::video(nv12)).expect("uploaded");
+            uploaded.lock().unwrap().remove(0)
+        };
+        let on_cuda = worst_miss_on(true, &upload);
+        let in_memory = worst_miss(true);
+        eprintln!("worst miss by look: on CUDA {on_cuda}, in system memory {in_memory}");
+        assert!(on_cuda < 16.0, "on CUDA, {on_cuda} pixels at worst");
+        assert!(
+            (on_cuda - in_memory).abs() < 2.0,
+            "on CUDA {on_cuda} against {in_memory} in system memory"
+        );
     }
 
     /// A gap of three pictures' time between two is three pictures of

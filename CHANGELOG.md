@@ -386,6 +386,16 @@ compile error with no explanation.
   counts the seven crossing a line across the floor, net, where motion
   alone counts four, and numbers 11 objects where motion alone numbers 19.
 
+  With the `cuda-visual-tracking` feature, CUDA pictures are followed by
+  look on the GPU: every followed object's neighbourhoods are sampled,
+  normalised, transformed by cuFFT, matched against its filter, and their
+  peaks found there at once, by kernels of their own, and four numbers an
+  object come back; the filters live on the device. cuFFT 12 is linked, as
+  `ort-cuda` links its libraries, so the program does not start without it.
+  It follows as the CPU does — the same boxes, to the third decimal, on
+  both walking clips — and costs nothing to see: on the 1080p concert, 8.1
+  seconds against 8.2 for motion alone, where the CPU took 24.
+
   `BoxColors::ByTrack` colours each object by its number, and a label shows
   the number — `person #7 0.87`; a class the model names none of is
   labelled `class 3` rather than `#3`.

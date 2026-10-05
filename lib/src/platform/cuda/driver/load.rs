@@ -47,8 +47,10 @@ macro_rules! cuda_driver {
         $(#[$meta:meta])*
         fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> CUresult;
     )*) => {
-        /// This block's entry points, as the driver answered for each.
-        #[allow(non_snake_case)]
+        /// This block's entry points, as the driver answered for each. An
+        /// entry point whose function a feature leaves out is still looked
+        /// up, and never read.
+        #[allow(non_snake_case, dead_code)]
         struct Entries {
             $($name: Option<unsafe extern "C" fn($($ty),*) -> CUresult>,)*
         }

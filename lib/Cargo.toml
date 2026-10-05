@@ -538,6 +538,11 @@ ort-cuda = ["ort", "cuda", "ort/cuda"]
 # The same through TensorRT, with CUDA for what it cannot run, and TensorRT
 # 10 and its ONNX parser linked as well.
 ort-tensorrt = ["ort-cuda", "ort/tensorrt"]
+# ObjectTracker's visual following, `TrackerOptions::visual`, on the GPU
+# for CUDA pictures: the correlation filters sampled, transformed and
+# matched there, a batch of every object at once. Links cuFFT 12 — see
+# `build.rs` — so the program does not start without it.
+cuda-visual-tracking = ["cuda"]
 # Detection on VideoToolbox pictures, on macOS: `MetalOrtDetector`. A Metal
 # kernel fits each picture into the model's input, and ONNX Runtime's Core ML
 # provider runs the model on the GPU or the Neural Engine. Its build is

@@ -30,6 +30,7 @@ unprefixed type works the same on every platform.
 | `ort` | ONNX Runtime object detection on the CPU, `SwOrtDetector`; `Detections` and the detection overlays need no feature | All |
 | `ort-cuda` | Object detection on CUDA pictures, `CudaOrtDetector`, on ONNX Runtime's CUDA provider; links CUDA and cuDNN; enables `ort` and `cuda` | Linux, Windows |
 | `ort-tensorrt` | `CudaOrtDetector` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
+| `cuda-visual-tracking` | `ObjectTracker`'s following by look on the GPU for CUDA pictures; links cuFFT; enables `cuda` | Linux, Windows |
 | `ort-coreml` | Object detection and classification on VideoToolbox pictures, `MetalOrtDetector` and `MetalOrtClassifier`, through ONNX Runtime's Core ML provider; enables `ort` and `metal` | macOS (Apple silicon) |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
@@ -70,6 +71,8 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
   needs a driver for CUDA 13.0 and at least the CUDA 13.2 runtime, cuDNN
   9.23 and TensorRT 10.15; `CudaOrtDetector::runtime` says what falls
   short.
+- **`cuda-visual-tracking`**: cuFFT 12 is linked as those are, found the
+  same way, and needed the same way at run time.
 
   An application that ships them beside itself on Linux, as it would
   FFmpeg, needs one thing more where TensorRT comes from NVIDIA's tar

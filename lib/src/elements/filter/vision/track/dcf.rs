@@ -26,9 +26,9 @@ const SIGMA: f32 = 2.0;
 /// How much of each new look a filter takes in: Bolme's rate.
 pub(super) const LEARNING_RATE: f32 = 0.125;
 /// Keeps the filter's division away from frequencies with no energy.
-const REGULARISER: f32 = 0.01;
+pub(super) const REGULARISER: f32 = 0.01;
 /// The scales tried around the last size.
-const SCALES: [f64; 3] = [1.0 / 1.05, 1.0, 1.05];
+pub(super) const SCALES: [f64; 3] = [1.0 / 1.05, 1.0, 1.05];
 /// The half-side of the area around the peak left out of the sidelobe.
 const PEAK_EXCLUSION: isize = 5;
 
@@ -52,7 +52,7 @@ pub(super) struct Dcf {
 }
 
 /// The wanted response: a Gaussian peak at the centre, transformed.
-fn target() -> &'static [Complex] {
+pub(super) fn target() -> &'static [Complex] {
     static TARGET: std::sync::OnceLock<Vec<Complex>> = std::sync::OnceLock::new();
     TARGET.get_or_init(|| {
         let centre = (SIZE / 2) as f32;
@@ -69,7 +69,7 @@ fn target() -> &'static [Complex] {
 
 /// A Hann window, which fades the neighbourhood's edges out so that the
 /// transform does not see them as a sharp border.
-fn window() -> &'static [f32] {
+pub(super) fn window() -> &'static [f32] {
     static WINDOW: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
     WINDOW.get_or_init(|| {
         let hann = |i: usize| {
@@ -82,7 +82,7 @@ fn window() -> &'static [f32] {
 }
 
 /// The window around a box of `size`, in pixels.
-fn window_of(size: (f64, f64)) -> (f64, f64) {
+pub(super) fn window_of(size: (f64, f64)) -> (f64, f64) {
     (
         (size.0 * PADDING).max(MIN_WINDOW),
         (size.1 * PADDING).max(MIN_WINDOW),

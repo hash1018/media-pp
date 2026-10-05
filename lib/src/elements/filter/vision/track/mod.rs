@@ -10,6 +10,8 @@ mod assign;
 mod byte_track;
 mod dcf;
 mod fft;
+#[cfg(feature = "cuda-visual-tracking")]
+mod gpu;
 mod kalman;
 mod luma;
 mod object_tracker;

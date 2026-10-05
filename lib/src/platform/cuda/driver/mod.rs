@@ -22,6 +22,8 @@ use thiserror::Error as ThisError;
 
 use crate::color::Color;
 
+#[cfg(feature = "cuda-visual-tracking")]
+mod dcf;
 #[cfg(feature = "ort-cuda")]
 mod fit;
 /// What a graphics API needs from CUDA to show a CUDA frame — see
@@ -31,6 +33,8 @@ pub(crate) mod interop;
 mod load;
 mod ptx;
 
+#[cfg(feature = "cuda-visual-tracking")]
+pub(crate) use dcf::{CudaDcf, DcfJob, DcfSource, cufft_version};
 #[cfg(feature = "ort-cuda")]
 pub(crate) use fit::{CudaTensor, Fit, FitKernels};
 
@@ -89,6 +93,10 @@ load::cuda_driver! {
     fn cuMemAlloc_v2(ptr: *mut CUdeviceptr, size: usize) -> CUresult;
     fn cuMemFree_v2(ptr: CUdeviceptr) -> CUresult;
     fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const c_void, size: usize) -> CUresult;
+    #[cfg(feature = "cuda-visual-tracking")]
+    fn cuMemcpyDtoH_v2(dst: *mut c_void, src: CUdeviceptr, size: usize) -> CUresult;
+    #[cfg(feature = "cuda-visual-tracking")]
+    fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, count: usize) -> CUresult;
     fn cuMemsetD2D8_v2(
         dst: CUdeviceptr,
         dst_pitch: usize,
@@ -188,6 +196,34 @@ unsafe fn launch(
             grid_x,
             grid_y,
             1,
+            block,
+            block,
+            1,
+            0,
+            std::ptr::null_mut(),
+            params.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    })
+}
+
+/// [`launch`] over a grid of `grid_z` layers as well, the same square
+/// block in each.
+#[cfg(feature = "cuda-visual-tracking")]
+unsafe fn launch_layers(
+    function: CUfunction,
+    (grid_x, grid_y, grid_z): (u32, u32, u32),
+    block: u32,
+    params: &mut [*mut c_void],
+) -> Result<(), CudaDriverError> {
+    // SAFETY: the caller's promise, which is everything `cuLaunchKernel`
+    // reads; the two null pointers are the default stream and no `extra`.
+    check("cuLaunchKernel", unsafe {
+        cuLaunchKernel(
+            function,
+            grid_x,
+            grid_y,
+            grid_z,
             block,
             block,
             1,
