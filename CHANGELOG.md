@@ -930,6 +930,13 @@ compile error with no explanation.
 
 ### Changed
 
+- **`SwOrtDetector` and `SwOrtClassifier` read an untagged HD picture as
+  BT.709,** as the CUDA and Metal detectors and every renderer already did:
+  a picture that names no matrix is BT.709 above 576 lines and BT.601 at
+  or below (`color::matrix_of`). swscale's own reading was BT.601 at any
+  size, so the same 1080p picture was handed to a model in other colours
+  on the CPU than on the GPU — its scores differed by about 0.05.
+
 - **A YOLOv8 or YOLO11 detector reads its model's output about six times
   faster.** Each box's best class was found by walking a column of the
   output through a view whose dimension was known only at run time — about

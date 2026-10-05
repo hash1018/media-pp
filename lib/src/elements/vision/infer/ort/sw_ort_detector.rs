@@ -215,7 +215,11 @@ fn fitting(
 }
 
 /// A conversion of pictures shaped `from` to RGB24 at `size`, by the
-/// colours they say they are in.
+/// colours they say they are in — or, untagged, those the CUDA and Metal
+/// paths guess for them too (`color::matrix_of`): a detector on the CPU and
+/// one on the GPU are handed the same colours of the same picture, where
+/// swscale's own reading, BT.601 whatever the size, had an untagged HD
+/// picture's scores differ by about 0.05.
 pub(super) fn to_rgb24(
     from: (
         ffmpeg::format::Pixel,
@@ -240,7 +244,8 @@ pub(super) fn to_rgb24(
         // SAFETY: `context` is a live `SwsContext` this fitting owns, and the
         // tables are swscale's own static ones.
         unsafe {
-            let source = ffmpeg::ffi::sws_getCoefficients(matrix(space));
+            let source =
+                ffmpeg::ffi::sws_getCoefficients(matrix(crate::color::matrix_of(space, height)));
             let full = i32::from(range == ffmpeg::color::Range::JPEG);
             ffmpeg::ffi::sws_setColorspaceDetails(
                 context.as_mut_ptr(),
@@ -331,6 +336,58 @@ mod tests {
     fn model() -> Option<String> {
         let path = std::env::var("MEDIA_PP_TEST_YOLO").ok()?;
         Path::new(&path).is_file().then_some(path)
+    }
+
+    /// An untagged picture is read in the colours the GPU paths guess for
+    /// it: one 1080 lines tall as BT.709 — whose red, (72, 107, 220) as
+    /// Y'CbCr, comes out red — and one of 480 as BT.601, each as the rows
+    /// the CUDA fitting is handed read the same samples, within rounding.
+    #[test]
+    fn an_untagged_picture_is_read_as_the_gpu_reads_it() {
+        for height in [1080, 480] {
+            let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, height);
+            let (luma, chroma) = (frame.stride(0), frame.stride(1));
+            frame.data_mut(0)[..luma * height as usize].fill(72);
+            for pair in frame.data_mut(1)[..chroma * (height / 2) as usize]
+                .as_chunks_mut::<2>()
+                .0
+            {
+                *pair = [107, 220];
+            }
+            let from = (
+                frame.format(),
+                64,
+                height,
+                frame.color_space(),
+                frame.color_range(),
+            );
+            assert_eq!(from.3, ffmpeg::color::Space::Unspecified);
+            let mut rgb = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, 64, height);
+            to_rgb24(from, (64, height))
+                .expect("a conversion")
+                .run(&frame, &mut rgb)
+                .expect("converted");
+            let got = &rgb.data(0)[..3];
+
+            let rows = crate::color::yuv_to_rgb_rows(from.3, from.4, height);
+            let sample = [72.0, 107.0, 220.0, 255.0].map(|v: f32| v / 255.0);
+            let want: Vec<u8> = rows
+                .iter()
+                .map(|row| {
+                    let v: f32 = row.iter().zip(sample).map(|(k, s)| k * s).sum();
+                    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+                })
+                .collect();
+            assert!(
+                got.iter()
+                    .zip(&want)
+                    .all(|(got, want)| got.abs_diff(*want) <= 2),
+                "{height} lines: {got:?} against {want:?}"
+            );
+            if height == 1080 {
+                assert!(got[0] > 200 && got[1] < 40 && got[2] < 40, "red: {got:?}");
+            }
+        }
     }
 
     /// The real thing, where a model is given: a picture goes on unchanged,

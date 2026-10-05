@@ -1653,14 +1653,15 @@ BMDONE:
 /// pixels it covers — three by three where a 1080p picture is shrunk to
 /// 640 — or, enlarging, of the one it falls in. The source sample at its
 /// centre alone, one pixel in nine, was tried first: on a picture whose
-/// bottle YOLOv10n gave 0.64 from swscale's bilinear fitting it gave 0.18,
-/// and the same inputs through the CPU's session scored the same, so it
-/// was the fitting. The mean gives 0.57 for it, and every object of that
-/// picture, of YOLOv10n and YOLO11n alike, scores within 0.07 of the CPU's.
-/// An NV12 pixel is averaged as Y', Cb and Cr — each source pixel with the
-/// chroma sample it shares — and made RGB by the three rows `fit_nv12` is
-/// handed, the same `(Y', Cb, Cr, 1)` rows `nv12_to_bgra` reads; a BGRA one
-/// is averaged as it is.
+/// bottle YOLOv10n scored about 0.6 from swscale's bilinear fitting it
+/// scored 0.18, and the same inputs through the CPU's session scored the
+/// same, so it was the fitting. The mean gives 0.57 for it, and every
+/// object of that picture, of YOLOv10n and YOLO11n alike, scores within a
+/// tenth of the CPU's — what is left is swscale's filter against a plain
+/// mean. An NV12 pixel is averaged as Y', Cb and Cr — each source pixel
+/// with the chroma sample it shares — and made RGB by the three rows
+/// `fit_nv12` is handed, the same `(Y', Cb, Cr, 1)` rows `nv12_to_bgra`
+/// reads; a BGRA one is averaged as it is.
 ///
 /// `best_class` reads what a YOLOv8 or YOLO11 model made of a batch where
 /// it is, on the device — `rows` (four, then a score per class) by `boxes`

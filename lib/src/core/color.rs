@@ -115,6 +115,22 @@ impl ColorDescription {
     }
 }
 
+/// The matrix a picture `height` lines tall was made with, by its `space`
+/// tag — or, where it has none, by the common SD/HD fallback: BT.601
+/// through 576 lines and BT.709 above. Every path that turns YUV into RGB
+/// for its own reading guesses the same, so that an untagged picture is
+/// the same colours to each.
+pub(crate) fn matrix_of(
+    space: ffmpeg_next::color::Space,
+    height: u32,
+) -> ffmpeg_next::color::Space {
+    match space {
+        ffmpeg_next::color::Space::Unspecified if height > 576 => ffmpeg_next::color::Space::BT709,
+        ffmpeg_next::color::Space::Unspecified => ffmpeg_next::color::Space::BT470BG,
+        tagged => tagged,
+    }
+}
+
 /// Builds three affine rows that turn normalized `(Y, Cb, Cr, 1)` samples
 /// into RGB. Unspecified color metadata follows the common SD/HD fallback:
 /// BT.601 through 576 lines and BT.709 above it; unspecified range is
@@ -124,14 +140,13 @@ pub(crate) fn yuv_to_rgb_rows(
     range: ffmpeg_next::color::Range,
     height: u32,
 ) -> [[f32; 4]; 3] {
-    let (kr, kb) = match space {
+    let (kr, kb) = match matrix_of(space, height) {
         ffmpeg_next::color::Space::BT709 => (0.2126f32, 0.0722f32),
         ffmpeg_next::color::Space::BT2020NCL | ffmpeg_next::color::Space::BT2020CL => {
             (0.2627f32, 0.0593f32)
         }
         ffmpeg_next::color::Space::FCC => (0.30f32, 0.11f32),
         ffmpeg_next::color::Space::SMPTE240M => (0.212f32, 0.087f32),
-        ffmpeg_next::color::Space::Unspecified if height > 576 => (0.2126f32, 0.0722f32),
         _ => (0.299f32, 0.114f32),
     };
     let kg = 1.0 - kr - kb;
