@@ -306,7 +306,7 @@ impl Filter for Detecting {
         if is_hardware(frame.format()) {
             return Err(refused("a hardware video frame").into());
         }
-        if !self.interval.look() {
+        if !self.interval.look(&buf) {
             // Let by unlooked-at, carrying nothing, which says so.
             out.push(buf);
             return Ok(());

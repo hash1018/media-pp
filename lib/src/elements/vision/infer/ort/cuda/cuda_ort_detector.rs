@@ -448,7 +448,7 @@ impl Filter for Detecting {
             }
             .into());
         };
-        if !self.interval.look() {
+        if !self.interval.look(&buf) {
             // Let by unlooked-at, carrying nothing, which says so.
             out.push(buf);
             return Ok(());

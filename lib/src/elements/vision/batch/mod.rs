@@ -9,6 +9,7 @@
 mod demux;
 mod input;
 mod meta;
+mod per_stream;
 
 use std::collections::VecDeque;
 use std::sync::{
@@ -32,6 +33,7 @@ use crate::{
 pub use demux::StreamDemuxHandle;
 pub use input::StreamMuxInput;
 pub use meta::{BatchSlot, StreamId, StreamOrigin};
+pub(crate) use per_stream::{PerStream, stream_of};
 
 /// Errors specific to [`StreamMux`]. Converts into the crate-wide `Error`
 /// via `?`.

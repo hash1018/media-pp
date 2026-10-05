@@ -99,41 +99,50 @@ impl Default for OrtDetectorOptions {
 }
 
 /// Which pictures a detector looks at, by [`OrtDetectorOptions::interval`]:
-/// the first, then every `interval + 1`th after it.
-#[derive(Debug, Clone, Copy, Default)]
+/// the first, then every `interval + 1`th after it — counted for each
+/// stream on its own, where a [`StreamMux`](crate::elements::StreamMux)
+/// interleaves several: counted across them, a stream could be looked at
+/// every time and another never.
 pub(crate) struct Interval {
     interval: u32,
-    /// Pictures let by since the last one looked at; `None` before the
-    /// first.
-    since: Option<u32>,
+    /// For each stream, pictures let by since the last one looked at;
+    /// `None` before the first.
+    since: crate::elements::vision::batch::PerStream<Option<u32>>,
 }
 
 impl Interval {
     pub(crate) fn new(interval: u32) -> Self {
         Self {
             interval,
-            since: None,
+            since: Default::default(),
         }
     }
 
-    /// Whether to look at the picture in hand.
-    pub(crate) fn look(&mut self) -> bool {
-        match self.since {
-            Some(since) if since < self.interval => {
-                self.since = Some(since + 1);
+    /// Whether to look at `buf`. A stream whose pipeline was sought starts
+    /// over, looking at its first picture after.
+    pub(crate) fn look(&mut self, buf: &crate::buffer::MediaBuffer) -> bool {
+        let interval = self.interval;
+        let (since, sought) = self.since.get(buf, |_| None);
+        if sought {
+            *since = None;
+        }
+        match *since {
+            Some(count) if count < interval => {
+                *since = Some(count + 1);
                 false
             }
             _ => {
-                self.since = Some(0);
+                *since = Some(0);
                 true
             }
         }
     }
 
-    /// Starts over, looking at the next picture: after a seek or a flush,
-    /// the first picture of what follows is the one to look at.
+    /// Starts over, looking at the next picture of every stream: after a
+    /// seek or a flush, the first picture of what follows is the one to
+    /// look at.
     pub(crate) fn restart(&mut self) {
-        self.since = None;
+        self.since.clear();
     }
 }
 
@@ -300,15 +309,60 @@ pub(crate) fn model_input(session: &ort::session::Session) -> Result<(u32, u32),
 mod tests {
     use super::*;
 
+    /// A picture of `stream`, in its `generation`, as a mux hands one on —
+    /// or of no mux, for `None`.
+    fn picture(stream: Option<u64>, generation: u64) -> crate::buffer::MediaBuffer {
+        let picture = crate::buffer::MediaBuffer::video(ffmpeg::frame::Video::empty());
+        match stream {
+            None => picture,
+            Some(id) => {
+                let origin = crate::elements::StreamOrigin {
+                    id: crate::elements::StreamId(id),
+                    name: "stream".into(),
+                    generation,
+                };
+                picture.with_metadata(crate::buffer::Metadata::default().with(origin))
+            }
+        }
+    }
+
     #[test]
     fn the_first_picture_is_looked_at_then_every_interval_plus_oneth() {
+        let alone = picture(None, 0);
         let mut every_third = Interval::new(2);
-        let looked: Vec<bool> = (0..7).map(|_| every_third.look()).collect();
+        let looked: Vec<bool> = (0..7).map(|_| every_third.look(&alone)).collect();
         assert_eq!(looked, [true, false, false, true, false, false, true]);
         every_third.restart();
-        assert!(every_third.look(), "after a restart, the next one");
+        assert!(every_third.look(&alone), "after a restart, the next one");
         let mut every = Interval::new(0);
-        assert!((0..4).all(|_| every.look()));
+        assert!((0..4).all(|_| every.look(&alone)));
+    }
+
+    /// Three streams taking turns through one detector looking at every
+    /// third picture: each stream is looked at every third of its own —
+    /// counted across them, the same stream would be looked at every time.
+    #[test]
+    fn each_stream_is_counted_on_its_own() {
+        let mut every_third = Interval::new(2);
+        let mut looked = vec![Vec::new(); 3];
+        for _ in 0..6 {
+            for (stream, looked) in looked.iter_mut().enumerate() {
+                looked.push(every_third.look(&picture(Some(stream as u64), 0)));
+            }
+        }
+        for looked in looked {
+            assert_eq!(looked, [true, false, false, true, false, false]);
+        }
+        // A sought stream starts over; the others carry on.
+        assert!(every_third.look(&picture(Some(1), 1)), "a new generation");
+        assert!(
+            every_third.look(&picture(Some(0), 0)),
+            "stream 0's next due"
+        );
+        assert!(
+            every_third.look(&picture(Some(2), 0)),
+            "stream 2's next due"
+        );
     }
 
     #[test]
