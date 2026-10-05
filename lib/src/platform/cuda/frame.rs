@@ -159,6 +159,28 @@ pub(crate) fn validate(
     }
 }
 
+/// What a CUDA frame's surface holds, from its frames context — `None`
+/// for a frame that is not a CUDA one or has no frames context.
+///
+/// For an element that reads a part of a picture and takes no device of
+/// its own to compare against; [`validate`] is the check for one that does.
+pub(crate) fn surface_layout(frame: &ffmpeg::frame::Video) -> Option<Pixel> {
+    if frame.format() != Pixel::CUDA {
+        return None;
+    }
+    // SAFETY: as in `validate`: a live `Pixel::CUDA` frame's `hw_frames_ctx`
+    // is null or an `AVBufferRef` whose `data` is an `AVHWFramesContext`,
+    // and both nulls are checked before the read.
+    unsafe {
+        let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
+        if frames_ref.is_null() || (*frames_ref).data.is_null() {
+            return None;
+        }
+        let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
+        Some(Pixel::from((*frames_ctx).sw_format))
+    }
+}
+
 #[derive(Debug, ThisError)]
 pub(crate) enum CudaFramesContextError {
     #[error("failed to allocate the CUDA frames context")]

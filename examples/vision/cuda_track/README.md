@@ -9,7 +9,8 @@ where it expects each object on the rest — DeepStream's `interval`.
 `--out tracked.mp4` records it through `CudaDetectionOverlay`, each object in
 a colour of its own and labelled with its number, and encodes it on NVENC.
 `--confirm 1` numbers a new object when it is first seen rather than on its
-second sighting, which a long interval needs.
+second sighting, which a long interval needs. `--visual` follows each object
+by how it looks as well as by its motion (`TrackerOptions::visual`).
 
 `--eval 1,2,4,9` measures how good the filled-in pictures are: it runs the
 file with the detector on every picture as the reference, then once per
@@ -26,7 +27,7 @@ LD_LIBRARY_PATH=/path/to/cuda13-cudnn9-tensorrt10/lib \
 
 Measured with YOLOv10n on an RTX 3050, `--confirm 1`, as mean IoU and the
 share of reference objects overlapped by half or more, on the pictures let
-by — the tracker against holding still:
+by — the tracker by motion alone against holding still:
 
 | interval | people walking, 12 fps | people, bicycles, cars, 12 fps |
 |---|---|---|
@@ -35,8 +36,20 @@ by — the tracker against holding still:
 | 4 | 0.707, 86.9% / 0.633, 73.8% | 0.638, 77.5% / 0.544, 62.9% |
 | 9 | 0.469, 50.6% / 0.436, 40.7% | 0.309, 29.0% / 0.301, 27.8% |
 
+And by motion alone against `--visual`, which keeps the short gaps and
+holds on over the long ones:
+
+| interval | people walking: motion / visual | people, bicycles, cars: motion / visual |
+|---|---|---|
+| 1 | 0.837, 96.2% / 0.836, 96.2% | 0.779, 89.6% / 0.776, 89.6% |
+| 2 | 0.779, 91.6% / 0.778, 92.0% | 0.728, 86.0% / 0.742, 88.8% |
+| 4 | 0.707, 86.9% / 0.726, 90.6% | 0.638, 77.5% / 0.661, 84.0% |
+| 9 | 0.469, 50.6% / 0.606, 74.3% | 0.309, 29.0% / 0.542, 73.0% |
+
 The clips are Intel's `people-detection.mp4` and
 `person-bicycle-car-detection.mp4` sample videos. On a 30 fps concert video,
 where people mostly stand, the two are within a thousandth of each other. A
 gap of a second or more — interval 9 at 12 fps — is past what carrying the
-motion on can follow.
+motion on can follow, and where following by look earns its cost: on that
+concert, a hundred people at 1080p, `--visual` took 24 seconds where motion
+alone took 8.

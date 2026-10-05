@@ -44,6 +44,8 @@ type CUmodule = *mut c_void;
 type CUfunction = *mut c_void;
 
 const CUDA_SUCCESS: CUresult = 0;
+/// `CU_MEMORYTYPE_HOST`.
+const CU_MEMORYTYPE_HOST: c_uint = 1;
 /// `CU_MEMORYTYPE_DEVICE`.
 const CU_MEMORYTYPE_DEVICE: c_uint = 2;
 
@@ -690,6 +692,57 @@ impl CudaDriver {
                 dst_pitch: destination.pitch,
                 width_in_bytes: width as usize * 4,
                 height: height as usize,
+                ..CudaMemcpy2D::default()
+            };
+            check("cuMemcpy2D", cuMemcpy2D_v2(&copy))
+        })
+    }
+
+    /// Copies a rectangle of a device surface into host memory: `height`
+    /// rows of `width_in_bytes`, from `x_in_bytes` and row `y` of `source`
+    /// at `pitch`, into `into`, packed.
+    ///
+    /// For reading a small part of a picture on the CPU — the region around
+    /// an object a tracker follows — without downloading all of it. The
+    /// copy waits for itself; work queued on other streams that writes
+    /// `source` is the caller's to wait for first.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn download_rect(
+        &self,
+        source: CUdeviceptr,
+        pitch: usize,
+        x_in_bytes: usize,
+        y: usize,
+        width_in_bytes: usize,
+        height: usize,
+        into: &mut [u8],
+    ) -> Result<(), CudaDriverError> {
+        if width_in_bytes == 0 || height == 0 {
+            return Ok(());
+        }
+        assert!(
+            into.len() >= width_in_bytes * height,
+            "a host buffer of {} bytes for {width_in_bytes} by {height}",
+            into.len()
+        );
+        // SAFETY: `with_context` has the context current, and the descriptor is
+        // a live local: the source is device memory, the destination a host
+        // slice the assertion above holds to at least `width_in_bytes * height`
+        // bytes, written packed at that width. The array fields `Default` left
+        // null are ignored for these memory types. Keeping the rectangle inside
+        // the source surface is the caller's contract.
+        self.with_context(|| unsafe {
+            let copy = CudaMemcpy2D {
+                src_memory_type: CU_MEMORYTYPE_DEVICE,
+                src_device: source,
+                src_pitch: pitch,
+                src_x_in_bytes: x_in_bytes,
+                src_y: y,
+                dst_memory_type: CU_MEMORYTYPE_HOST,
+                dst_host: into.as_mut_ptr().cast(),
+                dst_pitch: width_in_bytes,
+                width_in_bytes,
+                height,
                 ..CudaMemcpy2D::default()
             };
             check("cuMemcpy2D", cuMemcpy2D_v2(&copy))

@@ -8,7 +8,10 @@
 
 mod assign;
 mod byte_track;
+mod dcf;
+mod fft;
 mod kalman;
+mod luma;
 mod object_tracker;
 
 pub use object_tracker::ObjectTracker;
@@ -44,6 +47,20 @@ pub struct TrackerOptions {
     /// Whether a detection is matched only to a track of its own class,
     /// so that a person's number never passes to a car.
     pub per_class: bool,
+    /// Whether each object is also followed by how it looks — a correlation
+    /// filter learned from the pixels around it, as DeepStream's NvDCF has
+    /// — rather than by its motion alone. Between detections it finds the
+    /// object where it went rather than where its speed would have taken
+    /// it, which holds through a turn and over a longer
+    /// interval; on a detection's picture it puts the track where the
+    /// object is before matching, so that one that moved far is still
+    /// matched.
+    ///
+    /// It reads the pixels around each object: of 8-bit YUV, grey and RGB
+    /// pictures in system memory, and with the `cuda` feature of NV12 and
+    /// BGRA CUDA pictures, copying down only those regions. Pictures it
+    /// cannot read are followed by motion alone.
+    pub visual: bool,
 }
 
 impl Default for TrackerOptions {
@@ -55,6 +72,7 @@ impl Default for TrackerOptions {
             confirm_after: 2,
             lost_pictures: 30,
             per_class: true,
+            visual: false,
         }
     }
 }

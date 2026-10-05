@@ -1,8 +1,11 @@
 //! [`ObjectTracker`]: what a detector found, numbered across pictures.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::pp_log::{PpLog, pp_info};
+use ffmpeg_next as ffmpeg;
+
+use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
@@ -13,7 +16,23 @@ use crate::{
 };
 
 use super::TrackerOptions;
-use super::byte_track::{ByteTrack, Seen};
+use super::byte_track::{ByteTrack, Expected, Seen};
+use super::dcf::{Dcf, LEARNING_RATE};
+use super::luma::{Luma, SystemLuma};
+
+/// How sure a correlation filter must be of where it found an object for
+/// the track to be moved there: a peak-to-sidelobe ratio Bolme found to
+/// tell a found object from a lost one.
+const MIN_PSR: f32 = 7.0;
+/// How much less a filter's find is trusted than a detection, as the
+/// factor on a detection's uncertainty. The find is weighed against the
+/// motion rather than taken as it is: over a short gap the motion is the
+/// better guess, and a filter taken at its word made the boxes worse there
+/// than motion alone — measured on 12 fps walking people, 0.71 mean overlap
+/// with the detector's against 0.84 a picture after a detection. At 3 the
+/// two agree over short gaps, and the look wins over long ones: 0.61
+/// against 0.47 ten pictures on. 2 and 5 measured a little worse.
+const LOOK_DOUBT: f64 = 3.0;
 
 /// The most pictures one gap between two is taken to span: past it, a gap
 /// is a jump rather than pictures missed, and the motion is not run on
@@ -28,10 +47,11 @@ const MAX_STEPS: u64 = 120;
 /// unconfident a partly hidden object still gets.
 ///
 /// It goes after a detector: `Detector -> ObjectTracker -> Overlay`. It
-/// reads and writes metadata alone, never a pixel, so it takes pictures
-/// wherever they live — system memory, CUDA, any GPU — and hands each on
-/// as it came. A picture before any detection has been seen goes on
-/// carrying nothing.
+/// reads and writes metadata, and hands each picture on as it came, so it
+/// takes pictures wherever they live — system memory, CUDA, any GPU. With
+/// [`TrackerOptions::visual`] it also follows each object by how it looks,
+/// reading the pixels around it where it can. A picture before any
+/// detection has been seen goes on carrying nothing.
 ///
 /// Pictures missed between two — a dropping queue before the detector —
 /// are told from the timestamps, and the motion is carried through them,
@@ -85,6 +105,66 @@ struct Tracking {
     /// Whose the last detections seen were, which the expected ones on a
     /// picture let by say too.
     last: Option<Origin>,
+    /// Each followed object's correlation filter, by its number, where the
+    /// tracker follows by look.
+    filters: HashMap<u64, Dcf>,
+    /// The driver CUDA pictures are read through, opened at the first.
+    #[cfg(feature = "cuda")]
+    driver: Option<crate::platform::cuda::driver::CudaDriver>,
+    /// Whether it has said that it cannot read a picture's pixels.
+    unreadable_said: bool,
+}
+
+/// `frame`'s brightness, where it can be read.
+fn luma<'a>(
+    frame: &'a ffmpeg::frame::Video,
+    #[cfg(feature = "cuda")] driver: &'a mut Option<crate::platform::cuda::driver::CudaDriver>,
+) -> Option<Box<dyn Luma + 'a>> {
+    if let Some(system) = SystemLuma::of(frame) {
+        return Some(Box::new(system));
+    }
+    #[cfg(feature = "cuda")]
+    if frame.format() == ffmpeg::format::Pixel::CUDA {
+        use crate::platform::cuda::driver::CudaDriver;
+        if driver.is_none() {
+            *driver = CudaDriver::retain_primary().ok();
+        }
+        let driver = driver.as_ref()?;
+        // What wrote the picture — a decoder, a scaler — ran on other
+        // streams of the context; the copies wait for all of it.
+        driver.synchronize().ok()?;
+        return super::luma::CudaLuma::of(driver, frame)
+            .map(|luma| Box::new(luma) as Box<dyn Luma>);
+    }
+    None
+}
+
+/// Moves each followed object to where its filter finds it, where the
+/// filter is sure, and learns how it looks there.
+fn follow_by_look(
+    tracker: &mut ByteTrack,
+    filters: &mut HashMap<u64, Dcf>,
+    luma: &mut dyn Luma,
+) -> Vec<Expected> {
+    let mut expected = tracker.expected();
+    for object in &mut expected {
+        let Some(filter) = filters.get_mut(&object.id) else {
+            continue;
+        };
+        let [x, y, w, h] = object.tlwh;
+        let Some(found) = filter.find(luma, (x + w / 2.0, y + h / 2.0)) else {
+            continue;
+        };
+        if found.psr < MIN_PSR {
+            continue;
+        }
+        let Some(tlwh) = tracker.correct(object.id, found.tlwh, LOOK_DOUBT) else {
+            continue;
+        };
+        filter.learn(luma, tlwh, LEARNING_RATE);
+        object.tlwh = tlwh;
+    }
+    expected
 }
 
 impl ObjectTracker {
@@ -100,6 +180,10 @@ impl ObjectTracker {
             tracker: ByteTrack::new(options),
             pace: Pace::default(),
             last: None,
+            filters: HashMap::new(),
+            #[cfg(feature = "cuda")]
+            driver: None,
+            unreadable_said: false,
         }))
     }
 }
@@ -143,17 +227,42 @@ impl Filter for Tracking {
             .metadata()
             .and_then(|metadata| metadata.get::<Detections>())
             .cloned();
+        if found.is_none() && self.last.is_none() {
+            out.push(buf);
+            return Ok(());
+        }
+
+        self.tracker.advance(steps);
+        let mut pixels = if self.options.visual {
+            luma(
+                frame,
+                #[cfg(feature = "cuda")]
+                &mut self.driver,
+            )
+        } else {
+            None
+        };
+        if self.options.visual && pixels.is_none() && !self.unreadable_said {
+            pp_warn!(
+                pp_log: &self.pp_log,
+                "cannot read the pixels of {:?} pictures: following by motion alone",
+                frame.format()
+            );
+            self.unreadable_said = true;
+        }
+        // Where each object is now, by its look where it can be seen: on a
+        // picture let by, that is the answer; on a detected one, it is where
+        // the matching starts from.
+        let expected = match pixels.as_deref_mut() {
+            Some(luma) => follow_by_look(&mut self.tracker, &mut self.filters, luma),
+            None => self.tracker.expected(),
+        };
 
         let Some(mut found) = found else {
-            // Let by unlooked-at: where the objects are expected, once there
-            // are any.
             let Some(Origin { detector, labels }) = self.last.clone() else {
-                out.push(buf);
-                return Ok(());
+                unreachable!("returned above without one");
             };
-            let items = self
-                .tracker
-                .expect(steps)
+            let items = expected
                 .into_iter()
                 .filter_map(|expected| {
                     let [x, y, w, h] = expected.tlwh;
@@ -176,6 +285,7 @@ impl Filter for Tracking {
                 predicted: true,
                 ..Detections::new(detector, labels, items)
             };
+            drop(pixels);
             out.push(expected.attach_to(buf));
             return Ok(());
         };
@@ -194,7 +304,26 @@ impl Filter for Tracking {
                 ],
             })
             .collect();
-        let ids = self.tracker.update(&seen, steps);
+        let ids = self.tracker.associate(&seen);
+        if let Some(luma) = pixels.as_deref_mut() {
+            // Each matched object as the detector saw it is how it looks now.
+            for (seen, id) in seen.iter().zip(&ids) {
+                let Some(id) = id else {
+                    continue;
+                };
+                match self.filters.get_mut(id) {
+                    Some(filter) => filter.learn(luma, seen.tlwh, LEARNING_RATE),
+                    None => {
+                        if let Some(filter) = Dcf::new(luma, seen.tlwh) {
+                            self.filters.insert(*id, filter);
+                        }
+                    }
+                }
+            }
+            let alive = self.tracker.ids();
+            self.filters.retain(|id, _| alive.contains(id));
+        }
+        drop(pixels);
         for (item, id) in found.items.iter_mut().zip(ids) {
             item.track_id = id;
         }
@@ -211,6 +340,7 @@ impl Filter for Tracking {
         self.tracker = ByteTrack::new(self.options);
         self.pace = Pace::default();
         self.last = None;
+        self.filters.clear();
     }
 }
 
@@ -291,6 +421,109 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A grey 240 by 160 picture at `pts` with a textured block at `block`
+    /// on a textured background, carrying a detection of it where `detected`.
+    fn scene(pts: i64, block: [u32; 4], detected: bool) -> MediaBuffer {
+        let (w, h) = (240u32, 160u32);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, w, h);
+        frame.set_pts(Some(pts));
+        let stride = frame.stride(0);
+        let hash = |x: u32, y: u32, seed: u32| {
+            let mut v = x.wrapping_mul(374_761_393) ^ y.wrapping_mul(668_265_263) ^ seed;
+            v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+            ((v ^ (v >> 16)) & 0xff) as u8
+        };
+        let [bx, by, bw, bh] = block;
+        for y in 0..h {
+            for x in 0..w {
+                let inside = x >= bx && x < bx + bw && y >= by && y < by + bh;
+                frame.data_mut(0)[y as usize * stride + x as usize] = if inside {
+                    100 + hash((x - bx) / 3, (y - by) / 3, 7) / 2
+                } else {
+                    hash(x, y, 1) / 4
+                };
+            }
+        }
+        let buf = MediaBuffer::video(frame);
+        if !detected {
+            return buf;
+        }
+        let fraction = |v: u32, of: u32| v as f32 / of as f32;
+        Detections::new(
+            "detector",
+            Arc::from([Arc::from("thing")]),
+            vec![Detection::new(
+                0,
+                0.9,
+                fraction(bx, w),
+                fraction(by, h),
+                fraction(bw, w),
+                fraction(bh, h),
+            )],
+        )
+        .attach_to(buf)
+    }
+
+    /// Where the block is at picture `n`: right for twenty pictures, then
+    /// down — a turn, between two detections.
+    fn turning(n: u32) -> [u32; 4] {
+        let (x, y) = if n <= 20 {
+            (20 + 3 * n, 30)
+        } else {
+            (80, 30 + 3 * (n - 20))
+        };
+        [x, y, 24, 32]
+    }
+
+    /// How far the boxes the tracker put on the pictures let by are from
+    /// the block, at worst, in pixels, detecting every tenth picture.
+    fn worst_miss(visual: bool) -> f32 {
+        let options = TrackerOptions {
+            visual,
+            ..TrackerOptions::default()
+        };
+        let mut tracker = ObjectTracker::new("tracker", options);
+        let kept = capture(&mut tracker);
+        for n in 0..=34 {
+            tracker
+                .consume(scene(i64::from(n) * 100, turning(n), n % 10 == 0))
+                .expect("tracked");
+        }
+        let kept = kept.lock().unwrap();
+        (0..=34u32)
+            .filter(|n| n % 10 != 0)
+            .map(|n| {
+                let found = detections(&kept[n as usize]).expect("filled in");
+                // An object no longer followed is as lost as it can be.
+                let Some(item) = found.items.first() else {
+                    return f32::INFINITY;
+                };
+                let [bx, by, _, _] = turning(n);
+                let dx = item.x * 240.0 - bx as f32;
+                let dy = item.y * 160.0 - by as f32;
+                (dx * dx + dy * dy).sqrt()
+            })
+            .fold(0.0, f32::max)
+    }
+
+    /// Detected every tenth picture, a block that turns sharply between two
+    /// detections is kept by its look, where its motion alone carries the
+    /// box on past the turn and the next detection is not matched to it.
+    /// The look is weighed against the motion, so the box lags the turn for
+    /// a few pictures — about half the block's width at worst — before the
+    /// look pulls it round.
+    #[test]
+    fn following_by_look_holds_through_a_turn_motion_alone_loses_it() {
+        let by_look = worst_miss(true);
+        let by_motion = worst_miss(false);
+        eprintln!("worst miss: by look {by_look}, by motion {by_motion}");
+        assert!(by_look < 16.0, "by look, {by_look} pixels at worst");
+        assert!(
+            by_motion.is_infinite(),
+            "by motion, {by_motion} pixels at worst"
+        );
     }
 
     /// A gap of three pictures' time between two is three pictures of

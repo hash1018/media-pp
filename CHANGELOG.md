@@ -302,6 +302,24 @@ compile error with no explanation.
   0.63. On macOS, `metal_detect --track` and `--interval N` put it behind
   `MetalOrtDetector`.
 
+  `TrackerOptions::visual` follows each object by how it looks as well —
+  a correlation filter learned from the pixels around it, as DeepStream's
+  NvDCF has (MOSSE, searched at three scales). Between detections it finds
+  the object where it went rather than where its speed would have taken
+  it; on a detection's picture it moves the track there before matching.
+  It reads only the pixels around each object: 8-bit YUV, grey and RGB
+  pictures in system memory in place, and with `cuda` NV12 and BGRA CUDA
+  pictures by copying down those regions alone (`cuMemcpy2D`), with no
+  kernel; pictures it cannot read are followed by motion. What it finds is
+  weighed against the motion in the Kalman filter, as a measurement three
+  times as uncertain as a detection: taken at its word, the boxes were
+  worse than motion alone over short gaps. Weighed, on 12 fps walking
+  people it matches motion alone a picture after a detection and beats it
+  further on — detecting every fifth picture, 91% of objects covered by
+  half or more against 87%; every tenth, 74% against 51%, and on people,
+  bicycles and cars 73% against 29%. It costs CPU per object and picture:
+  a 1080p concert with a hundred people went from 8 to 24 seconds.
+
   `BoxColors::ByTrack` colours each object by its number, and a label shows
   the number — `person #7 0.87`; a class the model names none of is
   labelled `class 3` rather than `#3`.

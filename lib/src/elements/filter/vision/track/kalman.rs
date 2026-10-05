@@ -112,12 +112,19 @@ impl Kalman {
     /// Corrects the box toward where it was measured, by how much the
     /// filter trusts the measurement over its own expectation.
     pub(super) fn update(&mut self, measurement: Measurement) {
+        self.update_trusting(measurement, 1.0);
+    }
+
+    /// [`Self::update`], for a measurement `doubt` times as uncertain as a
+    /// detection's — one a visual tracker made, which the motion is weighed
+    /// against rather than overruled by.
+    pub(super) fn update_trusting(&mut self, measurement: Measurement, doubt: f64) {
         let (w, h) = (self.mean[2], self.mean[3]);
         let std = [
-            POSITION_WEIGHT * w,
-            POSITION_WEIGHT * h,
-            POSITION_WEIGHT * w,
-            POSITION_WEIGHT * h,
+            doubt * POSITION_WEIGHT * w,
+            doubt * POSITION_WEIGHT * h,
+            doubt * POSITION_WEIGHT * w,
+            doubt * POSITION_WEIGHT * h,
         ];
         // S = H · P · Hᵀ + R: the top-left 4x4 of P, plus the noise.
         let mut s: Small = [[0.0; 4]; 4];

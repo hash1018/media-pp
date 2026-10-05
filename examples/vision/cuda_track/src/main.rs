@@ -64,6 +64,7 @@ mod example {
         video: String,
         interval: u32,
         confirm: u32,
+        visual: bool,
         out: Option<String>,
         eval: Option<Vec<u32>>,
     }
@@ -71,14 +72,15 @@ mod example {
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
-                "usage: cuda_track <model.onnx> <video.mp4> [--interval N] [--confirm N] [--out tracked.mp4]\n\
-                 \x20      cuda_track <model.onnx> <video.mp4> --eval 1,2,4,9 [--confirm N]"
+                "usage: cuda_track <model.onnx> <video.mp4> [--interval N] [--confirm N] [--visual] [--out tracked.mp4]\n\
+                 \x20      cuda_track <model.onnx> <video.mp4> --eval 1,2,4,9 [--confirm N] [--visual]"
             );
             std::process::exit(1);
         };
         let mut positional = Vec::new();
         let (mut interval, mut out, mut eval) = (0, None, None);
         let mut confirm = TrackerOptions::default().confirm_after;
+        let mut visual = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -94,6 +96,7 @@ mod example {
                         .and_then(|n| n.parse().ok())
                         .unwrap_or_else(|| usage())
                 }
+                "--visual" => visual = true,
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
                 "--eval" => {
                     eval = Some(
@@ -113,6 +116,7 @@ mod example {
             video,
             interval,
             confirm,
+            visual,
             out,
             eval,
         }
@@ -251,6 +255,7 @@ mod example {
                     "tracker",
                     TrackerOptions {
                         confirm_after: args.confirm,
+                        visual: args.visual,
                         ..TrackerOptions::default()
                     },
                 ));

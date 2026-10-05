@@ -108,8 +108,8 @@ impl ByteTrack {
         }
     }
 
-    /// Moves every track on by `steps` pictures.
-    fn advance(&mut self, steps: u64) {
+    /// Moves every track on by `steps` pictures, to where each is expected.
+    pub(super) fn advance(&mut self, steps: u64) {
         self.picture += steps;
         for track in &mut self.tracks {
             for _ in 0..steps {
@@ -196,8 +196,16 @@ impl ByteTrack {
     /// A picture `steps` on from the last, with what was detected on it:
     /// the number of the object each detection is, where it is one this
     /// follows.
+    #[cfg(test)]
     pub(super) fn update(&mut self, seen: &[Seen], steps: u64) -> Vec<Option<u64>> {
         self.advance(steps);
+        self.associate(seen)
+    }
+
+    /// What was detected on the picture the tracks were last advanced to:
+    /// the number of the object each detection is, where it is one this
+    /// follows.
+    pub(super) fn associate(&mut self, seen: &[Seen]) -> Vec<Option<u64>> {
         let options = self.options;
         let mut ids = vec![None; seen.len()];
 
@@ -314,8 +322,15 @@ impl ByteTrack {
 
     /// A picture `steps` on with nothing detected on it: where each
     /// followed, confirmed object is expected to be.
+    #[cfg(test)]
     pub(super) fn expect(&mut self, steps: u64) -> Vec<Expected> {
         self.advance(steps);
+        self.expected()
+    }
+
+    /// Where each followed, confirmed object is expected on the picture the
+    /// tracks were last advanced to.
+    pub(super) fn expected(&self) -> Vec<Expected> {
         self.tracks
             .iter()
             .filter(|track| track.state == State::Tracked)
@@ -328,6 +343,26 @@ impl ByteTrack {
                 })
             })
             .collect()
+    }
+
+    /// Corrects where object `id` is to `tlwh`, as something other than a
+    /// detection saw it — a visual tracker following it between them. It
+    /// moves the track as a detection would, but does not count as one:
+    /// an object seen only so is still lost when the next detection misses
+    /// it.
+    ///
+    /// The correction is weighed against the motion as a measurement
+    /// `doubt` times as uncertain as a detection; what comes back is where
+    /// the track is after it.
+    pub(super) fn correct(&mut self, id: u64, tlwh: [f64; 4], doubt: f64) -> Option<[f64; 4]> {
+        let track = self.tracks.iter_mut().find(|track| track.id == Some(id))?;
+        track.kalman.update_trusting(to_xywh(tlwh), doubt);
+        Some(track.tlwh())
+    }
+
+    /// The numbers of the objects this still follows or waits for.
+    pub(super) fn ids(&self) -> Vec<u64> {
+        self.tracks.iter().filter_map(|track| track.id).collect()
     }
 }
 
