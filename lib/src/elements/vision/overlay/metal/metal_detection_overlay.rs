@@ -35,7 +35,7 @@ use super::super::{
 };
 use crate::elements::source::{TextFontError, load_font, rasterize_coverage};
 
-const SHADER: &str = include_str!("../../../../../shaders/metal/overlay.metal");
+const SHADER: &str = include_str!("../../../../shaders/metal/overlay.metal");
 
 /// Errors specific to `MetalDetectionOverlay`. Converts into the crate-wide
 /// `Error` via `?`.

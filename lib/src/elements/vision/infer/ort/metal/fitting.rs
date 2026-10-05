@@ -16,7 +16,7 @@ use crate::{
 
 use super::super::OrtError;
 
-const SHADER: &str = include_str!("../../../../../../shaders/metal/fit.metal");
+const SHADER: &str = include_str!("../../../../../shaders/metal/fit.metal");
 
 /// A VideoToolbox picture a [`Fitting`] can read: NV12 or BGRA, its pixel
 /// buffer held, no smaller than the picture says it is.
