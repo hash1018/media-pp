@@ -296,7 +296,7 @@ pub use vision::UseTensorRtPolicy;
 pub use vision::{
     Analytics, AnalyticsOptions, BoxColors, COCO_CLASS_LABELS, Classification, Crossing, Detection,
     DetectionOverlayOptions, Detections, LabelStyle, Line, LineCount, ObjectAnalytics,
-    ObjectAnalyticsError, ObjectTracker, StreamAnalyticsOptions, SwDetectionOverlay,
+    ObjectAnalyticsError, ObjectTracker, OverlayParts, StreamAnalyticsOptions, SwDetectionOverlay,
     SwDetectionOverlayError, TrackerOptions, Zone, ZoneCount,
 };
 pub use vision::{

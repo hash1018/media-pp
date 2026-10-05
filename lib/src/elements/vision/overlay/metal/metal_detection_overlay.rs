@@ -11,7 +11,6 @@ use thiserror::Error as ThisError;
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
-    color::Color,
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
@@ -30,10 +29,10 @@ use crate::{
 };
 
 use super::super::{
-    Canvas, DetectionOverlayOptions, LABEL_CACHE, Rect, box_color, bt709_limited, drawn,
-    label_text, text_color,
+    Canvas, DetectionOverlayOptions, LABEL_CACHE, MaskKey, Rect, bt709_limited, marks, rasterize,
 };
-use crate::elements::source::{TextFontError, load_font, rasterize_coverage};
+use crate::elements::Analytics;
+use crate::elements::source::{TextFontError, load_font};
 
 const SHADER: &str = include_str!("../../../../shaders/metal/overlay.metal");
 
@@ -124,9 +123,10 @@ struct Overlaying {
     pp_log: PpLog,
     options: DetectionOverlayOptions,
     font: Option<ab_glyph::FontArc>,
-    /// Labels already rasterized and uploaded, by their text; `None` for
-    /// one with nothing to draw.
-    labels: HashMap<String, Option<Texture>>,
+    /// Masks already rasterized and uploaded — labels by their text, the
+    /// pieces of zones and lines by where they are; `None` for one with
+    /// nothing to draw.
+    masks: HashMap<MaskKey, Option<Texture>>,
     gpu: MetalGpu,
     kernels: Kernels,
     /// What a solid paint binds where a label's mask goes: it is not read,
@@ -194,7 +194,7 @@ impl MetalDetectionOverlay {
             pp_log,
             options,
             font,
-            labels: HashMap::new(),
+            masks: HashMap::new(),
             gpu,
             kernels: Kernels {
                 copy_nv12,
@@ -209,14 +209,6 @@ impl MetalDetectionOverlay {
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         })))
     }
-}
-
-/// One rectangle to paint: where, in what colour, and through which label
-/// mask, if any.
-struct Stroke {
-    rect: Rect,
-    color: Color,
-    mask: Option<String>,
 }
 
 /// The kernel parameters for `rect` in `colour`, as the shader's `Paint`.
@@ -238,16 +230,18 @@ fn paint(rect: Rect, colour: [f32; 3], masked: bool) -> Vec<u8> {
 }
 
 impl Overlaying {
-    /// Whether the label `text` has a mask to draw, rasterizing and
-    /// uploading it where it is not cached yet.
-    fn label(&mut self, text: &str) -> Option<(u32, u32)> {
-        let font = self.font.as_ref()?;
-        let size = self.options.labels.as_ref()?.size;
-        if !self.labels.contains_key(text) {
-            if self.labels.len() >= LABEL_CACHE {
-                self.labels.clear();
+    /// The size of the mask `key` names, where it has one to draw,
+    /// rasterizing and uploading it where it is not cached yet.
+    fn mask(&mut self, key: &MaskKey) -> Option<(u32, u32)> {
+        if !self.masks.contains_key(key) {
+            if self.masks.len() >= LABEL_CACHE {
+                self.masks.clear();
             }
-            let mask = match rasterize_coverage(font, size, text) {
+            let font = self
+                .font
+                .as_ref()
+                .zip(self.options.labels.as_ref().map(|style| style.size));
+            let mask = match rasterize(key, font) {
                 Ok(Some(raster)) => self
                     .gpu
                     .texture(
@@ -266,17 +260,17 @@ impl Overlaying {
                             raster.height,
                         );
                     })
-                    .inspect_err(|error| pp_error!(self, "label {text:?} not drawn: {error}"))
+                    .inspect_err(|error| pp_error!(self, "{key:?} not drawn: {error}"))
                     .ok(),
                 Ok(None) => None,
                 Err(error) => {
-                    pp_error!(self, "label {text:?} not drawn: {error:?}");
+                    pp_error!(self, "{key:?} not drawn: {error:?}");
                     None
                 }
             };
-            self.labels.insert(text.to_owned(), mask);
+            self.masks.insert(key.clone(), mask);
         }
-        let mask = self.labels.get(text)?.as_ref()?;
+        let mask = self.masks.get(key)?.as_ref()?;
         Some((mask.width() as u32, mask.height() as u32))
     }
 
@@ -318,60 +312,12 @@ impl Overlaying {
         Ok(destination)
     }
 
-    /// What to paint for `detections` on a picture `canvas` describes, in
-    /// order: each box's lines, then its label's band and text.
-    fn strokes(&mut self, canvas: Canvas, detections: &Detections) -> Vec<Stroke> {
-        let score = self
-            .options
-            .labels
-            .as_ref()
-            .is_some_and(|style| style.score);
-        let mut strokes = Vec::new();
-        for detection in drawn(detections, self.options.min_score) {
-            let Some(placed) = canvas.place(detection) else {
-                continue;
-            };
-            let color = box_color(self.options.colors, detection);
-            strokes.extend(
-                canvas
-                    .edges(placed, self.options.line_width)
-                    .into_iter()
-                    .filter(|edge| !edge.is_empty())
-                    .map(|rect| Stroke {
-                        rect,
-                        color,
-                        mask: None,
-                    }),
-            );
-            let text = label_text(detections, detection, score);
-            let Some((mask_width, mask_height)) = self.label(&text) else {
-                continue;
-            };
-            let (band, area) = canvas.label(placed, mask_width, mask_height);
-            if band.is_empty() {
-                continue;
-            }
-            strokes.push(Stroke {
-                rect: band,
-                color,
-                mask: None,
-            });
-            if !area.is_empty() {
-                strokes.push(Stroke {
-                    rect: area,
-                    color: text_color(color),
-                    mask: Some(text),
-                });
-            }
-        }
-        strokes
-    }
-
-    /// A copy of `source` with `detections` drawn on it.
+    /// A copy of `source` with `detections` and `analytics` drawn on it.
     fn draw(
         &mut self,
         source: &ffmpeg::frame::Video,
-        detections: &Detections,
+        detections: Option<&Detections>,
+        analytics: Option<&Analytics>,
     ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, MetalDetectionOverlayError>
     {
         let layout = match sw_format_of(source) {
@@ -401,7 +347,13 @@ impl Overlaying {
             height,
             block: if nv12 { 2 } else { 1 },
         };
-        let strokes = self.strokes(canvas, detections);
+        let strokes = marks(
+            canvas,
+            self.options.style(),
+            detections,
+            analytics,
+            &mut |key| self.mask(key),
+        );
         let mut destination = self.frame(layout, width, height)?;
         let to = PixelBuffer::of_frame(&destination).expect("a frame of this element's own pool");
 
@@ -459,7 +411,7 @@ impl Overlaying {
             let mask = stroke
                 .mask
                 .as_ref()
-                .and_then(|text| self.labels.get(text))
+                .and_then(|key| self.masks.get(key))
                 .and_then(Option::as_ref);
             let bound: Vec<&Texture> = targets
                 .iter()
@@ -526,20 +478,17 @@ impl Filter for Overlaying {
         let metadata = buf.metadata_arc().cloned();
         let detections = metadata
             .as_deref()
-            .and_then(|metadata| metadata.get::<Detections>())
-            .filter(|detections| {
-                detections
-                    .items
-                    .iter()
-                    .any(|detection| detection.score >= self.options.min_score)
-            });
-        let Some(detections) = detections else {
+            .and_then(|metadata| metadata.get::<Detections>());
+        let analytics = metadata
+            .as_deref()
+            .and_then(|metadata| metadata.get::<Analytics>());
+        if !self.options.style().draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
             return Ok(());
-        };
+        }
         let drawn = self
-            .draw(frame, detections)
+            .draw(frame, detections, analytics)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
         let mut output = MediaBuffer::Video(Arc::new(drawn).into());
         output.set_metadata(metadata);
@@ -552,9 +501,10 @@ impl Filter for Overlaying {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::{BoxColors, LabelStyle, tests::system_font};
+    use super::super::super::{BoxColors, LabelStyle, OverlayParts, tests::system_font};
     use super::*;
     use crate::buffer::Metadata;
+    use crate::color::Color;
     use crate::element::RawSink;
     use crate::elements::{Detection, VideoToolboxDownload, VideoToolboxUpload};
     use crate::test_support::{capture, try_videotoolbox_device};
@@ -794,6 +744,65 @@ mod tests {
                 written > 10,
                 "{format:?}: the text is drawn ({written} dark pixels)"
             );
+        }
+    }
+
+    /// Zones and lines are drawn on the GPU as the CPU draws them, from
+    /// NV12 and BGRA alike: the same marks through the same masks.
+    #[test]
+    fn zones_and_lines_are_drawn_as_the_cpu_draws_them() {
+        use crate::elements::{Analytics, SwDetectionOverlay};
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let options = DetectionOverlayOptions {
+            line_width: 4,
+            parts: OverlayParts::all(),
+            ..DetectionOverlayOptions::default()
+        };
+        let analytics: Analytics = super::super::super::tests::watched();
+        for format in FORMATS {
+            let input = grey(&device, format, 128, 64, None)
+                .with_metadata(Metadata::new().with(analytics.clone()));
+            let mut gpu =
+                MetalDetectionOverlay::new("gpu", &device, options.clone()).expect("opens");
+            let kept = capture(&mut gpu);
+            gpu.consume(input.clone()).expect("drawn");
+            let on_gpu = download(kept.lock().unwrap().remove(0));
+
+            let mut cpu = SwDetectionOverlay::new("cpu", options.clone()).expect("opens");
+            let kept = capture(&mut cpu);
+            cpu.consume(
+                MediaBuffer::video(download(input))
+                    .with_metadata(Metadata::new().with(analytics.clone())),
+            )
+            .expect("drawn");
+            let MediaBuffer::Video(on_cpu) = kept.lock().unwrap().remove(0) else {
+                unreachable!();
+            };
+            let mut differ = 0;
+            let mut changed = 0;
+            for plane in 0..on_cpu.planes() {
+                let rows = if plane == 0 { 64 } else { 32 };
+                let bytes = if format == ffmpeg::format::Pixel::NV12 {
+                    128
+                } else {
+                    512
+                };
+                for y in 0..rows {
+                    let gpu_row = &on_gpu.data(plane)[y * on_gpu.stride(plane)..][..bytes];
+                    let cpu_row = &on_cpu.data(plane)[y * on_cpu.stride(plane)..][..bytes];
+                    for (a, b) in gpu_row.iter().zip(cpu_row) {
+                        changed += usize::from(*b != 128);
+                        differ += usize::from(a.abs_diff(*b) > 1);
+                    }
+                }
+            }
+            assert!(
+                changed > 200,
+                "{format:?}: something drawn ({changed} bytes)"
+            );
+            assert_eq!(differ, 0, "{format:?}: bytes more than 1 apart");
         }
     }
 }

@@ -53,7 +53,7 @@ filter_stage!(ObjectAnalytics);
 /// A zone, ready to be tested against.
 struct ZoneRule {
     name: Arc<str>,
-    corners: Vec<(f32, f32)>,
+    corners: Arc<[(f32, f32)]>,
     classes: Option<Vec<usize>>,
     crowded_at: Option<usize>,
 }
@@ -144,7 +144,7 @@ impl Rules {
                     }
                     Ok(ZoneRule {
                         name: name.into(),
-                        corners,
+                        corners: corners.into(),
                         classes,
                         crowded_at,
                     })
@@ -317,6 +317,7 @@ impl Watch {
                     .collect();
                 ZoneCount {
                     name: Arc::clone(&zone.name),
+                    corners: Arc::clone(&zone.corners),
                     crowded: zone.crowded_at.is_some_and(|at| objects.len() >= at),
                     objects,
                 }
@@ -386,6 +387,8 @@ impl Watch {
             .zip(crossed)
             .map(|((line, &(forward, backward)), crossed)| LineCount {
                 name: Arc::clone(&line.name),
+                start: line.start,
+                end: line.end,
                 forward,
                 backward,
                 crossed,
@@ -550,6 +553,11 @@ mod tests {
         let kept = kept.lock().unwrap();
         let first = &analytics(&kept[0]).zones[0];
         assert_eq!(&*first.name, "left");
+        assert_eq!(
+            &*first.corners,
+            &[(0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.0)],
+            "where it is, for an overlay to draw"
+        );
         assert_eq!(first.objects, vec![0], "inside and of the class only");
         assert!(!first.crowded);
         let second = &analytics(&kept[1]).zones[0];
@@ -591,6 +599,11 @@ mod tests {
             ],
         );
         let lines: Vec<&LineCount> = seen.iter().map(|a| &a.lines[0]).collect();
+        assert_eq!(
+            (lines[0].start, lines[0].end),
+            ((0.0, 0.5), (1.0, 0.5)),
+            "where it is, for an overlay to draw"
+        );
         assert!(lines[1].crossed.is_empty(), "not across yet");
         assert_eq!(
             lines[2].crossed,

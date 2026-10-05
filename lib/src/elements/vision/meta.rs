@@ -179,6 +179,10 @@ pub struct Analytics {
 pub struct ZoneCount {
     /// The zone's name.
     pub name: Arc<str>,
+    /// Its corners, in fractions of the picture's width and height, as
+    /// the zone was given — so that what draws the zone draws the one
+    /// counted, a stream's own included.
+    pub corners: Arc<[(f32, f32)]>,
     /// The objects inside it, as indices into the picture's
     /// [`Detections::items`].
     pub objects: Vec<usize>,
@@ -193,6 +197,11 @@ pub struct ZoneCount {
 pub struct LineCount {
     /// The line's name.
     pub name: Arc<str>,
+    /// Where it starts, in fractions of the picture's width and height, as
+    /// the line was given.
+    pub start: (f32, f32),
+    /// Where it ends.
+    pub end: (f32, f32),
     /// Crossings from its left to its right, as seen going from its start
     /// to its end — so a line drawn left to right counts what moves down
     /// the picture.

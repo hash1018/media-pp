@@ -46,7 +46,7 @@ mod example {
             CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat, CudaOrtClassifier,
             CudaOrtDetector, CudaOrtDetectorOptions, Detection, DetectionOverlayOptions,
             Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle, ObjectTracker,
-            OrtClassifierOptions, OrtDetectorOptions, TrackerOptions,
+            OrtClassifierOptions, OrtDetectorOptions, OverlayParts, TrackerOptions,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -249,6 +249,7 @@ mod example {
                                 ..LabelStyle::new(font)
                             },
                         ),
+                        parts: OverlayParts::default(),
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");

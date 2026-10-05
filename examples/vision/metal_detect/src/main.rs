@@ -35,8 +35,9 @@
 //! picture and records it, still on the GPU:
 //! `Tee -> MetalDetectionOverlay -> Queue -> VideoToolboxEncoder ->
 //! FileMuxer`, each object tracked in a colour of its own and labelled with
-//! its number. The overlay draws on copies, so the branch printing beside it
-//! sees the pictures as they were handed on.
+//! its number, and with `--line` each line drawn across it, labelled with
+//! its crossings each way. The overlay draws on copies, so the branch
+//! printing beside it sees the pictures as they were handed on.
 //!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26 — of the stock weights: the boxes are named with
@@ -80,9 +81,9 @@ mod example {
             DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
             Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier, MetalOrtDetector,
             MetalOrtDetectorOptions, ObjectAnalytics, ObjectTracker, OrtClassifierOptions,
-            OrtDetectorOptions, TrackerOptions, VideoToolboxCodec, VideoToolboxDecoder,
-            VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
-            VideoToolboxFrameFormat,
+            OrtDetectorOptions, OverlayParts, TrackerOptions, VideoToolboxCodec,
+            VideoToolboxDecoder, VideoToolboxDevice, VideoToolboxEncoder,
+            VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -250,7 +251,8 @@ mod example {
                 )
             })
             .transpose()?;
-        let analytics = (!lines.is_empty())
+        let count_lines = !lines.is_empty();
+        let analytics = count_lines
             .then(|| {
                 ObjectAnalytics::new(
                     "analytics",
@@ -388,6 +390,11 @@ mod example {
                             size: 22.0,
                             ..LabelStyle::new(font)
                         }),
+                        // The lines counted, and their crossings so far.
+                        parts: OverlayParts {
+                            lines: count_lines,
+                            ..OverlayParts::default()
+                        },
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");

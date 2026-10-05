@@ -63,7 +63,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   streams into a batch for a model to take at once, and the demux its
   handle makes, which splits the streams out again; `SwDetectionOverlay`,
   `CudaDetectionOverlay` and `MetalDetectionOverlay`, which draw those boxes
-  and labels onto the picture; `WhisperTranscriber`, `FrameCounter`,
+  and labels onto the picture, and an `ObjectAnalytics`'s zones and lines
+  with their counts, each as `OverlayParts` says; `WhisperTranscriber`, `FrameCounter`,
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 

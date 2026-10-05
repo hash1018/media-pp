@@ -34,9 +34,10 @@ and the totals at the end. It implies `--track`.
 With `--out boxes.mp4`, a Tee at the end also records each picture with what
 was found drawn on it, still on the GPU: `MetalDetectionOverlay -> Queue ->
 VideoToolboxEncoder -> FileMuxer`, each object tracked in a colour of its own
-and labelled with its number. The overlay draws on copies, so the printing
-branch beside it is handed the pictures as they were. Labels are drawn in
-Arial, which macOS ships.
+and labelled with its number, and with `--line` each line drawn across it,
+labelled with its crossings each way. The overlay draws on copies, so the
+printing branch beside it is handed the pictures as they were. Labels are
+drawn in Arial, which macOS ships.
 
 The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
 and YOLO26 — of the stock weights: the boxes are named with COCO's 80 classes,

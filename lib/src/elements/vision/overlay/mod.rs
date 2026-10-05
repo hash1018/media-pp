@@ -1,6 +1,9 @@
 //! Drawing what a detector found onto the picture it found it in, as
 //! filters: each picture that carries [`Detections`] is handed on with a
-//! box around each object, and with a label above it where a font is given.
+//! box around each object, and with a label above it where a font is given
+//! — and, as [`OverlayParts`] says, the zones and lines an
+//! [`ObjectAnalytics`](crate::elements::ObjectAnalytics) counted from its
+//! [`Analytics`].
 //!
 //! One element per place a picture lives, as the detectors are:
 //! [`SwDetectionOverlay`] draws on pictures in system memory, and
@@ -12,8 +15,8 @@
 //! Each draws on a copy, never on the picture it was handed: a picture is
 //! shared, and a Tee before the overlay hands the same one to a branch that
 //! must not see the boxes. A picture with nothing to draw is handed on as
-//! it came. Its [`Detections`] go on with the drawn copy, so whatever comes
-//! after can still read them.
+//! it came. What it carries goes on with the drawn copy, so whatever comes
+//! after can still read it.
 
 mod sw_detection_overlay;
 
@@ -29,7 +32,8 @@ pub use metal::{MetalDetectionOverlay, MetalDetectionOverlayError};
 pub use sw_detection_overlay::{SwDetectionOverlay, SwDetectionOverlayError};
 
 use crate::color::Color;
-use crate::elements::{Detection, Detections};
+use crate::elements::source::{TextMask, TextRasterError, rasterize_coverage};
+use crate::elements::{Analytics, Detection, Detections};
 
 /// How a detection overlay draws, beside the picture and what was found
 /// in it.
@@ -46,6 +50,9 @@ pub struct DetectionOverlayOptions {
     pub colors: BoxColors,
     /// The labels above the boxes, or `None` for boxes alone.
     pub labels: Option<LabelStyle>,
+    /// Which of what a picture carries are drawn: by default the boxes
+    /// alone.
+    pub parts: OverlayParts,
 }
 
 impl Default for DetectionOverlayOptions {
@@ -55,6 +62,48 @@ impl Default for DetectionOverlayOptions {
             min_score: 0.0,
             colors: BoxColors::ByClass,
             labels: None,
+            parts: OverlayParts::default(),
+        }
+    }
+}
+
+/// Which of what a picture carries an overlay draws. Each label goes with
+/// what it labels, where [`DetectionOverlayOptions::labels`] gives a font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayParts {
+    /// Each object's box, and its label — what [`LabelStyle`] says goes in
+    /// it — from the picture's [`Detections`].
+    pub boxes: bool,
+    /// Each zone of an [`ObjectAnalytics`](crate::elements::ObjectAnalytics),
+    /// from the picture's [`Analytics`]: its outline in amber — red while it
+    /// is crowded — `line_width` thick, labelled with its name and how many
+    /// objects are in it, `door 2`.
+    pub zones: bool,
+    /// Each line of an [`ObjectAnalytics`](crate::elements::ObjectAnalytics),
+    /// from the picture's [`Analytics`]: drawn across the picture in cyan,
+    /// `line_width` thick, labelled with its name and its crossings forward
+    /// and backward, `gate 12 / 3`.
+    pub lines: bool,
+}
+
+impl Default for OverlayParts {
+    /// The boxes alone: zones and lines are drawn where asked for.
+    fn default() -> Self {
+        Self {
+            boxes: true,
+            zones: false,
+            lines: false,
+        }
+    }
+}
+
+impl OverlayParts {
+    /// Boxes, zones and lines alike.
+    pub fn all() -> Self {
+        Self {
+            boxes: true,
+            zones: true,
+            lines: true,
         }
     }
 }
@@ -75,8 +124,11 @@ pub enum BoxColors {
     ByTrack,
 }
 
-/// How the label above each box is drawn: the class name, and the score
-/// if asked for, on a band of the box's colour.
+/// How the label above each box is drawn, and what it says — of the class
+/// name, the number a tracker gave the object, the score and what
+/// classifiers said of it, each as asked for, `car #7 0.87 | minivan` with
+/// all four — on a band of the box's colour. A box whose label would say
+/// nothing has none.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelStyle {
     /// Raw TrueType or OpenType font bytes. This crate bundles no font of
@@ -84,23 +136,35 @@ pub struct LabelStyle {
     pub font_data: Vec<u8>,
     /// The text's pixel height, in the picture drawn on.
     pub size: f32,
-    /// Whether the score follows the name, as in `person 0.87`.
+    /// Whether the class's name is said — or `class` and its number where
+    /// the model names none.
+    pub class: bool,
+    /// Whether the number an [`ObjectTracker`](crate::elements::ObjectTracker)
+    /// gave the object follows, as in `person #7`, where it has one.
+    pub track_id: bool,
+    /// Whether the score follows, as in `person 0.87`.
     pub score: bool,
+    /// Whether what classifiers said of the object follows, as in
+    /// `car | minivan`.
+    pub classes: bool,
 }
 
 impl LabelStyle {
-    /// A label in `font_data`, 16 pixels high, with the score.
+    /// A label in `font_data`, 16 pixels high, saying all it can.
     pub fn new(font_data: Vec<u8>) -> Self {
         Self {
             font_data,
             size: 16.0,
+            class: true,
+            track_id: true,
             score: true,
+            classes: true,
         }
     }
 }
 
 /// A rectangle of a picture, in pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Rect {
     pub(crate) x: u32,
     pub(crate) y: u32,
@@ -174,6 +238,40 @@ impl Canvas {
             y: top,
             width: right.saturating_sub(left),
             height: bottom.saturating_sub(top),
+        };
+        (!placed.is_empty()).then_some(placed)
+    }
+
+    /// The rectangle `points` — in pixels — span, grown by `reach` each
+    /// way and out to whole blocks, and cut to the picture. `None` where
+    /// none of it is in the picture.
+    fn bounds(&self, points: &[(f32, f32)], reach: f32) -> Option<Rect> {
+        let (limit_x, limit_y) = self.limit();
+        let fold = |pick: fn(&(f32, f32)) -> f32, start: f32, keep: fn(f32, f32) -> f32| {
+            points.iter().map(pick).fold(start, keep)
+        };
+        let (left, right) = (
+            fold(|p| p.0, f32::INFINITY, f32::min) - reach,
+            fold(|p| p.0, f32::NEG_INFINITY, f32::max) + reach,
+        );
+        let (top, bottom) = (
+            fold(|p| p.1, f32::INFINITY, f32::min) - reach,
+            fold(|p| p.1, f32::NEG_INFINITY, f32::max) + reach,
+        );
+        let clamp = |value: f32, limit: u32| (value.max(0.0) as u32).min(limit);
+        let x = self.down(clamp(left.floor(), limit_x));
+        let y = self.down(clamp(top.floor(), limit_y));
+        let placed = Rect {
+            x,
+            y,
+            width: self
+                .up(clamp(right.ceil(), limit_x))
+                .min(limit_x)
+                .saturating_sub(x),
+            height: self
+                .up(clamp(bottom.ceil(), limit_y))
+                .min(limit_y)
+                .saturating_sub(y),
         };
         (!placed.is_empty()).then_some(placed)
     }
@@ -279,25 +377,41 @@ pub(crate) fn text_color(background: Color) -> Color {
     }
 }
 
-/// What a label says: the class's name, or `class` and its number where
-/// the model names none; then the object's number where a tracker gave it
-/// one, the score if asked for, and what classifiers said of it —
-/// `car #7 0.87 | minivan`.
-pub(crate) fn label_text(detections: &Detections, detection: &Detection, score: bool) -> String {
-    let mut text = match detections.label(detection) {
-        Some(name) => name.to_owned(),
-        None => format!("class {}", detection.class_id),
-    };
-    if let Some(id) = detection.track_id {
-        text.push_str(&format!(" #{id}"));
+/// What a label says, of what `parts` asks for: the class's name, or
+/// `class` and its number where the model names none; then the object's
+/// number where a tracker gave it one, the score, and what classifiers said
+/// of it — `car #7 0.87 | minivan` with all four. Empty where it says
+/// nothing.
+pub(crate) fn label_text(
+    detections: &Detections,
+    detection: &Detection,
+    parts: LabelParts,
+) -> String {
+    let mut words = Vec::new();
+    if parts.class {
+        words.push(match detections.label(detection) {
+            Some(name) => name.to_owned(),
+            None => format!("class {}", detection.class_id),
+        });
     }
-    if score {
-        text.push_str(&format!(" {:.2}", detection.score));
+    if parts.track_id
+        && let Some(id) = detection.track_id
+    {
+        words.push(format!("#{id}"));
     }
-    for class in &detection.classes {
-        match class.label() {
-            Some(label) => text.push_str(&format!(" | {label}")),
-            None => text.push_str(&format!(" | class {}", class.class_id)),
+    if parts.score {
+        words.push(format!("{:.2}", detection.score));
+    }
+    let mut text = words.join(" ");
+    if parts.classes {
+        for class in &detection.classes {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            match class.label() {
+                Some(label) => text.push_str(&format!("| {label}")),
+                None => text.push_str(&format!("| class {}", class.class_id)),
+            }
         }
     }
     text
@@ -337,6 +451,303 @@ pub(crate) fn bt709_limited(color: Color) -> (u8, u8, u8) {
 /// How many rasterized labels an overlay keeps before forgetting them all:
 /// a label with a score is a new string most pictures.
 pub(crate) const LABEL_CACHE: usize = 256;
+
+/// A zone's outline, and its label's band.
+const ZONE: Color = Color::new(255, 196, 0);
+/// A zone's while it is crowded.
+const CROWDED: Color = Color::new(255, 64, 64);
+/// A line, and its label's band.
+const LINE: Color = Color::new(0, 229, 255);
+
+/// How long a piece of a slanting line is at most, in pixels: each is
+/// painted through a coverage mask of the rectangle around it, so a line
+/// across the picture costs its length times this, not its rectangle.
+const PIECE: f32 = 64.0;
+
+/// A coverage mask an overlay paints through, and what it is cached by.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum MaskKey {
+    /// A label's text, in the overlay's font.
+    Text(String),
+    /// A piece of a line `width` pixels thick, from `from` to `to` — in
+    /// sixteenths of a pixel of the picture — through exactly `rect`, which
+    /// the mask is the size of.
+    Stroke {
+        rect: Rect,
+        from: (i32, i32),
+        to: (i32, i32),
+        width: u32,
+    },
+}
+
+/// What a mask is made of: a label in the overlay's font and size where it
+/// has one — `None` draws no label — and a line's piece from its key
+/// alone.
+pub(crate) fn rasterize(
+    key: &MaskKey,
+    font: Option<(&ab_glyph::FontArc, f32)>,
+) -> Result<Option<TextMask>, TextRasterError> {
+    match key {
+        MaskKey::Text(text) => match font {
+            Some((font, size)) => rasterize_coverage(font, size, text),
+            None => Ok(None),
+        },
+        &MaskKey::Stroke {
+            rect,
+            from,
+            to,
+            width,
+        } => Ok(Some(stroke_mask(rect, from, to, width))),
+    }
+}
+
+/// How much of each pixel of `rect` a line `width` thick from `from` to
+/// `to` — in sixteenths of a pixel — covers, with round ends and a pixel's
+/// fade at its edges.
+fn stroke_mask(rect: Rect, from: (i32, i32), to: (i32, i32), width: u32) -> TextMask {
+    let point = |(x, y): (i32, i32)| (x as f32 / 16.0, y as f32 / 16.0);
+    let (a, b) = (point(from), point(to));
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length = dx * dx + dy * dy;
+    let half = width as f32 / 2.0;
+    let mut coverage = Vec::with_capacity((rect.width * rect.height) as usize);
+    for y in 0..rect.height {
+        for x in 0..rect.width {
+            let p = ((rect.x + x) as f32 + 0.5, (rect.y + y) as f32 + 0.5);
+            let t = if length > 0.0 {
+                (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let distance = (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy);
+            coverage.push(((half + 0.5 - distance).clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+    }
+    TextMask {
+        width: rect.width,
+        height: rect.height,
+        coverage,
+    }
+}
+
+/// One thing an overlay paints, in order: a rectangle of the picture in a
+/// colour, solid or through a mask.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Mark {
+    pub(crate) rect: Rect,
+    pub(crate) color: Color,
+    /// The mask, of at least the rectangle's size and read from its
+    /// top-left, or `None` to paint the rectangle solid.
+    pub(crate) mask: Option<MaskKey>,
+}
+
+/// What an overlay draws with, of its options: all but the font.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Style {
+    line_width: u32,
+    min_score: f32,
+    colors: BoxColors,
+    parts: OverlayParts,
+    label: LabelParts,
+}
+
+/// What a box's label says, of a [`LabelStyle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct LabelParts {
+    class: bool,
+    track_id: bool,
+    score: bool,
+    classes: bool,
+}
+
+impl DetectionOverlayOptions {
+    pub(crate) fn style(&self) -> Style {
+        Style {
+            line_width: self.line_width,
+            min_score: self.min_score,
+            colors: self.colors,
+            parts: self.parts,
+            // Without a font no label is drawn, whatever it would say.
+            label: self
+                .labels
+                .as_ref()
+                .map_or_else(LabelParts::default, |style| LabelParts {
+                    class: style.class,
+                    track_id: style.track_id,
+                    score: style.score,
+                    classes: style.classes,
+                }),
+        }
+    }
+}
+
+impl Style {
+    /// Whether a picture carrying `detections` and `analytics` has anything
+    /// to draw: a picture with nothing is handed on as it came.
+    pub(crate) fn draws(
+        &self,
+        detections: Option<&Detections>,
+        analytics: Option<&Analytics>,
+    ) -> bool {
+        (self.parts.boxes
+            && detections.is_some_and(|detections| {
+                detections
+                    .items
+                    .iter()
+                    .any(|detection| detection.score >= self.min_score)
+            }))
+            || analytics.is_some_and(|analytics| {
+                (self.parts.zones && !analytics.zones.is_empty())
+                    || (self.parts.lines && !analytics.lines.is_empty())
+            })
+    }
+}
+
+/// What to paint for `detections` and `analytics` on a picture `canvas`
+/// describes, in order: the zones and lines, then each box's lines, then
+/// its label's band and text. `mask` makes — or finds — the mask a key
+/// names, and says its size, or `None` where it has nothing to draw.
+pub(crate) fn marks(
+    canvas: Canvas,
+    style: Style,
+    detections: Option<&Detections>,
+    analytics: Option<&Analytics>,
+    mask: &mut dyn FnMut(&MaskKey) -> Option<(u32, u32)>,
+) -> Vec<Mark> {
+    let mut marks = Vec::new();
+    if let Some(analytics) = analytics {
+        let pixels = |(x, y): (f32, f32)| (x * canvas.width as f32, y * canvas.height as f32);
+        let zones = analytics.zones.iter().filter(|_| style.parts.zones);
+        for zone in zones {
+            let corners: Vec<(f32, f32)> = zone.corners.iter().copied().map(pixels).collect();
+            let color = if zone.crowded { CROWDED } else { ZONE };
+            for (index, &from) in corners.iter().enumerate() {
+                let to = corners[(index + 1) % corners.len()];
+                stroke(canvas, style, from, to, color, &mut marks, mask);
+            }
+            if let Some(anchor) = canvas.bounds(&corners, 0.0) {
+                let text = format!("{} {}", zone.name, zone.objects.len());
+                labelled(canvas, anchor, text, color, &mut marks, mask);
+            }
+        }
+        let lines = analytics.lines.iter().filter(|_| style.parts.lines);
+        for line in lines {
+            let (from, to) = (pixels(line.start), pixels(line.end));
+            stroke(canvas, style, from, to, LINE, &mut marks, mask);
+            if let Some(anchor) = canvas.bounds(&[from, to], 0.0) {
+                let text = format!("{} {} / {}", line.name, line.forward, line.backward);
+                labelled(canvas, anchor, text, LINE, &mut marks, mask);
+            }
+        }
+    }
+    let Some(detections) = detections.filter(|_| style.parts.boxes) else {
+        return marks;
+    };
+    for detection in drawn(detections, style.min_score) {
+        let Some(placed) = canvas.place(detection) else {
+            continue;
+        };
+        let color = box_color(style.colors, detection);
+        marks.extend(
+            canvas
+                .edges(placed, style.line_width)
+                .into_iter()
+                .filter(|edge| !edge.is_empty())
+                .map(|rect| Mark {
+                    rect,
+                    color,
+                    mask: None,
+                }),
+        );
+        let text = label_text(detections, detection, style.label);
+        if !text.is_empty() {
+            labelled(canvas, placed, text, color, &mut marks, mask);
+        }
+    }
+    marks
+}
+
+/// A line from `from` to `to`, in pixels, as pieces each painted through
+/// a mask of the rectangle around it.
+fn stroke(
+    canvas: Canvas,
+    style: Style,
+    from: (f32, f32),
+    to: (f32, f32),
+    color: Color,
+    marks: &mut Vec<Mark>,
+    mask: &mut dyn FnMut(&MaskKey) -> Option<(u32, u32)>,
+) {
+    let width = canvas.up(style.line_width.max(1));
+    let length = (to.0 - from.0).hypot(to.1 - from.1);
+    let pieces = (length / PIECE).ceil().max(1.0) as usize;
+    let at = |t: f32| (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+    let fixed = |(x, y): (f32, f32)| ((x * 16.0).round() as i32, (y * 16.0).round() as i32);
+    for piece in 0..pieces {
+        let (a, b) = (
+            at(piece as f32 / pieces as f32),
+            at((piece + 1) as f32 / pieces as f32),
+        );
+        let Some(rect) = canvas.bounds(&[a, b], width as f32 / 2.0 + 1.0) else {
+            continue;
+        };
+        let key = MaskKey::Stroke {
+            rect,
+            from: fixed(a),
+            to: fixed(b),
+            width,
+        };
+        // Cut to the mask as it was kept: one stored on whole blocks may
+        // have lost an odd last row or column of its fade.
+        let Some((width, height)) = mask(&key) else {
+            continue;
+        };
+        let rect = Rect {
+            width: rect.width.min(width),
+            height: rect.height.min(height),
+            ..rect
+        };
+        if !rect.is_empty() {
+            marks.push(Mark {
+                rect,
+                color,
+                mask: Some(key),
+            });
+        }
+    }
+}
+
+/// The label `text` for something placed at `anchor`: its band in `color`,
+/// and its text in black or white on it.
+fn labelled(
+    canvas: Canvas,
+    anchor: Rect,
+    text: String,
+    color: Color,
+    marks: &mut Vec<Mark>,
+    mask: &mut dyn FnMut(&MaskKey) -> Option<(u32, u32)>,
+) {
+    let key = MaskKey::Text(text);
+    let Some((width, height)) = mask(&key) else {
+        return;
+    };
+    let (band, area) = canvas.label(anchor, width, height);
+    if band.is_empty() {
+        return;
+    }
+    marks.push(Mark {
+        rect: band,
+        color,
+        mask: None,
+    });
+    if !area.is_empty() {
+        marks.push(Mark {
+            rect: area,
+            color: text_color(color),
+            mask: Some(key),
+        });
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -510,18 +921,33 @@ mod tests {
         assert!(text.x + text.width <= 100);
     }
 
+    /// A label says what its style asks for, each part in its place, and
+    /// nothing at all where it asks for none.
     #[test]
-    fn a_label_says_the_class_and_score() {
+    fn a_label_says_what_it_is_asked_to() {
         let detections =
             Detections::new("test", Arc::from(vec![Arc::<str>::from("person")]), vec![]);
+        let all = LabelParts {
+            class: true,
+            track_id: true,
+            score: true,
+            classes: true,
+        };
+        let without_score = LabelParts {
+            score: false,
+            ..all
+        };
         let mut found = detection(0.0, 0.0, 0.1, 0.1);
         found.score = 0.876;
-        assert_eq!(label_text(&detections, &found, true), "person 0.88");
-        assert_eq!(label_text(&detections, &found, false), "person");
+        assert_eq!(label_text(&detections, &found, all), "person 0.88");
+        assert_eq!(label_text(&detections, &found, without_score), "person");
         found.track_id = Some(12);
-        assert_eq!(label_text(&detections, &found, true), "person #12 0.88");
+        assert_eq!(label_text(&detections, &found, all), "person #12 0.88");
         found.class_id = 7;
-        assert_eq!(label_text(&detections, &found, false), "class 7 #12");
+        assert_eq!(
+            label_text(&detections, &found, without_score),
+            "class 7 #12"
+        );
         found.classes.push(crate::elements::Classification::new(
             "classifier",
             Arc::from([Arc::from("minivan")]),
@@ -529,8 +955,109 @@ mod tests {
             0.7,
         ));
         assert_eq!(
-            label_text(&detections, &found, false),
+            label_text(&detections, &found, without_score),
             "class 7 #12 | minivan"
+        );
+        let number_alone = LabelParts {
+            track_id: true,
+            ..LabelParts::default()
+        };
+        assert_eq!(label_text(&detections, &found, number_alone), "#12");
+        let classified_alone = LabelParts {
+            classes: true,
+            ..LabelParts::default()
+        };
+        assert_eq!(
+            label_text(&detections, &found, classified_alone),
+            "| minivan"
+        );
+        assert_eq!(label_text(&detections, &found, LabelParts::default()), "");
+    }
+
+    /// Boxes are drawn by default and zones and lines where asked for, each
+    /// apart; an object whose label says nothing has its box alone.
+    #[test]
+    fn each_part_is_drawn_where_asked_for() {
+        let canvas = Canvas {
+            width: 400,
+            height: 200,
+            block: 2,
+        };
+        let detections = Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("person")]),
+            vec![detection(0.1, 0.1, 0.2, 0.2)],
+        );
+        let analytics = watched();
+        let mut measure = |key: &MaskKey| match key {
+            MaskKey::Text(text) => Some((text.len() as u32 * 8, 12)),
+            MaskKey::Stroke { rect, .. } => Some((rect.width, rect.height)),
+        };
+        let mut drawn = |parts: OverlayParts, labels: Option<LabelStyle>| {
+            let options = DetectionOverlayOptions {
+                parts,
+                labels,
+                ..DetectionOverlayOptions::default()
+            };
+            let style = options.style();
+            let marks = marks(
+                canvas,
+                style,
+                Some(&detections),
+                Some(&analytics),
+                &mut measure,
+            );
+            let colors: Vec<Color> = marks.iter().map(|mark| mark.color).collect();
+            (
+                style.draws(Some(&detections), Some(&analytics)),
+                colors,
+                marks,
+            )
+        };
+        let boxed = box_color(BoxColors::ByClass, &detections.items[0]);
+        let (draws, colors, _) = drawn(OverlayParts::default(), None);
+        assert!(draws && colors.contains(&boxed));
+        assert!(!colors.contains(&ZONE) && !colors.contains(&LINE));
+        let lines_alone = OverlayParts {
+            boxes: false,
+            zones: false,
+            lines: true,
+        };
+        let (draws, colors, _) = drawn(lines_alone, None);
+        assert!(draws && colors.contains(&LINE));
+        assert!(!colors.contains(&ZONE) && !colors.contains(&boxed));
+        let zones_alone = OverlayParts {
+            boxes: false,
+            zones: true,
+            lines: false,
+        };
+        let (_, colors, _) = drawn(zones_alone, None);
+        assert!(colors.contains(&ZONE) && !colors.contains(&LINE));
+        let nothing = OverlayParts {
+            boxes: false,
+            zones: false,
+            lines: false,
+        };
+        let (draws, colors, _) = drawn(nothing, None);
+        assert!(!draws && colors.is_empty());
+
+        let silent = LabelStyle {
+            class: false,
+            track_id: false,
+            score: false,
+            classes: false,
+            ..LabelStyle::new(Vec::new())
+        };
+        let (_, _, marks) = drawn(OverlayParts::default(), Some(silent));
+        assert!(
+            marks.iter().all(|mark| mark.mask.is_none()),
+            "a label saying nothing is not drawn: {marks:?}"
+        );
+        let (_, _, marks) = drawn(OverlayParts::default(), Some(LabelStyle::new(Vec::new())));
+        assert!(
+            marks
+                .iter()
+                .any(|mark| mark.mask == Some(MaskKey::Text("person 0.90".into())))
         );
     }
 
@@ -567,5 +1094,149 @@ mod tests {
     fn white_and_black_are_limited_range() {
         assert_eq!(bt709_limited(Color::WHITE), (235, 128, 128));
         assert_eq!(bt709_limited(Color::BLACK), (16, 128, 128));
+    }
+
+    /// A zone of two objects and a line crossed three times forward and
+    /// once back — in fractions, as an `ObjectAnalytics` puts them.
+    pub(crate) fn watched() -> Analytics {
+        use crate::elements::{LineCount, ZoneCount};
+        Analytics {
+            zones: vec![ZoneCount {
+                name: Arc::from("door"),
+                corners: Arc::from(vec![(0.1, 0.1), (0.4, 0.1), (0.4, 0.8), (0.1, 0.8)]),
+                objects: vec![0, 1],
+                crowded: false,
+            }],
+            lines: vec![LineCount {
+                name: Arc::from("gate"),
+                start: (0.5, 0.2),
+                end: (0.9, 0.8),
+                forward: 3,
+                backward: 1,
+                crossed: Vec::new(),
+            }],
+        }
+    }
+
+    fn drawing_analytics() -> Style {
+        DetectionOverlayOptions {
+            line_width: 4,
+            parts: OverlayParts::all(),
+            ..DetectionOverlayOptions::default()
+        }
+        .style()
+    }
+
+    /// A slanting line is painted in pieces, each through a mask of the
+    /// rectangle around it alone, whose coverage is whole all along the
+    /// line and nothing a few pixels off it.
+    #[test]
+    fn a_slanting_line_is_painted_along_its_length_and_nowhere_else() {
+        let canvas = Canvas {
+            width: 400,
+            height: 200,
+            block: 2,
+        };
+        let mut analytics = watched();
+        analytics.zones.clear();
+        let mut masks = std::collections::HashMap::new();
+        let marks = marks(
+            canvas,
+            drawing_analytics(),
+            None,
+            Some(&analytics),
+            &mut |key| {
+                let mask = rasterize(key, None).unwrap()?;
+                let size = (mask.width, mask.height);
+                masks.insert(key.clone(), mask);
+                Some(size)
+            },
+        );
+        assert!(marks.len() > 1, "in pieces: {marks:?}");
+        assert!(marks.iter().all(|mark| mark.color == LINE));
+        let coverage = |x: f32, y: f32| -> u8 {
+            let (x, y) = (x as u32, y as u32);
+            marks
+                .iter()
+                .filter(|mark| {
+                    let rect = mark.rect;
+                    x >= rect.x
+                        && y >= rect.y
+                        && x < rect.x + rect.width
+                        && y < rect.y + rect.height
+                })
+                .map(|mark| {
+                    let mask = &masks[mark.mask.as_ref().expect("through a mask")];
+                    mask.coverage[((y - mark.rect.y) * mask.width + x - mark.rect.x) as usize]
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let (from, to) = ((200.0, 40.0), (360.0, 160.0));
+        let (length, across) = (200.0f32, ((120.0 / 200.0) as f32, (-160.0 / 200.0) as f32));
+        for step in 0..=50 {
+            let t = step as f32 / 50.0;
+            let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            assert_eq!(coverage(at.0, at.1), 255, "on the line at {at:?}");
+            let off = (at.0 + across.0 * 6.0, at.1 + across.1 * 6.0);
+            assert_eq!(coverage(off.0, off.1), 0, "six pixels off it at {off:?}");
+        }
+        let painted: u32 = marks
+            .iter()
+            .map(|mark| mark.rect.width * mark.rect.height)
+            .sum();
+        assert!(
+            (painted as f32) < length * 4.0 * 16.0,
+            "the pieces' rectangles, not the line's: {painted} pixels"
+        );
+    }
+
+    /// A zone is outlined in amber, red while crowded, and labelled with
+    /// how many objects are in it; a line is labelled with its crossings
+    /// each way. Neither is drawn unless asked for.
+    #[test]
+    fn zones_and_lines_are_labelled_with_their_counts() {
+        let canvas = Canvas {
+            width: 400,
+            height: 200,
+            block: 2,
+        };
+        let mut measure = |key: &MaskKey| match key {
+            MaskKey::Text(text) => Some((text.len() as u32 * 8, 12)),
+            MaskKey::Stroke { rect, .. } => Some((rect.width, rect.height)),
+        };
+        let mut analytics = watched();
+        let drawn = marks(
+            canvas,
+            drawing_analytics(),
+            None,
+            Some(&analytics),
+            &mut measure,
+        );
+        assert!(drawn.iter().any(|mark| mark.color == ZONE));
+        assert!(!drawn.iter().any(|mark| mark.color == CROWDED));
+        analytics.zones[0].crowded = true;
+        let crowded = marks(
+            canvas,
+            drawing_analytics(),
+            None,
+            Some(&analytics),
+            &mut measure,
+        );
+        assert!(crowded.iter().any(|mark| mark.color == CROWDED));
+        assert!(!crowded.iter().any(|mark| mark.color == ZONE));
+        let texts: Vec<&MaskKey> = drawn.iter().filter_map(|mark| mark.mask.as_ref()).collect();
+        for label in ["door 2", "gate 3 / 1"] {
+            assert!(
+                texts.contains(&&MaskKey::Text(label.to_owned())),
+                "{label}: {texts:?}"
+            );
+        }
+
+        let not_asked = DetectionOverlayOptions::default().style();
+        assert!(!not_asked.draws(None, Some(&analytics)));
+        assert!(marks(canvas, not_asked, None, Some(&analytics), &mut measure).is_empty());
+        assert!(drawing_analytics().draws(None, Some(&analytics)));
+        assert!(!drawing_analytics().draws(None, Some(&Analytics::default())));
     }
 }

@@ -28,10 +28,9 @@ use crate::{
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use super::super::{
-    Canvas, DetectionOverlayOptions, LABEL_CACHE, Rect, box_color, drawn, label_text, text_color,
-};
-use crate::elements::source::{TextFontError, load_font, rasterize_coverage};
+use super::super::{Canvas, DetectionOverlayOptions, LABEL_CACHE, MaskKey, Rect, marks, rasterize};
+use crate::elements::Analytics;
+use crate::elements::source::{TextFontError, load_font};
 
 /// Errors specific to `CudaDetectionOverlay`. Converts into the crate-wide
 /// `Error` via `?`.
@@ -110,9 +109,10 @@ struct Overlaying {
     pp_log: PpLog,
     options: DetectionOverlayOptions,
     font: Option<ab_glyph::FontArc>,
-    /// Labels already rasterized and uploaded, by their text; `None` for
-    /// one with nothing to draw.
-    labels: HashMap<String, Option<CudaMask>>,
+    /// Masks already rasterized and uploaded — labels by their text, the
+    /// pieces of zones and lines by where they are; `None` for one with
+    /// nothing to draw.
+    masks: HashMap<MaskKey, Option<CudaMask>>,
     driver: CudaDriver,
     /// This element's own reference to the shared context.
     hw_device_ctx: Arc<AvBufferRef>,
@@ -174,7 +174,7 @@ impl CudaDetectionOverlay {
             pp_log,
             options,
             font,
-            labels: HashMap::new(),
+            masks: HashMap::new(),
             driver,
             hw_device_ctx,
             device_ctx,
@@ -193,31 +193,33 @@ enum Surface {
 }
 
 impl Overlaying {
-    /// The label `text` rasterized and uploaded, from the cache where it is
-    /// there.
-    fn label(&mut self, text: &str) -> Option<&CudaMask> {
-        let font = self.font.as_ref()?;
-        let size = self.options.labels.as_ref()?.size;
-        if !self.labels.contains_key(text) {
-            if self.labels.len() >= LABEL_CACHE {
-                self.labels.clear();
+    /// The mask `key` names, rasterized and uploaded, from the cache where
+    /// it is there.
+    fn mask(&mut self, key: &MaskKey) -> Option<&CudaMask> {
+        if !self.masks.contains_key(key) {
+            if self.masks.len() >= LABEL_CACHE {
+                self.masks.clear();
             }
-            let mask = match rasterize_coverage(font, size, text) {
+            let font = self
+                .font
+                .as_ref()
+                .zip(self.options.labels.as_ref().map(|style| style.size));
+            let mask = match rasterize(key, font) {
                 Ok(Some(raster)) => self
                     .driver
                     .upload_mask(&raster.coverage, raster.width, raster.height)
-                    // A label under two pixels either way has no whole
-                    // block to draw; it is left out, not an error.
+                    // A mask under two pixels either way has no whole block
+                    // to draw; it is left out, not an error.
                     .ok(),
                 Ok(None) => None,
                 Err(error) => {
-                    pp_error!(self, "label {text:?} not drawn: {error:?}");
+                    pp_error!(self, "{key:?} not drawn: {error:?}");
                     None
                 }
             };
-            self.labels.insert(text.to_owned(), mask);
+            self.masks.insert(key.clone(), mask);
         }
-        self.labels.get(text)?.as_ref()
+        self.masks.get(key)?.as_ref()
     }
 
     /// A frame from this element's pool for `format` at `width` x `height`.
@@ -287,11 +289,12 @@ impl Overlaying {
         }
     }
 
-    /// A copy of `source` with `detections` drawn on it.
+    /// A copy of `source` with `detections` and `analytics` drawn on it.
     fn draw(
         &mut self,
         source: &ffmpeg::frame::Video,
-        detections: &Detections,
+        detections: Option<&Detections>,
+        analytics: Option<&Analytics>,
     ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, CudaDetectionOverlayError>
     {
         let layout = frame::validate(
@@ -345,43 +348,26 @@ impl Overlaying {
             height,
             block: if nv12 { 2 } else { 1 },
         };
-        let score = self
-            .options
-            .labels
-            .as_ref()
-            .is_some_and(|style| style.score);
-        for detection in drawn(detections, self.options.min_score) {
-            let Some(placed) = canvas.place(detection) else {
+        // Placed by each uploaded mask's size, which is the rasterized one
+        // cut to whole blocks, so nothing is read past it.
+        let marks = marks(
+            canvas,
+            self.options.style(),
+            detections,
+            analytics,
+            &mut |key| self.mask(key).map(|mask| (mask.width, mask.height)),
+        );
+        for mark in marks {
+            let Some(key) = &mark.mask else {
+                self.fill(surface, mark.rect, mark.color)?;
                 continue;
             };
-            let color = box_color(self.options.colors, detection);
-            for edge in canvas.edges(placed, self.options.line_width) {
-                if !edge.is_empty() {
-                    self.fill(surface, edge, color)?;
-                }
-            }
-            let text = label_text(detections, detection, score);
-            // Placed by the uploaded mask's size, which is the rasterized
-            // one cut to whole blocks, so the text never reads past it.
-            let Some((mask_width, mask_height)) =
-                self.label(&text).map(|mask| (mask.width, mask.height))
-            else {
-                continue;
-            };
-            let (band, area) = canvas.label(placed, mask_width, mask_height);
-            if band.is_empty() {
-                continue;
-            }
-            self.fill(surface, band, color)?;
-            if area.is_empty() {
-                continue;
-            }
-            let ink = text_color(color);
             let mask = self
-                .labels
-                .get(&text)
+                .masks
+                .get(key)
                 .and_then(Option::as_ref)
-                .expect("rasterized just above");
+                .expect("made while the marks were");
+            let area = mark.rect;
             match surface {
                 Surface::Nv12(nv12) => self.driver.blend_mask_nv12(
                     nv12,
@@ -392,7 +378,7 @@ impl Overlaying {
                     0,
                     area.width,
                     area.height,
-                    ink,
+                    mark.color,
                     255,
                 )?,
                 Surface::Bgra(bgra) => self.driver.blend_mask_bgra(
@@ -403,7 +389,7 @@ impl Overlaying {
                     mask.width,
                     area.width,
                     area.height,
-                    ink,
+                    mark.color,
                     255,
                 )?,
             }
@@ -466,20 +452,17 @@ impl Filter for Overlaying {
         let metadata = buf.metadata_arc().cloned();
         let detections = metadata
             .as_deref()
-            .and_then(|metadata| metadata.get::<Detections>())
-            .filter(|detections| {
-                detections
-                    .items
-                    .iter()
-                    .any(|detection| detection.score >= self.options.min_score)
-            });
-        let Some(detections) = detections else {
+            .and_then(|metadata| metadata.get::<Detections>());
+        let analytics = metadata
+            .as_deref()
+            .and_then(|metadata| metadata.get::<Analytics>());
+        if !self.options.style().draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
             return Ok(());
-        };
+        }
         let drawn = self
-            .draw(frame, detections)
+            .draw(frame, detections, analytics)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
         let mut output = MediaBuffer::Video(Arc::new(drawn).into());
         output.set_metadata(metadata);

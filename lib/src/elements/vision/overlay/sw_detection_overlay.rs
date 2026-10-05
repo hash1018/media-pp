@@ -22,10 +22,10 @@ use crate::{
 };
 
 use super::{
-    Canvas, DetectionOverlayOptions, LABEL_CACHE, Rect, box_color, bt709_limited, drawn,
-    label_text, text_color,
+    Canvas, DetectionOverlayOptions, LABEL_CACHE, MaskKey, Rect, bt709_limited, marks, rasterize,
 };
-use crate::elements::source::{TextFontError, TextMask, load_font, rasterize_coverage};
+use crate::elements::Analytics;
+use crate::elements::source::{TextFontError, TextMask, load_font};
 
 /// The pixel formats it draws on.
 const LAYOUTS: PixelLayoutSet = PixelLayoutSet::from_slice(&[
@@ -82,9 +82,10 @@ struct Overlaying {
     pp_log: PpLog,
     options: DetectionOverlayOptions,
     font: Option<ab_glyph::FontArc>,
-    /// Labels already rasterized, by their text; `None` for one with
-    /// nothing to draw.
-    labels: HashMap<String, Option<TextMask>>,
+    /// Masks already rasterized — labels by their text, the pieces of
+    /// zones and lines by where they are; `None` for one with nothing to
+    /// draw.
+    masks: HashMap<MaskKey, Option<TextMask>>,
 }
 
 impl SwDetectionOverlay {
@@ -117,7 +118,7 @@ impl SwDetectionOverlay {
             pp_log,
             options,
             font,
-            labels: HashMap::new(),
+            masks: HashMap::new(),
         })))
     }
 }
@@ -266,28 +267,31 @@ fn paint(
 }
 
 impl Overlaying {
-    /// The label `text` rasterized, from the cache where it is there.
-    fn label(&mut self, text: &str) -> Option<&TextMask> {
-        let font = self.font.as_ref()?;
-        let size = self.options.labels.as_ref()?.size;
-        if !self.labels.contains_key(text) {
-            if self.labels.len() >= LABEL_CACHE {
-                self.labels.clear();
+    /// The mask `key` names, from the cache where it is there.
+    fn mask(&mut self, key: &MaskKey) -> Option<&TextMask> {
+        if !self.masks.contains_key(key) {
+            if self.masks.len() >= LABEL_CACHE {
+                self.masks.clear();
             }
-            let mask = rasterize_coverage(font, size, text)
-                .inspect_err(|error| pp_error!(self, "label {text:?} not drawn: {error:?}"))
+            let font = self
+                .font
+                .as_ref()
+                .zip(self.options.labels.as_ref().map(|style| style.size));
+            let mask = rasterize(key, font)
+                .inspect_err(|error| pp_error!(self, "{key:?} not drawn: {error:?}"))
                 .ok()
                 .flatten();
-            self.labels.insert(text.to_owned(), mask);
+            self.masks.insert(key.clone(), mask);
         }
-        self.labels.get(text)?.as_ref()
+        self.masks.get(key)?.as_ref()
     }
 
-    /// A copy of `frame` with `detections` drawn on it.
+    /// A copy of `frame` with `detections` and `analytics` drawn on it.
     fn draw(
         &mut self,
         frame: &ffmpeg::frame::Video,
-        detections: &Detections,
+        detections: Option<&Detections>,
+        analytics: Option<&Analytics>,
     ) -> std::result::Result<ffmpeg::frame::Video, SwDetectionOverlayError> {
         let planes = Planes::of(frame.format())
             .ok_or(SwDetectionOverlayError::UnsupportedFormat(frame.format()))?;
@@ -296,42 +300,24 @@ impl Overlaying {
             height: frame.height(),
             block: planes.block(),
         };
+        let marks = marks(
+            canvas,
+            self.options.style(),
+            detections,
+            analytics,
+            &mut |key| self.mask(key).map(|mask| (mask.width, mask.height)),
+        );
         let mut copy = frame.clone();
-        let score = self
-            .options
-            .labels
-            .as_ref()
-            .is_some_and(|style| style.score);
-        for detection in drawn(detections, self.options.min_score) {
-            let Some(placed) = canvas.place(detection) else {
-                continue;
-            };
-            let color = box_color(self.options.colors, detection);
-            for edge in canvas.edges(placed, self.options.line_width) {
-                if !edge.is_empty() {
-                    paint(&mut copy, planes, edge, color, None);
-                }
-            }
-            let text = label_text(detections, detection, score);
-            let Some(mask) = self.label(&text) else {
-                continue;
-            };
-            let (band, area) = canvas.label(placed, mask.width, mask.height);
-            if band.is_empty() {
-                continue;
-            }
-            paint(&mut copy, planes, band, color, None);
-            if !area.is_empty() {
-                // The mask cut to the area, row by row: the area is never
-                // wider than the mask, so its stride is the mask's.
-                paint(
-                    &mut copy,
-                    planes,
-                    area,
-                    text_color(color),
-                    Some((&mask.coverage, mask.width as usize)),
-                );
-            }
+        for mark in marks {
+            let mask = mark
+                .mask
+                .as_ref()
+                .and_then(|key| self.masks.get(key))
+                .and_then(Option::as_ref);
+            // A mask is read row by row from the rectangle's top-left: the
+            // rectangle is never wider than it, so its stride is the mask's.
+            let mask = mask.map(|mask| (mask.coverage.as_slice(), mask.width as usize));
+            paint(&mut copy, planes, mark.rect, mark.color, mask);
         }
         Ok(copy)
     }
@@ -377,20 +363,17 @@ impl Filter for Overlaying {
         let metadata = buf.metadata_arc().cloned();
         let detections = metadata
             .as_deref()
-            .and_then(|metadata| metadata.get::<Detections>())
-            .filter(|detections| {
-                detections
-                    .items
-                    .iter()
-                    .any(|detection| detection.score >= self.options.min_score)
-            });
-        let Some(detections) = detections else {
+            .and_then(|metadata| metadata.get::<Detections>());
+        let analytics = metadata
+            .as_deref()
+            .and_then(|metadata| metadata.get::<Analytics>());
+        if !self.options.style().draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
             return Ok(());
-        };
+        }
         let drawn = self
-            .draw(frame, detections)
+            .draw(frame, detections, analytics)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
         let mut output = MediaBuffer::video(drawn);
         output.set_metadata(metadata);
@@ -405,6 +388,7 @@ impl Filter for Overlaying {
 mod tests {
     use std::sync::Mutex;
 
+    use super::super::{OverlayParts, box_color};
     use super::*;
     use crate::buffer::Metadata;
     use crate::element::{RawSink, SrcPads};
@@ -608,5 +592,69 @@ mod tests {
         assert_eq!(mix(10, 200, 0), 10);
         assert_eq!(mix(10, 200, 255), 200);
         assert_eq!(mix(0, 255, 128), 128);
+    }
+
+    /// With `analytics`, a picture carrying zones and lines and no box is
+    /// drawn on: the line in cyan where it was counted, the zone's edge in
+    /// amber, the rest as it was. Without, it is handed on as it came.
+    #[test]
+    fn zones_and_lines_are_drawn_where_they_were_counted() {
+        use crate::elements::{Analytics, LineCount};
+        let mut analytics = super::super::tests::watched();
+        analytics.lines = vec![LineCount {
+            name: Arc::from("gate"),
+            start: (0.5, 0.5),
+            end: (0.9, 0.5),
+            forward: 0,
+            backward: 0,
+            crossed: Vec::new(),
+        }];
+        let picture = || {
+            let mut frame = ffmpeg::frame::Video::new(Pixel::BGRA, 80, 40);
+            frame.data_mut(0).fill(128);
+            MediaBuffer::video(frame).with_metadata(Metadata::new().with(analytics.clone()))
+        };
+        let options = DetectionOverlayOptions {
+            parts: OverlayParts::all(),
+            ..DetectionOverlayOptions::default()
+        };
+        let mut overlay = SwDetectionOverlay::new("overlay", options).unwrap();
+        let kept = capture(&mut overlay);
+        overlay.consume(picture()).expect("drawn");
+        let output = kept.lock().unwrap().remove(0);
+        let MediaBuffer::Video(frame) = &output else {
+            unreachable!();
+        };
+        let pixel = |x: usize, y: usize| frame.data(0)[y * frame.stride(0) + x * 4..][..3].to_vec();
+        assert_eq!(pixel(56, 20), vec![255, 229, 0], "on the line");
+        assert_eq!(pixel(56, 19), vec![255, 229, 0], "its other row");
+        assert_eq!(pixel(56, 23), vec![128, 128, 128], "off it");
+        assert_eq!(pixel(20, 4), vec![0, 196, 255], "the zone's top edge");
+        assert_eq!(pixel(20, 20), vec![128, 128, 128], "inside the zone");
+        assert!(
+            output
+                .metadata()
+                .and_then(|m| m.get::<Analytics>())
+                .is_some(),
+            "the analytics go on with the copy"
+        );
+
+        let mut plain =
+            SwDetectionOverlay::new("plain", DetectionOverlayOptions::default()).unwrap();
+        let kept = capture(&mut plain);
+        let input = picture();
+        let MediaBuffer::Video(before) = &input else {
+            unreachable!();
+        };
+        let id = crate::buffer::picture_id(before);
+        plain.consume(input).expect("handed on");
+        let MediaBuffer::Video(after) = kept.lock().unwrap().remove(0) else {
+            unreachable!();
+        };
+        assert_eq!(
+            crate::buffer::picture_id(&after),
+            id,
+            "not asked: as it came"
+        );
     }
 }

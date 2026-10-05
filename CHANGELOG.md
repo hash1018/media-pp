@@ -370,6 +370,19 @@ compile error with no explanation.
   for the doors, counted a crossing back that never happened without it,
   and one along the wall's foot, which nobody crosses, four. It reads metadata alone, so it takes pictures wherever
   they live, and needs no feature. `metal_detect --line` counts with it.
+  Each `ZoneCount` carries its zone's corners and each `LineCount` its
+  line's ends, so that what draws them draws what was counted.
+
+- **What a detection overlay draws, chosen.** `DetectionOverlayOptions::parts`
+  (`OverlayParts`) turns each of the boxes, an `ObjectAnalytics`'s zones
+  and its lines on or off — the boxes alone by default. A zone is outlined
+  in amber, red while it is crowded, and labelled with how many objects are
+  in it; a line is drawn across the picture in cyan, slanting or not, and
+  labelled with its crossings each way, `gate 12 / 3`. All three overlays
+  draw them alike, a slanting line in pieces through coverage masks made
+  once and kept. `LabelStyle` says what a box's label says — `class`,
+  `track_id`, `score` and `classes`, all by default — and a box whose label
+  would say nothing has none. `metal_detect --line --out` draws its lines.
 
 - **`ObjectTracker`: what a detector found, numbered across pictures.**
   ByteTrack — a Kalman filter per object, and matching by overlap with the
