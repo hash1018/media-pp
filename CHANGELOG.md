@@ -210,22 +210,28 @@ compile error with no explanation.
   model's input in device memory, and ONNX Runtime's TensorRT provider
   reads it there, with CUDA as its fallback. The engine TensorRT builds for
   a model and GPU — minutes, once — is kept in the user's cache directory
-  (`CudaOrtDetectorOptions::engine_cache`). Needs CUDA 13, cuDNN 9 and
-  TensorRT 10 at run time. On an RTX 3050 a 1080p file is decoded by NVDEC
-  and run through YOLOv10n at about 530 pictures a second. The
+  (`CudaOrtDetectorOptions::engine_cache`). Needs at run time what the
+  ONNX Runtime build was made against, or newer within the same majors: a
+  driver for CUDA 13.0, the CUDA 13.2 runtime with cuBLAS and cuRAND,
+  cuDNN 9.23.2 and TensorRT 10.15.1. On an RTX 3050 a 1080p file is decoded
+  by NVDEC and run through YOLOv10n at about 540 pictures a second. The
   `cuda_detect` example runs it over a file.
 
   `CudaOrtDetector::runtime` says what a machine can run one on —
-  `CudaRuntime::TensorRt`, `CudaOnly` or `Missing`, naming the libraries
-  the loader could not open — without a model or a session, in under a
-  millisecond where nothing is installed and about 140 ms where everything
-  is: for an application deciding at start whether to offer detection on
-  the GPU. `new` asks it first, refusing with
-  `OrtDetectorError::CudaRuntimeMissing` where CUDA or cuDNN is missing.
-  Where TensorRT is, `CudaOrtDetectorOptions::tensorrt` decides: the default
+  `CudaRuntime::TensorRt`, `CudaOnly` or `Unavailable` — without a model or
+  a session, in about a millisecond where nothing is installed and under
+  100 ms where everything is: for an application deciding at start whether
+  to offer detection on the GPU. It asks the loader for each library and
+  the driver, CUDA runtime, cuDNN and TensorRT for their versions, and
+  says what falls short as a `RuntimeShortfall`: `Missing`, naming the
+  libraries the loader could not open, or `Outdated`, naming the library
+  with the `LibraryVersion` it reports and the one needed. `new` asks it
+  first, refusing with `OrtDetectorError::CudaRuntimeUnavailable` where the
+  CUDA side falls short. Where TensorRT does,
+  `CudaOrtDetectorOptions::tensorrt` decides: the default
   `UseTensorRtPolicy::Preferred` runs on CUDA alone with a warning,
-  `Required` refuses with `OrtDetectorError::TensorRtMissing` — and with the
-  provider's own error where TensorRT is present but cannot start, rather
+  `Required` refuses with `OrtDetectorError::TensorRtUnavailable` — and with
+  the provider's own error where TensorRT is there but cannot start, rather
   than ONNX Runtime passing over it to CUDA — and `Off` never uses it. On
   the same RTX 3050 and file, CUDA alone runs at about 190 pictures a
   second.

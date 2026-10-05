@@ -56,8 +56,10 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
   [`transcribe`](../examples/core/transcribe/README.md).
 - **`ort`**: a YOLO model exported to ONNX — YOLOv8 and YOLO11, or YOLOv10
   and YOLO26.
-- **`ort-cuda`**: CUDA 13, cuDNN 9 and TensorRT 10 at run time, where the
-  loader finds them.
+- **`ort-cuda`**: at run time, where the loader finds them, a driver for
+  CUDA 13.0, the CUDA 13.2 runtime, cuDNN 9.23 and TensorRT 10.15, or newer
+  within those majors; `CudaOrtDetector::runtime` says which of them a
+  machine lacks.
 
 What an element needs at run time — one shared `D3d11Gpu`, one `CudaDevice`
 per process, a portal for screen capture on Linux, a server to publish RTSP

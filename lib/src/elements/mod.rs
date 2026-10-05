@@ -130,7 +130,10 @@ pub use filter::{
     CudaVideoEffect, CudaVideoEffectError,
 };
 #[cfg(feature = "ort-cuda")]
-pub use filter::{CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, UseTensorRtPolicy};
+pub use filter::{
+    CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    UseTensorRtPolicy,
+};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{
     D3d11ChromaKey, D3d11ChromaKeyError, D3d11Decoder, D3d11DecoderError, D3d11Download,

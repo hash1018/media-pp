@@ -38,7 +38,10 @@ mod cuda;
 mod sw_ort_detector;
 
 #[cfg(feature = "ort-cuda")]
-pub use cuda::{CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, UseTensorRtPolicy};
+pub use cuda::{
+    CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    UseTensorRtPolicy,
+};
 pub use sw_ort_detector::SwOrtDetector;
 
 /// One object a detector found, placed as fractions of the picture it is
@@ -234,29 +237,16 @@ pub enum OrtDetectorError {
     #[cfg(feature = "ort-cuda")]
     #[error("a CUDA picture has no surface")]
     MissingSurface,
-    /// The CUDA runtime the CUDA provider needs is not where the loader
-    /// looks: CUDA 13 with cuBLAS and cuRAND, and cuDNN 9.
+    /// The driver, the CUDA runtime or cuDNN that the CUDA provider needs
+    /// is missing or too old: CUDA 13 with cuBLAS and cuRAND, and cuDNN 9.
     #[cfg(feature = "ort-cuda")]
-    #[error(
-        "CUDA 13 and cuDNN 9 are needed where the loader finds them \
-         (LD_LIBRARY_PATH on Linux, PATH on Windows), and these are not: {missing:?}"
-    )]
-    CudaRuntimeMissing {
-        /// The libraries the loader could not open, by the name it was
-        /// asked for.
-        missing: Vec<&'static str>,
-    },
-    /// TensorRT was required and its libraries are not where the loader
-    /// looks, so the detector would have run on CUDA alone.
+    #[error("the CUDA runtime cannot be used: {0}")]
+    CudaRuntimeUnavailable(RuntimeShortfall),
+    /// TensorRT was required and is missing or too old, so the detector
+    /// would have run on CUDA alone.
     #[cfg(feature = "ort-cuda")]
-    #[error(
-        "TensorRT 10 is required and not where the loader finds it \
-         (LD_LIBRARY_PATH on Linux, PATH on Windows): {missing:?}"
-    )]
-    TensorRtMissing {
-        /// The TensorRT libraries the loader could not open.
-        missing: Vec<&'static str>,
-    },
+    #[error("TensorRT is required and cannot be used: {0}")]
+    TensorRtUnavailable(RuntimeShortfall),
 }
 
 /// The model's input size, from its first input's `[1, 3, height, width]`;

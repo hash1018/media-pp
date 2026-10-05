@@ -117,7 +117,10 @@ pub use ort_detector::{
     COCO_CLASS_LABELS, Detection, Detections, OrtDetectorError, OrtDetectorOptions, SwOrtDetector,
 };
 #[cfg(feature = "ort-cuda")]
-pub use ort_detector::{CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, UseTensorRtPolicy};
+pub use ort_detector::{
+    CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    UseTensorRtPolicy,
+};
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};
 pub use rack::{Rack, RackError, RackHandle};

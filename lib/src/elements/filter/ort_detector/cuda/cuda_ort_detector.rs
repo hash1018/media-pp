@@ -34,72 +34,7 @@ use super::super::{
     Detections, Letterbox, OrtDetectorError, OrtDetectorOptions, attach, decode, labels,
     model_input,
 };
-
-// What ONNX Runtime 1.28's CUDA and TensorRT providers ask the loader for by
-// name. The Linux names are read off the providers' dynamic sections; the
-// Windows ones are the DLL names those releases ship, not read off a Windows
-// build, so a mismatch is a library said missing where it is present — which
-// the session then contradicts. Only these need finding: cuDNN and TensorRT
-// open their own parts from beside themselves.
-
-/// CUDA 13's runtime, cuBLAS and cuRAND, and cuDNN 9: what the CUDA
-/// provider, and so every detector, needs.
-#[cfg(not(windows))]
-const CUDA_LIBRARIES: &[&str] = &[
-    "libcudart.so.13",
-    "libcublas.so.13",
-    "libcublasLt.so.13",
-    "libcurand.so.10",
-    "libcudnn.so.9",
-];
-#[cfg(windows)]
-const CUDA_LIBRARIES: &[&str] = &[
-    "cudart64_13.dll",
-    "cublas64_13.dll",
-    "cublasLt64_13.dll",
-    "curand64_10.dll",
-    "cudnn64_9.dll",
-];
-
-/// TensorRT 10: what the TensorRT provider needs beside the CUDA ones.
-#[cfg(not(windows))]
-const TENSORRT_LIBRARIES: &[&str] = &["libnvinfer.so.10", "libnvonnxparser.so.10"];
-#[cfg(windows)]
-const TENSORRT_LIBRARIES: &[&str] = &["nvinfer_10.dll", "nvonnxparser_10.dll"];
-
-/// What this machine can run a [`CudaOrtDetector`] on, asked of the loader
-/// without a model or a GPU's time — see [`CudaOrtDetector::runtime`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum CudaRuntime {
-    /// TensorRT, with CUDA for what it cannot run.
-    TensorRt,
-    /// CUDA alone: TensorRT is not where the loader looks.
-    CudaOnly {
-        /// The TensorRT libraries the loader could not open.
-        tensorrt_missing: Vec<&'static str>,
-    },
-    /// Nothing: the CUDA runtime is not where the loader looks, and a
-    /// detector cannot be made.
-    Missing {
-        /// The libraries the loader could not open.
-        missing: Vec<&'static str>,
-    },
-}
-
-/// Which of `libraries` the loader cannot open — asked before a session is,
-/// because ONNX Runtime's own answer to a missing one names its provider
-/// bridge rather than the library.
-fn missing(libraries: &[&'static str]) -> Vec<&'static str> {
-    libraries
-        .iter()
-        .copied()
-        // SAFETY: loading runs a library's initialisers. These are NVIDIA's
-        // runtime libraries, which ONNX Runtime loads the same way moments
-        // later; each is let go of again at once.
-        .filter(|name| unsafe { libloading::Library::new(name) }.is_err())
-        .collect()
-}
+use super::runtime::{self, CudaRuntime};
 
 /// Whether a [`CudaOrtDetector`] runs its model through TensorRT.
 ///
@@ -119,9 +54,9 @@ pub enum UseTensorRtPolicy {
     #[default]
     Preferred,
     /// TensorRT, or no detector: [`CudaOrtDetector::new`] refuses with
-    /// [`OrtDetectorError::TensorRtMissing`] where its libraries are not
-    /// found, and with the provider's own error where they are but it
-    /// cannot start.
+    /// [`OrtDetectorError::TensorRtUnavailable`] where its libraries are
+    /// missing or too old, and with the provider's own error where they are
+    /// there but it cannot start.
     Required,
 }
 
@@ -132,15 +67,13 @@ fn choose(
     policy: UseTensorRtPolicy,
 ) -> std::result::Result<bool, OrtDetectorError> {
     match (runtime, policy) {
-        (CudaRuntime::Missing { missing }, _) => {
-            Err(OrtDetectorError::CudaRuntimeMissing { missing })
+        (CudaRuntime::Unavailable { cuda }, _) => {
+            Err(OrtDetectorError::CudaRuntimeUnavailable(cuda))
         }
         (_, UseTensorRtPolicy::Off) => Ok(false),
         (CudaRuntime::TensorRt, _) => Ok(true),
-        (CudaRuntime::CudaOnly { tensorrt_missing }, UseTensorRtPolicy::Required) => {
-            Err(OrtDetectorError::TensorRtMissing {
-                missing: tensorrt_missing,
-            })
+        (CudaRuntime::CudaOnly { tensorrt }, UseTensorRtPolicy::Required) => {
+            Err(OrtDetectorError::TensorRtUnavailable(tensorrt))
         }
         (CudaRuntime::CudaOnly { .. }, UseTensorRtPolicy::Preferred) => Ok(false),
     }
@@ -189,10 +122,12 @@ impl Default for CudaOrtDetectorOptions {
 /// # Requirements
 ///
 /// The `ort-cuda` feature, which fetches ONNX Runtime's CUDA and TensorRT
-/// build, and at run time CUDA 13, cuDNN 9 and TensorRT 10 where the loader
-/// finds them (`LD_LIBRARY_PATH` on Linux). Without TensorRT it runs on
-/// CUDA alone, saying so, unless [`UseTensorRtPolicy::Required`] says not to;
-/// without CUDA it cannot run, and says that.
+/// build, and at run time a driver for CUDA 13, the CUDA 13.2 runtime,
+/// cuDNN 9.23 and TensorRT 10.15, or newer within those majors, where the
+/// loader finds them (`LD_LIBRARY_PATH` on Linux). Without TensorRT it runs
+/// on CUDA alone, saying so, unless [`UseTensorRtPolicy::Required`] says not
+/// to; without CUDA it cannot run, and says that —
+/// [`CudaOrtDetector::runtime`] tells which before a model is loaded.
 ///
 /// The first start with TensorRT builds an engine for the model and GPU,
 /// which takes minutes — see [`CudaOrtDetectorOptions::engine_cache`].
@@ -230,25 +165,23 @@ unsafe impl Send for Detecting {}
 
 impl CudaOrtDetector {
     /// What this machine can run a detector on, found by asking the loader
-    /// for the libraries ONNX Runtime's providers open — CUDA 13 with cuBLAS
-    /// and cuRAND, cuDNN 9, and TensorRT 10 — without a model, a device or
-    /// a session. For an application deciding whether to offer detection on
-    /// the GPU at all; [`Self::new`] asks the same question first.
+    /// for the libraries ONNX Runtime's providers open — the driver, CUDA 13
+    /// with cuBLAS and cuRAND, cuDNN 9, and TensorRT 10 — and those that
+    /// say their version for it, without a model, a device or a session.
+    /// For an application deciding whether to offer detection on the GPU at
+    /// all; [`Self::new`] asks the same question first.
     ///
-    /// It says nothing of the GPU or its driver, which
-    /// [`CudaDevice::new`] answers.
+    /// The versions taken are those ONNX Runtime's build was made against:
+    /// a driver for CUDA 13.0 or newer, the CUDA 13.2 runtime, cuDNN 9.23.2
+    /// and TensorRT 10.15.1. Whether there is a GPU, [`CudaDevice::new`]
+    /// answers.
     pub fn runtime() -> CudaRuntime {
-        let missing_cuda = missing(CUDA_LIBRARIES);
-        if !missing_cuda.is_empty() {
-            return CudaRuntime::Missing {
-                missing: missing_cuda,
-            };
+        if let Some(cuda) = runtime::shortfall(runtime::CUDA) {
+            return CudaRuntime::Unavailable { cuda };
         }
-        let tensorrt_missing = missing(TENSORRT_LIBRARIES);
-        if tensorrt_missing.is_empty() {
-            CudaRuntime::TensorRt
-        } else {
-            CudaRuntime::CudaOnly { tensorrt_missing }
+        match runtime::shortfall(runtime::TENSORRT) {
+            None => CudaRuntime::TensorRt,
+            Some(tensorrt) => CudaRuntime::CudaOnly { tensorrt },
         }
     }
 
@@ -270,13 +203,10 @@ impl CudaOrtDetector {
             .unwrap_or_else(default_engine_cache);
 
         let runtime = Self::runtime();
-        if let (CudaRuntime::CudaOnly { tensorrt_missing }, UseTensorRtPolicy::Preferred) =
+        if let (CudaRuntime::CudaOnly { tensorrt }, UseTensorRtPolicy::Preferred) =
             (&runtime, options.tensorrt)
         {
-            pp_warn!(
-                pp_log: &pp_log,
-                "TensorRT 10 is not where the loader looks ({tensorrt_missing:?}): running on CUDA alone"
-            );
+            pp_warn!(pp_log: &pp_log, "TensorRT cannot be used ({tensorrt}): running on CUDA alone");
         }
         let tensorrt = choose(runtime, options.tensorrt)?;
 
@@ -495,6 +425,7 @@ impl Filter for Detecting {
 mod tests {
     use std::sync::Mutex;
 
+    use super::super::runtime::{LibraryVersion, RuntimeShortfall};
     use super::*;
     use crate::element::{RawSink, SrcPads};
     use crate::elements::{AppSink, CudaUpload, SwOrtDetector};
@@ -502,18 +433,35 @@ mod tests {
 
     #[test]
     fn tensorrt_is_used_where_the_machine_has_it_and_policy_allows() {
-        let cuda_only = || CudaRuntime::CudaOnly {
-            tensorrt_missing: vec!["libnvinfer.so.10"],
+        let old_tensorrt = RuntimeShortfall::Outdated {
+            library: "libnvinfer.so.10",
+            found: LibraryVersion {
+                major: 10,
+                minor: 3,
+                patch: 0,
+            },
+            needed: LibraryVersion {
+                major: 10,
+                minor: 15,
+                patch: 1,
+            },
         };
-        let missing = || CudaRuntime::Missing {
-            missing: vec!["libcudart.so.13"],
+        let cuda_only = || CudaRuntime::CudaOnly {
+            tensorrt: old_tensorrt.clone(),
+        };
+        let unavailable = || CudaRuntime::Unavailable {
+            cuda: RuntimeShortfall::Missing {
+                libraries: vec!["libcudart.so.13"],
+            },
         };
         use UseTensorRtPolicy::{Off, Preferred, Required};
 
         for policy in [Off, Preferred, Required] {
             assert!(matches!(
-                choose(missing(), policy),
-                Err(OrtDetectorError::CudaRuntimeMissing { .. })
+                choose(unavailable(), policy),
+                Err(OrtDetectorError::CudaRuntimeUnavailable(
+                    RuntimeShortfall::Missing { .. }
+                ))
             ));
         }
         assert!(!choose(CudaRuntime::TensorRt, Off).unwrap());
@@ -523,7 +471,7 @@ mod tests {
         assert!(!choose(cuda_only(), Preferred).unwrap());
         assert!(matches!(
             choose(cuda_only(), Required),
-            Err(OrtDetectorError::TensorRtMissing { missing }) if missing == ["libnvinfer.so.10"]
+            Err(OrtDetectorError::TensorRtUnavailable(shortfall)) if shortfall == old_tensorrt
         ));
     }
 
@@ -626,18 +574,12 @@ mod tests {
         let asked = std::time::Instant::now();
         let runtime = CudaOrtDetector::runtime();
         eprintln!("{runtime:?} in {:?}", asked.elapsed());
-        if let CudaRuntime::Missing { missing } = &runtime {
-            assert!(!missing.is_empty());
+        if let CudaRuntime::Unavailable {
+            cuda: RuntimeShortfall::Missing { libraries },
+        } = &runtime
+        {
+            assert!(!libraries.is_empty());
         }
-    }
-
-    #[test]
-    fn a_library_the_loader_cannot_open_is_named() {
-        assert_eq!(
-            missing(&["libmedia-pp-no-such-library.so.1"]),
-            vec!["libmedia-pp-no-such-library.so.1"]
-        );
-        assert!(missing(&[]).is_empty());
     }
 
     /// The point of the element: on the GPU it finds what the CPU detector
@@ -658,6 +600,10 @@ mod tests {
             eprintln!("skipping: no CUDA device");
             return;
         };
+        if let CudaRuntime::Unavailable { cuda } = CudaOrtDetector::runtime() {
+            eprintln!("skipping: the CUDA runtime cannot be used ({cuda})");
+            return;
+        }
         let options = CudaOrtDetectorOptions {
             tensorrt: UseTensorRtPolicy::Off,
             ..CudaOrtDetectorOptions::default()
