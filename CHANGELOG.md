@@ -27,12 +27,27 @@ compile error with no explanation.
   | `Filter` | `RawFilter` |
   | `SourceElement` | `RawSource` |
 
-  So `Box<dyn Sink>` — a muxer's track, a bridge's feeding end, a renderer
-  picked at run time — is `Box<dyn RawSink>`, `impl Sink for` an element
-  that routes the stream is `impl RawSink for`, and `impl Source for` is
-  `impl SrcPads for`. A terminal or a filter of your own is shorter
-  written as the new `Sink` or `Filter`; `custom_element` writes one of
-  each kind. The entries below use the new names.
+  So `impl Sink for` an element that routes the stream is
+  `impl RawSink for`, and `impl Source for` is `impl SrcPads for`. A
+  terminal or a filter of your own is shorter written as the new `Sink`
+  or `Filter`; `custom_element` writes one of each kind. The entries below
+  use the new names.
+
+- **A terminal or a filter whose kind is forgotten is an `AnySink` or an
+  `AnyFilter`, not a box.** What was a `Box<dyn Sink>` — a renderer picked
+  at run time, a muxer's track from `MuxerSinks::take`, an input from
+  `AudioMixer::add_source` or a compositor's `CompositorInput::sink`, a
+  bridge's feeding end from `PipelineBridgeHandle::connect` — is an
+  `AnySink`, and what was a `Box<dyn Filter>` an `AnyFilter`, which is
+  what `RackHandle::replace` takes. `AnySink::new` and `AnyFilter::new`
+  make one from a `Sink` or a `Filter` of your own and from any element of
+  this crate alike, `.to()` and `.pipe()` take one as they take what it
+  holds, and each derefs to the element inside. So
+  `let renderer: Box<dyn Sink> = Box::new(window)` is
+  `let renderer = AnySink::new(window)`, and
+  `rack.replace(vec![Box::new(effect)])` is
+  `rack.replace(vec![AnyFilter::new(effect)])`. `IntoTerminal::into_terminal`
+  and `IntoFilter::into_filter` return one too.
 
 - **The end of a stream is `StreamEvent::Eos`, not a buffer.**
   `MediaBuffer` is data only: `MediaBuffer::Eos` and `is_eos` are gone,
@@ -446,7 +461,7 @@ compile error with no explanation.
   never sees a control message. `ChainBuilder::pipe` takes one as it takes
   any filter — it now takes `impl IntoFilter<M>`, which a `RawFilter` and a
   `Filter` both are, with the marker worked out by the compiler — and
-  `into_filter()` makes one of it for a list, as a `Rack` takes. A filter
+  `AnyFilter::new` makes one of it for a list, as a `Rack` takes. A filter
   written as `RawSink` and `SrcPads` is unchanged. The scalers, uploads,
   downloads, converters, chroma keys, video effects and encoders of every
   backend, `D3d11ToneMap`, the audio filters, `AudioWaveform` and

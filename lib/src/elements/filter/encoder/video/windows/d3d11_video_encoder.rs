@@ -1251,7 +1251,7 @@ mod tests {
             .add_stream("video", &encoder)
             .expect("the track is added");
         let mut sinks = muxer.open().expect("the header is written");
-        encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track"));
+        encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track").into_raw());
 
         let (width, height) = (options.width, options.height);
         let mut scaler =

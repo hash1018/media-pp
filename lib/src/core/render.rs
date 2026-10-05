@@ -157,19 +157,20 @@ impl<R: Sink> RawSink for SinkStage<R> {
     }
 }
 
-/// What can be put where a terminal is asked for: a [`RawSink`] itself, or a
-/// [`Sink`], which the framework makes one of.
+/// What can be put where a terminal is asked for: a [`Sink`], which the
+/// framework makes one of, a [`RawSink`] itself, or an [`AnySink`] holding
+/// either.
 ///
-/// `M` says which of the two a type is, and the compiler works it out:
-/// nothing names it. A type that is both is refused as ambiguous —
-/// implement one or the other.
+/// `M` says which a type is, and the compiler works it out: nothing names
+/// it. A type that is both a `Sink` and a `RawSink` is refused as
+/// ambiguous — implement one or the other.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is neither a `RawSink` nor a `Sink`",
     note = "implement `Sink` for a terminal that does something with each buffer, or `RawSink` for one that routes the stream itself"
 )]
 pub trait IntoTerminal<M>: sealed::Sealed<M> {
-    /// The terminal this is, boxed.
-    fn into_terminal(self) -> Box<dyn RawSink>;
+    /// The terminal this is, whichever kind it is.
+    fn into_terminal(self) -> AnySink;
 }
 
 /// Says a type goes in as the [`RawSink`] it is — see [`IntoTerminal`].
@@ -178,26 +179,86 @@ pub enum AsRawSink {}
 /// Says a type goes in as the [`Sink`] it is — see [`IntoTerminal`].
 pub enum AsSink {}
 
+/// Says an [`AnySink`] goes in as the terminal it holds — see
+/// [`IntoTerminal`].
+pub enum AsAnySink {}
+
 impl<S: RawSink + 'static> IntoTerminal<AsRawSink> for S {
-    fn into_terminal(self) -> Box<dyn RawSink> {
-        Box::new(self)
+    fn into_terminal(self) -> AnySink {
+        AnySink(Box::new(self))
     }
 }
 
 impl<R: Sink + 'static> IntoTerminal<AsSink> for R {
-    fn into_terminal(self) -> Box<dyn RawSink> {
-        Box::new(SinkStage::new(self))
+    fn into_terminal(self) -> AnySink {
+        AnySink(Box::new(SinkStage::new(self)))
+    }
+}
+
+impl IntoTerminal<AsAnySink> for AnySink {
+    fn into_terminal(self) -> AnySink {
+        self
     }
 }
 
 mod sealed {
-    use super::{AsRawSink, AsSink, RawSink, Sink};
+    use super::{AnySink, AsAnySink, AsRawSink, AsSink, RawSink, Sink};
 
-    /// Keeps [`super::IntoTerminal`] to the two ways in it has.
+    /// Keeps [`super::IntoTerminal`] to the three ways in it has.
     pub trait Sealed<M> {}
 
     impl<S: RawSink + 'static> Sealed<AsRawSink> for S {}
     impl<R: Sink + 'static> Sealed<AsSink> for R {}
+    impl Sealed<AsAnySink> for AnySink {}
+}
+
+/// A terminal of any kind, which kind forgotten: what to hold where the
+/// terminal is picked as the program runs — a window on one machine, a
+/// file on another — and what a muxer's track, a mixer's or a compositor's
+/// input and a bridge's feeding end are handed out as.
+/// [`ChainBuilder::to`](crate::pipeline::ChainBuilder::to) ends a branch in
+/// one as in the terminal it holds.
+///
+/// Made with [`AnySink::new`] from a [`Sink`] or a [`RawSink`] alike. It
+/// derefs to the terminal inside, for what is asked of one directly — its
+/// name, or a buffer handed to it by hand.
+pub struct AnySink(Box<dyn RawSink>);
+
+impl AnySink {
+    /// `terminal`, whichever kind it is.
+    pub fn new<M>(terminal: impl IntoTerminal<M>) -> Self {
+        terminal.into_terminal()
+    }
+
+    /// A terminal this crate already holds boxed, as one.
+    pub(crate) fn from_raw(terminal: Box<dyn RawSink>) -> Self {
+        Self(terminal)
+    }
+
+    /// The terminal inside, as the framework drives it.
+    pub(crate) fn into_raw(self) -> Box<dyn RawSink> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for AnySink {
+    type Target = dyn RawSink;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl std::ops::DerefMut for AnySink {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.0
+    }
+}
+
+impl std::fmt::Debug for AnySink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AnySink").field(&self.0.name()).finish()
+    }
 }
 
 /// Makes `$name`, a newtype over `SinkStage<_>`, the terminal its stage

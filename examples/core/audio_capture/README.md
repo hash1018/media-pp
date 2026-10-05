@@ -5,8 +5,8 @@
 lists every audio device, picks one, captures about three seconds from it and
 reports how many buffers came through.
 
-A device of kind `Sink`/`RawSink` is captured through loopback or monitor
-(system audio), and `Capture`/`SrcPads` is a microphone. On Linux, where no
+A device of kind `Render`/`Sink` is captured through loopback or monitor
+(system audio), and `Capture`/`Source` is a microphone. On Linux, where no
 node of the wanted kind is marked default, any node of that kind is taken.
 
 On macOS an output device is captured through a Core Audio process tap,

@@ -670,7 +670,7 @@ fn filtered(shape: FileShape, chain: ChainBuilder, name: &str) -> ChainBuilder {
                 VideoEffect::ColorCorrection(ColorCorrection::default()),
             );
             handle
-                .replace(vec![Box::new(effect)])
+                .replace(vec![crate::element::AnyFilter::new(effect)])
                 .expect("fill the rack");
             chain
                 .pipe(SwScaler::new(

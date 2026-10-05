@@ -637,7 +637,7 @@ impl ChainBuilder {
 
     /// Adds a single-output filter (decoder, encoder, filter, ...) that
     /// receives what is upstream of it and hands on through its one pad —
-    /// either a [`RawFilter`] or a [`Filter`](crate::element::Filter), which the framework makes one
+    /// either a [`RawFilter`] or a [`Filter`], which the framework makes one
     /// of (see [`IntoFilter`]). It runs on the same thread as whatever is
     /// upstream of it — direct function call, no queue — unless it waits on
     /// the clock inside `consume`, as a [`Pacer`] and a
@@ -646,11 +646,11 @@ impl ChainBuilder {
     /// before them is that queue, and where there is none this puts one of
     /// eight there, named `<name>-queue`.
     ///
-    /// [`RawFilter`]: crate::element::Filter
+    /// [`Filter`]: crate::element::Filter
     /// [`Pacer`]: crate::elements::Pacer
     /// [`VideoSynchronizer`]: crate::elements::VideoSynchronizer
     pub fn pipe<M>(mut self, element: impl IntoFilter<M>) -> Self {
-        let mut element = element.into_filter();
+        let mut element = element.into_filter().into_raw();
         let name = element.name();
         let behind_a_queue = self
             .planned
@@ -748,7 +748,7 @@ impl ChainBuilder {
     /// Any sink, as it is — `.to(counter)` — or already boxed, the way a
     /// muxer hands its sinks over: a boxed sink is a sink.
     pub fn to<M>(self, terminal: impl IntoTerminal<M>) -> Result<DetachedBranch> {
-        let mut terminal: Box<dyn RawSink> = terminal.into_terminal();
+        let mut terminal: Box<dyn RawSink> = terminal.into_terminal().into_raw();
         if let Some(error) = self.error {
             return Err(error.into());
         }

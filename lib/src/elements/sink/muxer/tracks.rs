@@ -13,7 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
-use crate::{element::RawSink, error::Result};
+use crate::{
+    element::{AnySink, RawSink},
+    error::Result,
+};
 
 /// Errors from [`MuxerSinks::take`]. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
@@ -99,7 +102,7 @@ impl MuxerSinks {
     /// Fails for a track added to a different muxer; `track` is consumed
     /// either way. A track of this muxer always has its sink here, since
     /// the only way to ask for one is with the track itself.
-    pub fn take(&mut self, track: MuxerTrack) -> Result<Box<dyn RawSink>> {
+    pub fn take(&mut self, track: MuxerTrack) -> Result<AnySink> {
         let foreign = MuxerTrackError::ForeignTrack { index: track.index };
         if track.muxer != self.muxer {
             return Err(foreign.into());
@@ -107,6 +110,7 @@ impl MuxerSinks {
         self.sinks
             .get_mut(track.index)
             .and_then(Option::take)
+            .map(AnySink::from_raw)
             .ok_or_else(|| foreign.into())
     }
 }

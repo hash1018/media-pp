@@ -405,6 +405,7 @@ mod tests {
         open_tracks::<TestMuxer>(id, output, vec![pending], options)
             .take(track)
             .expect("the muxer's own track")
+            .into_raw()
     }
 
     fn seek_refused(sink: &mut Box<dyn RawSink>) -> bool {

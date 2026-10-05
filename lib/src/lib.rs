@@ -237,7 +237,7 @@
 //! run (`stopping`). The framework gives it its one pad, hands the end of the
 //! stream on after the drain and resets it on a seek; it never sees a
 //! control message. `pipe` takes one as it
-//! takes any filter, and [`IntoFilter::into_filter`](element::IntoFilter::into_filter)
+//! takes any filter, and [`AnyFilter::new`](element::AnyFilter::new)
 //! makes one of it where a list of filters is asked for, as a
 //! [`Rack`](elements::Rack)'s is. A filter that routes the stream itself —
 //! splits it, holds it back, waits on a clock — implements

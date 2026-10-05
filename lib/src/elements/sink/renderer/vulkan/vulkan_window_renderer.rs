@@ -370,7 +370,7 @@ impl VulkanWindowRenderer {
                         return Err(VulkanWindowRendererError::UnsupportedFrame(surface.layout));
                     }
                 }
-                let source = SrcPads::Cuda {
+                let source = Source::Cuda {
                     planes,
                     interop: &interop,
                 };
@@ -385,7 +385,7 @@ impl VulkanWindowRenderer {
                     return Err(VulkanWindowRendererError::UnsupportedFrame(format));
                 }
                 self.presenter
-                    .present(width, height, layout, colour, SrcPads::System(frame))?;
+                    .present(width, height, layout, colour, Source::System(frame))?;
                 Ok((layout, MemoryDomain::System))
             }
         }
@@ -627,7 +627,7 @@ impl PlaneShape {
 }
 
 /// Where a frame's planes are.
-enum SrcPads<'a> {
+enum Source<'a> {
     /// In system memory: copied into mapped memory on the CPU.
     System(&'a ffmpeg::frame::Video),
     /// In CUDA memory: copied device to device into the plane images, which
@@ -640,7 +640,7 @@ enum SrcPads<'a> {
     },
 }
 
-impl SrcPads<'_> {
+impl Source<'_> {
     fn domain(&self) -> MemoryDomain {
         match self {
             Self::System(_) => MemoryDomain::System,
@@ -954,7 +954,7 @@ impl Presenter {
         height: u32,
         layout: Layout,
         colour: Colour,
-        source: SrcPads<'_>,
+        source: Source<'_>,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
         // What a measured presentation delay counts from: the moment the frame
         // is handed over, which is what a synchronizer schedules.
@@ -978,10 +978,10 @@ impl Presenter {
 
     /// Puts one frame's planes where [`Self::record`] finds them: packed into
     /// the staging buffer, or written into the images.
-    fn stage(&mut self, source: SrcPads<'_>) -> std::result::Result<(), VulkanWindowRendererError> {
+    fn stage(&mut self, source: Source<'_>) -> std::result::Result<(), VulkanWindowRendererError> {
         let video = self.video.as_ref().expect("ensured before staging");
         match (source, &video.upload) {
-            (SrcPads::System(frame), Upload::System { mapped, .. }) => {
+            (Source::System(frame), Upload::System { mapped, .. }) => {
                 for (index, shape) in video.shapes.iter().enumerate() {
                     let (data, pitch) = (frame.data(index), frame.stride(index));
                     let row_bytes = shape.row_bytes();
@@ -1002,7 +1002,7 @@ impl Presenter {
                 Ok(())
             }
             #[cfg(feature = "cuda")]
-            (SrcPads::Cuda { planes, interop }, Upload::Cuda) => {
+            (Source::Cuda { planes, interop }, Upload::Cuda) => {
                 let copies: Vec<ArrayRows> = video
                     .shapes
                     .iter()

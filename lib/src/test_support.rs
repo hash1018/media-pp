@@ -307,7 +307,7 @@ fn build_sound(
     let mut muxer = FileMuxer::create(&partial)?;
     let track = muxer.add_stream("audio", &encoder)?;
     let mut sinks = muxer.open()?;
-    encoder.src_pads()[0].link(sinks.take(track)?);
+    encoder.src_pads()[0].link(sinks.take(track)?.into_raw());
     // Written at once, as `build_fixture` writes its sound.
     let total = (seconds * f64::from(sample_rate)).round() as usize;
     let chunk = sample_rate as usize / 100;
@@ -866,8 +866,8 @@ fn build_fixture(
     let video_track = muxer.add_stream("video", &video_encoder)?;
     let audio_track = muxer.add_stream("audio", &audio_encoder)?;
     let mut sinks = muxer.open()?;
-    video_encoder.src_pads()[0].link(sinks.take(video_track)?);
-    audio_encoder.src_pads()[0].link(sinks.take(audio_track)?);
+    video_encoder.src_pads()[0].link(sinks.take(video_track)?.into_raw());
+    audio_encoder.src_pads()[0].link(sinks.take(audio_track)?.into_raw());
 
     // Each frame's sound just ahead of it, so the muxer interleaves as it
     // goes rather than holding one track until the other catches up. The

@@ -267,7 +267,7 @@ impl SwVideoCompositorHandle {
     ) -> std::result::Result<SwVideoCompositorInput, SwVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(SwVideoCompositorInput {
-            sink: Box::new(SwVideoCompositorInputSink {
+            sink: crate::element::AnySink::new(SwVideoCompositorInputSink {
                 name: layer.name.clone(),
                 pp_log: element_pp_log(ElementType::SwVideoCompositor, &layer.name, None),
                 shared: self.shared.clone(),
@@ -1449,7 +1449,7 @@ mod tests {
         layer: VideoLayer,
     ) -> (Box<dyn RawSink>, SwVideoLayerHandle) {
         let input = handle.add_source(name, layer).unwrap();
-        (input.sink, input.layer)
+        (input.sink.into_raw(), input.layer)
     }
 
     /// Four quadrants in one frame, so which part of it was drawn is

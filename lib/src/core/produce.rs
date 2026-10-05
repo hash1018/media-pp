@@ -824,12 +824,12 @@ pub trait IntoSource<M>: sealed::Sealed<M> {
 }
 
 /// Says a type goes in as the [`RawSource`] it is — see [`IntoSource`].
-pub enum AsSourceElement {}
+pub enum AsRawSource {}
 
 /// Says a type goes in as the [`Source`] it is — see [`IntoSource`].
 pub enum AsSource {}
 
-impl<S: RawSource + 'static> IntoSource<AsSourceElement> for S {
+impl<S: RawSource + 'static> IntoSource<AsRawSource> for S {
     type Raw = S;
 
     fn into_source(self) -> S {
@@ -846,12 +846,12 @@ impl<P: Source + 'static> IntoSource<AsSource> for P {
 }
 
 mod sealed {
-    use super::{AsSource, AsSourceElement, RawSource, Source};
+    use super::{AsRawSource, AsSource, RawSource, Source};
 
     /// Keeps [`super::IntoSource`] to the two ways in it has.
     pub trait Sealed<M> {}
 
-    impl<S: RawSource + 'static> Sealed<AsSourceElement> for S {}
+    impl<S: RawSource + 'static> Sealed<AsRawSource> for S {}
     impl<P: Source + 'static> Sealed<AsSource> for P {}
 }
 

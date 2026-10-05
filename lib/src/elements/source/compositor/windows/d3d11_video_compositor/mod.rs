@@ -385,7 +385,7 @@ impl D3d11VideoCompositorHandle {
     ) -> std::result::Result<D3d11VideoCompositorInput, D3d11VideoCompositorError> {
         let layer_handle = self.register_input(name, layer, true)?;
         Ok(D3d11VideoCompositorInput {
-            sink: Box::new(D3d11VideoCompositorInputSink {
+            sink: crate::element::AnySink::new(D3d11VideoCompositorInputSink {
                 name: layer_handle.name.clone(),
                 pp_log: element_pp_log(ElementType::D3d11VideoCompositor, &layer_handle.name, None),
                 shared: self.shared.clone(),

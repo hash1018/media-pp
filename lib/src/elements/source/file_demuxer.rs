@@ -1194,7 +1194,6 @@ mod tests {
     /// with no stream for a caller to index into.
     #[test]
     fn a_file_with_no_streams_is_refused() {
-        use crate::element::RawSink;
         use crate::elements::{FileMuxer, SwEncoder, SwEncoderOptions, VideoCodec};
 
         let path = std::env::temp_dir().join(format!(

@@ -292,7 +292,7 @@ impl MetalVideoCompositorHandle {
     ) -> std::result::Result<MetalVideoCompositorInput, MetalVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(MetalVideoCompositorInput {
-            sink: Box::new(MetalVideoCompositorInputSink {
+            sink: crate::element::AnySink::new(MetalVideoCompositorInputSink {
                 pp_log: element_pp_log(ElementType::MetalVideoCompositor, &layer.name, None),
                 name: layer.name.clone(),
                 id: layer.id,

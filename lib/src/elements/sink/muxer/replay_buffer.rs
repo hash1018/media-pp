@@ -693,7 +693,12 @@ mod tests {
         let (mut sinks, handle) = replay.open().expect("the buffer opens");
         let sinks = tracks
             .into_iter()
-            .map(|track| sinks.take(track).expect("the buffer's own track"))
+            .map(|track| {
+                sinks
+                    .take(track)
+                    .expect("the buffer's own track")
+                    .into_raw()
+            })
             .collect();
         (sinks, handle)
     }

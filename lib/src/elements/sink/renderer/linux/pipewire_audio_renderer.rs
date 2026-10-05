@@ -1601,7 +1601,7 @@ mod tests {
         let Err(error) =
             PipeWireAudioRenderer::open("out", PipeWireAudioRendererOptions { device })
         else {
-            panic!("a SrcPads device cannot be played to");
+            panic!("a Source device cannot be played to");
         };
         assert!(
             matches!(error, PipeWireAudioRendererError::NotAPlaybackDevice(name) if name == "some-mic"),

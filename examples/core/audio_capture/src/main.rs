@@ -131,7 +131,7 @@ mod windows_example {
 /// The device APIs really do line up, because audio capture needs no portal on
 /// either platform: `PipeWireAudioDeviceKind::Sink` is captured through its
 /// monitor ports and so plays the role `WasapiDeviceKind::Render` does with
-/// loopback, and `SrcPads` matches `Capture`. Screen capture is where the two
+/// loopback, and `Source` matches `Capture`. Screen capture is where the two
 /// platforms genuinely diverge — see `PipeWireScreenCaptureSource`'s docs.
 #[cfg(target_os = "linux")]
 mod linux_example {
@@ -186,7 +186,7 @@ mod linux_example {
         // Prefer the default node of the wanted kind, but fall back to any
         // node of that kind. PipeWire's `default.audio.source` metadata often
         // names a *sink* — that is how "use this output's monitor as my input"
-        // is expressed — which legitimately leaves no `SrcPads` flagged default.
+        // is expressed — which legitimately leaves no `Source` flagged default.
         let pick = |only_default: bool| {
             devices.iter().find(|d| {
                 let matches_default = !only_default || d.is_default;

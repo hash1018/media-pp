@@ -198,7 +198,7 @@ struct Capturing {
 unsafe impl Send for Capturing {}
 
 impl WasapiCaptureSource {
-    /// Enumerates every currently-active audio endpoint — both `Sink`
+    /// Enumerates every currently-active audio endpoint — both `Render`
     /// (playback) and `Capture` (recording) — as an [`WasapiDevice`] list a
     /// caller can show in a picker UI and index/search into, then hand the
     /// chosen entry straight to [`WasapiCaptureOptions::device`]. No

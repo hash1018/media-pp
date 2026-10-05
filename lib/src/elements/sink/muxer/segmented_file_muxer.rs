@@ -14,7 +14,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, RawSink, RawSinkExt, element_pp_log},
+    element::{AnySink, Element, ElementType, Flow, RawSink, RawSinkExt, element_pp_log},
     error::Result,
     stream::StreamEvent,
 };
@@ -253,7 +253,10 @@ fn open_segment(streams: &[StreamDef], path: PathBuf) -> Result<Vec<Box<dyn RawS
         })
         .collect::<Result<Vec<_>>>()?;
     let mut sinks = muxer.open()?;
-    tracks.into_iter().map(|track| sinks.take(track)).collect()
+    tracks
+        .into_iter()
+        .map(|track| sinks.take(track).map(AnySink::into_raw))
+        .collect()
 }
 
 struct GroupState {

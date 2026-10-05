@@ -36,10 +36,12 @@ use crate::{
 };
 
 pub use crate::produce::{
-    AsSource, AsSourceElement, IntoSource, ProduceError, Produced, Source, SourceStage, Wait,
+    AsRawSource, AsSource, IntoSource, ProduceError, Produced, Source, SourceStage, Wait,
 };
-pub use crate::render::{AsRawSink, AsSink, IntoTerminal, Sink};
-pub use crate::transform::{AsFilter, AsRawFilter, Filter, IntoFilter, Output};
+pub use crate::render::{AnySink, AsAnySink, AsRawSink, AsSink, IntoTerminal, Sink};
+pub use crate::transform::{
+    AnyFilter, AsAnyFilter, AsFilter, AsRawFilter, Filter, IntoFilter, Output,
+};
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
 /// compare/match, unlike the accompanying `name: Arc<str>` (an

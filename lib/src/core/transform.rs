@@ -233,20 +233,20 @@ impl<T: Filter> RawSink for FilterStage<T> {
     }
 }
 
-/// What can be put where a [`RawFilter`] is asked for: a filter itself, or a
-/// [`Filter`], which the framework makes one of.
+/// What can be put where a filter is asked for: a [`Filter`], which the
+/// framework makes one of, a [`RawFilter`] itself, or an [`AnyFilter`]
+/// holding either.
 ///
-/// `M` says which of the two a type is, and the compiler works it out:
-/// nothing names it. A type that is both is refused as ambiguous —
-/// implement one or the other.
+/// `M` says which a type is, and the compiler works it out: nothing names
+/// it. A type that is both a `Filter` and a `RawFilter` is refused as
+/// ambiguous — implement one or the other.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is neither a `RawFilter` nor a `Filter`",
     note = "implement `Filter` for an element that makes buffers of buffers, or `RawSink` and `SrcPads` for one that routes the stream itself"
 )]
 pub trait IntoFilter<M>: sealed::Sealed<M> {
-    /// The filter this is, boxed — for a list of filters, as a
-    /// [`Rack`](crate::elements::Rack) takes.
-    fn into_filter(self) -> Box<dyn RawFilter>;
+    /// The filter this is, whichever kind it is.
+    fn into_filter(self) -> AnyFilter;
 }
 
 /// Says a type goes in as the [`RawFilter`] it is — see [`IntoFilter`].
@@ -255,26 +255,79 @@ pub enum AsRawFilter {}
 /// Says a type goes in as the [`Filter`] it is — see [`IntoFilter`].
 pub enum AsFilter {}
 
+/// Says an [`AnyFilter`] goes in as the filter it holds — see
+/// [`IntoFilter`].
+pub enum AsAnyFilter {}
+
 impl<F: RawFilter + 'static> IntoFilter<AsRawFilter> for F {
-    fn into_filter(self) -> Box<dyn RawFilter> {
-        Box::new(self)
+    fn into_filter(self) -> AnyFilter {
+        AnyFilter(Box::new(self))
     }
 }
 
 impl<T: Filter + 'static> IntoFilter<AsFilter> for T {
-    fn into_filter(self) -> Box<dyn RawFilter> {
-        Box::new(FilterStage::new(self))
+    fn into_filter(self) -> AnyFilter {
+        AnyFilter(Box::new(FilterStage::new(self)))
+    }
+}
+
+impl IntoFilter<AsAnyFilter> for AnyFilter {
+    fn into_filter(self) -> AnyFilter {
+        self
     }
 }
 
 mod sealed {
-    use super::{AsFilter, AsRawFilter, Filter, RawFilter};
+    use super::{AnyFilter, AsAnyFilter, AsFilter, AsRawFilter, Filter, RawFilter};
 
-    /// Keeps [`super::IntoFilter`] to the two ways in it has.
+    /// Keeps [`super::IntoFilter`] to the three ways in it has.
     pub trait Sealed<M> {}
 
     impl<F: RawFilter + 'static> Sealed<AsRawFilter> for F {}
     impl<T: Filter + 'static> Sealed<AsFilter> for T {}
+    impl Sealed<AsAnyFilter> for AnyFilter {}
+}
+
+/// A filter of any kind, which kind forgotten: what to hold where the
+/// filter is picked as the program runs — an upload onto whichever device
+/// there is — and what a [`Rack`](crate::elements::Rack) is filled with.
+/// [`ChainBuilder::pipe`](crate::pipeline::ChainBuilder::pipe) takes one as
+/// it takes the filter it holds.
+///
+/// Made with [`AnyFilter::new`] from a [`Filter`] or a [`RawFilter`] alike.
+/// It derefs to the filter inside, for what is asked of one directly.
+pub struct AnyFilter(Box<dyn RawFilter>);
+
+impl AnyFilter {
+    /// `filter`, whichever kind it is.
+    pub fn new<M>(filter: impl IntoFilter<M>) -> Self {
+        filter.into_filter()
+    }
+
+    /// The filter inside, as the framework drives it.
+    pub(crate) fn into_raw(self) -> Box<dyn RawFilter> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for AnyFilter {
+    type Target = dyn RawFilter;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl std::ops::DerefMut for AnyFilter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.0
+    }
+}
+
+impl std::fmt::Debug for AnyFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AnyFilter").field(&self.0.name()).finish()
+    }
 }
 
 /// Makes `$name`, a newtype over `FilterStage<_>`, the filter its stage
