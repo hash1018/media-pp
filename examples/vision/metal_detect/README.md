@@ -7,11 +7,20 @@ where it is, Core ML runs the model on the GPU or the Neural Engine — and
 prints what each picture carries on, then how fast it went. The macOS
 counterpart of [`cuda_detect`](../cuda_detect).
 
-With `--out boxes.mp4`, a Tee after the detector also records each picture
-with what was found drawn on it, still on the GPU: `MetalDetectionOverlay ->
-Queue -> VideoToolboxEncoder -> FileMuxer`. The overlay draws on copies, so
-the printing branch beside it is handed the pictures as they were. Labels are
-drawn in Arial, which macOS ships.
+With `--track`, an `ObjectTracker` after the detector numbers each object,
+the same on every picture it is followed through, and with `--interval N` the
+detector lets N pictures by between two it looks at while the tracker puts
+where it expects each object on them — DeepStream's `interval`, as
+[`cuda_track`](../cuda_track) measures it. `--confirm 1` numbers a new object
+when it is first seen rather than on its second sighting, which a long
+interval needs. Either implies `--track`.
+
+With `--out boxes.mp4`, a Tee at the end also records each picture with what
+was found drawn on it, still on the GPU: `MetalDetectionOverlay -> Queue ->
+VideoToolboxEncoder -> FileMuxer`, each object tracked in a colour of its own
+and labelled with its number. The overlay draws on copies, so the printing
+branch beside it is handed the pictures as they were. Labels are drawn in
+Arial, which macOS ships.
 
 The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
 and YOLO26 — of the stock weights: the boxes are named with COCO's 80 classes,
@@ -20,7 +29,7 @@ them. It is built with `ort-coreml`, on an Apple silicon Mac.
 
 ```sh
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-  [--out boxes.mp4] [--pictures N]
+  [--track] [--interval N] [--confirm N] [--out boxes.mp4] [--pictures N]
 ```
 
 The file's video has to be one VideoToolbox decodes to NV12 — 8-bit H.264 or
@@ -30,4 +39,4 @@ about that many.
 
 On an M5, YOLOv10n over a 720p H.264 file runs at about 220 pictures a
 second, decoding included, and at 150 to 200 when it is also drawn on and
-encoded.
+encoded; with `--interval 4`, detecting one picture in five, at about 520.

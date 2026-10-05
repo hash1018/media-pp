@@ -299,7 +299,8 @@ compile error with no explanation.
   detecting every one: at a detection every third picture of 12 fps
   walking people, the expected boxes overlap the detector's by 0.78 on
   average, against 0.73 for holding still; at every fifth, 0.71 against
-  0.63.
+  0.63. On macOS, `metal_detect --track` and `--interval N` put it behind
+  `MetalOrtDetector`.
 
   `BoxColors::ByTrack` colours each object by its number, and a label shows
   the number — `person #7 0.87`; a class the model names none of is
