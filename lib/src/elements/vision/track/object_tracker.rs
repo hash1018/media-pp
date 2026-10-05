@@ -1,7 +1,8 @@
 //! [`ObjectTracker`]: what a detector found, numbered across pictures.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use ffmpeg_next as ffmpeg;
 
@@ -10,6 +11,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     element::{Element, ElementType, element_pp_log},
+    elements::vision::batch::PerStream,
     elements::{Detection, Detections},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -58,6 +60,13 @@ const MAX_STEPS: u64 = 120;
 /// are told from the timestamps, and the motion is carried through them,
 /// so an object that moved further than one picture's worth is still
 /// matched.
+///
+/// After a [`StreamMux`](crate::elements::StreamMux) each stream is followed
+/// on its own, by the [`StreamOrigin`](crate::elements::StreamOrigin) its
+/// pictures carry, and its objects numbered from one count shared by all, so
+/// that no two streams' objects ever share a number. A seek of one stream —
+/// its origin's `generation` moved — starts that stream over and leaves the
+/// others as they were.
 pub struct ObjectTracker(FilterStage<Tracking>);
 
 filter_stage!(ObjectTracker);
@@ -96,18 +105,27 @@ struct Origin {
     labels: Arc<[Arc<str>]>,
 }
 
-/// What an [`ObjectTracker`] does with each picture.
-struct Tracking {
-    name: Arc<str>,
-    pp_log: PpLog,
-    options: TrackerOptions,
+/// What an [`ObjectTracker`] follows of one stream.
+struct Stream {
     tracker: ByteTrack,
     pace: Pace,
     /// Whose the last detections seen were, which the expected ones on a
     /// picture let by say too.
     last: Option<Origin>,
-    /// Each followed object's correlation filter, by its number, where the
-    /// tracker follows by look.
+}
+
+/// What an [`ObjectTracker`] does with each picture.
+struct Tracking {
+    name: Arc<str>,
+    pp_log: PpLog,
+    options: TrackerOptions,
+    /// Each stream's objects, apart: the pictures of a mux's streams come
+    /// one after another, and an object of one is never another's.
+    streams: PerStream<Stream>,
+    /// The last number given out, to an object of any stream.
+    numbers: Arc<AtomicU64>,
+    /// Each followed object's correlation filter, by its number — unique
+    /// across the streams — where the tracker follows by look.
     filters: HashMap<u64, Dcf>,
     /// The driver CUDA pictures are read through, opened at the first.
     #[cfg(feature = "cuda")]
@@ -352,9 +370,8 @@ impl ObjectTracker {
             name,
             pp_log,
             options,
-            tracker: ByteTrack::new(options),
-            pace: Pace::default(),
-            last: None,
+            streams: PerStream::default(),
+            numbers: Arc::default(),
             filters: HashMap::new(),
             #[cfg(feature = "cuda")]
             driver: None,
@@ -398,17 +415,30 @@ impl Filter for Tracking {
             return Ok(());
         };
         let (width, height) = (f64::from(frame.width()), f64::from(frame.height()));
-        let steps = self.pace.steps(frame.pts());
+        let (options, numbers) = (self.options, &self.numbers);
+        let fresh = || Stream {
+            tracker: ByteTrack::new(options, Arc::clone(numbers)),
+            pace: Pace::default(),
+            last: None,
+        };
+        let (stream, moved) = self.streams.get(&buf, |_| fresh());
+        if moved {
+            // That stream was sought: its objects are not where they were.
+            // Their filters go at the next detection, with every object no
+            // longer followed.
+            *stream = fresh();
+        }
+        let steps = stream.pace.steps(frame.pts());
         let found = buf
             .metadata()
             .and_then(|metadata| metadata.get::<Detections>())
             .cloned();
-        if found.is_none() && self.last.is_none() {
+        if found.is_none() && stream.last.is_none() {
             out.push(buf);
             return Ok(());
         }
 
-        self.tracker.advance(steps);
+        stream.tracker.advance(steps);
         let gpu_source = if self.options.visual {
             self.gpus.source(frame, &self.pp_log)
         } else {
@@ -436,13 +466,13 @@ impl Filter for Tracking {
         // picture let by, that is the answer; on a detected one, it is where
         // the matching starts from.
         let expected = match pixels.as_deref_mut() {
-            Some(luma) => follow_by_look(&mut self.tracker, &mut self.filters, luma),
-            None => self.tracker.expected(),
+            Some(luma) => follow_by_look(&mut stream.tracker, &mut self.filters, luma),
+            None => stream.tracker.expected(),
         };
         let expected = match &gpu_source {
             Some(source) => self
                 .gpus
-                .follow(&mut self.tracker, source)
+                .follow(&mut stream.tracker, source)
                 .unwrap_or_else(|error| {
                     pp_warn!(pp_log: &self.pp_log, "following by look on the GPU failed: {error}");
                     expected
@@ -451,7 +481,7 @@ impl Filter for Tracking {
         };
 
         let Some(mut found) = found else {
-            let Some(Origin { detector, labels }) = self.last.clone() else {
+            let Some(Origin { detector, labels }) = stream.last.clone() else {
                 unreachable!("returned above without one");
             };
             let items = expected
@@ -496,7 +526,17 @@ impl Filter for Tracking {
                 ],
             })
             .collect();
-        let ids = self.tracker.associate(&seen);
+        let ids = stream.tracker.associate(&seen);
+        stream.last = Some(Origin {
+            detector: Arc::clone(&found.detector),
+            labels: Arc::clone(&found.labels),
+        });
+        // The filters are of every stream's objects.
+        let alive: HashSet<u64> = self
+            .streams
+            .values()
+            .flat_map(|stream| stream.tracker.ids())
+            .collect();
         if let Some(luma) = pixels.as_deref_mut() {
             // Each matched object as the detector saw it is how it looks now.
             for (seen, id) in seen.iter().zip(&ids) {
@@ -512,7 +552,6 @@ impl Filter for Tracking {
                     }
                 }
             }
-            let alive = self.tracker.ids();
             self.filters.retain(|id, _| alive.contains(id));
         }
         if let Some(source) = &gpu_source {
@@ -521,7 +560,7 @@ impl Filter for Tracking {
                 .zip(&ids)
                 .filter_map(|(seen, id)| Some(((*id)?, seen.tlwh)))
                 .collect();
-            let alive = self.tracker.ids();
+            let alive: Vec<u64> = alive.into_iter().collect();
             if let Err(error) = self.gpus.detected(source, &matched, &alive) {
                 pp_warn!(pp_log: &self.pp_log, "learning on the GPU failed: {error}");
             }
@@ -530,19 +569,15 @@ impl Filter for Tracking {
         for (item, id) in found.items.iter_mut().zip(ids) {
             item.track_id = id;
         }
-        self.last = Some(Origin {
-            detector: Arc::clone(&found.detector),
-            labels: Arc::clone(&found.labels),
-        });
         out.push(found.attach_to(buf));
         Ok(())
     }
 
     /// A seek or a flush: what follows is not where these objects went.
+    /// The numbers go on from where they were, so that an object after it
+    /// is never taken for one before.
     fn reset(&mut self) {
-        self.tracker = ByteTrack::new(self.options);
-        self.pace = Pace::default();
-        self.last = None;
+        self.streams.clear();
         self.filters.clear();
         self.gpus.clear();
     }
@@ -806,6 +841,80 @@ mod tests {
         assert!(
             (on_cuda - in_memory).abs() < 2.0,
             "on CUDA {on_cuda} against {in_memory} in system memory"
+        );
+    }
+
+    /// [`picture`], of `stream` at `generation` as a mux hands it on.
+    fn of_stream(stream: u64, generation: u64, buf: MediaBuffer) -> MediaBuffer {
+        use crate::elements::vision::batch::{StreamId, StreamOrigin};
+        let metadata = buf
+            .metadata()
+            .cloned()
+            .unwrap_or_default()
+            .with(StreamOrigin {
+                id: StreamId(stream),
+                name: Arc::from(format!("camera {stream}")),
+                generation,
+            });
+        buf.with_metadata(metadata)
+    }
+
+    /// The number of the one object `buf` carries.
+    fn number(buf: &MediaBuffer) -> Option<u64> {
+        detections(buf)?.items.first()?.track_id
+    }
+
+    /// Two streams' pictures in turn, the same object at the same place on
+    /// each, and a third stream's at a time the others' never reach: each
+    /// stream's object has a number of its own, held across its pictures,
+    /// and the pictures of one do not count as missed pictures of another.
+    /// A seek of one stream numbers its object anew and leaves the others'.
+    #[test]
+    fn each_stream_is_followed_on_its_own() {
+        let mut tracker = ObjectTracker::new("tracker", TrackerOptions::default());
+        let kept = capture(&mut tracker);
+        let thing = || Some(vec![Detection::new(0, 0.9, 0.4, 0.2, 0.1, 0.5)]);
+        for n in 0..6 {
+            for stream in [1, 2] {
+                tracker
+                    .consume(of_stream(stream, 0, picture(1000 * n, thing())))
+                    .expect("tracked");
+            }
+            tracker
+                .consume(of_stream(3, 0, picture(1_000_000 + 1000 * n, thing())))
+                .expect("tracked");
+        }
+        let numbers = |kept: &[MediaBuffer], from: usize| -> Vec<u64> {
+            kept[from..]
+                .iter()
+                .map(|buf| number(buf).expect("numbered"))
+                .collect()
+        };
+        let first = numbers(&kept.lock().unwrap(), 3);
+        let (one, two, three) = (first[0], first[1], first[2]);
+        assert!(one != two && two != three && one != three, "{first:?}");
+        assert!(
+            first.chunks(3).all(|turn| turn == [one, two, three]),
+            "{first:?}"
+        );
+
+        let before = kept.lock().unwrap().len();
+        for n in 6..9 {
+            tracker
+                .consume(of_stream(1, 1, picture(1000 * n, thing())))
+                .expect("tracked");
+            tracker
+                .consume(of_stream(2, 0, picture(1000 * n, thing())))
+                .expect("tracked");
+        }
+        let kept = kept.lock().unwrap();
+        let after: Vec<Option<u64>> = kept[before..].iter().map(number).collect();
+        let renumbered = after[0].expect("numbered at once, as a first sighting is");
+        assert_eq!(after[2], Some(renumbered), "{after:?}");
+        assert!(![one, two, three].contains(&renumbered), "{after:?}");
+        assert_eq!(
+            after[1..].iter().step_by(2).collect::<Vec<_>>(),
+            [&Some(two); 3]
         );
     }
 

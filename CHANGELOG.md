@@ -211,8 +211,11 @@ compile error with no explanation.
   pictures one after another. Live, a batch waits for every input or
   `batch_timeout`; offline, for every input that has not ended.
   `StreamMuxHandle::demux` makes a `Tee` that hands each stream to a branch
-  of its own and ends a stream's branch when the stream ends. Running a
-  batch through a model at once comes next.
+  of its own and ends a stream's branch when the stream ends. A detector's
+  `interval` and `ObjectTracker` keep what they keep for each stream, and a
+  seek of one stream starts only that one over; the tracker's numbers are
+  unique across the streams, and go on after a seek rather than starting
+  from 1 again. Running a batch through a model at once comes next.
 
 - **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
   TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`

@@ -2,10 +2,6 @@
 //! [`StreamMux`](super::StreamMux), keyed by the [`StreamOrigin`] each
 //! picture carries.
 
-// Until the tracker, the analytics and the classifiers keep their state
-// here, only the detectors do, and they need `ort`.
-#![cfg_attr(not(feature = "ort"), allow(dead_code))]
-
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -96,6 +92,11 @@ impl<T> PerStream<T> {
                 (&mut kept.state, false)
             }
         }
+    }
+
+    /// Every stream's state.
+    pub(crate) fn values(&self) -> impl Iterator<Item = &T> {
+        self.states.values().map(|kept| &kept.state)
     }
 
     /// Lets go of every stream's state.

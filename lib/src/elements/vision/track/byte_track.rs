@@ -3,6 +3,9 @@
 //! detections first and then the unconfident ones a partly hidden object
 //! still gets, which other trackers throw away and lose it with.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::TrackerOptions;
 use super::assign::assign;
 use super::kalman::{Kalman, Measurement};
@@ -94,17 +97,21 @@ pub(super) struct ByteTrack {
     /// Whether it has been handed a detection at all: the first picture's
     /// objects are confirmed at once, as ByteTrack's are.
     started: bool,
-    next_id: u64,
+    /// The numbers given out, shared by every tracker of one element so
+    /// that no two streams' objects share one.
+    numbers: Arc<AtomicU64>,
 }
 
 impl ByteTrack {
-    pub(super) fn new(options: TrackerOptions) -> Self {
+    /// A tracker numbering its objects from `numbers`, which holds the last
+    /// number given out.
+    pub(super) fn new(options: TrackerOptions, numbers: Arc<AtomicU64>) -> Self {
         Self {
             options,
             tracks: Vec::new(),
             picture: 0,
             started: false,
-            next_id: 1,
+            numbers,
         }
     }
 
@@ -177,8 +184,7 @@ impl ByteTrack {
         if let Some(id) = self.tracks[track].id {
             return id;
         }
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.numbers.fetch_add(1, Ordering::Relaxed) + 1;
         self.tracks[track].id = Some(id);
         id
     }
@@ -379,7 +385,7 @@ mod tests {
     }
 
     fn tracker() -> ByteTrack {
-        ByteTrack::new(TrackerOptions::default())
+        ByteTrack::new(TrackerOptions::default(), Arc::default())
     }
 
     #[test]
@@ -444,17 +450,23 @@ mod tests {
     /// where three are wanted, on the third.
     #[test]
     fn how_many_sightings_confirm_an_object_is_a_choice() {
-        let mut once = ByteTrack::new(TrackerOptions {
-            confirm_after: 1,
-            ..TrackerOptions::default()
-        });
+        let mut once = ByteTrack::new(
+            TrackerOptions {
+                confirm_after: 1,
+                ..TrackerOptions::default()
+            },
+            Arc::default(),
+        );
         once.update(&[seen(0, 0.9, 0.0, 0.0)], 1);
         assert!(once.update(&[seen(0, 0.9, 900.0, 100.0)], 1)[0].is_some());
 
-        let mut thrice = ByteTrack::new(TrackerOptions {
-            confirm_after: 3,
-            ..TrackerOptions::default()
-        });
+        let mut thrice = ByteTrack::new(
+            TrackerOptions {
+                confirm_after: 3,
+                ..TrackerOptions::default()
+            },
+            Arc::default(),
+        );
         thrice.update(&[seen(0, 0.9, 0.0, 0.0)], 1);
         let ids: Vec<bool> = (0..3)
             .map(|n| thrice.update(&[seen(0, 0.9, 900.0 + f64::from(n), 100.0)], 1)[0].is_some())
