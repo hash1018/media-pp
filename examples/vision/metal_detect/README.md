@@ -14,7 +14,9 @@ the printing branch beside it is handed the pictures as they were. Labels are
 drawn in Arial, which macOS ships.
 
 The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
-and YOLO26. It is built with `ort-coreml`, on an Apple silicon Mac.
+and YOLO26 — of the stock weights: the boxes are named with COCO's 80 classes,
+whatever the model says, so an export that lost its class names still has
+them. It is built with `ort-coreml`, on an Apple silicon Mac.
 
 ```sh
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \

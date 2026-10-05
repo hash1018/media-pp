@@ -12,7 +12,8 @@
 //! sees the pictures as the detector handed them on.
 //!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
-//! YOLOv10 and YOLO26. Built with `ort-coreml`, on an Apple silicon Mac. The
+//! YOLOv10 and YOLO26 — of the stock weights: the boxes are named with
+//! COCO's 80 classes, whatever the model says. Built with `ort-coreml`, on an Apple silicon Mac. The
 //! file's video has to be one VideoToolbox decodes to NV12 — 8-bit H.264 or
 //! HEVC, say: a 10-bit one is refused as the pipeline is wired, the decoder's
 //! P010 being a layout the detector does not take. `--pictures` stops it
@@ -114,7 +115,17 @@ mod example {
 
         let device = VideoToolboxDevice::new()?;
         let started = Instant::now();
-        let detector = MetalOrtDetector::new("detector", &model, OrtDetectorOptions::default())?;
+        // COCO's class names, which stock Ultralytics weights are trained
+        // on, given rather than read from the model: an export that lost
+        // them would otherwise put numbers on the boxes.
+        let detector = MetalOrtDetector::new(
+            "detector",
+            &model,
+            OrtDetectorOptions {
+                labels: Some(COCO_CLASS_LABELS.map(String::from).to_vec()),
+                ..OrtDetectorOptions::default()
+            },
+        )?;
         println!("detector ready in {:.1?}", started.elapsed());
 
         let (source, _) = FileDemuxer::open("demux", &video)?;
@@ -137,10 +148,7 @@ mod example {
                     .items
                     .iter()
                     .map(|item| {
-                        let label = found
-                            .label(item)
-                            .or_else(|| COCO_CLASS_LABELS.get(item.class_id).copied())
-                            .unwrap_or("?");
+                        let label = found.label(item).unwrap_or("?");
                         format!("{label} {:.0}%", item.score * 100.0)
                     })
                     .collect();
