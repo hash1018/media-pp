@@ -2,6 +2,8 @@
 //!
 //! [`source`] produces buffers, [`filter`] transforms them, [`sink`] consumes
 //! them, and [`driver`] holds the background tasks that have no pads at all.
+//! [`vision`] is grouped by what it is for rather than by role: finding
+//! objects in pictures, following them, counting them and drawing them.
 //! These are built *on* the framework re-exported at the crate root, not part
 //! of it — anything here could equally be written outside this crate against
 //! the same traits.
@@ -22,6 +24,7 @@ pub(crate) mod rtsp;
 pub mod sink;
 pub mod source;
 mod video_format;
+pub mod vision;
 
 pub use audio_format::AudioFormat;
 pub use rtsp::{RtspOptions, RtspTransport};
@@ -120,27 +123,12 @@ pub use filter::{
 };
 // Video analysis: the data every detector writes, and the overlays, for
 // any build; inference with the runtime its feature brings.
-#[cfg(feature = "ort-tensorrt")]
-pub use filter::UseTensorRtPolicy;
-pub use filter::{
-    Analytics, AnalyticsOptions, BoxColors, COCO_CLASS_LABELS, Classification, Crossing, Detection,
-    DetectionOverlayOptions, Detections, LabelStyle, Line, LineCount, ObjectAnalytics,
-    ObjectAnalyticsError, ObjectTracker, SwDetectionOverlay, SwDetectionOverlayError,
-    TrackerOptions, Zone, ZoneCount,
-};
 #[cfg(feature = "cuda")]
 pub use filter::{
     CudaChromaKey, CudaChromaKeyError, CudaCodec, CudaConverter, CudaConverterError, CudaDecoder,
     CudaDecoderError, CudaDownload, CudaDownloadError, CudaEncoder, CudaEncoderError,
     CudaEncoderOptions, CudaScaler, CudaScalerError, CudaScalerInterp, CudaUpload, CudaUploadError,
     CudaVideoEffect, CudaVideoEffectError,
-};
-#[cfg(feature = "cuda")]
-pub use filter::{CudaDetectionOverlay, CudaDetectionOverlayError};
-#[cfg(feature = "ort-cuda")]
-pub use filter::{
-    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
-    RuntimeShortfall,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{
@@ -162,20 +150,11 @@ pub use filter::{
 pub use filter::{
     EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
 };
-#[cfg(feature = "ort")]
-pub use filter::{
-    InputScale, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtError,
-    SwOrtClassifier, SwOrtDetector,
-};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use filter::{
     MetalChromaKey, MetalChromaKeyError, MetalConverter, MetalConverterError, MetalScaler,
     MetalScalerError, MetalScalerInterp, MetalVideoEffect, MetalVideoEffectError,
 };
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub use filter::{MetalDetectionOverlay, MetalDetectionOverlayError};
-#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use filter::{MetalOrtClassifier, MetalOrtDetector};
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
@@ -312,3 +291,27 @@ pub use source::{
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
 pub use source::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};
+#[cfg(feature = "ort-tensorrt")]
+pub use vision::UseTensorRtPolicy;
+pub use vision::{
+    Analytics, AnalyticsOptions, BoxColors, COCO_CLASS_LABELS, Classification, Crossing, Detection,
+    DetectionOverlayOptions, Detections, LabelStyle, Line, LineCount, ObjectAnalytics,
+    ObjectAnalyticsError, ObjectTracker, SwDetectionOverlay, SwDetectionOverlayError,
+    TrackerOptions, Zone, ZoneCount,
+};
+#[cfg(feature = "cuda")]
+pub use vision::{CudaDetectionOverlay, CudaDetectionOverlayError};
+#[cfg(feature = "ort-cuda")]
+pub use vision::{
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
+    RuntimeShortfall,
+};
+#[cfg(feature = "ort")]
+pub use vision::{
+    InputScale, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtError,
+    SwOrtClassifier, SwOrtDetector,
+};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use vision::{MetalDetectionOverlay, MetalDetectionOverlayError};
+#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+pub use vision::{MetalOrtClassifier, MetalOrtDetector};

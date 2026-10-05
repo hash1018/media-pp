@@ -2,20 +2,20 @@
 //! of this crate's own: finding objects in pictures, and doing something
 //! with what was found.
 //!
-//! What every one of them shares is the data in [`meta`]: [`Detections`],
+//! What every one of them shares is [`Detections`],
 //! the [`Metadata`](crate::buffer::Metadata) a detector puts on each
 //! picture and every later element reads. Then a family of elements per
 //! stage, each with its software and GPU members:
 //!
-//! - [`infer`] — models that look at pictures: ONNX Runtime's, with the
+//! - `infer` — models that look at pictures: ONNX Runtime's, with the
 //!   `ort` features, as `SwOrtDetector`, `CudaOrtDetector` and
 //!   `MetalOrtDetector`.
-//! - [`track`] — following what was found from picture to picture:
+//! - `track` — following what was found from picture to picture:
 //!   [`ObjectTracker`], which numbers each object and fills in the pictures
 //!   a detector let by.
-//! - [`analytics`] — making sense of it: [`ObjectAnalytics`], which counts
+//! - `analytics` — making sense of it: [`ObjectAnalytics`], which counts
 //!   the objects in zones of the picture and across lines.
-//! - [`overlay`] — drawing what was found onto the pictures:
+//! - `overlay` — drawing what was found onto the pictures:
 //!   [`SwDetectionOverlay`], `CudaDetectionOverlay` and
 //!   `MetalDetectionOverlay`.
 //!

@@ -898,6 +898,14 @@ compile error with no explanation.
 
 ### Changed
 
+- **The video analysis elements are a module of their own,
+  `elements::vision`,** no longer inside `elements::filter`: detectors,
+  classifiers, the tracker, analytics and the overlays are grouped by what
+  they are for, as a stream mux for batched inference is to join them. The
+  flat paths — `media_pp::elements::ObjectTracker` and the rest — are
+  unchanged; only a path through `elements::filter::` has to become
+  `elements::vision::`.
+
 - **`ort-cuda`, `ort-tensorrt` and `cuda-visual-tracking` build on Windows
   with nothing of NVIDIA's installed.** The few calls this crate makes into
   CUDA's runtime, cuBLAS, cuRAND, cuFFT, cuDNN and TensorRT name each DLL

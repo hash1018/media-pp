@@ -38,7 +38,6 @@ mod tone_map;
 pub(crate) mod upload;
 mod video_effect;
 mod video_synchronizer;
-mod vision;
 
 pub use audio::{
     AudioCompressor, AudioCompressorError, AudioCompressorHandle, AudioCompressorOptions,
@@ -164,7 +163,6 @@ fn is_codec_drain_boundary(error: &ffmpeg_next::Error) -> bool {
     }
 }
 
-pub use vision::*;
 #[cfg(test)]
 mod codec_error_tests {
     use super::*;
