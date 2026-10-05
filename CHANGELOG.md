@@ -919,6 +919,15 @@ compile error with no explanation.
 
 ### Changed
 
+- **A YOLOv8 or YOLO11 detector reads its model's output about six times
+  faster.** Each box's best class was found by walking a column of the
+  output through a view whose dimension was known only at run time — about
+  1.8 ms a picture for YOLO11n's 8400 boxes, measured on a desktop CPU; now
+  a row at a time through a three-axis view, about 0.3 ms. Every
+  detector reads its output the same way, so `SwOrtDetector`,
+  `CudaOrtDetector` and `MetalOrtDetector` all gain; YOLOv10 and YOLO26
+  outputs, already small, are unchanged.
+
 - **The video analysis elements are a module of their own,
   `elements::vision`,** no longer inside `elements::filter`: detectors,
   classifiers, the tracker, analytics and the overlays are grouped by what

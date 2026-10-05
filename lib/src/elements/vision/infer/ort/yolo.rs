@@ -2,7 +2,7 @@
 //! input the way Ultralytics trains it — see [`OrtDetectorOptions`] for the
 //! two layouts.
 
-use ndarray::{ArrayViewD, Axis};
+use ndarray::{ArrayView2, ArrayViewD, Axis, Ix3};
 
 use super::{OrtDetectorError, OrtDetectorOptions};
 use crate::elements::Detection;
@@ -88,6 +88,11 @@ pub(crate) fn decode_batch(
             )));
         }
     }
+    // Three axes, known as such: walked through a view of a dimension
+    // known only at run time, every step costs an index of its own.
+    let output = output
+        .into_dimensionality::<Ix3>()
+        .map_err(|error| OrtDetectorError::UnsupportedModel(error.to_string()))?;
     letterboxes
         .iter()
         .enumerate()
@@ -104,7 +109,7 @@ pub(crate) fn decode_batch(
 
 /// One picture's rows of an output of `shape`.
 fn decode_one(
-    output: ArrayViewD<'_, f32>,
+    output: ArrayView2<'_, f32>,
     shape: &[usize],
     letterbox: &Letterbox,
     options: &OrtDetectorOptions,
@@ -123,20 +128,30 @@ fn decode_one(
             })
             .collect()
     } else if shape[1] > 4 {
-        // `[4 + classes, boxes]`: a column per box.
+        // `[4 + classes, boxes]`: a column per box. Each box's best class
+        // is found a row at a time — one class's score for every box, side
+        // by side in memory — rather than a column at a time, whose values
+        // lie a whole row apart: over YOLO11's 8400 boxes and 80 classes,
+        // reading by column took more than a millisecond a picture.
+        let mut best = vec![(0, f32::NEG_INFINITY); shape[2]];
+        for (class_id, row) in output.axis_iter(Axis(0)).skip(4).enumerate() {
+            let mut keep = |(best, &score): (&mut (usize, f32), &f32)| {
+                if score > best.1 {
+                    *best = (class_id, score);
+                }
+            };
+            match row.as_slice() {
+                Some(row) => best.iter_mut().zip(row).for_each(&mut keep),
+                None => best.iter_mut().zip(row.iter()).for_each(&mut keep),
+            }
+        }
         let mut candidates = Vec::new();
-        for column in output.axis_iter(Axis(1)) {
-            let (class_id, score) = column
-                .iter()
-                .skip(4)
-                .copied()
-                .enumerate()
-                .reduce(|best, next| if next.1 > best.1 { next } else { best })
-                .expect("more than four rows");
+        for (index, &(class_id, score)) in best.iter().enumerate() {
             if score < options.conf_threshold {
                 continue;
             }
-            let (cx, cy, w, h) = (column[0], column[1], column[2], column[3]);
+            let at = |row: usize| output[[row, index]];
+            let (cx, cy, w, h) = (at(0), at(1), at(2), at(3));
             candidates.push((
                 class_id,
                 score,
