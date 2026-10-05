@@ -256,7 +256,8 @@ compile error with no explanation.
   where the provider will not start rather than run the whole model on the
   CPU, which is `SwOrtDetector`'s job. On an M5 YOLOv10n
   looks at a 720p picture in about 7 ms through Core ML, against about 19
-  ms on the CPU, and loads in under half a second.
+  ms on the CPU, and loads in under half a second. The `metal_detect`
+  example runs it over a file.
 
 - **`Detections`: what a detector found in a picture, as its metadata.**
   `SwOrtDetector` puts one on every picture it hands on — the detector's name,
