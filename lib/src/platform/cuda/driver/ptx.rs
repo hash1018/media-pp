@@ -1649,12 +1649,18 @@ BMDONE:
 ///
 /// The picture sits scaled inside the input at `offset`, `scaled` in size,
 /// proportions kept; a pixel outside it is the grey Ultralytics trains on,
-/// 114 of 255 (`0f3EE4E4E5`). Inside, each pixel takes the source sample at
-/// its centre — nearest rather than filtered: a detector fed a third of a
-/// 1080p picture finds the same objects either way, and this is one load
-/// a pixel. An NV12 sample is made RGB by the three rows `fit_nv12` is
+/// 114 of 255 (`0f3EE4E4E5`). Inside, each pixel is the mean of the source
+/// pixels it covers — three by three where a 1080p picture is shrunk to
+/// 640 — or, enlarging, of the one it falls in. The source sample at its
+/// centre alone, one pixel in nine, was tried first: on a picture whose
+/// bottle YOLOv10n gave 0.64 from swscale's bilinear fitting it gave 0.18,
+/// and the same inputs through the CPU's session scored the same, so it
+/// was the fitting. The mean gives 0.57 for it, and every object of that
+/// picture, of YOLOv10n and YOLO11n alike, scores within 0.07 of the CPU's.
+/// An NV12 pixel is averaged as Y', Cb and Cr — each source pixel with the
+/// chroma sample it shares — and made RGB by the three rows `fit_nv12` is
 /// handed, the same `(Y', Cb, Cr, 1)` rows `nv12_to_bgra` reads; a BGRA one
-/// is read as it is.
+/// is averaged as it is.
 ///
 /// `best_class` reads what a YOLOv8 or YOLO11 model made of a batch where
 /// it is, on the device — `rows` (four, then a score per class) by `boxes`
@@ -1741,48 +1747,84 @@ pub(super) const FIT_PTX: &str = r#"
     setp.ge.u32     %p4, %r16, %r14;
     @%p4 bra        FIT_NV12_STORE;
 
-    // The source sample at the pixel's centre: (2d + 1) * src / (2 * scaled).
+    // The source pixels the output pixel covers, [x0, x1) by [y0, y1):
+    // x0 = d * src / scaled, x1 = (d + 1) * src / scaled rounded up, at
+    // least one pixel and none past the edge. Averaged, so that a picture
+    // shrunk to a third is read from every pixel rather than one in nine.
     ld.param.u32    %r17, [src_w];
     ld.param.u32    %r18, [src_h];
-    shl.b32         %r19, %r15, 1;
-    add.s32         %r19, %r19, 1;
-    mul.lo.s32      %r19, %r19, %r17;
-    shl.b32         %r20, %r5, 1;
-    div.u32         %r21, %r19, %r20;
-    shl.b32         %r22, %r16, 1;
-    add.s32         %r22, %r22, 1;
-    mul.lo.s32      %r22, %r22, %r18;
-    shl.b32         %r23, %r14, 1;
-    div.u32         %r24, %r22, %r23;
+    mul.lo.s32      %r19, %r15, %r17;
+    div.u32         %r21, %r19, %r5;
+    add.s32         %r19, %r19, %r17;
+    add.s32         %r19, %r19, %r5;
+    sub.s32         %r19, %r19, 1;
+    div.u32         %r36, %r19, %r5;
+    min.u32         %r36, %r36, %r17;
+    add.s32         %r20, %r21, 1;
+    max.u32         %r36, %r36, %r20;
+    mul.lo.s32      %r22, %r16, %r18;
+    div.u32         %r24, %r22, %r14;
+    add.s32         %r22, %r22, %r18;
+    add.s32         %r22, %r22, %r14;
+    sub.s32         %r22, %r22, 1;
+    div.u32         %r37, %r22, %r14;
+    min.u32         %r37, %r37, %r18;
+    add.s32         %r23, %r24, 1;
+    max.u32         %r37, %r37, %r23;
 
     ld.param.u64    %rd1, [luma];
     ld.param.u32    %r25, [luma_pitch];
     ld.param.u64    %rd2, [chroma];
     ld.param.u32    %r26, [chroma_pitch];
 
-    mad.lo.s32      %r27, %r24, %r25, %r21;
-    cvt.u64.u32     %rd3, %r27;
+    // Sums of Y', Cb and Cr, each source pixel taking the chroma sample it
+    // shares with three others.
+    mov.f32         %f1, 0f00000000;
+    mov.f32         %f2, 0f00000000;
+    mov.f32         %f3, 0f00000000;
+    mov.u32         %r38, 0;
+    mov.u32         %r30, %r24;
+FIT_NV12_ROW:
+    mov.u32         %r31, %r21;
+    mul.lo.s32      %r27, %r30, %r25;
+    shr.u32         %r28, %r30, 1;
+    mul.lo.s32      %r29, %r28, %r26;
+FIT_NV12_PIXEL:
+    add.s32         %r32, %r27, %r31;
+    cvt.u64.u32     %rd3, %r32;
     add.s64         %rd4, %rd1, %rd3;
     ld.global.u8    %rs1, [%rd4];
-
-    shr.u32         %r28, %r24, 1;
-    shr.u32         %r29, %r21, 1;
-    shl.b32         %r29, %r29, 1;
-    mad.lo.s32      %r30, %r28, %r26, %r29;
-    cvt.u64.u32     %rd5, %r30;
+    shr.u32         %r33, %r31, 1;
+    shl.b32         %r33, %r33, 1;
+    add.s32         %r33, %r29, %r33;
+    cvt.u64.u32     %rd5, %r33;
     add.s64         %rd6, %rd2, %rd5;
     ld.global.u8    %rs2, [%rd6];
     ld.global.u8    %rs3, [%rd6+1];
+    cvt.u32.u16     %r34, %rs1;
+    cvt.rn.f32.u32  %f7, %r34;
+    add.f32         %f1, %f1, %f7;
+    cvt.u32.u16     %r34, %rs2;
+    cvt.rn.f32.u32  %f7, %r34;
+    add.f32         %f2, %f2, %f7;
+    cvt.u32.u16     %r34, %rs3;
+    cvt.rn.f32.u32  %f7, %r34;
+    add.f32         %f3, %f3, %f7;
+    add.s32         %r38, %r38, 1;
+    add.s32         %r31, %r31, 1;
+    setp.lt.u32     %p5, %r31, %r36;
+    @%p5 bra        FIT_NV12_PIXEL;
+    add.s32         %r30, %r30, 1;
+    setp.lt.u32     %p5, %r30, %r37;
+    @%p5 bra        FIT_NV12_ROW;
 
-    cvt.u32.u16     %r31, %rs1;
-    cvt.rn.f32.u32  %f1, %r31;
-    mul.f32         %f1, %f1, 0f3B808081;
-    cvt.u32.u16     %r32, %rs2;
-    cvt.rn.f32.u32  %f2, %r32;
-    mul.f32         %f2, %f2, 0f3B808081;
-    cvt.u32.u16     %r33, %rs3;
-    cvt.rn.f32.u32  %f3, %r33;
-    mul.f32         %f3, %f3, 0f3B808081;
+    // The means, 0 to 1: each sum over 255 times the count.
+    cvt.rn.f32.u32  %f8, %r38;
+    mul.f32         %f8, %f8, 0f437F0000;
+    rcp.rn.f32      %f8, %f8;
+    mul.f32         %f1, %f1, %f8;
+    mul.f32         %f2, %f2, %f8;
+    mul.f32         %f3, %f3, %f8;
 
     ld.param.f32    %f10, [red_y];
     ld.param.f32    %f11, [red_cb];
@@ -1880,39 +1922,72 @@ FIT_NV12_DONE:
     setp.ge.u32     %p4, %r16, %r14;
     @%p4 bra        FIT_BGRA_STORE;
 
+    // The source pixels the output pixel covers, averaged, as `fit_nv12`
+    // finds them.
     ld.param.u32    %r17, [src_w];
     ld.param.u32    %r18, [src_h];
-    shl.b32         %r19, %r15, 1;
-    add.s32         %r19, %r19, 1;
-    mul.lo.s32      %r19, %r19, %r17;
-    shl.b32         %r20, %r5, 1;
-    div.u32         %r21, %r19, %r20;
-    shl.b32         %r22, %r16, 1;
-    add.s32         %r22, %r22, 1;
-    mul.lo.s32      %r22, %r22, %r18;
-    shl.b32         %r23, %r14, 1;
-    div.u32         %r24, %r22, %r23;
+    mul.lo.s32      %r19, %r15, %r17;
+    div.u32         %r21, %r19, %r5;
+    add.s32         %r19, %r19, %r17;
+    add.s32         %r19, %r19, %r5;
+    sub.s32         %r19, %r19, 1;
+    div.u32         %r36, %r19, %r5;
+    min.u32         %r36, %r36, %r17;
+    add.s32         %r20, %r21, 1;
+    max.u32         %r36, %r36, %r20;
+    mul.lo.s32      %r22, %r16, %r18;
+    div.u32         %r24, %r22, %r14;
+    add.s32         %r22, %r22, %r18;
+    add.s32         %r22, %r22, %r14;
+    sub.s32         %r22, %r22, 1;
+    div.u32         %r37, %r22, %r14;
+    min.u32         %r37, %r37, %r18;
+    add.s32         %r23, %r24, 1;
+    max.u32         %r37, %r37, %r23;
 
     ld.param.u64    %rd1, [src];
     ld.param.u32    %r25, [src_pitch];
-    shl.b32         %r26, %r21, 2;
-    mad.lo.s32      %r27, %r24, %r25, %r26;
-    cvt.u64.u32     %rd2, %r27;
+
+    // B, G, R in memory; summed as R, G, B.
+    mov.f32         %f4, 0f00000000;
+    mov.f32         %f5, 0f00000000;
+    mov.f32         %f6, 0f00000000;
+    mov.u32         %r38, 0;
+    mov.u32         %r30, %r24;
+FIT_BGRA_ROW:
+    mov.u32         %r31, %r21;
+    mul.lo.s32      %r27, %r30, %r25;
+FIT_BGRA_PIXEL:
+    shl.b32         %r26, %r31, 2;
+    add.s32         %r26, %r27, %r26;
+    cvt.u64.u32     %rd2, %r26;
     add.s64         %rd3, %rd1, %rd2;
     ld.global.u8    %rs1, [%rd3];
     ld.global.u8    %rs2, [%rd3+1];
     ld.global.u8    %rs3, [%rd3+2];
-
-    // B, G, R in memory; R, G, B out.
     cvt.u32.u16     %r28, %rs3;
-    cvt.rn.f32.u32  %f4, %r28;
-    mul.f32         %f4, %f4, 0f3B808081;
-    cvt.u32.u16     %r29, %rs2;
-    cvt.rn.f32.u32  %f5, %r29;
-    mul.f32         %f5, %f5, 0f3B808081;
-    cvt.u32.u16     %r30, %rs1;
-    cvt.rn.f32.u32  %f6, %r30;
-    mul.f32         %f6, %f6, 0f3B808081;
+    cvt.rn.f32.u32  %f7, %r28;
+    add.f32         %f4, %f4, %f7;
+    cvt.u32.u16     %r28, %rs2;
+    cvt.rn.f32.u32  %f7, %r28;
+    add.f32         %f5, %f5, %f7;
+    cvt.u32.u16     %r28, %rs1;
+    cvt.rn.f32.u32  %f7, %r28;
+    add.f32         %f6, %f6, %f7;
+    add.s32         %r38, %r38, 1;
+    add.s32         %r31, %r31, 1;
+    setp.lt.u32     %p5, %r31, %r36;
+    @%p5 bra        FIT_BGRA_PIXEL;
+    add.s32         %r30, %r30, 1;
+    setp.lt.u32     %p5, %r30, %r37;
+    @%p5 bra        FIT_BGRA_ROW;
+
+    cvt.rn.f32.u32  %f1, %r38;
+    mul.f32         %f1, %f1, 0f437F0000;
+    rcp.rn.f32      %f1, %f1;
+    mul.f32         %f4, %f4, %f1;
+    mul.f32         %f5, %f5, %f1;
+    mul.f32         %f6, %f6, %f1;
 
 FIT_BGRA_STORE:
     ld.param.u64    %rd7, [dst];

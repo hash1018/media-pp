@@ -675,3 +675,79 @@ fn black_and_white_map_to_limited_range_endpoints() {
         "white must be chroma-neutral, got ({u}, {v})"
     );
 }
+
+/// What the fitting kernels make of a picture of 48 by 24 whose every third
+/// column, from the second, is white and the rest black, fitted into a 16
+/// by 16 input — shrunk to a third, 16 by 8, grey above and below. The red
+/// plane, row by row.
+#[cfg(feature = "ort-cuda")]
+fn fitted_stripes(device: &crate::elements::CudaDevice, bgra: bool) -> Vec<f32> {
+    let white = |x: u32| if x % 3 == 1 { 255 } else { 0 };
+    let buf = if bgra {
+        cuda_bgra_surface(device, 48, 24, |x, _| {
+            let v = white(x);
+            [v, v, v, 255]
+        })
+    } else {
+        cuda_surface_with(device, 48, 24, |x, _| white(x), 128)
+    }
+    .expect("uploaded");
+    let MediaBuffer::Video(frame) = &buf else {
+        panic!("a picture");
+    };
+    let driver = CudaDriver::retain_primary().expect("driver");
+    let kernels = driver.fit_kernels().expect("kernels");
+    let tensor = driver.batch_tensor(16, 16, 1).expect("tensor");
+    let fit = Fit {
+        model: (16, 16),
+        offset: (0, 4),
+        scaled: (16, 8),
+    };
+    if bgra {
+        let source = BgraSurface::from_frame(frame).expect("surface");
+        driver
+            .fit_bgra(&kernels, &tensor, 0, fit, source, (48, 24))
+            .expect("fits");
+    } else {
+        // Full range, so that a neutral chroma leaves R = G = B = Y'.
+        let colour = YuvToBgra::of(ffmpeg::color::Space::BT709, ffmpeg::color::Range::JPEG, 24);
+        let source = Nv12Surface::from_frame(frame).expect("surface");
+        driver
+            .fit_nv12(&kernels, &tensor, 0, fit, source, (48, 24), &colour)
+            .expect("fits");
+    }
+    driver.synchronize().expect("ran");
+    let mut planes = vec![0.0; 3 * 16 * 16];
+    driver.download(&tensor, &mut planes).expect("copied down");
+    planes.truncate(16 * 16);
+    planes
+}
+
+/// A picture shrunk to a third is fitted from every pixel, not one in
+/// nine: every third column white averages to a third, where the sample
+/// at each output pixel's centre — the second of its three columns — read
+/// every pixel white, and a model saw a thin object fatter or not at all.
+/// It cost YOLOv10n a bottle, 0.64 on the CPU against 0.18 on the GPU.
+#[cfg(feature = "ort-cuda")]
+#[test]
+fn a_picture_is_fitted_from_every_pixel_it_is_shrunk_from() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    for bgra in [false, true] {
+        let red = fitted_stripes(&device, bgra);
+        for (row, values) in red.chunks(16).enumerate() {
+            let expected = if (4..12).contains(&row) {
+                1.0 / 3.0
+            } else {
+                114.0 / 255.0
+            };
+            for value in values {
+                assert!(
+                    (value - expected).abs() < 0.01,
+                    "bgra={bgra}, row {row}: {values:?}"
+                );
+            }
+        }
+    }
+}
