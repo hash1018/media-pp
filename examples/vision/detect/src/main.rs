@@ -206,6 +206,7 @@ mod example {
                     // The model's own class names, which an Ultralytics
                     // export carries.
                     labels: None,
+                    ..OrtDetectorOptions::default()
                 },
             )?;
             let overlay = SwDetectionOverlay::new(
