@@ -296,8 +296,8 @@ pub use vision::UseTensorRtPolicy;
 pub use vision::{
     Analytics, AnalyticsOptions, BoxColors, COCO_CLASS_LABELS, Classification, Crossing, Detection,
     DetectionOverlayOptions, Detections, LabelStyle, Line, LineCount, ObjectAnalytics,
-    ObjectAnalyticsError, ObjectTracker, SwDetectionOverlay, SwDetectionOverlayError,
-    TrackerOptions, Zone, ZoneCount,
+    ObjectAnalyticsError, ObjectTracker, StreamAnalyticsOptions, SwDetectionOverlay,
+    SwDetectionOverlayError, TrackerOptions, Zone, ZoneCount,
 };
 pub use vision::{
     BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,

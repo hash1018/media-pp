@@ -1,6 +1,7 @@
 //! [`ObjectAnalytics`]: objects counted in zones and across lines.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use crate::pp_log::{PpLog, pp_info};
@@ -8,12 +9,13 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     element::{Element, ElementType, element_pp_log},
+    elements::vision::batch::PerStream,
     elements::{Analytics, Crossing, Detection, Detections, LineCount, ZoneCount},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use super::{AnalyticsOptions, Line, ObjectAnalyticsError, Zone};
+use super::{AnalyticsOptions, Line, ObjectAnalyticsError, StreamAnalyticsOptions, Zone};
 
 /// How many pictures an object may go unseen before its last place is
 /// forgotten — a tracker forgets it sooner, so this only bounds memory.
@@ -37,6 +39,13 @@ const FORGET_AFTER: u64 = 300;
 /// they live and hands each on as it came. A picture carrying no
 /// `Detections` goes on carrying no `Analytics`. A seek forgets where each
 /// object was, so a jump is not counted as a crossing; the totals carry on.
+///
+/// After a [`StreamMux`](crate::elements::StreamMux) each stream is watched
+/// on its own, by the [`StreamOrigin`](crate::elements::StreamOrigin) its
+/// pictures carry — with the zones and lines
+/// [`AnalyticsOptions::streams`] gives it, or the shared ones — and its
+/// lines' totals are its own. A seek of one stream forgets where that
+/// stream's objects were and no other's.
 pub struct ObjectAnalytics(FilterStage<Analysing>);
 
 filter_stage!(ObjectAnalytics);
@@ -49,15 +58,20 @@ struct ZoneRule {
     crowded_at: Option<usize>,
 }
 
-/// A line, and what has crossed it.
+/// A line, ready to be tested against.
 struct LineRule {
     name: Arc<str>,
     start: (f32, f32),
     end: (f32, f32),
     classes: Option<Vec<usize>>,
     margin: f32,
-    forward: u64,
-    backward: u64,
+}
+
+/// The zones and lines one stream, or every stream not given its own, is
+/// watched with.
+struct Rules {
+    zones: Vec<ZoneRule>,
+    lines: Vec<LineRule>,
 }
 
 /// The side of a line an object was last clearly on — at least the
@@ -76,34 +90,40 @@ struct Last {
     sides: Vec<Option<Settled>>,
 }
 
+/// What is kept of one stream: what has crossed its lines, and where its
+/// objects were.
+struct Watch {
+    rules: Arc<Rules>,
+    /// For each line, the crossings forward and backward so far.
+    totals: Vec<(u64, u64)>,
+    last: HashMap<u64, Last>,
+    /// Pictures of the stream carrying `Detections` seen so far.
+    pictures: u64,
+}
+
 /// What an [`ObjectAnalytics`] does with each picture.
 struct Analysing {
     name: Arc<str>,
     pp_log: PpLog,
-    zones: Vec<ZoneRule>,
-    lines: Vec<LineRule>,
-    last: HashMap<u64, Last>,
-    /// Pictures carrying `Detections` seen so far.
-    pictures: u64,
+    /// The zones and lines of every stream not given its own.
+    rules: Arc<Rules>,
+    /// Those of the streams given their own, by the streams' names.
+    by_stream: HashMap<Arc<str>, Arc<Rules>>,
+    streams: PerStream<Watch>,
 }
 
 fn finite(point: (f32, f32)) -> bool {
     point.0.is_finite() && point.1.is_finite()
 }
 
-impl ObjectAnalytics {
-    /// Analytics over the zones and lines `options` give.
+impl Rules {
+    /// `zones` and `lines` ready to be tested against.
     ///
     /// # Errors
     ///
-    /// A zone of fewer than three corners or a corner that is not a
-    /// number, and a line of no length or an end that is not a number.
-    pub fn new(
-        name: impl Into<String>,
-        options: AnalyticsOptions,
-    ) -> std::result::Result<Self, ObjectAnalyticsError> {
-        let zones = options
-            .zones
+    /// As [`ObjectAnalytics::new`]'s.
+    fn new(zones: Vec<Zone>, lines: Vec<Line>) -> std::result::Result<Self, ObjectAnalyticsError> {
+        let zones = zones
             .into_iter()
             .map(
                 |Zone {
@@ -131,8 +151,7 @@ impl ObjectAnalytics {
                 },
             )
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let lines = options
-            .lines
+        let lines = lines
             .into_iter()
             .map(
                 |Line {
@@ -161,28 +180,67 @@ impl ObjectAnalytics {
                         end,
                         classes,
                         margin,
-                        forward: 0,
-                        backward: 0,
                     })
                 },
             )
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Self { zones, lines })
+    }
+}
+
+impl ObjectAnalytics {
+    /// Analytics over the zones and lines `options` give.
+    ///
+    /// # Errors
+    ///
+    /// A zone of fewer than three corners or a corner that is not a
+    /// number, a line of no length or an end that is not a number, and a
+    /// stream given zones and lines of its own twice.
+    pub fn new(
+        name: impl Into<String>,
+        options: AnalyticsOptions,
+    ) -> std::result::Result<Self, ObjectAnalyticsError> {
+        let AnalyticsOptions {
+            zones,
+            lines,
+            streams,
+        } = options;
+        let rules = Rules::new(zones, lines)?;
+        let mut by_stream = HashMap::new();
+        for StreamAnalyticsOptions {
+            stream,
+            zones,
+            lines,
+        } in streams
+        {
+            let rules = Rules::new(zones, lines)?;
+            match by_stream.entry(Arc::<str>::from(stream)) {
+                Entry::Occupied(taken) => {
+                    return Err(ObjectAnalyticsError::DuplicateStream(
+                        taken.key().to_string(),
+                    ));
+                }
+                Entry::Vacant(free) => {
+                    free.insert(Arc::new(rules));
+                }
+            }
+        }
 
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::ObjectAnalytics, &name, None);
         pp_info!(
             pp_log: &pp_log,
-            "opened: {} zones, {} lines",
-            zones.len(),
-            lines.len()
+            "opened: {} zones, {} lines, {} streams with their own",
+            rules.zones.len(),
+            rules.lines.len(),
+            by_stream.len()
         );
         Ok(Self(FilterStage::new(Analysing {
             name,
             pp_log,
-            zones,
-            lines,
-            last: HashMap::new(),
-            pictures: 0,
+            rules: Arc::new(rules),
+            by_stream,
+            streams: PerStream::default(),
         })))
     }
 }
@@ -230,11 +288,21 @@ fn within(start: (f32, f32), end: (f32, f32), from: (f32, f32), to: (f32, f32)) 
     side(from, to, start) * side(from, to, end) <= 0.0
 }
 
-impl Analysing {
+impl Watch {
+    fn new(rules: Arc<Rules>) -> Self {
+        Self {
+            totals: vec![(0, 0); rules.lines.len()],
+            rules,
+            last: HashMap::new(),
+            pictures: 0,
+        }
+    }
+
     /// What `found`, on a picture of `size` pixels, counts as.
     fn analyse(&mut self, found: &Detections, size: (u32, u32)) -> Analytics {
         self.pictures += 1;
-        let zones = self
+        let rules = &*self.rules;
+        let zones = rules
             .zones
             .iter()
             .map(|zone| {
@@ -259,7 +327,7 @@ impl Analysing {
         // runs across a picture that is not square.
         let (width, height) = (size.0 as f32, size.1 as f32);
         let pixels = |(x, y): (f32, f32)| (x * width, y * height);
-        let mut crossed: Vec<Vec<Crossing>> = vec![Vec::new(); self.lines.len()];
+        let mut crossed: Vec<Vec<Crossing>> = vec![Vec::new(); rules.lines.len()];
         for item in &found.items {
             let Some(track_id) = item.track_id else {
                 continue;
@@ -267,11 +335,15 @@ impl Analysing {
             let at = pixels(anchor(item));
             let last = self.last.entry(track_id).or_insert_with(|| Last {
                 picture: 0,
-                sides: vec![None; self.lines.len()],
+                sides: vec![None; rules.lines.len()],
             });
             last.picture = self.pictures;
-            for ((line, crossed), settled) in
-                self.lines.iter_mut().zip(&mut crossed).zip(&mut last.sides)
+            for (((line, total), crossed), settled) in rules
+                .lines
+                .iter()
+                .zip(&mut self.totals)
+                .zip(&mut crossed)
+                .zip(&mut last.sides)
             {
                 if !counts(&line.classes, item.class_id) {
                     continue;
@@ -290,9 +362,9 @@ impl Analysing {
                     && within(start, end, was.at, at)
                 {
                     if right {
-                        line.forward += 1;
+                        total.0 += 1;
                     } else {
-                        line.backward += 1;
+                        total.1 += 1;
                     }
                     crossed.push(Crossing {
                         track_id,
@@ -307,14 +379,15 @@ impl Analysing {
         self.last
             .retain(|_, last| now - last.picture <= FORGET_AFTER);
 
-        let lines = self
+        let lines = rules
             .lines
             .iter()
+            .zip(&self.totals)
             .zip(crossed)
-            .map(|(line, crossed)| LineCount {
+            .map(|((line, &(forward, backward)), crossed)| LineCount {
                 name: Arc::clone(&line.name),
-                forward: line.forward,
-                backward: line.backward,
+                forward,
+                backward,
                 crossed,
             })
             .collect();
@@ -359,7 +432,18 @@ impl Filter for Analysing {
             out.push(buf);
             return Ok(());
         };
-        let analytics = self.analyse(found, (frame.width(), frame.height()));
+        let (rules, by_stream) = (&self.rules, &self.by_stream);
+        let (watch, moved) = self.streams.get(&buf, |origin| {
+            let rules = origin
+                .and_then(|origin| by_stream.get(&*origin.name))
+                .unwrap_or(rules);
+            Watch::new(Arc::clone(rules))
+        });
+        if moved {
+            // That stream was sought, as `reset` is for all of them.
+            watch.last.clear();
+        }
+        let analytics = watch.analyse(found, (frame.width(), frame.height()));
         let metadata = buf.metadata().cloned().unwrap_or_default().with(analytics);
         out.push(buf.with_metadata(metadata));
         Ok(())
@@ -368,7 +452,9 @@ impl Filter for Analysing {
     /// A seek or a flush: where each object was is not where it comes from
     /// next, so a jump across a line is not a crossing.
     fn reset(&mut self) {
-        self.last.clear();
+        for watch in self.streams.values_mut() {
+            watch.last.clear();
+        }
     }
 }
 
@@ -443,6 +529,7 @@ mod tests {
             AnalyticsOptions {
                 zones: vec![zone],
                 lines: vec![],
+                ..AnalyticsOptions::default()
             },
         )
         .expect("a zone");
@@ -488,6 +575,7 @@ mod tests {
             AnalyticsOptions {
                 zones: vec![],
                 lines: vec![line],
+                ..AnalyticsOptions::default()
             },
         )
         .expect("a line");
@@ -533,6 +621,7 @@ mod tests {
             AnalyticsOptions {
                 zones: vec![],
                 lines: vec![line],
+                ..AnalyticsOptions::default()
             },
         )
         .expect("a line");
@@ -592,6 +681,7 @@ mod tests {
                 AnalyticsOptions {
                     zones: vec![],
                     lines: vec![line],
+                    ..AnalyticsOptions::default()
                 },
             )
             .expect("a line");
@@ -613,6 +703,7 @@ mod tests {
             AnalyticsOptions {
                 zones: vec![],
                 lines: vec![line],
+                ..AnalyticsOptions::default()
             },
         )
         .expect("a line");
@@ -625,6 +716,103 @@ mod tests {
             .consume(picture(Some(vec![standing(0, Some(1), 0.5, 0.7)])))
             .expect("analysed");
         assert_eq!(analytics(&kept.lock().unwrap()[1]).lines[0].forward, 0);
+    }
+
+    /// [`picture`] carrying `items`, of `stream` at `generation` as a mux
+    /// hands it on.
+    fn of_stream(stream: u64, generation: u64, items: Vec<Detection>) -> MediaBuffer {
+        use crate::elements::vision::batch::{StreamId, StreamOrigin};
+        let buf = picture(Some(items));
+        let metadata = buf
+            .metadata()
+            .cloned()
+            .unwrap_or_default()
+            .with(StreamOrigin {
+                id: StreamId(stream),
+                name: Arc::from(format!("camera {stream}")),
+                generation,
+            });
+        buf.with_metadata(metadata)
+    }
+
+    /// Two streams' pictures in turn, one object numbered 1 on each. The
+    /// first stream's crosses its line, and that stream alone counts it;
+    /// the second is watched with a line of its own, which the first does
+    /// not have. A seek of the first is not a crossing back, and leaves the
+    /// second's object where it was: it crosses its line after the seek.
+    #[test]
+    fn each_stream_is_watched_on_its_own() {
+        let middle = Line::new("middle", (0.0, 0.5), (1.0, 0.5));
+        let mut element = ObjectAnalytics::new(
+            "analytics",
+            AnalyticsOptions {
+                lines: vec![middle],
+                streams: vec![StreamAnalyticsOptions {
+                    stream: "camera 2".into(),
+                    lines: vec![Line::new("upright", (0.5, 0.0), (0.5, 1.0))],
+                    ..StreamAnalyticsOptions::default()
+                }],
+                ..AnalyticsOptions::default()
+            },
+        )
+        .expect("lines");
+        let kept = capture(&mut element);
+        let at = |x, y| vec![standing(0, Some(1), x, y)];
+        for y in [0.3, 0.7, 0.7] {
+            element
+                .consume(of_stream(1, 0, at(0.3, y)))
+                .expect("analysed");
+            element
+                .consume(of_stream(2, 0, at(0.3, 0.3)))
+                .expect("analysed");
+        }
+        // Stream 1 sought back above its line; stream 2 goes on, across its.
+        element
+            .consume(of_stream(1, 1, at(0.3, 0.3)))
+            .expect("analysed");
+        element
+            .consume(of_stream(2, 0, at(0.7, 0.3)))
+            .expect("analysed");
+
+        let kept = kept.lock().unwrap();
+        let line = |n: usize| analytics(&kept[n]).lines[0].clone();
+        assert_eq!(&*line(0).name, "middle");
+        assert_eq!(
+            &*line(1).name,
+            "upright",
+            "its own line in place of the shared"
+        );
+        assert_eq!(line(2).crossed.len(), 1, "stream 1 crossed");
+        assert_eq!(line(4).forward, 1, "and its total stays");
+        for n in [1, 3, 5] {
+            assert_eq!(
+                (line(n).forward, line(n).backward),
+                (0, 0),
+                "stream 2 has crossed nothing yet, picture {n}"
+            );
+        }
+        assert!(line(6).crossed.is_empty(), "a seek is not a crossing back");
+        assert_eq!((line(6).forward, line(6).backward), (1, 0));
+        assert_eq!(line(7).crossed.len(), 1, "stream 2 kept where it was");
+    }
+
+    /// One stream given zones and lines of its own twice is refused.
+    #[test]
+    fn a_stream_given_its_own_twice_is_refused() {
+        let own = StreamAnalyticsOptions {
+            stream: "door".into(),
+            ..StreamAnalyticsOptions::default()
+        };
+        assert!(matches!(
+            ObjectAnalytics::new(
+                "analytics",
+                AnalyticsOptions {
+                    streams: vec![own.clone(), own],
+                    ..AnalyticsOptions::default()
+                },
+            ),
+            Err(ObjectAnalyticsError::DuplicateStream(stream)) if stream == "door"
+        ));
     }
 
     /// A picture nobody looked at goes on as it came, and so does what is
@@ -656,6 +844,7 @@ mod tests {
                 AnalyticsOptions {
                     zones: vec![zone],
                     lines: vec![],
+                    ..AnalyticsOptions::default()
                 },
             ),
             Err(ObjectAnalyticsError::InvalidZone { zone, .. }) if zone == "flat"
@@ -667,6 +856,7 @@ mod tests {
                 AnalyticsOptions {
                     zones: vec![],
                     lines: vec![line],
+                    ..AnalyticsOptions::default()
                 },
             ),
             Err(ObjectAnalyticsError::InvalidLine { line, .. }) if line == "dot"
@@ -681,6 +871,7 @@ mod tests {
                 AnalyticsOptions {
                     zones: vec![],
                     lines: vec![below],
+                    ..AnalyticsOptions::default()
                 },
             )
             .is_err()
@@ -692,6 +883,7 @@ mod tests {
                 AnalyticsOptions {
                     zones: vec![],
                     lines: vec![nan],
+                    ..AnalyticsOptions::default()
                 },
             )
             .is_err()

@@ -20,6 +20,25 @@ pub struct AnalyticsOptions {
     pub zones: Vec<Zone>,
     /// Lines to count the objects crossing.
     pub lines: Vec<Line>,
+    /// Zones and lines of their own for some of a
+    /// [`StreamMux`](crate::elements::StreamMux)'s streams, which watch those
+    /// in place of `zones` and `lines` — a camera's doorway is not where
+    /// another's is. A stream not named here, and a picture no mux handed
+    /// on, is watched with `zones` and `lines`.
+    pub streams: Vec<StreamAnalyticsOptions>,
+}
+
+/// The zones and lines one of a [`StreamMux`](crate::elements::StreamMux)'s
+/// streams is watched with — see [`AnalyticsOptions::streams`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StreamAnalyticsOptions {
+    /// The name the stream was registered under, as its
+    /// [`StreamOrigin`](crate::elements::StreamOrigin) carries it.
+    pub stream: String,
+    /// Zones to count the objects inside of.
+    pub zones: Vec<Zone>,
+    /// Lines to count the objects crossing.
+    pub lines: Vec<Line>,
 }
 
 /// A region of the picture, by its corners in fractions of the picture's
@@ -116,4 +135,7 @@ pub enum ObjectAnalyticsError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A stream given zones and lines of its own twice.
+    #[error("stream {0:?} is given zones and lines twice")]
+    DuplicateStream(String),
 }

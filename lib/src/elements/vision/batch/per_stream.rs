@@ -99,6 +99,11 @@ impl<T> PerStream<T> {
         self.states.values().map(|kept| &kept.state)
     }
 
+    /// Every stream's state, to change.
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.states.values_mut().map(|kept| &mut kept.state)
+    }
+
     /// Lets go of every stream's state.
     pub(crate) fn clear(&mut self) {
         self.states.clear();

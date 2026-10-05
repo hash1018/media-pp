@@ -30,7 +30,9 @@ mod meta;
 mod overlay;
 mod track;
 
-pub use analytics::{AnalyticsOptions, Line, ObjectAnalytics, ObjectAnalyticsError, Zone};
+pub use analytics::{
+    AnalyticsOptions, Line, ObjectAnalytics, ObjectAnalyticsError, StreamAnalyticsOptions, Zone,
+};
 pub use batch::{
     BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,
     StreamMuxInput, StreamMuxOptions, StreamOrigin,
