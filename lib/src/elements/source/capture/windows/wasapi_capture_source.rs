@@ -22,7 +22,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::AudioFormat,
     error::Result,
     platform::windows::wasapi::{
@@ -30,7 +30,7 @@ use crate::{
         list_devices as enumerate_wasapi_devices, list_processes as enumerate_wasapi_processes,
         open_device, resolve_mix_format,
     },
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// How long a [`WasapiCaptureSource`] waits, once it has handed on
@@ -156,9 +156,9 @@ pub struct WasapiCaptureOptions {
 ///
 /// Runs until `Stop` — never reaches `Eos` on its own, same as every other
 /// live source in this crate.
-pub struct WasapiCaptureSource(ProducingSource<Capturing>);
+pub struct WasapiCaptureSource(SourceStage<Capturing>);
 
-produce_source!(WasapiCaptureSource);
+source_stage!(WasapiCaptureSource);
 
 /// What a [`WasapiCaptureSource`] does when asked: the device's next packet,
 /// or the silence that keeps up with the clock. All of its work, which the
@@ -367,7 +367,7 @@ impl WasapiCaptureSource {
         capture_client: IAudioCaptureClient,
         audio_format: AudioFormat,
     ) -> Self {
-        Self(ProducingSource::new(Capturing {
+        Self(SourceStage::new(Capturing {
             name,
             pp_log,
             audio_client,
@@ -522,7 +522,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

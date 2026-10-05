@@ -140,13 +140,13 @@ impl Element for FailingSource {
     }
 }
 
-impl Source for FailingSource {
+impl SrcPads for FailingSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for FailingSource {
+impl RawSource for FailingSource {
     fn is_live(&self) -> bool {
         false
     }
@@ -181,7 +181,7 @@ impl Element for StopRecordingSink {
     }
 }
 
-impl Sink for StopRecordingSink {
+impl RawSink for StopRecordingSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Ok(())
     }
@@ -468,7 +468,7 @@ impl Element for SlowPauseSink {
     }
 }
 
-impl Sink for SlowPauseSink {
+impl RawSink for SlowPauseSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Ok(())
     }
@@ -824,7 +824,7 @@ impl<F: Send + 'static> Element for Answering<F> {
     }
 }
 
-impl<F> Sink for Answering<F>
+impl<F> RawSink for Answering<F>
 where
     F: FnMut(&'static str) -> Result<()> + Send + 'static,
 {

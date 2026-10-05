@@ -10,7 +10,7 @@ use super::scale_graph::CudaScaleGraph;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     frame_size::OutputSize,
     platform::{
@@ -20,7 +20,7 @@ use crate::{
         },
         ffmpeg::AvBufferRef,
     },
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `CudaScaler`. Converts into the crate-wide `Error`
@@ -110,8 +110,8 @@ impl CudaScalerInterp {
 }
 
 /// Resizes GPU-resident `Pixel::CUDA` `Video` frames without ever touching
-/// the CPU, through libavfilter's `scale_cuda`. A `Filter`: receives via
-/// `Sink`, pushes the scaled frame into its own single src pad.
+/// the CPU, through libavfilter's `scale_cuda`. A `RawFilter`: receives via
+/// `RawSink`, pushes the scaled frame into its own single src pad.
 ///
 /// This is what makes a hardware transcode at a different resolution
 /// possible at all — `CudaDecoder -> CudaScaler -> CudaEncoder` stays on the
@@ -153,9 +153,9 @@ impl CudaScalerInterp {
 /// its `libswscale` context. The output size is whatever the constructor
 /// settled: one it was given, or the input's own through
 /// [`CudaScaler::to_format`].
-pub struct CudaScaler(TransformStage<Scaling>);
+pub struct CudaScaler(FilterStage<Scaling>);
 
-transform_filter!(CudaScaler);
+filter_stage!(CudaScaler);
 
 /// What a [`CudaScaler`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -285,7 +285,7 @@ impl CudaScaler {
                 "created: dst=the input's own size, interp={interp:?}, format={format:?}"
             ),
         }
-        Self(TransformStage::new(Scaling {
+        Self(FilterStage::new(Scaling {
             name,
             pp_log,
             _hw_device_ctx: hw_device_ctx,
@@ -374,7 +374,7 @@ impl Element for Scaling {
     }
 }
 
-impl Transform for Scaling {
+impl Filter for Scaling {
     /// Resizes on the device; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -432,7 +432,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::{
         elements::{CudaDecoder, CudaDownload, CudaUpload},
         test_support::{try_cuda_device, try_test_video},

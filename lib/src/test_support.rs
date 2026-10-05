@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::buffer::MediaBuffer;
-use crate::element::{Element, ElementType, Sink};
+use crate::element::{Element, ElementType, RawSink};
 use crate::elements::VideoCodec;
 use crate::pp_log::PpLog;
 
@@ -42,11 +42,11 @@ mod crash_report {
         context: *mut c_void,
     }
 
-    type Filter = unsafe extern "system" fn(*const ExceptionPointers) -> i32;
+    type ExceptionFilter = unsafe extern "system" fn(*const ExceptionPointers) -> i32;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn SetUnhandledExceptionFilter(filter: Option<Filter>) -> Option<Filter>;
+        fn SetUnhandledExceptionFilter(filter: Option<ExceptionFilter>) -> Option<ExceptionFilter>;
     }
 
     /// Carry on to the process's end, as without this filter.
@@ -125,7 +125,7 @@ impl Element for Room {
     }
 }
 
-impl Sink for Room {
+impl RawSink for Room {
     fn ready_consume(&mut self) -> bool {
         self.taken.lock().unwrap().len() < self.room
     }
@@ -147,6 +147,23 @@ impl Sink for Room {
         }
         Ok(())
     }
+}
+
+/// Takes one off `count` unless it is already zero, and says whether it
+/// did — what a test's sink counts its refusals or its room down with. A
+/// loop of its own rather than `fetch_update`, which Rust 1.99 deprecates
+/// for a `try_update` the crate's minimum Rust does not have.
+pub(crate) fn take_one(count: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut current = count.load(Ordering::SeqCst);
+    while current > 0 {
+        match count.compare_exchange_weak(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
 }
 
 /// Path to a video file for tests that need one — synthesized here, every
@@ -256,7 +273,7 @@ fn build_sound(
     name: &str,
     seconds: f64,
 ) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{
         AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
         TestAudioSource,
@@ -290,7 +307,7 @@ fn build_sound(
     let mut muxer = FileMuxer::create(&partial)?;
     let track = muxer.add_stream("audio", &encoder)?;
     let mut sinks = muxer.open()?;
-    encoder.src_pads()[0].link(sinks.take(track)?);
+    encoder.src_pads()[0].link(sinks.take(track)?.into_raw());
     // Written at once, as `build_fixture` writes its sound.
     let total = (seconds * f64::from(sample_rate)).round() as usize;
     let chunk = sample_rate as usize / 100;
@@ -691,7 +708,7 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
     use std::sync::{Arc, Mutex};
 
     use crate::buffer::MediaBuffer;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{AppSink, SwEncoder, SwEncoderOptions};
     use ffmpeg_next as ffmpeg;
 
@@ -779,7 +796,7 @@ fn build_fixture(
     codec: VideoCodec,
     max_b_frames: Option<u32>,
 ) -> std::result::Result<Fixture, Box<dyn std::error::Error>> {
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{
         AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions,
         TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
@@ -849,8 +866,8 @@ fn build_fixture(
     let video_track = muxer.add_stream("video", &video_encoder)?;
     let audio_track = muxer.add_stream("audio", &audio_encoder)?;
     let mut sinks = muxer.open()?;
-    video_encoder.src_pads()[0].link(sinks.take(video_track)?);
-    audio_encoder.src_pads()[0].link(sinks.take(audio_track)?);
+    video_encoder.src_pads()[0].link(sinks.take(video_track)?.into_raw());
+    audio_encoder.src_pads()[0].link(sinks.take(audio_track)?.into_raw());
 
     // Each frame's sound just ahead of it, so the muxer interleaves as it
     // goes rather than holding one track until the other catches up. The
@@ -1024,7 +1041,7 @@ impl crate::element::Element for CapturingSink {
     }
 }
 
-impl crate::element::Sink for CapturingSink {
+impl crate::element::RawSink for CapturingSink {
     fn consume(&mut self, buf: crate::buffer::MediaBuffer) -> crate::error::Result<()> {
         self.received.lock().unwrap().push(buf);
         Ok(())
@@ -1034,7 +1051,7 @@ impl crate::element::Sink for CapturingSink {
 /// Links a [`CapturingSink`] to `element`'s first src pad, and returns
 /// what it will have received.
 pub(crate) fn capture(
-    element: &mut dyn crate::element::Source,
+    element: &mut dyn crate::element::SrcPads,
 ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::buffer::MediaBuffer>>> {
     let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     element.src_pads()[0].link(Box::new(CapturingSink {
@@ -1052,7 +1069,7 @@ pub(crate) fn capture(
 pub(crate) struct Linked<F>(pub(crate) F);
 
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
-impl<F: crate::element::Filter> crate::element::Element for Linked<F> {
+impl<F: crate::element::RawFilter> crate::element::Element for Linked<F> {
     fn name(&self) -> Arc<str> {
         self.0.name()
     }
@@ -1071,7 +1088,7 @@ impl<F: crate::element::Filter> crate::element::Element for Linked<F> {
 }
 
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
-impl<F: crate::element::Filter> crate::element::Sink for Linked<F> {
+impl<F: crate::element::RawFilter> crate::element::RawSink for Linked<F> {
     fn ready_consume(&mut self) -> bool {
         self.0.ready_consume()
     }
@@ -1102,7 +1119,7 @@ impl<F: crate::element::Filter> crate::element::Sink for Linked<F> {
     all(target_os = "macos", feature = "videotoolbox")
 ))]
 pub(crate) fn one_frame(
-    filter: &mut impl crate::element::Filter,
+    filter: &mut impl crate::element::RawFilter,
     buf: MediaBuffer,
 ) -> crate::error::Result<Arc<crate::pool::UnboundObjectPoolRef<ffmpeg_next::frame::Video>>> {
     let received = capture(filter);

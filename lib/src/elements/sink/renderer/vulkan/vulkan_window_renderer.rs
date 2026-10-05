@@ -26,7 +26,7 @@ use crate::{
         InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
         PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     elements::sink::renderer::presentation_delay::PresentationDelay,
     elements::{VulkanGpu, WindowControl, WindowEvents, WindowOptions},
     error::Result,
@@ -427,7 +427,7 @@ impl Element for VulkanWindowRenderer {
     }
 }
 
-impl Sink for VulkanWindowRenderer {
+impl RawSink for VulkanWindowRenderer {
     /// NV12, YUV420P and BGRA, in system memory; in CUDA memory too where
     /// the GPU was made for it, where the frames are NV12 or BGRA.
     fn input_contract(&self) -> InputContract {

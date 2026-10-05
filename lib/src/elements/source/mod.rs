@@ -11,7 +11,7 @@
 //! [`Pipeline::new`](crate::pipeline::Pipeline::new) builds the common
 //! single-source case. [`PipelineBuilder`](crate::pipeline::PipelineBuilder)
 //! can register one or more of these in the same pipeline; each one's
-//! [`SourceElement::run`](crate::element::SourceElement::run) loop drives its
+//! [`RawSource::run`](crate::element::RawSource::run) loop drives its
 //! own branches on a separate background thread.
 
 mod app_source;

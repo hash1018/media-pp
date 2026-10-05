@@ -27,14 +27,14 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
     elements::{AudioFormat, CoreAudioDevice, CoreAudioDeviceKind},
     error::Result,
     platform::macos::coreaudio::{self, HalUnit, OsStatusError, Refcon},
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
     time::{MediaTimestamp, TimeBase},
 };
 
@@ -174,9 +174,9 @@ impl From<OsStatusError> for CoreAudioRendererError {
 /// Stopping the device for a pause lets go of what it was playing at that
 /// moment, one IO buffer at most (about 10 ms); the position it masters
 /// steps over it, so the picture keeps to the sound.
-pub struct CoreAudioRenderer(RenderStage<Rendering>);
+pub struct CoreAudioRenderer(SinkStage<Rendering>);
 
-render_sink!(CoreAudioRenderer);
+sink_stage!(CoreAudioRenderer);
 
 /// What the output unit's callback shares with the element.
 struct Shared {
@@ -537,7 +537,7 @@ impl CoreAudioRenderer {
         );
 
         Ok((
-            Self(RenderStage::new(Rendering {
+            Self(SinkStage::new(Rendering {
                 name,
                 pp_log,
                 format,
@@ -554,7 +554,7 @@ impl CoreAudioRenderer {
         ))
     }
 
-    /// The format [`Sink::consume`](crate::element::Sink::consume) accepts, unchanged since `open`.
+    /// The format [`RawSink::consume`](crate::element::RawSink::consume) accepts, unchanged since `open`.
     pub fn format(&self) -> AudioFormat {
         self.0.inner.format
     }
@@ -945,7 +945,7 @@ impl Element for Rendering {
     }
 }
 
-impl Render for Rendering {
+impl Sink for Rendering {
     /// Writes samples into the ring the output unit plays from.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -1018,7 +1018,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{Sink, SinkExt};
+    use crate::element::{RawSink, RawSinkExt};
     use crate::{
         clock::Clock, control::ControlMsg, playback_clock::PlaybackMaster, stream::StreamEvent,
     };

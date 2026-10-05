@@ -456,7 +456,7 @@ pub(crate) mod tests {
     #[cfg(feature = "videotoolbox")]
     #[test]
     fn a_pixel_buffer_is_a_videotoolbox_frame_as_it_is() {
-        use crate::element::Sink;
+        use crate::element::RawSink;
         use crate::elements::{
             VideoToolboxCodec, VideoToolboxDownload, VideoToolboxEncoder,
             VideoToolboxEncoderOptions,

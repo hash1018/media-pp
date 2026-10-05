@@ -10,7 +10,7 @@ use super::super::options::{ChromaKeyOptions, feather_band};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::VulkanDevice,
     error::Result,
     platform::vulkan::{
@@ -19,7 +19,7 @@ use crate::{
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/chroma_key.wgsl");
@@ -64,9 +64,9 @@ impl From<BgraPassError> for VulkanChromaKeyError {
 /// written, multiplied by the key; the colour, PTS, duration and colour tags
 /// pass through. Tuned while it runs through the [`ChromaKeyHandle`]
 /// [`Self::new`] returns; a disabled one hands every frame straight through.
-pub struct VulkanChromaKey(TransformStage<Keying>);
+pub struct VulkanChromaKey(FilterStage<Keying>);
 
-transform_filter!(VulkanChromaKey);
+filter_stage!(VulkanChromaKey);
 
 /// What a [`VulkanChromaKey`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -106,7 +106,7 @@ impl VulkanChromaKey {
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
         Ok((
-            Self(TransformStage::new(Keying {
+            Self(FilterStage::new(Keying {
                 name,
                 pp_log,
                 pass,
@@ -209,7 +209,7 @@ impl Element for Keying {
     }
 }
 
-impl Transform for Keying {
+impl Filter for Keying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
@@ -258,7 +258,7 @@ impl Drop for Keying {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{ChromaKeyMethod, VulkanDownload, VulkanUpload},
         test_support::{capture, try_vulkan_device},

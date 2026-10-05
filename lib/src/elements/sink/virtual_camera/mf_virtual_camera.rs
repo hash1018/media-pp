@@ -31,11 +31,11 @@ use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::filter::scaler::{is_rgb, matrix},
     error::Result,
     platform::windows::com::ComApartment,
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
 };
 
 use super::protocol::{self, Header};
@@ -72,9 +72,9 @@ const LOOK_AGAIN_AFTER: Duration = Duration::from_millis(500);
 /// the multithreaded COM apartment Media Foundation wants, so the thread
 /// constructing the element may be in any apartment. Dropping the element
 /// removes the camera and joins that thread.
-pub struct MfVirtualCamera(RenderStage<Feeding>);
+pub struct MfVirtualCamera(SinkStage<Feeding>);
 
-render_sink!(MfVirtualCamera);
+sink_stage!(MfVirtualCamera);
 
 /// Why an [`MfVirtualCamera`] could not be made or could not take a buffer.
 #[derive(Debug, thiserror::Error)]
@@ -152,7 +152,7 @@ impl MfVirtualCamera {
         }
         let camera = Camera::start(friendly_name)?;
         pp_info!(pp_log: &pp_log, "created: camera \"{friendly_name}\" registered");
-        Ok(Self(RenderStage::new(Feeding {
+        Ok(Self(SinkStage::new(Feeding {
             name,
             pp_log,
             _camera: Some(camera),
@@ -169,7 +169,7 @@ impl MfVirtualCamera {
     fn for_section(section_name: &'static str) -> Self {
         let name: Arc<str> = "camera".into();
         let pp_log = element_pp_log(ElementType::MfVirtualCamera, &name, None);
-        Self(RenderStage::new(Feeding {
+        Self(SinkStage::new(Feeding {
             name,
             pp_log,
             _camera: None,
@@ -508,7 +508,7 @@ impl Element for Feeding {
     }
 }
 
-impl Render for Feeding {
+impl Sink for Feeding {
     /// Decoded video in system memory, any pixel layout: each picture is
     /// converted to whatever the reading application asked for.
     fn input_contract(&self) -> InputContract {
@@ -562,7 +562,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
 
     /// The camera's part: a section under a `Local\` name, which needs no
     /// privilege, opened at `size`.

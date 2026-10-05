@@ -32,7 +32,7 @@ use crate::rate::{FrameRate, FrameRateHandle};
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
     contract::{MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::{ScreenCaptureKitDisplay, ScreenCaptureKitWindow, VideoFormat},
     error::Result,
     platform::macos::{
@@ -40,7 +40,7 @@ use crate::{
         screencapturekit::{self, ContentError},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
 };
 
@@ -213,9 +213,9 @@ impl ScreenCaptureKitOptions {
 /// which macOS does by showing a prompt and sending the user to System
 /// Settings, and returns [`ScreenCaptureKitSourceError::PermissionDenied`]
 /// at once; a program allowed there has to be started again before it may.
-pub struct ScreenCaptureKitSource(ProducingSource<Capturing>);
+pub struct ScreenCaptureKitSource(SourceStage<Capturing>);
 
-produce_source!(ScreenCaptureKitSource);
+source_stage!(ScreenCaptureKitSource);
 
 /// What the stream has said, written on its queue and read on the source's
 /// thread.
@@ -540,7 +540,7 @@ impl ScreenCaptureKitSource {
             options.include_cursor
         );
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 name,
                 pp_log,
                 stream,
@@ -739,7 +739,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

@@ -7,9 +7,9 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 use crate::elements::AudioFormat;
@@ -110,7 +110,7 @@ pub struct SwAudioEncoderOptions {
 
 /// Encodes `Audio` frames into `Packet`s via a software encoder (see
 /// [`AudioCodec`]) — the audio sibling of
-/// [`crate::elements::SwEncoder`]. A `Filter`: receives via `Sink`,
+/// [`crate::elements::SwEncoder`]. A `RawFilter`: receives via `RawSink`,
 /// pushes what it produces into its own (single) src pad.
 ///
 /// Unlike `SwEncoder` (which requires exactly `Pixel::YUV420P` in and
@@ -140,9 +140,9 @@ pub struct SwAudioEncoderOptions {
 /// [`ffmpeg::software::resampling::Context::flush`]) and whatever's left
 /// in `pending` (as one final, possibly short, frame — allowed for the
 /// last frame only) before flushing the encoder itself.
-pub struct SwAudioEncoder(TransformStage<Encoding>);
+pub struct SwAudioEncoder(FilterStage<Encoding>);
 
-transform_filter!(SwAudioEncoder);
+filter_stage!(SwAudioEncoder);
 
 /// What a [`SwAudioEncoder`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -268,7 +268,7 @@ impl SwAudioEncoder {
             frame_size,
             options.bit_rate
         );
-        Ok(Self(TransformStage::new(Encoding {
+        Ok(Self(FilterStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -526,7 +526,7 @@ impl Element for Encoding {
     }
 }
 
-impl Transform for Encoding {
+impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::AudioPacket))
     }
@@ -575,7 +575,7 @@ impl Transform for Encoding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
 
     /// `SwAudioEncoder::new` should fail cleanly (not panic) when the
     /// linked ffmpeg build wasn't compiled with `aac` — vanishingly
@@ -626,7 +626,7 @@ mod tests {
         }
     }
 
-    impl Sink for RecordingSink {
+    impl RawSink for RecordingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(_) = buf {
                 *self.packets.lock().unwrap() += 1;
@@ -733,7 +733,7 @@ mod tests {
         }
     }
 
-    impl Sink for CapturingSink {
+    impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = buf {
                 self.packets.lock().unwrap().push(packet);

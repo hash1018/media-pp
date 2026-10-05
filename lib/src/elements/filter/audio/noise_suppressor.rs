@@ -9,9 +9,9 @@ use super::audio_f32::{self, Unreadable};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// The one rate RNNoise was trained at, and so the one it takes.
@@ -122,9 +122,9 @@ impl Channel {
 ///
 /// The network's weights are compiled into the crate, so nothing is loaded
 /// from disk. Each channel keeps one RNNoise state, about 100 KB.
-pub struct NoiseSuppressor(TransformStage<Suppressing>);
+pub struct NoiseSuppressor(FilterStage<Suppressing>);
 
-transform_filter!(NoiseSuppressor);
+filter_stage!(NoiseSuppressor);
 
 /// What a [`NoiseSuppressor`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -146,7 +146,7 @@ impl NoiseSuppressor {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::NoiseSuppressor, &name, None);
         pp_info!(pp_log: &pp_log, "created");
-        Self(TransformStage::new(Suppressing {
+        Self(FilterStage::new(Suppressing {
             name: name.clone(),
             pp_log,
             channels: Vec::new(),
@@ -280,7 +280,7 @@ impl Element for Suppressing {
     }
 }
 
-impl Transform for Suppressing {
+impl Filter for Suppressing {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -322,8 +322,8 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::SinkExt;
-    use crate::element::{Sink, Source};
+    use crate::element::RawSinkExt;
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = NOISE_SUPPRESSOR_SAMPLE_RATE;

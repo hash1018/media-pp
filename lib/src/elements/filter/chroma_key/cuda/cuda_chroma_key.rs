@@ -10,7 +10,7 @@ use super::super::options::{ChromaKeyOptions, feather_band};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
@@ -22,7 +22,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `CudaChromaKey`. Converts into the crate-wide `Error`
@@ -94,9 +94,9 @@ pub enum CudaChromaKeyError {
 /// the same normalized BGR distance and the same feather ramp
 /// [`SwChromaKey`](crate::elements::SwChromaKey) does, from the same
 /// resolved band the D3D11 shader reads.
-pub struct CudaChromaKey(TransformStage<Keying>);
+pub struct CudaChromaKey(FilterStage<Keying>);
 
-transform_filter!(CudaChromaKey);
+filter_stage!(CudaChromaKey);
 
 /// What a [`CudaChromaKey`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -182,7 +182,7 @@ impl CudaChromaKey {
 
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self(TransformStage::new(Keying {
+        let element = Self(FilterStage::new(Keying {
             name,
             pp_log,
             hw_device_ctx,
@@ -363,7 +363,7 @@ impl Element for Keying {
     }
 }
 
-impl Transform for Keying {
+impl Filter for Keying {
     /// Writes alpha into a device-resident frame; the surface layout it
     /// requires is a runtime value, not part of this.
     fn input_contract(&self) -> InputContract {
@@ -419,7 +419,7 @@ mod tests {
 
     use super::super::super::options::ChromaKeyMethod;
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{CudaDownload, CudaUpload},
         test_support::try_cuda_device,

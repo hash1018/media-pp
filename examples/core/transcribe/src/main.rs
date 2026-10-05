@@ -64,7 +64,7 @@ mod example {
     };
     use media_pp::ffmpeg;
     use media_pp::{
-        bus::BusEvent, element::Sink, ffmpeg::media, pipeline::Pipeline, stream::StreamEvent,
+        bus::BusEvent, element::BoxSink, ffmpeg::media, pipeline::Pipeline, stream::StreamEvent,
         subtitle,
     };
 
@@ -314,8 +314,8 @@ mod example {
     /// Where each line of text is written: the copy's own text track, and a
     /// subtitle file of its own when one was asked for.
     struct TextOut {
-        track: Box<dyn Sink>,
-        sidecar: Option<(subtitle::Codec, Box<dyn Sink>)>,
+        track: BoxSink,
+        sidecar: Option<(subtitle::Codec, BoxSink)>,
     }
 
     impl TextOut {

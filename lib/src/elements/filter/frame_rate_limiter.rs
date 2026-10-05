@@ -8,10 +8,10 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::{MediaBuffer, release_picture},
     contract::{InputContract, MediaKind, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     pool::UnboundObjectPool,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to [`FrameRateLimiter`].
@@ -79,9 +79,9 @@ pub enum FrameRateLimiterError {
 ///
 /// A reference to the frames it keeps and nothing at all for the ones it
 /// drops. No pixels are read, copied or converted here.
-pub struct FrameRateLimiter(TransformStage<Limiting>);
+pub struct FrameRateLimiter(FilterStage<Limiting>);
 
-transform_filter!(FrameRateLimiter);
+filter_stage!(FrameRateLimiter);
 
 /// What a [`FrameRateLimiter`] does to each frame: all of its work, which
 /// the framework makes the filter.
@@ -116,7 +116,7 @@ impl FrameRateLimiter {
     pub fn new(name: impl Into<String>, rate: ffmpeg::Rational) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::FrameRateLimiter, &name, None);
-        Self(TransformStage::new(Limiting {
+        Self(FilterStage::new(Limiting {
             pp_log,
             name,
             rate,
@@ -174,7 +174,7 @@ impl Element for Limiting {
     }
 }
 
-impl Transform for Limiting {
+impl Filter for Limiting {
     /// Video frames. It reads a timestamp and forwards a reference, so where
     /// the pixels live is not its business — but packets are not what it
     /// handles, and audio has no frame rate to limit.
@@ -268,7 +268,7 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::{Sink, SinkExt, Source};
+    use crate::element::{RawSink, RawSinkExt, SrcPads};
 
     fn capture(element: &mut FrameRateLimiter) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

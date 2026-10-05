@@ -16,7 +16,7 @@ use crate::elements::{VulkanGpu as Gpu, VulkanWindowRenderer as Backend};
 use crate::{
     buffer::MediaBuffer,
     contract::InputContract,
-    element::{Context, Element, ElementType, Flow, Sink},
+    element::{Context, Element, ElementType, Flow, RawSink},
     elements::{WindowControl, WindowEvents, WindowOptions},
     error::Result,
     pp_log::PpLog,
@@ -227,7 +227,7 @@ impl Element for VideoWindow {
     }
 }
 
-impl Sink for VideoWindow {
+impl RawSink for VideoWindow {
     fn input_contract(&self) -> InputContract {
         self.renderer.input_contract()
     }

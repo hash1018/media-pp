@@ -1,5 +1,5 @@
-//! Elements that are both a [`Sink`](crate::element::Sink) and a
-//! [`Source`](crate::element::Source).
+//! Elements that are both a [`RawSink`](crate::element::RawSink) and a
+//! [`SrcPads`](crate::element::SrcPads).
 //!
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
 //! resampling, gain, gating, compression, limiting and noise suppression,

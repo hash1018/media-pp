@@ -424,7 +424,7 @@ pub(crate) struct PortContracts {
     pub input: InputContract,
     pub output: OutputContract,
     /// Whether the element can follow a seek — see
-    /// [`crate::element::Sink::accepts_seek`].
+    /// [`crate::element::RawSink::accepts_seek`].
     pub accepts_seek: bool,
     /// Whether it can follow its pipeline playing backwards: anything but
     /// what turns a picture's packets into pictures and is not a

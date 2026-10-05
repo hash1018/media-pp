@@ -5,7 +5,7 @@
 //! concurrently and a full channel becomes backpressure.
 //!
 //! Crossing it changes how failure is handled. A direct
-//! [`Sink::consume`](crate::element::Sink::consume) call can return `Err` to
+//! [`RawSink::consume`](crate::element::RawSink::consume) call can return `Err` to
 //! its caller; a `Queue`'s worker has no caller to return to, so a downstream
 //! data error is posted to the [`Bus`](crate::bus::Bus), that buffer is
 //! dropped, and the worker continues. [`OverflowPolicy`] decides what a full
@@ -34,7 +34,7 @@ use crate::{
         self, ControlMsg, ControlReceiver, ControlSender, Direct, Registration, RequestKind,
         Workers,
     },
-    element::{Context, Element, ElementType, Flow, Sink, SinkExt, element_pp_log},
+    element::{Context, Element, ElementType, Flow, RawSink, RawSinkExt, element_pp_log},
     error::{Result, ThreadSpawnError},
     playback_state::{Bell, PlaybackState},
     stats::ElementCounters,
@@ -101,7 +101,7 @@ pub enum OverflowPolicy {
     /// an actually-unbounded wait can't recover from: whatever's
     /// downstream not just falling behind (ordinary backpressure, which
     /// resolves on its own as the worker keeps draining) but genuinely
-    /// stuck — a `Sink::consume` call somewhere in the chain that never
+    /// stuck — a `RawSink::consume` call somewhere in the chain that never
     /// returns. An unbounded wait here would then also wedge whoever's
     /// pushing into this `Queue`, and transitively every `Queue`
     /// upstream of *that*, since each one's worker can't get back to its
@@ -111,7 +111,7 @@ pub enum OverflowPolicy {
     /// in flight). Timing out bounds that: it's what lets a `Stop` sent
     /// to an upstream `Queue` eventually reach it instead of waiting
     /// forever. Doesn't help if the stall is inside a raw (non-`Queue`)
-    /// `Sink`'s own `consume()` call directly — nothing here retries or
+    /// `RawSink`'s own `consume()` call directly — nothing here retries or
     /// times out *that* call itself, only the channel send. On timeout,
     /// returns [`QueueError::SendTimedOut`] rather than losing the
     /// buffer silently — unlike [`OverflowPolicy::DropNewest`], this
@@ -141,7 +141,7 @@ impl Default for OverflowPolicy {
 /// and returns immediately — it never blocks the caller on whatever is
 /// downstream (unless the channel is full and `policy` is `Block`). A
 /// dedicated worker thread owns everything downstream of the queue and
-/// drives it via direct `Sink::consume` calls, until it hits another
+/// drives it via direct `RawSink::consume` calls, until it hits another
 /// `Queue`.
 ///
 /// What the pipeline asks crosses this same thread boundary through a separate
@@ -242,7 +242,7 @@ impl Queue {
     pub fn spawn(
         name: impl Into<String>,
         capacity: usize,
-        downstream: Box<dyn Sink>,
+        downstream: Box<dyn RawSink>,
         bus: Bus,
         pipeline_id: Option<&str>,
     ) -> Result<Queue> {
@@ -270,7 +270,7 @@ impl Queue {
     pub fn spawn_with_policy(
         name: impl Into<String>,
         capacity: usize,
-        downstream: Box<dyn Sink>,
+        downstream: Box<dyn RawSink>,
         bus: Bus,
         policy: OverflowPolicy,
         pipeline_id: Option<&str>,
@@ -295,7 +295,7 @@ impl Queue {
     pub(crate) fn spawn_in_pipeline(
         name: impl Into<String>,
         capacity: usize,
-        downstream: Box<dyn Sink>,
+        downstream: Box<dyn RawSink>,
         bus: Bus,
         policy: OverflowPolicy,
         counters: Arc<ElementCounters>,
@@ -321,7 +321,7 @@ impl Queue {
     fn spawn_with_policy_using(
         name: impl Into<String>,
         capacity: usize,
-        downstream: Box<dyn Sink>,
+        downstream: Box<dyn RawSink>,
         bus: Bus,
         policy: OverflowPolicy,
         pipeline_id: Option<&str>,
@@ -464,7 +464,7 @@ impl Queue {
         result
     }
 
-    /// Hands `buf` over, as [`Sink::consume`] does — which answers what
+    /// Hands `buf` over, as [`RawSink::consume`] does — which answers what
     /// this says, but for a handover a stop cut short.
     fn take(&mut self, buf: MediaBuffer) -> Result<()> {
         let counters = self.counters.as_deref();
@@ -521,7 +521,7 @@ impl Queue {
     }
 }
 
-impl Sink for Queue {
+impl RawSink for Queue {
     fn ready_consume(&mut self) -> bool {
         match self.policy {
             // Dropping the incoming buffer is this policy's defined way to
@@ -851,7 +851,7 @@ impl Drop for RingOnEnd {
 fn worker_loop(
     inbox: Inbox,
     control_rx: ControlReceiver,
-    mut downstream: Box<dyn Sink>,
+    mut downstream: Box<dyn RawSink>,
     bus: Bus,
     name: Arc<str>,
     // Cloned from `Queue`'s own field before this thread was spawned —
@@ -878,7 +878,7 @@ fn worker_loop(
     };
     // However this ends, a thread waiting to hand a buffer over hears of it.
     let _ends = RingOnEnd(inbox.room.clone());
-    let apply = |msg, ack: &Sender<()>, direct: bool, downstream: &mut Box<dyn Sink>| {
+    let apply = |msg, ack: &Sender<()>, direct: bool, downstream: &mut Box<dyn RawSink>| {
         apply_control(
             &inbox,
             downstream,
@@ -1006,7 +1006,7 @@ struct Worker<'a> {
 
 /// Hands one buffer to `downstream`, counting it and reporting a failure on
 /// the bus — a failure drops that buffer and nothing else.
-fn forward(downstream: &mut Box<dyn Sink>, item: Item, worker: &Worker<'_>) {
+fn forward(downstream: &mut Box<dyn RawSink>, item: Item, worker: &Worker<'_>) {
     if worker.inbox.flushing.get() {
         match &item {
             // The seek's own: the new position's stream begins here.
@@ -1045,7 +1045,7 @@ fn forward(downstream: &mut Box<dyn Sink>, item: Item, worker: &Worker<'_>) {
 
 /// Hands the end of the stream to `downstream`, and says so on the bus
 /// once it is taken.
-fn forward_end(downstream: &mut Box<dyn Sink>, worker: &Worker<'_>) {
+fn forward_end(downstream: &mut Box<dyn RawSink>, worker: &Worker<'_>) {
     let call = worker
         .counters
         .map(|counters| counters.begin_forwarding(true));
@@ -1085,7 +1085,7 @@ fn forward_end(downstream: &mut Box<dyn Sink>, worker: &Worker<'_>) {
 
 /// Hands one event to `downstream`, reporting a failure on the bus as a
 /// buffer's is.
-fn forward_event(downstream: &mut Box<dyn Sink>, event: &StreamEvent, worker: &Worker<'_>) {
+fn forward_event(downstream: &mut Box<dyn RawSink>, event: &StreamEvent, worker: &Worker<'_>) {
     pp_trace!(
         pp_log: worker.pp_log,
         "event={event} phase=forwarding"
@@ -1105,7 +1105,7 @@ fn forward_event(downstream: &mut Box<dyn Sink>, event: &StreamEvent, worker: &W
 #[allow(clippy::too_many_arguments)]
 fn apply_control(
     inbox: &Inbox,
-    downstream: &mut Box<dyn Sink>,
+    downstream: &mut Box<dyn RawSink>,
     msg: ControlMsg,
     ack: &Sender<()>,
     direct: bool,
@@ -1238,7 +1238,7 @@ impl QueueErrorReporter<'_> {
 /// [`apply_control`], while the failure is exposed through the same Bus path
 /// used for `consume` failures.
 fn forward_control(
-    downstream: &mut Box<dyn Sink>,
+    downstream: &mut Box<dyn RawSink>,
     msg: ControlMsg,
     direct: bool,
     error_reporter: &QueueErrorReporter<'_>,
@@ -1260,7 +1260,7 @@ fn forward_control(
 /// without taking it left everything after it unstopped, and a muxer there
 /// unfinished. Passed on without pausing for any of it: nothing comes after.
 fn deliver_pending(
-    downstream: &mut Box<dyn Sink>,
+    downstream: &mut Box<dyn RawSink>,
     control_rx: &ControlReceiver,
     error_reporter: &QueueErrorReporter<'_>,
 ) {
@@ -1342,7 +1342,7 @@ mod tests {
         }
     }
 
-    impl Sink for SlowCounter {
+    impl RawSink for SlowCounter {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(_) = buf {
                 thread::sleep(Duration::from_millis(20));
@@ -1385,7 +1385,7 @@ mod tests {
         }
     }
 
-    impl Sink for DropAwareSink {
+    impl RawSink for DropAwareSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1496,7 +1496,7 @@ mod tests {
         }
     }
 
-    impl Sink for Gated {
+    impl RawSink for Gated {
         fn ready_consume(&mut self) -> bool {
             self.open.load(Ordering::SeqCst)
         }
@@ -1680,7 +1680,7 @@ mod tests {
                 Err(_) => timed_out += 1,
             }
         }
-        // Eos isn't subject to the timeout (see `Sink::consume`'s own
+        // Eos isn't subject to the timeout (see `RawSink::consume`'s own
         // special-casing) — always goes through even after some sends
         // above timed out.
         queue.stream_event(&StreamEvent::Eos).unwrap();
@@ -1910,7 +1910,7 @@ mod tests {
         }
     }
 
-    impl Sink for FailFirstThenCount {
+    impl RawSink for FailFirstThenCount {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             let MediaBuffer::Packet(_) = buf else {
                 return Ok(());
@@ -1946,7 +1946,7 @@ mod tests {
         }
     }
 
-    impl Sink for FailControl {
+    impl RawSink for FailControl {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1959,7 +1959,7 @@ mod tests {
     }
 
     /// Regression test for the design change prompted by the `NoFreeSlot`
-    /// investigation: a `Sink::consume` failure used to end the worker
+    /// investigation: a `RawSink::consume` failure used to end the worker
     /// thread outright (and, transitively, everything upstream once its
     /// data channel closed). Now it's just one dropped buffer — the
     /// worker keeps running, later buffers still get through, and exactly
@@ -2115,7 +2115,7 @@ mod tests {
         }
     }
 
-    impl Sink for RefuseEos {
+    impl RawSink for RefuseEos {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -2219,7 +2219,7 @@ mod tests {
         }
     }
 
-    impl Sink for Recorder {
+    impl RawSink for Recorder {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.seen.lock().unwrap().push("packet");
             Ok(())
@@ -2349,7 +2349,7 @@ mod tests {
         }
     }
 
-    impl Sink for PtsRecorder {
+    impl RawSink for PtsRecorder {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = buf {
                 self.seen.lock().unwrap().push(packet.pts().unwrap_or(-1));
@@ -2482,7 +2482,7 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         assert_eq!(*seen.lock().unwrap(), [10]);
     }
-    fn gated(open: &Arc<AtomicBool>, count: &Arc<AtomicUsize>) -> Box<dyn Sink> {
+    fn gated(open: &Arc<AtomicBool>, count: &Arc<AtomicUsize>) -> Box<dyn RawSink> {
         Box::new(Gated {
             pp_log: element_pp_log(ElementType::Other, "gated", None),
             open: Arc::clone(open),

@@ -25,7 +25,7 @@ use super::d3d11_video_processor::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     frame_size::OutputSize,
     platform::windows::{
@@ -35,7 +35,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `D3d11Scaler`. Converts into the crate-wide `Error`
@@ -175,7 +175,7 @@ impl D3d11ScalerFormat {
 
 /// Resizes and, when asked, converts GPU-resident `Pixel::D3D11` `Video`
 /// frames without ever touching the CPU, through D3D11's own video
-/// processor (`VideoProcessorBlt`). A `Filter`: receives via `Sink`, pushes
+/// processor (`VideoProcessorBlt`). A `RawFilter`: receives via `RawSink`, pushes
 /// the scaled frame into its own single src pad.
 ///
 /// This is what makes a resolution change possible inside a D3D11 pipeline
@@ -249,9 +249,9 @@ impl D3d11ScalerFormat {
 /// one lock every element shares — and this element holds that lock for a
 /// whole configure-and-`Blt` sequence, for the same reason
 /// [`crate::elements::D3d11Download`] holds it across its own copy and map.
-pub struct D3d11Scaler(TransformStage<Scaling>);
+pub struct D3d11Scaler(FilterStage<Scaling>);
 
-transform_filter!(D3d11Scaler);
+filter_stage!(D3d11Scaler);
 
 /// What a [`D3d11Scaler`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -449,7 +449,7 @@ impl D3d11Scaler {
                 pp_info!(pp_log: &pp_log, "opened: dst=the input's own size {format:?}")
             }
         }
-        Ok(Self(TransformStage::new(Scaling {
+        Ok(Self(FilterStage::new(Scaling {
             name,
             pp_log,
             device: device.clone(),
@@ -718,7 +718,7 @@ impl Element for Scaling {
     }
 }
 
-impl Transform for Scaling {
+impl Filter for Scaling {
     /// Scaling happens on the GPU; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -818,7 +818,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{D3d11Download, D3d11Upload};
     use crate::test_support::try_d3d11_gpu as try_device;
 

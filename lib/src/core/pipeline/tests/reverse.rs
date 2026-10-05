@@ -364,7 +364,7 @@ impl Element for Sums {
     feature = "cuda",
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
 ))]
-impl Sink for Sums {
+impl RawSink for Sums {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         if let MediaBuffer::Video(frame) = &buf {
             let (width, height, stride) = (
@@ -401,7 +401,7 @@ impl Sink for Sums {
 fn backwards_on_hardware_shows_the_same_pictures_as_forwards(
     label: &str,
     target: crate::elements::DecodeTarget,
-    download: Box<dyn crate::element::Filter>,
+    download: Box<dyn crate::element::RawFilter>,
 ) {
     use crate::elements::{DecodePath, VideoDecodeBin};
     use std::collections::HashMap;
@@ -583,13 +583,13 @@ impl Element for Watched {
     }
 }
 
-impl Source for Watched {
+impl SrcPads for Watched {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         self.inner.src_pads()
     }
 }
 
-impl Sink for Watched {
+impl RawSink for Watched {
     fn ready_consume(&mut self) -> bool {
         self.inner.ready_consume()
     }

@@ -53,7 +53,7 @@ pub enum FileMuxerError {
 }
 
 /// Builds one container file with one or more tracks, then opens it into
-/// one [`Sink`](crate::element::Sink) per track.
+/// one [`RawSink`](crate::element::RawSink) per track.
 ///
 /// Which container is the path's own: `format::output` asks FFmpeg to guess
 /// a muxer from the file name, so `.mp4` gets MP4 and `.mkv` gets Matroska
@@ -63,7 +63,7 @@ pub enum FileMuxerError {
 /// every stream's codec parameters up front — `avformat_write_header`
 /// can't run until every [`FileMuxer::add_stream`] this file will ever hold
 /// has already happened — so there's no way to make this a single
-/// long-lived `Sink` that tracks attach to one at a time as their encoders
+/// long-lived `RawSink` that tracks attach to one at a time as their encoders
 /// come online (contrast [`crate::elements::AudioMixer`], whose inputs
 /// *can* attach at any time — it has no "known shape before the first
 /// byte" constraint the way a container header does).
@@ -146,7 +146,7 @@ impl FileMuxer {
     /// demuxed [`&StreamInfo`](crate::elements::StreamInfo) for a stream
     /// copied through unchanged; see [`TrackFormat`]. `name` becomes
     /// this track's own [`Element::name`](crate::element::Element::name)/`pp_log` identity once
-    /// [`FileMuxer::open`] turns it into a `Sink` — pick something that
+    /// [`FileMuxer::open`] turns it into a `RawSink` — pick something that
     /// tells multiple tracks apart in logs/[`crate::bus::BusEvent`]s,
     /// e.g. `"video"`/`"audio"`.
     ///
@@ -175,10 +175,10 @@ impl FileMuxer {
 
     /// Writes the container header — every [`FileMuxer::add_stream`] call
     /// this file will ever get must already have happened — and returns
-    /// one [`Sink`](crate::element::Sink) per track, each taken out by the [`MuxerTrack`] its
+    /// one [`RawSink`](crate::element::RawSink) per track, each taken out by the [`MuxerTrack`] its
     /// [`FileMuxer::add_stream`] returned.
     ///
-    /// All returned `Sink`s write into the same underlying file behind a
+    /// All returned `RawSink`s write into the same underlying file behind a
     /// shared lock: packets from independently-threaded branches (e.g. a
     /// video encode chain and an audio encode chain, each on their own
     /// [`crate::queue::Queue`]) can arrive concurrently, and neither
@@ -237,8 +237,8 @@ mod tests {
     use crate::buffer::MediaBuffer;
     use crate::contract::{InputContract, MediaKind, PortContract};
     use crate::control::ControlMsg;
-    use crate::element::SinkExt;
-    use crate::element::{Sink, Source};
+    use crate::element::RawSinkExt;
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions};
 
     /// A name that picks no container is refused as that, naming the file
@@ -370,7 +370,7 @@ mod tests {
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("open must write the header");
-        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track").into_raw());
 
         for tick in 0..20i64 {
             encoder
@@ -392,7 +392,7 @@ mod tests {
     }
 
     /// Regression test against a leaked file handle: dropping every track
-    /// `Sink` without ever sending `Eos`/`Stop` (simulating a `Pipeline`
+    /// `RawSink` without ever sending `Eos`/`Stop` (simulating a `Pipeline`
     /// just getting dropped mid-recording, e.g. the process is tearing
     /// down) must still release the underlying file — no stray clone of
     /// the shared `Arc` (or the `ffmpeg::format::context::Output` it
@@ -458,8 +458,8 @@ mod tests {
         let mut sinks = muxer.open().expect("open must write the header");
         let sink_b = sinks.take(b).expect("the muxer's own track");
         let sink_a = sinks.take(a).expect("the muxer's own track");
-        encoder_a.src_pads()[0].link(sink_a);
-        encoder_b.src_pads()[0].link(sink_b);
+        encoder_a.src_pads()[0].link(sink_a.into_raw());
+        encoder_b.src_pads()[0].link(sink_b.into_raw());
 
         for tick in 0..10i64 {
             encoder_a
@@ -539,7 +539,7 @@ mod tests {
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("open must write the header");
-        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track").into_raw());
 
         for tick in 0..20i64 {
             encoder
@@ -658,7 +658,7 @@ mod tests {
         let mut sinks = muxer
             .open()
             .expect("Matroska must accept an Opus track's header");
-        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track").into_raw());
 
         for tick in 0..20i64 {
             encoder

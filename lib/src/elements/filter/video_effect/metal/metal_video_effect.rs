@@ -10,7 +10,7 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::VideoToolboxDevice,
     error::Result,
     platform::macos::{
@@ -19,7 +19,7 @@ use crate::{
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/metal/video_effect.metal");
@@ -65,9 +65,9 @@ impl From<MetalPassError> for MetalVideoEffectError {
 /// duration and colour tags carried through. An effect that changes
 /// nothing, and an element that is turned off, hand each frame straight
 /// through — the same picture, not a copy of it.
-pub struct MetalVideoEffect(TransformStage<Applying>);
+pub struct MetalVideoEffect(FilterStage<Applying>);
 
-transform_filter!(MetalVideoEffect);
+filter_stage!(MetalVideoEffect);
 
 /// What a [`MetalVideoEffect`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -102,7 +102,7 @@ impl MetalVideoEffect {
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
         Ok((
-            Self(TransformStage::new(Applying {
+            Self(FilterStage::new(Applying {
                 name,
                 pp_log,
                 pass,
@@ -205,7 +205,7 @@ impl Element for Applying {
     }
 }
 
-impl Transform for Applying {
+impl Filter for Applying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
@@ -256,7 +256,7 @@ impl Drop for Applying {
 mod tests {
     use super::super::super::options::apply;
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{ColorCorrection, LumaKey, VideoToolboxDownload, VideoToolboxUpload},
         test_support::{capture, try_videotoolbox_device},

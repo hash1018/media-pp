@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, ReversibleDecoder, SrcPads, element_pp_log},
     elements::{VideoToolboxDevice, filter::is_codec_drain_boundary},
     pad::SrcPad,
     platform::ffmpeg::AvBufferRef,
@@ -53,7 +53,7 @@ pub enum VideoToolboxDecoderError {
 /// Decodes one video stream's `Packet`s into VideoToolbox frames through
 /// FFmpeg's VideoToolbox hwaccel, on a [`VideoToolboxDevice`] — the Mac's
 /// own media engine, for H.264, HEVC and whatever else this Mac decodes in
-/// hardware. A `Filter`, same shape as [`crate::elements::SwDecoder`].
+/// hardware. A `RawFilter`, same shape as [`crate::elements::SwDecoder`].
 ///
 /// Frames this produces are still plain `MediaBuffer::Video`, tagged
 /// [`ffmpeg::format::Pixel::VIDEOTOOLBOX`]: `Pacer`, `Tee` and `Queue` take
@@ -242,13 +242,13 @@ impl Element for VideoToolboxDecoder {
     }
 }
 
-impl Source for VideoToolboxDecoder {
+impl SrcPads for VideoToolboxDecoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for VideoToolboxDecoder {
+impl RawSink for VideoToolboxDecoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {

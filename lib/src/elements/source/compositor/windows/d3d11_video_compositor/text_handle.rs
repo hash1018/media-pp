@@ -71,7 +71,7 @@ pub enum D3d11TextLayerError {
 /// [`super::D3d11VideoCompositorHandle::add_text_layer`] — there's no upstream
 /// `Pipeline` branch feeding this input, only
 /// [`D3d11TextLayerHandle::set_text`] calls. Not an
-/// [`crate::element::Element`] — never wired into a `Pipeline` (no `Sink`,
+/// [`crate::element::Element`] — never wired into a `Pipeline` (no `RawSink`,
 /// no bus/topology identity). Named to match [`D3d11VideoLayerHandle`]'s
 /// family, but it isn't as thin as the rest of that family: every other
 /// `*Handle` in this crate is a cheap, `Clone`-able `Weak`-backed proxy

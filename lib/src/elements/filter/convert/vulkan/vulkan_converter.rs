@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::VulkanDevice,
     error::Result,
     platform::vulkan::{
@@ -18,7 +18,7 @@ use crate::{
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/convert.wgsl");
@@ -64,9 +64,9 @@ impl From<BgraPassError> for VulkanConverterError {
 /// BT.709 above 576 rows and BT.601 at or below where it names none — and
 /// comes out full-range RGB, opaque, with its timing carried through and
 /// tagged as what it now is.
-pub struct VulkanConverter(TransformStage<Converting>);
+pub struct VulkanConverter(FilterStage<Converting>);
 
-transform_filter!(VulkanConverter);
+filter_stage!(VulkanConverter);
 
 /// What a [`VulkanConverter`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -89,7 +89,7 @@ impl VulkanConverter {
         let pp_log = element_pp_log(ElementType::VulkanConverter, &name, None);
         let pass = BgraPass::new(device, SHADER, c"main", 64, PassInput::Nv12)?;
         pp_info!(pp_log: &pp_log, "opened: NV12 -> BGRA on {}", device.name());
-        Ok(Self(TransformStage::new(Converting {
+        Ok(Self(FilterStage::new(Converting {
             name,
             pp_log,
             pass,
@@ -164,7 +164,7 @@ impl Element for Converting {
     }
 }
 
-impl Transform for Converting {
+impl Filter for Converting {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
@@ -208,7 +208,7 @@ impl Drop for Converting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{VulkanDownload, VulkanUpload},
         test_support::{capture, try_vulkan_device},

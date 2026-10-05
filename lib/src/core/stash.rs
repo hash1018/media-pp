@@ -117,7 +117,7 @@ mod tests {
     use super::*;
     use crate::{
         control::{ControlMsg, PrerollContext},
-        element::{Element, ElementType, Sink, element_pp_log},
+        element::{Element, ElementType, RawSink, element_pp_log},
         pp_log::PpLog,
     };
 
@@ -148,7 +148,7 @@ mod tests {
         }
     }
 
-    impl Sink for Gated {
+    impl RawSink for Gated {
         fn ready_consume(&mut self) -> bool {
             self.open.load(Ordering::SeqCst)
         }

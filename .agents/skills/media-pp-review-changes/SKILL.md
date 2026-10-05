@@ -43,7 +43,7 @@ working tree.
 - For control and the stream plane, check that no element forwards a control
   message itself or applies one it merely received (only the framework and
   the routing elements — Queue, Tee, bins, racks — send one on); that a
-  source waits only through its `Wait` and a new source is a `Produce`, not a
+  source waits only through its `Wait` and a new source is a `Source`, not a
   hand-written loop; that phase is read from `PlaybackState`, with
   restrictions written before their message and releases travelling only as
   a message; that what a `Flush` leaves is dropped until the flushed segment;

@@ -47,7 +47,7 @@ use crate::{
         InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
         PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     elements::{
         D3d11Gpu, D3d11RendererError, SubmitError, WindowControl, WindowEvents, WindowOptions,
     },
@@ -257,7 +257,7 @@ impl Element for D3d11WindowRenderer {
     }
 }
 
-impl Sink for D3d11WindowRenderer {
+impl RawSink for D3d11WindowRenderer {
     /// A D3D11 texture, NV12 or BGRA, as a
     /// [`D3d11Renderer`](crate::elements::D3d11Renderer) takes; or a frame in
     /// system memory, NV12, YUV420P or BGRA.

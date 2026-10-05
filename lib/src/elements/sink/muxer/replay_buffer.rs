@@ -53,7 +53,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, Sink, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, element_pp_log},
     error::Result,
     pp_log::{PpLog, pp_error, pp_info},
     stream::StreamEvent,
@@ -223,7 +223,7 @@ impl ReplayBuffer {
             tracks
                 .into_iter()
                 .enumerate()
-                .map(|(track, (name, kind))| -> Box<dyn Sink> {
+                .map(|(track, (name, kind))| -> Box<dyn RawSink> {
                     Box::new(ReplayTrackSink {
                         pp_log: element_pp_log(ElementType::ReplayBuffer, &name, None),
                         name,
@@ -588,7 +588,7 @@ impl Element for ReplayTrackSink {
     }
 }
 
-impl Sink for ReplayTrackSink {
+impl RawSink for ReplayTrackSink {
     /// Encoded packets of this track's own medium, as a muxer's track takes.
     fn input_contract(&self) -> InputContract {
         match self.kind {
@@ -649,7 +649,7 @@ fn micros(value: i64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::error::Error;
 
     /// Every packet of a file, with the tracks it declares — the file stands
@@ -677,7 +677,7 @@ mod tests {
     fn buffer_over(
         recorded: &Recorded,
         length: Duration,
-    ) -> (Vec<Box<dyn Sink>>, ReplayBufferHandle) {
+    ) -> (Vec<Box<dyn RawSink>>, ReplayBufferHandle) {
         let mut replay = ReplayBuffer::create(length);
         let tracks: Vec<_> = recorded
             .streams
@@ -693,13 +693,18 @@ mod tests {
         let (mut sinks, handle) = replay.open().expect("the buffer opens");
         let sinks = tracks
             .into_iter()
-            .map(|track| sinks.take(track).expect("the buffer's own track"))
+            .map(|track| {
+                sinks
+                    .take(track)
+                    .expect("the buffer's own track")
+                    .into_raw()
+            })
             .collect();
         (sinks, handle)
     }
 
     fn feed<'a>(
-        sinks: &mut [Box<dyn Sink>],
+        sinks: &mut [Box<dyn RawSink>],
         packets: impl IntoIterator<Item = &'a (usize, ffmpeg::Packet)>,
     ) {
         for (track, packet) in packets {

@@ -1,7 +1,7 @@
 # decode
 
-Demux -> SwDecoder -> FrameCounter: proves `SwDecoder` (a `Filter`, both
-`Source` and `Sink`) actually decodes packets into frames, not just that it
+Demux -> SwDecoder -> FrameCounter: proves `SwDecoder` (a `RawFilter`, both
+`SrcPads` and `RawSink`) actually decodes packets into frames, not just that it
 compiles.
 
 ```sh

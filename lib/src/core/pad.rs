@@ -12,7 +12,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::OutputContract,
     control::ControlMsg,
-    element::{ElementType, Sink, SinkExt},
+    element::{ElementType, RawSink, RawSinkExt},
     error::Result,
     pp_log::{PpLog, pp_trace},
     stats::PadCounters,
@@ -34,7 +34,7 @@ use crate::{
 pub struct SrcPad {
     name: String,
     contract: OutputContract,
-    peer: Option<Box<dyn Sink>>,
+    peer: Option<Box<dyn RawSink>>,
     /// What has left through this pad — see [`crate::stats`]. Every pad has
     /// one, so an element's outputs are counted without it doing anything.
     counters: Arc<PadCounters>,
@@ -104,7 +104,7 @@ impl SrcPad {
     /// Runtime half of a connection. Pipeline users connect through
     /// [`crate::element::Context::attach`], which keeps the graph and this
     /// peer in sync. Kept crate-visible for element-level unit tests.
-    pub(crate) fn link(&mut self, sink: Box<dyn Sink>) {
+    pub(crate) fn link(&mut self, sink: Box<dyn RawSink>) {
         self.peer = Some(sink);
     }
 
@@ -225,7 +225,7 @@ impl SrcPad {
     /// Pushing into an unlinked pad is a no-op, same as `push`.
     ///
     /// Not public: an element never passes control on itself — see
-    /// `Sink::flow` — and one that did would hand
+    /// `RawSink::flow` — and one that did would hand
     /// everything after it each message twice.
     pub(crate) fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // A seek's own, and nobody else's — see `crate::stream`.
@@ -269,7 +269,7 @@ mod tests {
         }
     }
 
-    impl Sink for Heard {
+    impl RawSink for Heard {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.heard.lock().unwrap().push("data");
             Ok(())

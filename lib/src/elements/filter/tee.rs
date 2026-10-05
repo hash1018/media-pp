@@ -12,7 +12,7 @@ use crate::{
     bus::BusEvent,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Flow, Sink, element_pp_log},
+    element::{Context, Element, ElementType, Flow, RawSink, element_pp_log},
     error::Result,
     graph::{BranchId, ElementId, GraphError, Incoming, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
@@ -25,7 +25,7 @@ use crate::{
 /// [`TeeHandle`], which can be cloned and used from any thread, independent
 /// of whatever thread is driving `Tee::consume`
 /// (the pipeline's source/queue-worker thread). That's the whole reason
-/// `Tee` doesn't implement [`crate::element::Source`] like other
+/// `Tee` doesn't implement [`crate::element::SrcPads`] like other
 /// multi-pad elements (e.g. [`crate::elements::FileDemuxer`]): its pads
 /// live in individually locked branch slots instead of being a plain
 /// `&mut [SrcPad]`. `consume` only holds the branch-list lock long enough
@@ -79,7 +79,7 @@ struct TeeShared {
 ///
 /// Every handle is joined rather than dropped, even one already finished:
 /// dropping it detaches the thread and discards its result, which is the one
-/// way a panicking branch teardown — a `Sink::drop` or a `Queue` worker that
+/// way a panicking branch teardown — a `RawSink::drop` or a `Queue` worker that
 /// died mid-flush — would leave no trace at all. Joining a finished thread
 /// returns immediately, so the reaping caller pays nothing for it.
 fn join_finishers(
@@ -280,7 +280,7 @@ impl TeeBuilder {
         let shared = tee.shared.clone();
         let context = shared.context.clone();
         let mut tee_branch = context.branch().to(tee)?;
-        // `ChainBuilder` ends a chain at a terminal `Sink`, which by
+        // `ChainBuilder` ends a chain at a terminal `RawSink`, which by
         // definition emits nothing, so it recorded this `Tee` as producing
         // `Unknown`. A `Tee` is the one terminal that does have outputs —
         // its pads just live behind a lock instead of in `src_pads` — and
@@ -723,7 +723,7 @@ impl Tee {
     }
 }
 
-impl Sink for Tee {
+impl RawSink for Tee {
     fn ready_consume(&mut self) -> bool {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
         // The preroll, if one is running, holds the branches that have
@@ -860,7 +860,7 @@ mod tests {
         }
     }
 
-    impl Sink for CountingSink {
+    impl RawSink for CountingSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -889,7 +889,7 @@ mod tests {
         }
     }
 
-    impl Sink for AlwaysFailSink {
+    impl RawSink for AlwaysFailSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Err(crate::error::Error::Other(
                 "simulated branch failure".into(),
@@ -922,7 +922,7 @@ mod tests {
         }
     }
 
-    impl Sink for ControlObservingSink {
+    impl RawSink for ControlObservingSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -963,7 +963,7 @@ mod tests {
         }
     }
 
-    impl Sink for PanicOnceSink {
+    impl RawSink for PanicOnceSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             if !self.panicked {
                 self.panicked = true;
@@ -998,7 +998,7 @@ mod tests {
         }
     }
 
-    impl Sink for BlockingSink {
+    impl RawSink for BlockingSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             if let Some(entered) = self.entered.take() {
                 let _ = entered.send(());
@@ -1032,7 +1032,7 @@ mod tests {
         }
     }
 
-    impl Sink for GraphInspectingDropSink {
+    impl RawSink for GraphInspectingDropSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1234,7 +1234,7 @@ mod tests {
         }
     }
 
-    impl Sink for RecordingSink {
+    impl RawSink for RecordingSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             lock_unpoisoned(&self.seen).push("data");
             Ok(())
@@ -1363,7 +1363,7 @@ mod tests {
         );
     }
 
-    /// A finisher thread runs arbitrary `Sink::drop` code. One that panics
+    /// A finisher thread runs arbitrary `RawSink::drop` code. One that panics
     /// must be joined and reported rather than detached and forgotten, and it
     /// must not take the `Tee` — or any other branch — with it.
     #[test]
@@ -1429,7 +1429,7 @@ mod tests {
         }
     }
 
-    impl Sink for PanicOnDropSink {
+    impl RawSink for PanicOnDropSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1467,7 +1467,7 @@ mod tests {
         }
     }
 
-    impl Sink for SlowRecordingSink {
+    impl RawSink for SlowRecordingSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             thread::sleep(Duration::from_millis(30));
             lock_unpoisoned(&self.seen).push("data");
@@ -1772,7 +1772,7 @@ mod tests {
         }
     }
 
-    impl Sink for PtsSink {
+    impl RawSink for PtsSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = buf {
                 self.seen.lock().unwrap().push(packet.pts().unwrap_or(-1));

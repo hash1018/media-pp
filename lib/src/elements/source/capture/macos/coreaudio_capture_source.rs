@@ -28,11 +28,11 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::{AudioFormat, CoreAudioDevice, CoreAudioDeviceKind, CoreAudioProcess},
     error::Result,
     platform::macos::coreaudio::{self, HalUnit, OsStatusError, ProcessTap, Refcon, TapError},
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// How many packets the IO thread can hand over before the source's thread
@@ -187,9 +187,9 @@ impl From<TapError> for CoreAudioCaptureSourceError {
 /// Runs until `Stop` — never reaches `Eos` on its own, as no live source in
 /// this crate does. An unplugged device ends it with
 /// [`CoreAudioCaptureSourceError::DeviceGone`].
-pub struct CoreAudioCaptureSource(ProducingSource<Capturing>);
+pub struct CoreAudioCaptureSource(SourceStage<Capturing>);
 
-produce_source!(CoreAudioCaptureSource);
+source_stage!(CoreAudioCaptureSource);
 
 /// One capture from the device, in a buffer made once and used again.
 struct Packet {
@@ -545,7 +545,7 @@ impl CoreAudioCaptureSource {
             format.sample_format
         );
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 name,
                 pp_log,
                 format,
@@ -752,7 +752,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

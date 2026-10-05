@@ -22,7 +22,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::AudioFormat,
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
@@ -31,7 +31,7 @@ use crate::{
         PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
     },
     playback_clock::{AudioMasterRegistration, PlaybackClock, PlaybackClockError},
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
 };
 
 /// How long [`PipeWireAudioRenderer::open`] waits for the stream to negotiate a
@@ -215,6 +215,21 @@ struct Playback {
     ended: AtomicBool,
 }
 
+/// Takes `frames` off `count`, stopping at zero — a flush may have zeroed it
+/// in between. A loop of its own rather than `fetch_update`, which Rust 1.99
+/// deprecates for a `try_update` the crate's minimum Rust does not have.
+fn saturating_sub(count: &AtomicU64, frames: u64) {
+    let mut current = count.load(Ordering::Acquire);
+    while let Err(actual) = count.compare_exchange_weak(
+        current,
+        current.saturating_sub(frames),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        current = actual;
+    }
+}
+
 /// What the PipeWire thread reports back to `open` once, at startup.
 enum Startup {
     Ready(AudioFormat),
@@ -296,7 +311,7 @@ type CommandResult = std::result::Result<(), String>;
 type CommandReply = SyncSender<CommandResult>;
 
 /// Sent into the PipeWire thread's own main loop. Mutations that are part of
-/// the synchronous `Sink::flow` contract carry a reply: enqueueing a
+/// the synchronous `RawSink::flow` contract carry a reply: enqueueing a
 /// command is not the same as having applied it.
 enum Command {
     SetActive {
@@ -385,9 +400,9 @@ fn complete_device_drain(
 /// `consume` therefore hands frames to a bounded queue instead of writing to a
 /// device buffer directly, and an empty queue is covered with silence rather
 /// than stalling the graph.
-pub struct PipeWireAudioRenderer(RenderStage<Rendering>);
+pub struct PipeWireAudioRenderer(SinkStage<Rendering>);
 
-render_sink!(PipeWireAudioRenderer);
+sink_stage!(PipeWireAudioRenderer);
 
 /// What a [`PipeWireAudioRenderer`] does with each frame — queues it for
 /// the PipeWire thread to play: all of its work, which the framework makes
@@ -538,7 +553,7 @@ impl PipeWireAudioRenderer {
         );
 
         Ok((
-            Self(RenderStage::new(Rendering {
+            Self(SinkStage::new(Rendering {
                 name: name.into(),
                 pp_log,
                 format,
@@ -556,7 +571,7 @@ impl PipeWireAudioRenderer {
         ))
     }
 
-    /// The format [`Sink::consume`](crate::element::Sink::consume) accepts, unchanged since `open`.
+    /// The format [`RawSink::consume`](crate::element::RawSink::consume) accepts, unchanged since `open`.
     pub fn format(&self) -> AudioFormat {
         self.0.inner.format
     }
@@ -759,11 +774,7 @@ impl Rendering {
     }
 
     fn rollback_queued(&self, frames: u64) {
-        let _ = self.playback.queued_frames.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |queued| Some(queued.saturating_sub(frames)),
-        );
+        saturating_sub(&self.playback.queued_frames, frames);
     }
 
     /// Starts the stream once enough audio is queued to survive the first few
@@ -955,7 +966,7 @@ impl Element for Rendering {
     }
 }
 
-impl Render for Rendering {
+impl Sink for Rendering {
     /// Writes samples into the PipeWire stream buffer.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -1329,11 +1340,7 @@ fn run_pipewire(
                         }
                         // Saturating, because a flush may have zeroed the
                         // count between the copy and here.
-                        let _ = playback.queued_frames.fetch_update(
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                            |queued| Some(queued.saturating_sub(consumed)),
-                        );
+                        saturating_sub(&playback.queued_frames, consumed);
                         want
                     };
 
@@ -1395,7 +1402,7 @@ mod tests {
     use super::*;
     use crate::{
         control::ControlMsg,
-        element::{Sink, SinkExt},
+        element::{RawSink, RawSinkExt},
         stream::StreamEvent,
     };
 

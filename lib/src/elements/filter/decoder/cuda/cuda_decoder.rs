@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, ReversibleDecoder, SrcPads, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     pad::SrcPad,
     platform::{cuda::CudaDevice, ffmpeg::AvBufferRef},
@@ -53,7 +53,7 @@ pub enum CudaDecoderError {
 }
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames on
-/// NVDEC, tagged [`ffmpeg::format::Pixel::CUDA`]. A `Filter`, same shape as
+/// NVDEC, tagged [`ffmpeg::format::Pixel::CUDA`]. A `RawFilter`, same shape as
 /// [`crate::elements::SwDecoder`]/`D3d11Decoder`.
 ///
 /// Frames this produces are still plain `MediaBuffer::Video` — `Pacer`,
@@ -324,13 +324,13 @@ impl Element for CudaDecoder {
     }
 }
 
-impl Source for CudaDecoder {
+impl SrcPads for CudaDecoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for CudaDecoder {
+impl RawSink for CudaDecoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {

@@ -5,7 +5,7 @@ use super::*;
 use crate::test_support::try_d3d11_gpu as try_device;
 use crate::{
     color::Color,
-    element::Source,
+    element::SrcPads,
     elements::{D3d11Download, VideoRect},
 };
 
@@ -975,7 +975,7 @@ impl Element for TimestampSink {
     }
 }
 
-impl Sink for TimestampSink {
+impl RawSink for TimestampSink {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         if matches!(buf, MediaBuffer::Video(_)) {
             let _ = self.tx.send(Instant::now());

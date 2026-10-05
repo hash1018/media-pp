@@ -53,7 +53,7 @@ mod windows_example {
 
     use media_pp::{
         bus::BusEvent,
-        element::{ElementType, SourceElement},
+        element::{ElementType, RawSource},
         elements::{
             CaptureMode, D3d11Gpu, D3d11WindowRenderer, DxgiCaptureOptions, DxgiCaptureSource,
             WgcCaptureOptions, WgcCaptureSource, WindowOptions,
@@ -284,7 +284,7 @@ mod windows_example {
         }
     }
 
-    fn present<S: SourceElement + 'static>(
+    fn present<S: RawSource + 'static>(
         source: S,
         source_type: ElementType,
         renderer: D3d11WindowRenderer,

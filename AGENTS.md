@@ -1,8 +1,10 @@
 # AGENTS.md
 
 Repository guidance for AI-assisted and human development. Read `README.md`
-first for the element inventory, feature flags, examples, and build
-requirements, the crate documentation in `lib/src/lib.rs` for how a pipeline
+first and the files it lists under `docs/` — the element inventory
+(`docs/elements.md`), feature flags and what each needs
+(`docs/features.md`), examples (`docs/examples.md`), and platform setup
+(`docs/building/`) — the crate documentation in `lib/src/lib.rs` for how a pipeline
 runs, and `CONTRIBUTING.md` for how to test. Treat the code and tests as the
 final source of truth when documentation and implementation differ.
 
@@ -33,12 +35,12 @@ final source of truth when documentation and implementation differ.
 
 ## Pipeline and error boundaries
 
-- A direct `Sink::consume` call is synchronous and may return `Err`. A `Queue`
+- A direct `RawSink::consume` call is synchronous and may return `Err`. A `Queue`
   is the explicit thread and recovery boundary: it reports a downstream data
   error as `BusEvent::Error`, drops that buffer, and continues its worker.
   The one exception to "explicit": an element that waits on the clock
   inside `consume` — `Pacer`, `VideoSynchronizer` — answers
-  `Sink::own_queue`, and a chain runs it behind the `.queue()` straight in
+  `RawSink::own_queue`, and a chain runs it behind the `.queue()` straight in
   front of it or, where there is none, one it adds; a `Rack` refuses it.
   Its constructor takes no depth, so callers need not know.
 - What a seek leaves behind is dropped between its `Flush` and its
@@ -49,7 +51,7 @@ final source of truth when documentation and implementation differ.
   element that hands buffers to a worker of its own drops what it holds on
   `Flush` and hands on nothing between the `Flush` and the segment.
 - A source likewise goes on past one buffer's failure: the framework posts a
-  failed pad push to the `Bus`, and a `Produce` posts what fails for one part
+  failed pad push to the `Bus`, and a `Source` posts what fails for one part
   of what it makes — a compositor layer it cannot draw — itself. `produce`
   returns `Err` only when the source cannot meaningfully continue.
 - Fan-in/fan-out and batched processing must isolate failures. A bad mixer input,
@@ -110,30 +112,30 @@ final source of truth when documentation and implementation differ.
   incompatible input. Before FFI or GPU calls, validate format, dimensions,
   plane/stride bounds, texture array index, and device ownership as applicable.
 - A filter that makes each buffer into none, one or several is a
-  `Transform`: its media work, with `drain` for what it still holds at the
+  `Filter`: its media work, with `drain` for what it still holds at the
   end, `reset` for what a `Flush` lets go of and `stopping` for what a
   `Stop` lets go of beside it (by default the same). The framework's
   stage owns its pad, hands `Eos` on after the drain, keeps what the pad
   cannot take while a preroll holds the graph (`OutputStash`, which the
   decoders' gate, a bin and a rack keep too), and never shows it a control
-  message. Write `Sink` and `Source` directly only for an element that
+  message. Write `RawSink` and `SrcPads` directly only for an element that
   routes the stream itself — `Queue`, `Tee`, a bin or a rack, a muxer, a
   compositor or mixer input — or reads the stream plane. An element of
   this crate moved onto one keeps its public name, constructors and
-  `Filter` as a newtype over `TransformStage` (`transform_filter!`).
+  `RawFilter` as a newtype over `FilterStage` (`filter_stage!`).
 - A terminal that does something with each buffer — plays, shows, counts,
-  hands it out — is a `Render`: `render` for each buffer, `drain` before
+  hands it out — is a `Sink`: `render` for each buffer, `drain` before
   its end is taken, `reset` for a `Flush` and `stopping` for a `Stop` (by
   default the same), and `pausing` and
   `resuming` for a device it stops for a pause. The framework turns the
   control messages into those and never shows it one; what the terminal
   wrapper does — the preroll's counting, holding while paused — is
   unchanged by it. A muxer of several tracks, a compositor's or a mixer's
-  input and an `AppSink` handing control to the application stay `Sink`s.
+  input and an `AppSink` handing control to the application stay `RawSink`s.
   An element of this crate moved onto one keeps its public name as a
-  newtype over `RenderStage` (`render_sink!`).
-- Declare a new element's link contract through `Sink::input_contract` and
-  `SrcPad::with_contract` — a `Transform`'s own `input_contract` and
+  newtype over `SinkStage` (`sink_stage!`).
+- Declare a new element's link contract through `RawSink::input_contract` and
+  `SrcPad::with_contract` — a `Filter`'s own `input_contract` and
   `output_contract` — limited to what construction already settles:
   the `MediaKind`s a port deals in, and for a decoded one the `MemoryDomain`s its
   frames may live in and the `PixelLayout`s (NV12, P010, BGRA, other) they may
@@ -152,7 +154,7 @@ final source of truth when documentation and implementation differ.
   simply leaves it alone rather than guessing.
 - Whether a seek can be followed is declared the same way, at wiring: a
   sink whose output is a record of the stream as it ran — a file being
-  written, a replay window — returns false from `Sink::accepts_seek`, and a
+  written, a replay window — returns false from `RawSink::accepts_seek`, and a
   source that can reposition its input is a `SeekableSource`, saying so
   from `as_seekable`; one that cannot writes no `seek` at all. A live one
   also says so through `is_live`. `Pipeline::check_seek` answers from what
@@ -193,35 +195,35 @@ final source of truth when documentation and implementation differ.
 
 ## Control, lifetime, and concurrency
 
-- A source that makes one thing at a time is a `Produce`: the framework
+- A source that makes one thing at a time is a `Source`: the framework
   runs its loop — takes each request the one way every source does, keeps
   a pause out of the clock `Wait::now` reads, and ends the stream after
   `Produced::End` — and it waits only through its `Wait`, which lets go the
   moment the pipeline has something for the thread. With several outputs
-  (`Produce::outputs`, `Produced::On`) the framework holds back what an
+  (`Source::outputs`, `Produced::On`) the framework holds back what an
   output cannot take yet, within bounds, so the one read cursor keeps the
   others fed (`crate::parking`), and ends each output as soon as it owes
-  nothing; a source that can be sought (`Produce::as_seekable`) has its
+  nothing; a source that can be sought (`Source::as_seekable`) has its
   seeks taken between one thing made and the next and stays at its end
   until stopped or sought; a segment of its own — a lap, another input —
   is `Produced::Segment`. What
   a device sets up on the source's own thread — an apartment joined, a
-  capture started — goes in `Produce::starting` and is let go of in
+  capture started — goes in `Source::starting` and is let go of in
   `stopping`, which the framework calls there however the loop ended;
   stopping and restarting its input for a pause goes in `pausing` and
   `resuming`. An element of this crate moved onto one keeps its public
-  name as a newtype over `ProducingSource` (`produce_source!`).
-- Every source of this crate is a `Produce`; a `SourceElement` loop written
+  name as a newtype over `SourceStage` (`source_stage!`).
+- Every source of this crate is a `Source`; a `RawSource` loop written
   by hand is left only in tests. Such a loop must remain responsive to
   Pause, Resume, Stop, and Seek: it drains its channel with `drain_control`
   (test-only), or hands each request it takes to `control::handle_request` —
   never applies one itself: a source that passed a `Pause` on without
   pausing deadlocked a seek (208af56).
 - Control stays inside the crate: `ControlMsg` reaches this crate's
-  elements through `Sink::flow`, a hidden hook whose argument nothing
-  outside can name (the crate calls it as `SinkExt::control`), and a sink
+  elements through `RawSink::flow`, a hidden hook whose argument nothing
+  outside can name (the crate calls it as `RawSinkExt::control`), and a sink
   outside the crate hears a pause, a resume and a stop through
-  `Sink::pausing`, `resuming` and `stopping`, which `flow`'s default
+  `RawSink::pausing`, `resuming` and `stopping`, which `flow`'s default
   calls, and a seek through the flushed segment. `flow` is an element's
   own reaction and nothing more. The graph
   passes each message on through a filter's `src_pads()` after it
@@ -240,7 +242,7 @@ final source of truth when documentation and implementation differ.
   looping file at each lap, and a bridge where its feeding side flushed or
   another input begins, those on the timeline they come in — and the
   `Eos` it ends with, in order
-  with the buffers. An element reacts through `Sink::stream_event`, pushing
+  with the buffers. An element reacts through `RawSink::stream_event`, pushing
   from there whatever it answers the event with; the graph passes the event
   on through its pads, as it does control. Only an element that routes the
   stream its own way — `Queue`, `Tee`, a bin's or a rack's line — sends it
@@ -365,7 +367,7 @@ final source of truth when documentation and implementation differ.
   `audio_mixer.rs`'s `against_a_file` tests, where removing the `Pacer` makes a
   test that reproduces an 8% shortfall pass against the bug.
 - A change to how control travels — a new `ControlMsg`, the framework's
-  source loop or a `Produce`'s waits, an element that waits on the clock, a
+  source loop or a `Source`'s waits, an element that waits on the clock, a
   `Queue` or `Tee` path — runs the control conformance sequences pinned to
   two cores, a few hundred of them, alone and loaded, before it lands (see
   `CONTRIBUTING.md`). A new element that waits, holds buffers, or produces
@@ -386,8 +388,11 @@ final source of truth when documentation and implementation differ.
 
 ## Documentation and repository hygiene
 
-- Update `README.md` when public API, feature flags, requirements, or examples
-  change. Keep volatile roadmap ideas out of agent instruction files.
+- Update the documentation when public API, feature flags, requirements, or
+  examples change: the element inventory in `docs/elements.md`, feature flags
+  and their requirements in `docs/features.md`, examples in
+  `docs/examples.md`, platform setup in `docs/building/`. `README.md` stays a
+  short overview with a table of those files; detail goes into `docs/`. Keep volatile roadmap ideas out of agent instruction files.
 - Doc comments should explain invariants, ownership, thread/error behavior, and
   non-obvious rationale. Do not repeat claims that can be read directly from a
   struct definition.

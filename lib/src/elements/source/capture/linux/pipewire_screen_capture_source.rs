@@ -33,11 +33,11 @@ use crate::{
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::VideoFormat,
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
 };
 
@@ -510,9 +510,9 @@ struct Terminate;
 /// constructor rather than an option because it needs a
 /// `CudaDevice` to allocate against, and the two modes
 /// negotiate mutually exclusive buffer kinds.
-pub struct PipeWireScreenCaptureSource(ProducingSource<Capturing>);
+pub struct PipeWireScreenCaptureSource(SourceStage<Capturing>);
 
-produce_source!(PipeWireScreenCaptureSource);
+source_stage!(PipeWireScreenCaptureSource);
 
 /// What a [`PipeWireScreenCaptureSource`] hands on, a picture a tick: all of
 /// its work, which the framework makes the source.
@@ -778,7 +778,7 @@ impl PipeWireScreenCaptureSource {
         );
 
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 // `open` emits CPU frames and `open_gpu` CUDA-resident
                 // ones, and which of the two is settled here — so a
                 // downstream filter can be checked against it.
@@ -1182,7 +1182,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

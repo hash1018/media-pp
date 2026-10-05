@@ -10,7 +10,7 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
@@ -22,7 +22,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `CudaVideoEffect`. Converts into the crate-wide
@@ -75,9 +75,9 @@ pub enum CudaVideoEffectError {
 /// through the hardware's approximate `lg2`/`ex2`, which is why this agrees
 /// with the software element to within one step rather than exactly
 /// wherever a gamma is set.
-pub struct CudaVideoEffect(TransformStage<Applying>);
+pub struct CudaVideoEffect(FilterStage<Applying>);
 
-transform_filter!(CudaVideoEffect);
+filter_stage!(CudaVideoEffect);
 
 /// What a [`CudaVideoEffect`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -143,7 +143,7 @@ impl CudaVideoEffect {
 
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self(TransformStage::new(Applying {
+        let element = Self(FilterStage::new(Applying {
             name,
             pp_log,
             hw_device_ctx,
@@ -304,7 +304,7 @@ impl Element for Applying {
     }
 }
 
-impl Transform for Applying {
+impl Filter for Applying {
     /// Device-resident frames; the surface layout it needs is a runtime
     /// value, not part of this.
     fn input_contract(&self) -> InputContract {
@@ -359,7 +359,7 @@ mod tests {
 
     use super::super::super::options::apply;
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{ColorCorrection, CudaDownload, CudaUpload, LumaKey},
         test_support::try_cuda_device,

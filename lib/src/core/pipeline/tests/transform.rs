@@ -1,10 +1,10 @@
-//! A `Transform` in a running pipeline: piped as any filter is, or racked
+//! A `Filter` in a running pipeline: piped as any filter is, or racked
 //! through `into_filter`, and told of a seek by the framework rather than by
 //! a message of its own.
 
 use super::*;
 
-use crate::element::{IntoFilter, Output, Transform};
+use crate::element::{Filter, IntoFilter, Output};
 use crate::elements::Rack;
 
 /// Passes everything on, counting what it passed and each reset.
@@ -50,7 +50,7 @@ impl Element for Counting {
     }
 }
 
-impl Transform for Counting {
+impl Filter for Counting {
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         self.passed.fetch_add(1, Ordering::SeqCst);
         out.push(buf);

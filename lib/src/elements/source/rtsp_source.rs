@@ -7,11 +7,11 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::{RtspOptions, rtsp::redact},
     error::Result,
     pad::SrcPad,
-    produce::produce_source,
+    produce::source_stage,
 };
 
 use super::file_demuxer::StreamInfo;
@@ -49,9 +49,9 @@ pub enum RtspSourceError {
 /// stuck connection un-`Stop`-able (the pipeline's requests never get a
 /// turn) and this element's "fail fast, don't retry" contract impossible to
 /// keep.
-pub struct RtspSource(ProducingSource<Reading>);
+pub struct RtspSource(SourceStage<Reading>);
 
-produce_source!(RtspSource);
+source_stage!(RtspSource);
 
 /// What an [`RtspSource`] hands on, a packet at a time as the session
 /// delivers it: all of its work, which the framework makes the source.
@@ -101,7 +101,7 @@ impl RtspSource {
             streams.len()
         );
         Ok((
-            Self(ProducingSource::new(Reading {
+            Self(SourceStage::new(Reading {
                 name,
                 pp_log,
                 input,
@@ -153,7 +153,7 @@ impl Element for Reading {
     }
 }
 
-impl Produce for Reading {
+impl Source for Reading {
     fn is_live(&self) -> bool {
         true
     }

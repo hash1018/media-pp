@@ -54,7 +54,7 @@ use crate::{
         InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
         PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     elements::{
         D3d12Gpu, D3d12RendererError, SubmitError, WindowControl, WindowEvents, WindowOptions,
     },
@@ -280,7 +280,7 @@ impl Element for D3d12WindowRenderer {
     }
 }
 
-impl Sink for D3d12WindowRenderer {
+impl RawSink for D3d12WindowRenderer {
     /// An NV12 D3D12 texture, as a
     /// [`D3d12Renderer`](crate::elements::D3d12Renderer) takes; or a frame in
     /// system memory, NV12, YUV420P or BGRA.

@@ -63,13 +63,13 @@ impl Element for Watcher {
     }
 }
 
-impl Source for Watcher {
+impl SrcPads for Watcher {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for Watcher {
+impl RawSink for Watcher {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.seen.lock().unwrap().push(Seen::Buffer);
         self.pad.push(buf)
@@ -146,7 +146,7 @@ fn every_element_begins_with_the_segment_its_buffers_are_on() {
     let (after, after_seen) = Watcher::new("after-the-rack");
     let (rack, rack_handle) = Rack::new("rack", InputContract::Unknown, OutputContract::Unknown);
     rack_handle
-        .replace(vec![Box::new(inside)])
+        .replace(vec![crate::element::BoxFilter::new(inside)])
         .expect("one pad");
     let (pipeline, ()) = Pipeline::new("segments", small(), |source, ctx| {
         let tee = ctx
@@ -222,7 +222,9 @@ fn a_rack_filled_anew_hands_what_it_holds_the_segment_first() {
     let (first, first_seen) = Watcher::new("first");
     let (after, after_seen) = Watcher::new("after");
     let (rack, rack_handle) = Rack::new("rack", InputContract::Unknown, OutputContract::Unknown);
-    rack_handle.replace(vec![Box::new(first)]).expect("one pad");
+    rack_handle
+        .replace(vec![crate::element::BoxFilter::new(first)])
+        .expect("one pad");
     let (pipeline, ()) = Pipeline::new("refilled", small(), |source, ctx| {
         let branch = ctx.branch().pipe(rack).to(after)?;
         ctx.attach(source, 0, branch)?;
@@ -234,7 +236,7 @@ fn a_rack_filled_anew_hands_what_it_holds_the_segment_first() {
 
     let (second, second_seen) = Watcher::new("second");
     rack_handle
-        .replace(vec![Box::new(second)])
+        .replace(vec![crate::element::BoxFilter::new(second)])
         .expect("one pad");
     wait_for_a_buffer("second", &second_seen);
     pipeline.stop();

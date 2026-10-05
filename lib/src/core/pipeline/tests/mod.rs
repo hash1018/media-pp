@@ -24,7 +24,7 @@ use crate::stream::StreamEvent;
 use crate::test_support::try_test_video;
 use crate::{
     control::{ControlReceiver, drain_control},
-    element::{Flow, SinkExt, Source, SourceElement},
+    element::{Flow, RawSinkExt, RawSource, SrcPads},
     pad::SrcPad,
 };
 
@@ -66,13 +66,13 @@ impl Element for BurstSource {
     }
 }
 
-impl Source for BurstSource {
+impl SrcPads for BurstSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for BurstSource {
+impl RawSource for BurstSource {
     fn is_live(&self) -> bool {
         false
     }
@@ -116,7 +116,7 @@ impl Element for SlowEosSink {
     }
 }
 
-impl Sink for SlowEosSink {
+impl RawSink for SlowEosSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         thread::sleep(Duration::from_millis(5));
         self.count.fetch_add(1, Ordering::AcqRel);
@@ -152,7 +152,7 @@ impl Element for NoOpSink {
         &mut self.pp_log
     }
 }
-impl Sink for NoOpSink {
+impl RawSink for NoOpSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Ok(())
     }
@@ -180,7 +180,7 @@ impl Element for CountingSink {
         &mut self.pp_log
     }
 }
-impl Sink for CountingSink {
+impl RawSink for CountingSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         // Every buffer counts — `FileDemuxer`'s `Packet`s (what every other
         // test using this sink actually sends) and

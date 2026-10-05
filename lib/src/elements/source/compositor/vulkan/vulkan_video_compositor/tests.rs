@@ -6,7 +6,7 @@ use super::*;
 use crate::{
     bus::BusEvent,
     color::Color,
-    element::Source,
+    element::SrcPads,
     elements::{VulkanDownload, VulkanUpload},
     test_support::{CapturingSink, try_vulkan_device},
 };
@@ -24,7 +24,7 @@ fn options(width: u32, height: u32) -> VideoCompositorOptions {
 
 type Received = Arc<Mutex<Vec<MediaBuffer>>>;
 
-fn capture(source: &mut dyn Source) -> Received {
+fn capture(source: &mut dyn SrcPads) -> Received {
     let received = Arc::new(Mutex::new(Vec::new()));
     source.src_pads()[0].link(Box::new(CapturingSink {
         received: received.clone(),

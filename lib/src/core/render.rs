@@ -1,9 +1,9 @@
-//! Writing a terminal by what it does with each buffer — see [`Render`].
+//! Writing a terminal by what it does with each buffer — see [`Sink`].
 //!
-//! A terminal written directly, as a [`Sink`], reacts to every control
+//! A terminal written directly, as a [`RawSink`], reacts to every control
 //! message itself: a pause, a seek's flush, a stop, the end of its stream
 //! among its buffers. Each did that for itself, and each a little
-//! differently — docs/stream-events.md lists what that cost. A [`Render`]
+//! differently — docs/stream-events.md lists what that cost. A [`Sink`]
 //! does what the terminal is for and nothing else; the framework does the
 //! rest, once, the same way for every one.
 
@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::InputContract,
     control::ControlMsg,
-    element::{Context, Element, ElementType, Flow, Sink},
+    element::{Context, Element, ElementType, Flow, RawSink},
     error::Result,
     graph::ElementId,
     pp_log::PpLog,
@@ -32,10 +32,10 @@ use crate::{
 ///
 /// Put in a pipeline as any terminal is, with
 /// [`ChainBuilder::to`](crate::pipeline::ChainBuilder::to), which takes a
-/// `Render` as it takes a [`Sink`] (see [`IntoTerminal`]). A terminal that
+/// `Sink` as it takes a [`RawSink`] (see [`IntoTerminal`]). A terminal that
 /// routes the stream itself — a muxer with several tracks, a compositor's
 /// input — is written the direct way.
-pub trait Render: Element {
+pub trait Sink: Element {
     /// Does with `buf` what this terminal is for. Never handed the end of
     /// the stream: that is `drain`'s.
     fn render(&mut self, buf: MediaBuffer) -> Result<()>;
@@ -48,7 +48,7 @@ pub trait Render: Element {
 
     /// Lets go of what belongs to the timeline a seek has left, or to a
     /// stream that has been stopped — a device's queued sound among it,
-    /// which is why this, unlike a [`Transform`](crate::element::Transform)'s,
+    /// which is why this, unlike a [`Filter`](crate::element::Filter)'s,
     /// can fail. Nothing by default.
     fn reset(&mut self) -> Result<()> {
         Ok(())
@@ -72,33 +72,33 @@ pub trait Render: Element {
         Ok(())
     }
 
-    /// What it takes — see [`Sink::input_contract`]. Nothing said by default.
+    /// What it takes — see [`RawSink::input_contract`]. Nothing said by default.
     fn input_contract(&self) -> InputContract {
         InputContract::Unknown
     }
 
-    /// Whether it can follow a seek — see [`Sink::accepts_seek`]. Yes by
+    /// Whether it can follow a seek — see [`RawSink::accepts_seek`]. Yes by
     /// default.
     fn accepts_seek(&self) -> bool {
         true
     }
 }
 
-/// What a [`Render`] is in a pipeline: the terminal the framework makes of
+/// What a [`Sink`] is in a pipeline: the terminal the framework makes of
 /// it, keeping the rules it does not keep itself.
-pub(crate) struct RenderStage<R> {
+pub(crate) struct SinkStage<R> {
     /// The terminal itself — open to the element of this crate that is a
     /// newtype over its stage, to reach what it is made of.
     pub(crate) inner: R,
 }
 
-impl<R: Render> RenderStage<R> {
+impl<R: Sink> SinkStage<R> {
     pub(crate) fn new(inner: R) -> Self {
         Self { inner }
     }
 }
 
-impl<R: Render> Element for RenderStage<R> {
+impl<R: Sink> Element for SinkStage<R> {
     fn name(&self) -> Arc<str> {
         self.inner.name()
     }
@@ -124,7 +124,7 @@ impl<R: Render> Element for RenderStage<R> {
     }
 }
 
-impl<R: Render> Sink for RenderStage<R> {
+impl<R: Sink> RawSink for SinkStage<R> {
     fn input_contract(&self) -> InputContract {
         self.inner.input_contract()
     }
@@ -157,60 +157,121 @@ impl<R: Render> Sink for RenderStage<R> {
     }
 }
 
-/// What can be put where a terminal is asked for: a [`Sink`] itself, or a
-/// [`Render`], which the framework makes one of.
+/// What can be put where a terminal is asked for: a [`Sink`], which the
+/// framework makes one of, a [`RawSink`] itself, or a [`BoxSink`] holding
+/// either.
 ///
-/// `M` says which of the two a type is, and the compiler works it out:
-/// nothing names it. A type that is both is refused as ambiguous —
-/// implement one or the other.
+/// `M` says which a type is, and the compiler works it out: nothing names
+/// it. A type that is both a `Sink` and a `RawSink` is refused as
+/// ambiguous — implement one or the other.
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is neither a `Sink` nor a `Render`",
-    note = "implement `Render` for a terminal that does something with each buffer, or `Sink` for one that routes the stream itself"
+    message = "`{Self}` is neither a `RawSink` nor a `Sink`",
+    note = "implement `Sink` for a terminal that does something with each buffer, or `RawSink` for one that routes the stream itself"
 )]
 pub trait IntoTerminal<M>: sealed::Sealed<M> {
-    /// The terminal this is, boxed.
-    fn into_terminal(self) -> Box<dyn Sink>;
+    /// The terminal this is, whichever kind it is.
+    fn into_terminal(self) -> BoxSink;
 }
+
+/// Says a type goes in as the [`RawSink`] it is — see [`IntoTerminal`].
+pub enum AsRawSink {}
 
 /// Says a type goes in as the [`Sink`] it is — see [`IntoTerminal`].
 pub enum AsSink {}
 
-/// Says a type goes in as the [`Render`] it is — see [`IntoTerminal`].
-pub enum AsRender {}
+/// Says a [`BoxSink`] goes in as the terminal it holds — see
+/// [`IntoTerminal`].
+pub enum AsBoxSink {}
 
-impl<S: Sink + 'static> IntoTerminal<AsSink> for S {
-    fn into_terminal(self) -> Box<dyn Sink> {
-        Box::new(self)
+impl<S: RawSink + 'static> IntoTerminal<AsRawSink> for S {
+    fn into_terminal(self) -> BoxSink {
+        BoxSink(Box::new(self))
     }
 }
 
-impl<R: Render + 'static> IntoTerminal<AsRender> for R {
-    fn into_terminal(self) -> Box<dyn Sink> {
-        Box::new(RenderStage::new(self))
+impl<R: Sink + 'static> IntoTerminal<AsSink> for R {
+    fn into_terminal(self) -> BoxSink {
+        BoxSink(Box::new(SinkStage::new(self)))
+    }
+}
+
+impl IntoTerminal<AsBoxSink> for BoxSink {
+    fn into_terminal(self) -> BoxSink {
+        self
     }
 }
 
 mod sealed {
-    use super::{AsRender, AsSink, Render, Sink};
+    use super::{AsBoxSink, AsRawSink, AsSink, BoxSink, RawSink, Sink};
 
-    /// Keeps [`super::IntoTerminal`] to the two ways in it has.
+    /// Keeps [`super::IntoTerminal`] to the three ways in it has.
     pub trait Sealed<M> {}
 
-    impl<S: Sink + 'static> Sealed<AsSink> for S {}
-    impl<R: Render + 'static> Sealed<AsRender> for R {}
+    impl<S: RawSink + 'static> Sealed<AsRawSink> for S {}
+    impl<R: Sink + 'static> Sealed<AsSink> for R {}
+    impl Sealed<AsBoxSink> for BoxSink {}
 }
 
-/// Makes `$name`, a newtype over `RenderStage<_>`, the terminal its stage
+/// A terminal of any kind, which kind forgotten: what to hold where the
+/// terminal is picked as the program runs — a window on one machine, a
+/// file on another — and what a muxer's track, a mixer's or a compositor's
+/// input and a bridge's feeding end are handed out as.
+/// [`ChainBuilder::to`](crate::pipeline::ChainBuilder::to) ends a branch in
+/// one as in the terminal it holds.
+///
+/// Made with [`BoxSink::new`] from a [`Sink`] or a [`RawSink`] alike. It
+/// derefs to the terminal inside, for what is asked of one directly — its
+/// name, or a buffer handed to it by hand.
+pub struct BoxSink(Box<dyn RawSink>);
+
+impl BoxSink {
+    /// `terminal`, whichever kind it is.
+    pub fn new<M>(terminal: impl IntoTerminal<M>) -> Self {
+        terminal.into_terminal()
+    }
+
+    /// A terminal this crate already holds boxed, as one.
+    pub(crate) fn from_raw(terminal: Box<dyn RawSink>) -> Self {
+        Self(terminal)
+    }
+
+    /// The terminal inside, as the framework drives it.
+    pub(crate) fn into_raw(self) -> Box<dyn RawSink> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for BoxSink {
+    type Target = dyn RawSink;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl std::ops::DerefMut for BoxSink {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.0
+    }
+}
+
+impl std::fmt::Debug for BoxSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BoxSink").field(&self.0.name()).finish()
+    }
+}
+
+/// Makes `$name`, a newtype over `SinkStage<_>`, the terminal its stage
 /// is — every method the stage's. For an element of this crate that keeps
 /// the public name and constructors it always had while its work moves
-/// into a [`Render`]. A generic one names its parameters and their bounds:
-/// `render_sink!(Name<F> where F: Bound)`.
-macro_rules! render_sink {
+/// into a [`Sink`]. A generic one names its parameters and their bounds:
+/// `sink_stage!(Name<F> where F: Bound)`.
+macro_rules! sink_stage {
     ($name:ident) => {
-        $crate::render::render_sink!(@impl [] $name [] []);
+        $crate::render::sink_stage!(@impl [] $name [] []);
     };
     ($name:ident<$($param:ident),+> where $($bound:tt)+) => {
-        $crate::render::render_sink!(@impl [$($param),+] $name [$($param),+] [$($bound)+]);
+        $crate::render::sink_stage!(@impl [$($param),+] $name [$($param),+] [$($bound)+]);
     };
     (@impl [$($generic:ident),*] $name:ident [$($arg:ident),*] [$($bound:tt)*]) => {
         impl<$($generic),*> $crate::element::Element for $name<$($arg),*>
@@ -237,7 +298,7 @@ macro_rules! render_sink {
             }
         }
 
-        impl<$($generic),*> $crate::element::Sink for $name<$($arg),*>
+        impl<$($generic),*> $crate::element::RawSink for $name<$($arg),*>
         where
             $($bound)*
         {
@@ -263,7 +324,7 @@ macro_rules! render_sink {
     };
 }
 
-pub(crate) use render_sink;
+pub(crate) use sink_stage;
 
 #[cfg(test)]
 mod tests {
@@ -312,7 +373,7 @@ mod tests {
         }
     }
 
-    impl Render for Noting {
+    impl Sink for Noting {
         fn render(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.note("render");
             Ok(())
@@ -358,7 +419,7 @@ mod tests {
         }
     }
 
-    impl Render for Stopping {
+    impl Sink for Stopping {
         fn render(&mut self, buf: MediaBuffer) -> Result<()> {
             self.0.render(buf)
         }
@@ -376,20 +437,20 @@ mod tests {
     /// `stopping`, which is `reset` where it says nothing of its own.
     #[test]
     fn a_flush_resets_and_a_stop_stops() {
-        use crate::{control::ControlMsg, element::SinkExt};
+        use crate::{control::ControlMsg, element::RawSinkExt};
 
         let noting = |seen: &Arc<Mutex<Vec<&'static str>>>| Noting {
             pp_log: element_pp_log(ElementType::Other, "noting", None),
             seen: Arc::clone(seen),
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut telling = RenderStage::new(Stopping(noting(&seen)));
+        let mut telling = SinkStage::new(Stopping(noting(&seen)));
         telling.control(&ControlMsg::Flush).unwrap();
         telling.control(&ControlMsg::Stop).unwrap();
         assert_eq!(*seen.lock().unwrap(), ["reset", "stopping"]);
 
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut plain = RenderStage::new(noting(&seen));
+        let mut plain = SinkStage::new(noting(&seen));
         plain.control(&ControlMsg::Flush).unwrap();
         plain.control(&ControlMsg::Stop).unwrap();
         assert_eq!(*seen.lock().unwrap(), ["reset", "reset"]);
@@ -403,7 +464,7 @@ mod tests {
         }
     }
 
-    /// A `Render` goes where a terminal does, and the framework asks of it
+    /// A `Sink` goes where a terminal does, and the framework asks of it
     /// what a pause, playing on, the end of the stream and a stop each
     /// ask — never a control message of its own.
     #[test]

@@ -16,7 +16,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
+        BoxSink, Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     elements::AudioFormat,
@@ -24,7 +24,7 @@ use crate::{
     elements::source::render_mode::RenderMode,
     error::Result,
     playback_state::{Bell, PlaybackState},
-    produce::produce_source,
+    produce::source_stage,
     stream::StreamEvent,
 };
 
@@ -108,7 +108,9 @@ pub struct AudioMixerOptions {
 /// stored copy of either could only ever disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MixFormat {
+    /// Samples a second.
     pub sample_rate: u32,
+    /// Interleaved channels, in the default layout for their count.
     pub channels: u16,
 }
 
@@ -358,7 +360,7 @@ pub struct MixerHandle {
 }
 
 impl MixerHandle {
-    /// Registers a new input under `name` and returns a [`Sink`] to use as
+    /// Registers a new input under `name` and returns a [`RawSink`] to use as
     /// a detached branch terminal. Build and attach it inside that source's
     /// own `Pipeline::new` wiring closure — a
     /// *different* pipeline/thread than this mixer's own, which is exactly
@@ -376,7 +378,7 @@ impl MixerHandle {
     pub fn add_source(
         &self,
         name: impl Into<String>,
-    ) -> std::result::Result<Box<dyn Sink>, AudioMixerError> {
+    ) -> std::result::Result<BoxSink, AudioMixerError> {
         let shared = self.shared.upgrade().ok_or(AudioMixerError::Stopped)?;
         let name: Arc<str> = name.into().into();
         let id = shared.next_input_id.fetch_add(1, Ordering::Relaxed);
@@ -397,7 +399,7 @@ impl MixerHandle {
         );
         drop(inputs);
         shared.arrived.ring();
-        Ok(Box::new(MixerInputSink {
+        Ok(BoxSink::new(MixerInputSink {
             name: name.clone(),
             id,
             pp_log: element_pp_log(ElementType::AudioMixerInput, &name, None),
@@ -530,7 +532,7 @@ impl Element for MixerInputSink {
     }
 }
 
-impl Sink for MixerInputSink {
+impl RawSink for MixerInputSink {
     /// Every input is summed sample by sample, so each carries decoded
     /// audio just as the mixed output does.
     fn input_contract(&self) -> InputContract {
@@ -668,7 +670,7 @@ impl Sink for MixerInputSink {
 /// lock; `AudioMixer` is a dynamic set of inputs (added/removed via
 /// [`MixerHandle`], from whatever thread each one's own source pipeline
 /// runs on) summed into one output. Unlike `Tee`, which is a passive
-/// [`Sink`] driven entirely by whatever calls `consume`, `AudioMixer` has
+/// [`RawSink`] driven entirely by whatever calls `consume`, `AudioMixer` has
 /// to drive itself: it's a source with a thread of its own,
 /// ticking every `TICK_INTERVAL` to sum however many samples each
 /// currently-attached input has ready — because mixing has to keep
@@ -710,9 +712,9 @@ impl Sink for MixerInputSink {
 /// [`crate::queue::Queue`] somewhere in that pipeline to wait on. The mix
 /// ends at the mode's `end`, or, without one, once every input has ended
 /// and been mixed to its last sample; and its format is fixed.
-pub struct AudioMixer(ProducingSource<Mixing>);
+pub struct AudioMixer(SourceStage<Mixing>);
 
-produce_source!(AudioMixer);
+source_stage!(AudioMixer);
 
 /// What an [`AudioMixer`] does when asked: the next stretch of the mix, once
 /// it is owed. All of its work, which the framework makes the source.
@@ -770,7 +772,7 @@ impl AudioMixer {
             fed: AtomicBool::new(false),
         });
         (
-            Self(ProducingSource::new(Mixing {
+            Self(SourceStage::new(Mixing {
                 name,
                 pp_log,
                 shared: shared.clone(),
@@ -910,7 +912,7 @@ impl Element for Mixing {
     }
 }
 
-impl Produce for Mixing {
+impl Source for Mixing {
     fn is_live(&self) -> bool {
         self.shared.mode.is_live()
     }
@@ -1087,10 +1089,10 @@ mod tests {
     use crate::pp_log::PpLog;
 
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use std::thread;
 
-    use crate::{bus::BusEvent, element::SourceElement, pipeline::Pipeline};
+    use crate::{bus::BusEvent, element::RawSource, pipeline::Pipeline};
 
     fn constant_frame(value: f32, samples: usize, rate: u32) -> ffmpeg::frame::Audio {
         let mut frame = ffmpeg::frame::Audio::new(
@@ -1164,7 +1166,7 @@ mod tests {
         }
     }
 
-    impl Sink for RecordingSink {
+    impl RawSink for RecordingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Audio(frame) = buf
                 && frame.samples() > 0
@@ -1197,7 +1199,7 @@ mod tests {
         }
     }
 
-    impl Sink for ShapeSink {
+    impl RawSink for ShapeSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Audio(frame) = buf
                 && frame.samples() > 0
@@ -1255,7 +1257,7 @@ mod tests {
         }
     }
 
-    impl Sink for StereoRecordingSink {
+    impl RawSink for StereoRecordingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Audio(frame) = buf
                 && frame.samples() > 0
@@ -1523,7 +1525,7 @@ mod tests {
     /// shutdown signal a live source like `WasapiCaptureSource` ever sends,
     /// since it never reaches `Eos` on its own — used to leave a stale
     /// entry in the mixer's input map forever, because only `Eos` cleared
-    /// it. `Sink::flow` is what a `Queue`/`Pipeline` actually calls on
+    /// it. `RawSink::flow` is what a `Queue`/`Pipeline` actually calls on
     /// `Stop` (mirrored by hand here, since this input isn't wired into a
     /// real second `Pipeline` in this test), not `consume`.
     #[test]
@@ -1558,7 +1560,7 @@ mod tests {
         assert_eq!(handle.source_count(), 1);
 
         // What a `Queue`/`Pipeline` actually calls on this input's own
-        // `Sink` when its upstream capture pipeline is stopped — never
+        // `RawSink` when its upstream capture pipeline is stopped — never
         // its end, since `WasapiCaptureSource` doesn't send one.
         input_a.control(&ControlMsg::Stop).unwrap();
 
@@ -1670,7 +1672,7 @@ mod tests {
     /// A misrouted `Packet`/`Video` buffer used to be silently logged and
     /// dropped — no `BusEvent::Error`, no way for a misconfigured pipeline
     /// to ever find out. Matches the typed-error pattern every other
-    /// `Sink` in this codebase already uses for a wrong `MediaBuffer`
+    /// `RawSink` in this codebase already uses for a wrong `MediaBuffer`
     /// variant (e.g. a muxer's track sinks).
     #[test]
     fn rejects_buffers_that_are_neither_audio_nor_eos() {

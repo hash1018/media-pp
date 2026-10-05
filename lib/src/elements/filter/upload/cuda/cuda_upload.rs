@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::filter::upload::nv12,
     error::Result,
     frame_size::ForSize,
@@ -19,7 +19,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `CudaUpload`. Converts into the crate-wide `Error` via
@@ -94,7 +94,7 @@ impl From<CudaFramesContextError> for CudaUploadError {
 /// [`crate::elements::CudaRenderer`] at all.
 /// [`crate::elements::CudaDownload`] is the mirror of this element.
 ///
-/// A `Filter`: receives via `Sink`, pushes the uploaded frame into its own
+/// A `RawFilter`: receives via `RawSink`, pushes the uploaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///
@@ -120,9 +120,9 @@ impl From<CudaFramesContextError> for CudaUploadError {
 /// `initial_pool_size` are all plain fields of the type-agnostic
 /// `AVHWFramesContext` that `ffmpeg-sys-next` binds directly, and FFmpeg's
 /// own code fills in everything else during `av_hwframe_ctx_init`.
-pub struct CudaUpload(TransformStage<Uploading>);
+pub struct CudaUpload(FilterStage<Uploading>);
 
-transform_filter!(CudaUpload);
+filter_stage!(CudaUpload);
 
 /// What a [`CudaUpload`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -168,7 +168,7 @@ impl CudaUpload {
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {:?} -> CUDA", format.pixel());
-        Self(TransformStage::new(Uploading {
+        Self(FilterStage::new(Uploading {
             name,
             pp_log,
             hw_device_ctx,
@@ -308,7 +308,7 @@ impl Element for Uploading {
     }
 }
 
-impl Transform for Uploading {
+impl Filter for Uploading {
     /// CPU-readable planes: uploading is what this does, so a frame already in device memory has no work here.
     fn input_contract(&self) -> InputContract {
         let layouts = match self.format {
@@ -364,7 +364,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::test_support::try_cuda_device;
 
     fn nv12_frame(width: u32, height: u32, pts: i64) -> MediaBuffer {

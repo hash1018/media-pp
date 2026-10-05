@@ -30,7 +30,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     elements::{CudaScalerInterp, filter::scaler::cuda::scale_graph::CudaScaleGraph},
@@ -45,7 +45,7 @@ use crate::{
     },
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
     stats::TickCounters,
     stream::StreamEvent,
@@ -312,7 +312,7 @@ impl CudaVideoCompositorHandle {
     ) -> std::result::Result<CudaVideoCompositorInput, CudaVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(CudaVideoCompositorInput {
-            sink: Box::new(CudaVideoCompositorInputSink {
+            sink: crate::element::BoxSink::new(CudaVideoCompositorInputSink {
                 pp_log: element_pp_log(ElementType::CudaVideoCompositor, &layer.name, None),
                 name: layer.name.clone(),
                 id: layer.id,
@@ -323,7 +323,7 @@ impl CudaVideoCompositorHandle {
         })
     }
 
-    /// Registers an input and returns *only* its layer handle — no `Sink` —
+    /// Registers an input and returns *only* its layer handle — no `RawSink` —
     /// for a caller that sets this input's picture itself through
     /// [`CudaVideoLayerHandle::set_frame`] rather than wiring a pipeline into
     /// it: a still image, a title card, a picture drawn by the application.
@@ -500,7 +500,7 @@ impl Element for CudaVideoCompositorInputSink {
     }
 }
 
-impl Sink for CudaVideoCompositorInputSink {
+impl RawSink for CudaVideoCompositorInputSink {
     /// Every layer is composited on the device, so each input arrives there just as the composed output does.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -765,9 +765,9 @@ impl Composed {
 /// NV12 chroma is subsampled 2x2, so a layer's placement and size are
 /// aligned to even pixels. A rectangle at an odd coordinate is drawn up to
 /// one pixel away from where it was asked for; nothing else changes.
-pub struct CudaVideoCompositor(ProducingSource<Compositing>);
+pub struct CudaVideoCompositor(SourceStage<Compositing>);
 
-produce_source!(CudaVideoCompositor);
+source_stage!(CudaVideoCompositor);
 
 /// What a [`CudaVideoCompositor`] does when asked: the next frame of the
 /// composition. All of its work, which the framework makes the source.
@@ -896,7 +896,7 @@ impl CudaVideoCompositor {
             options.frame_rate
         );
         Ok((
-            Self(ProducingSource::new(Compositing {
+            Self(SourceStage::new(Compositing {
                 name,
                 pp_log,
                 shared: shared.clone(),
@@ -1441,7 +1441,7 @@ impl Element for Compositing {
     }
 }
 
-impl Produce for Compositing {
+impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }

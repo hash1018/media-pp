@@ -307,7 +307,7 @@ pub enum HlsMuxerError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// Builds one HLS media playlist and returns one [`Sink`](crate::element::Sink) per registered
+/// Builds one HLS media playlist and returns one [`RawSink`](crate::element::RawSink) per registered
 /// track. FFmpeg owns segment boundary selection, fMP4/MPEG-TS creation,
 /// atomic playlist replacement, live-window trimming, and final
 /// `#EXT-X-ENDLIST` generation.
@@ -414,7 +414,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::MediaBuffer,
-        element::{Sink, Source},
+        element::{RawSink, SrcPads},
         elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions},
     };
 
@@ -466,7 +466,7 @@ mod tests {
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("HLS header must be written");
-        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track").into_raw());
 
         for tick in 0..ticks {
             encoder
@@ -648,8 +648,8 @@ mod tests {
         let mut sinks = muxer.open().unwrap();
         let sink_b = sinks.take(b).unwrap();
         let sink_a = sinks.take(a).unwrap();
-        encoder_a.src_pads()[0].link(sink_a);
-        encoder_b.src_pads()[0].link(sink_b);
+        encoder_a.src_pads()[0].link(sink_a.into_raw());
+        encoder_b.src_pads()[0].link(sink_b.into_raw());
 
         for tick in 0..60i64 {
             encoder_a

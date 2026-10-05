@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
@@ -20,7 +20,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `CudaConverter`. Converts into the crate-wide `Error`
@@ -65,7 +65,7 @@ pub enum CudaConverterError {
 
 /// Converts CUDA-resident BGRA surfaces into CUDA-resident NV12 ones.
 ///
-/// A `Filter`: receives via `Sink`, pushes the converted frame into its own
+/// A `RawFilter`: receives via `RawSink`, pushes the converted frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///
@@ -119,9 +119,9 @@ pub enum CudaConverterError {
 /// `RGB`/full pair `DxgiCaptureSource` puts on its own BGRA frames coming
 /// back. That is the one part of a frame's metadata this element
 /// deliberately replaces; PTS and duration cross unchanged.
-pub struct CudaConverter(TransformStage<Converting>);
+pub struct CudaConverter(FilterStage<Converting>);
 
-transform_filter!(CudaConverter);
+filter_stage!(CudaConverter);
 
 /// What a [`CudaConverter`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -185,7 +185,7 @@ impl CudaConverter {
             "opened: {:?} -> {output:?}",
             input_of(output)
         );
-        Ok(Self(TransformStage::new(Converting {
+        Ok(Self(FilterStage::new(Converting {
             name,
             pp_log,
             hw_device_ctx,
@@ -403,7 +403,7 @@ impl Element for Converting {
     }
 }
 
-impl Transform for Converting {
+impl Filter for Converting {
     /// Converts pixel layout on the device; the layout itself is a runtime value, not part of this.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -456,7 +456,7 @@ mod tests {
 
     use super::*;
     use crate::buffer::picture_id;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::elements::CudaUpload;
     use crate::test_support::try_cuda_device;
 

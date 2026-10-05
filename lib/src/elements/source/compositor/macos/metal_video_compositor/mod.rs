@@ -32,7 +32,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     elements::{VideoToolboxDevice, VideoToolboxFrameFormat},
@@ -46,7 +46,7 @@ use crate::{
         },
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
     stats::TickCounters,
     stream::StreamEvent,
@@ -292,7 +292,7 @@ impl MetalVideoCompositorHandle {
     ) -> std::result::Result<MetalVideoCompositorInput, MetalVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(MetalVideoCompositorInput {
-            sink: Box::new(MetalVideoCompositorInputSink {
+            sink: crate::element::BoxSink::new(MetalVideoCompositorInputSink {
                 pp_log: element_pp_log(ElementType::MetalVideoCompositor, &layer.name, None),
                 name: layer.name.clone(),
                 id: layer.id,
@@ -303,7 +303,7 @@ impl MetalVideoCompositorHandle {
         })
     }
 
-    /// Registers an input and returns *only* its layer handle — no `Sink` —
+    /// Registers an input and returns *only* its layer handle — no `RawSink` —
     /// for a caller that sets this input's picture itself through
     /// [`MetalVideoLayerHandle::set_frame`] rather than wiring a pipeline
     /// into it. Replaces any registration of the same name, as
@@ -465,7 +465,7 @@ impl Element for MetalVideoCompositorInputSink {
     }
 }
 
-impl Sink for MetalVideoCompositorInputSink {
+impl RawSink for MetalVideoCompositorInputSink {
     /// Every layer is drawn on the GPU, from a VideoToolbox frame of its own.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -745,9 +745,9 @@ impl Kernels {
 /// keeps its alpha, which is blended as the other compositors blend it,
 /// [`VideoLayer::premultiplied_alpha`] included. The output is what
 /// `VideoToolboxEncoder` takes, in either format.
-pub struct MetalVideoCompositor(ProducingSource<Compositing>);
+pub struct MetalVideoCompositor(SourceStage<Compositing>);
 
-produce_source!(MetalVideoCompositor);
+source_stage!(MetalVideoCompositor);
 
 /// What a [`MetalVideoCompositor`] does when asked: the next frame of the
 /// composition. All of its work, which the framework makes the source.
@@ -856,7 +856,7 @@ impl MetalVideoCompositor {
             gpu.device.name()
         );
         Ok((
-            Self(ProducingSource::new(Compositing {
+            Self(SourceStage::new(Compositing {
                 name,
                 pp_log,
                 shared: shared.clone(),
@@ -1356,7 +1356,7 @@ impl Element for Compositing {
     }
 }
 
-impl Produce for Compositing {
+impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }

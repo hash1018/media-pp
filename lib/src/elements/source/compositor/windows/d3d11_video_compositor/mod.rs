@@ -55,7 +55,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     elements::VideoCompositorOptions,
@@ -66,7 +66,7 @@ use crate::{
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
     stats::TickCounters,
     stream::StreamEvent,
@@ -321,11 +321,11 @@ pub type D3d11VideoCompositorInput = crate::elements::CompositorInput<D3d11Video
 
 impl D3d11VideoCompositorHandle {
     /// Registers an input under `name` and returns its layer handle —
-    /// shared by [`Self::add_source`] (which additionally wraps a `Sink`
+    /// shared by [`Self::add_source`] (which additionally wraps a `RawSink`
     /// around the same registration) and [`Self::add_layer`] (which
     /// returns just this handle, for handle-driven inputs like
     /// [`crate::elements::TextLayer`] that never receive `Pipeline`
-    /// frames and would otherwise build a `Sink` only to discard it).
+    /// frames and would otherwise build a `RawSink` only to discard it).
     fn register_input(
         &self,
         name: impl Into<String>,
@@ -363,7 +363,7 @@ impl D3d11VideoCompositorHandle {
         })
     }
 
-    /// Registers an input and returns its terminal `Sink` — the end of the
+    /// Registers an input and returns its terminal `RawSink` — the end of the
     /// branch that feeds it — and its [`D3d11VideoLayerHandle`], which moves,
     /// shows, hides and restacks it while it runs. Reusing `name` replaces the
     /// old registration; the replaced sink and handle can no longer affect
@@ -385,7 +385,7 @@ impl D3d11VideoCompositorHandle {
     ) -> std::result::Result<D3d11VideoCompositorInput, D3d11VideoCompositorError> {
         let layer_handle = self.register_input(name, layer, true)?;
         Ok(D3d11VideoCompositorInput {
-            sink: Box::new(D3d11VideoCompositorInputSink {
+            sink: crate::element::BoxSink::new(D3d11VideoCompositorInputSink {
                 name: layer_handle.name.clone(),
                 pp_log: element_pp_log(ElementType::D3d11VideoCompositor, &layer_handle.name, None),
                 shared: self.shared.clone(),
@@ -395,7 +395,7 @@ impl D3d11VideoCompositorHandle {
         })
     }
 
-    /// Registers an input and returns *only* its layer handle — no `Sink`
+    /// Registers an input and returns *only* its layer handle — no `RawSink`
     /// at all — for a caller that drives this input's frames directly via
     /// [`D3d11VideoLayerHandle::set_frame`] instead of wiring a `Pipeline`
     /// branch into it (e.g. [`crate::elements::TextLayer`]). Same
@@ -579,7 +579,7 @@ impl Element for D3d11VideoCompositorInputSink {
     }
 }
 
-impl Sink for D3d11VideoCompositorInputSink {
+impl RawSink for D3d11VideoCompositorInputSink {
     /// Every layer is composited on the GPU, so each input takes a
     /// device texture just as the composed output produces one.
     fn input_contract(&self) -> InputContract {
@@ -870,9 +870,9 @@ fn visible_uv_window(
 /// conventional one-input filter: upstream pipelines terminate at
 /// the sinks returned by [`D3d11VideoCompositorHandle::add_source`], while
 /// this element's own pipeline drives output on its independent clock.
-pub struct D3d11VideoCompositor(ProducingSource<Compositing>);
+pub struct D3d11VideoCompositor(SourceStage<Compositing>);
 
-produce_source!(D3d11VideoCompositor);
+source_stage!(D3d11VideoCompositor);
 
 /// What a [`D3d11VideoCompositor`] does when asked: the next frame of the
 /// composition. All of its work, which the framework makes the source.
@@ -994,7 +994,7 @@ impl D3d11VideoCompositor {
             options.frame_rate
         );
         Ok((
-            Self(ProducingSource::new(Compositing {
+            Self(SourceStage::new(Compositing {
                 name,
                 pp_log,
                 shared: shared.clone(),
@@ -1101,7 +1101,7 @@ impl Compositing {
     /// skipped and reported on `bus` as a [`BusEvent::Error`] rather than
     /// failing the whole call — same "elements don't die on data errors"
     /// contract as the rest of this crate (see
-    /// [`crate::element::Produce::produce`]'s own docs: a `Result::Err`
+    /// [`crate::element::Source::produce`]'s own docs: a `Result::Err`
     /// returned from here would end the source, and this compositor's
     /// output with it permanently, which one misbehaving
     /// input has no business doing). Only a genuine infrastructure failure
@@ -1463,7 +1463,7 @@ impl Element for Compositing {
     }
 }
 
-impl Produce for Compositing {
+impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }

@@ -11,7 +11,7 @@ use ffmpeg_next as ffmpeg;
 /// A choice made at construction, not a switch: a live element and an
 /// offline one differ in what a pipeline may do with them — whether it can
 /// be sought, whether it can preroll — and a pipeline settles that when it
-/// is wired (see [`crate::element::SourceElement::is_live`]).
+/// is wired (see [`crate::element::RawSource::is_live`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Emits at its own rate by the wall clock, drawing whatever each input
@@ -30,6 +30,14 @@ pub enum RenderMode {
     /// frame begins; it holds back whatever feeds it once it is a frame
     /// ahead of the output, which needs a [`crate::queue::Queue`] somewhere
     /// upstream in its pipeline to wait on.
+    ///
+    /// So the render goes as fast as its slowest input, and an input that
+    /// makes its frames at a rate of its own — a
+    /// [`TestVideoSource`](crate::elements::TestVideoSource), a capture —
+    /// holds the whole export to that rate, and never ends it without an
+    /// `end`. A still background is the compositor's own background colour,
+    /// or a layer whose picture is set rather than fed; a file decodes as
+    /// fast as it can.
     Offline {
         /// The output time the stream ends at. `None` ends it once every
         /// input fed through a sink has ended and been shown to its last

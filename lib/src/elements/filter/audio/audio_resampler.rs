@@ -7,11 +7,11 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::AudioFormat,
     error::Result,
     time::{MediaTimestamp, TimeBase},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// The reusable `libswresample` state shared by [`AudioResampler`] and
@@ -157,9 +157,9 @@ pub enum AudioResamplerError {
 /// contiguous across resampler buffering. The first output is anchored to
 /// the first input frame's PTS, rescaled from the time base that frame
 /// carries — see [`crate::buffer::time_base`].
-pub struct AudioResampler(TransformStage<Resampling>);
+pub struct AudioResampler(FilterStage<Resampling>);
 
-transform_filter!(AudioResampler);
+filter_stage!(AudioResampler);
 
 /// What an [`AudioResampler`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -185,7 +185,7 @@ impl AudioResampler {
             target.channels(),
             target.sample_format
         );
-        Self(TransformStage::new(Resampling {
+        Self(FilterStage::new(Resampling {
             name,
             pp_log,
             target,
@@ -266,7 +266,7 @@ impl Element for Resampling {
     }
 }
 
-impl Transform for Resampling {
+impl Filter for Resampling {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -322,7 +322,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
 
     fn f32_packed_frame(rate: u32, channels: u16, samples: usize, pts: i64) -> MediaBuffer {
         let format = ffmpeg::format::Sample::F32(Type::Packed);

@@ -17,7 +17,7 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
@@ -25,7 +25,7 @@ use crate::{
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/video_effect_bgra.hlsl");
@@ -170,9 +170,9 @@ impl EffectConstants {
 ///
 /// An effect that changes nothing, and an element that is turned off, hand
 /// each frame straight through — the same texture, not a copy of it.
-pub struct D3d11VideoEffect(TransformStage<Applying>);
+pub struct D3d11VideoEffect(FilterStage<Applying>);
 
-transform_filter!(D3d11VideoEffect);
+filter_stage!(D3d11VideoEffect);
 
 /// What a [`D3d11VideoEffect`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -242,7 +242,7 @@ impl D3d11VideoEffect {
         pp_info!(pp_log: &pp_log, "created: {} {effect:?}", effect.name());
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self(TransformStage::new(Applying {
+        let element = Self(FilterStage::new(Applying {
             name,
             pp_log,
             device: device.clone(),
@@ -458,7 +458,7 @@ impl Element for Applying {
     }
 }
 
-impl Transform for Applying {
+impl Filter for Applying {
     /// Drawn on the GPU; a system-memory frame belongs in SwVideoEffect.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -512,7 +512,7 @@ mod tests {
 
     use super::super::super::options::apply;
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{ColorCorrection, D3d11Download, LumaKey};
     use crate::test_support::try_d3d11_gpu as try_device;
 

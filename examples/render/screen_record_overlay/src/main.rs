@@ -147,7 +147,7 @@ mod linux_example {
         )?;
         let capture_sink = capture_input.sink;
 
-        // The text layer receives no frames — no `Sink` to wire up, just a
+        // The text layer receives no frames — no `RawSink` to wire up, just a
         // handle driven by `set_text`.
         let (font_path, font_data) = FONT_CANDIDATES
             .iter()
@@ -361,7 +361,7 @@ mod macos_example {
         )?;
         let capture_sink = capture_input.sink;
 
-        // The text layer receives no frames — no `Sink` to wire up, just a
+        // The text layer receives no frames — no `RawSink` to wire up, just a
         // handle driven by `set_text`.
         let (font_path, font_data) = FONT_CANDIDATES
             .iter()

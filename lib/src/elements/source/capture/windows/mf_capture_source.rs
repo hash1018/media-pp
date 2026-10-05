@@ -14,7 +14,7 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::VideoFormat,
     error::Result,
     platform::windows::{
@@ -25,7 +25,7 @@ use crate::{
         },
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// The unit every emitted `pts` counts in: Media Foundation's own 100ns
@@ -161,9 +161,9 @@ pub struct MfCaptureOptions {
 /// picking deliberately. A camera that stops delivering without failing
 /// would leave that call parked; in practice a device that goes away fails
 /// the read rather than going quiet, which is what makes this bounded.
-pub struct MfCaptureSource(ProducingSource<Capturing>);
+pub struct MfCaptureSource(SourceStage<Capturing>);
 
-produce_source!(MfCaptureSource);
+source_stage!(MfCaptureSource);
 
 /// What an [`MfCaptureSource`] does when asked: the camera's next picture.
 /// All of its work, which the framework makes the source.
@@ -365,7 +365,7 @@ impl MfCaptureSource {
         );
 
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 pp_log,
                 name: name.clone(),
                 _runtime: runtime,
@@ -630,7 +630,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

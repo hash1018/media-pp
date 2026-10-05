@@ -29,12 +29,12 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produce, Produced, ProducingSource, Sink, Wait,
+        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
         element_pp_log,
     },
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    produce::produce_source,
+    produce::source_stage,
     schedule::PeriodicSchedule,
     stats::TickCounters,
     stream::StreamEvent,
@@ -267,7 +267,7 @@ impl SwVideoCompositorHandle {
     ) -> std::result::Result<SwVideoCompositorInput, SwVideoCompositorError> {
         let layer = self.register(name, layer, true)?;
         Ok(SwVideoCompositorInput {
-            sink: Box::new(SwVideoCompositorInputSink {
+            sink: crate::element::BoxSink::new(SwVideoCompositorInputSink {
                 name: layer.name.clone(),
                 pp_log: element_pp_log(ElementType::SwVideoCompositor, &layer.name, None),
                 shared: self.shared.clone(),
@@ -277,7 +277,7 @@ impl SwVideoCompositorHandle {
         })
     }
 
-    /// Registers an input and returns *only* its layer handle — no `Sink` —
+    /// Registers an input and returns *only* its layer handle — no `RawSink` —
     /// for a caller that sets this input's picture itself through
     /// [`SwVideoLayerHandle::set_frame`] rather than wiring a pipeline into
     /// it: a still image, a title card, a picture drawn by the application.
@@ -352,18 +352,14 @@ impl SwVideoCompositorHandle {
         }
     }
 
-    /// Returns the number of compositor inputs currently registered.
-    ///
-    /// Returns zero after the compositor has been dropped.
     /// Changes the rate this compositor emits at, from the next tick.
     ///
     /// Fails with [`SwVideoCompositorError::InvalidFrameRate`] for a rate that is not
     /// positive, and [`SwVideoCompositorError::Stopped`] for a compositor that has already
     /// been dropped; either way the running rate is left alone. An offline compositor
     /// refuses any change with [`SwVideoCompositorError::FixedFrameRate`].
-    /// The same contract as the GPU
-    /// compositors' setters, and with the same caveat: [`
-    /// SwVideoCompositor::time_base`] is the reciprocal of this and the output
+    /// The same contract as the GPU compositors' setters, and with the same
+    /// caveat: [`SwVideoCompositor::time_base`] is the reciprocal of this and the output
     /// `pts` is a tick counter in those units, so a change re-means every
     /// timestamp after it while the ones already downstream were stamped under
     /// the old rate — see [`crate::rate`].
@@ -392,6 +388,7 @@ impl SwVideoCompositorHandle {
         Some(self.shared.upgrade()?.frame_rate.get())
     }
 
+    /// How many inputs are registered, or zero once the compositor is gone.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()
@@ -581,7 +578,7 @@ impl Element for SwVideoCompositorInputSink {
     }
 }
 
-impl Sink for SwVideoCompositorInputSink {
+impl RawSink for SwVideoCompositorInputSink {
     /// The CPU counterpart of D3d11VideoCompositor: layers are blended
     /// plane by plane, so every input arrives in system memory.
     fn input_contract(&self) -> InputContract {
@@ -785,9 +782,9 @@ impl InputScaler {
 /// element's own pipeline drives output on its independent clock. Input
 /// frame PTS values therefore do not become output PTS; output advances by
 /// one tick in [`SwVideoCompositor::time_base`] for every composed frame.
-pub struct SwVideoCompositor(ProducingSource<Compositing>);
+pub struct SwVideoCompositor(SourceStage<Compositing>);
 
-produce_source!(SwVideoCompositor);
+source_stage!(SwVideoCompositor);
 
 /// What a [`SwVideoCompositor`] does when asked: the next frame of the
 /// composition. All of its work, which the framework makes the source.
@@ -866,7 +863,7 @@ impl SwVideoCompositor {
             options.mode
         );
         Ok((
-            Self(ProducingSource::new(Compositing {
+            Self(SourceStage::new(Compositing {
                 name,
                 pp_log,
                 shared: shared.clone(),
@@ -1109,7 +1106,7 @@ impl Element for Compositing {
     }
 }
 
-impl Produce for Compositing {
+impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
     }
@@ -1411,8 +1408,8 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::SinkExt;
-    use crate::element::SourceElement;
+    use crate::element::RawSinkExt;
+    use crate::element::RawSource;
     use crate::elements::{SwTextLayerError, TextLayer};
 
     fn options(width: u32, height: u32) -> VideoCompositorOptions {
@@ -1450,9 +1447,9 @@ mod tests {
         handle: &SwVideoCompositorHandle,
         name: &str,
         layer: VideoLayer,
-    ) -> (Box<dyn Sink>, SwVideoLayerHandle) {
+    ) -> (Box<dyn RawSink>, SwVideoLayerHandle) {
         let input = handle.add_source(name, layer).unwrap();
-        (input.sink, input.layer)
+        (input.sink.into_raw(), input.layer)
     }
 
     /// Four quadrants in one frame, so which part of it was drawn is
@@ -1892,7 +1889,7 @@ mod tests {
         }
     }
 
-    impl Sink for TimestampSink {
+    impl RawSink for TimestampSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if matches!(buf, MediaBuffer::Video(_)) {
                 thread::sleep(self.hold);

@@ -25,7 +25,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, ProducingSource},
+    element::{Element, ElementType, SourceStage},
     elements::{AppSource, AppSourceHandle, source::app_source::Receiving},
     error::{D3d11FrameWrapError, D3d11SharedDeviceError},
     platform::windows::{
@@ -33,7 +33,7 @@ use crate::{
     },
     pool::UnboundObjectPool,
     pp_log::pp_info,
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// The one texture format taken here: what a compositing producer — a
@@ -149,9 +149,9 @@ pub enum D3d11SharedTextureSourceError {
 /// engine composites its page with the alpha already multiplied into the
 /// colour, and a layer drawn from such a frame has to say so — see
 /// [`VideoLayer::premultiplied_alpha`](crate::elements::VideoLayer::premultiplied_alpha).
-pub struct D3d11SharedTextureSource(ProducingSource<Receiving>);
+pub struct D3d11SharedTextureSource(SourceStage<Receiving>);
 
-produce_source!(D3d11SharedTextureSource);
+source_stage!(D3d11SharedTextureSource);
 
 /// Pushes another device's textures into a [`D3d11SharedTextureSource`].
 ///
@@ -449,7 +449,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::Sink,
+        element::RawSink,
         elements::D3d11Download,
         pipeline::Pipeline,
         test_support::{try_d3d11_device, try_d3d11_gpu},
@@ -750,7 +750,7 @@ mod tests {
     /// cannot ask it for.
     #[test]
     fn it_is_live_where_a_plain_app_source_is_not() {
-        use crate::element::SourceElement;
+        use crate::element::RawSource;
 
         let Some(gpu) = try_d3d11_gpu() else {
             return;

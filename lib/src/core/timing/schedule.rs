@@ -5,7 +5,7 @@
 //! turn into a burst of back-to-back catch-up work.
 //!
 //! What a pause leaves out is not this module's: a
-//! [`crate::element::Produce`] keeps its schedule on
+//! [`crate::element::Source`] keeps its schedule on
 //! [`crate::element::Wait::now`], a clock that stands still while the
 //! pipeline is paused.
 

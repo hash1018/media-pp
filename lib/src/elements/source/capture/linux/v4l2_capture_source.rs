@@ -31,12 +31,12 @@ use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::VideoFormat,
     error::Result,
     platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device},
     pool::UnboundObjectPool,
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// How many packets in a row the decoder may refuse before the source gives
@@ -104,9 +104,9 @@ pub struct V4l2CaptureOptions {
 /// away, and a device that disappears mid-capture ends the source with an
 /// error rather than reconnecting — a pipeline is one-shot, so coming back
 /// is whoever watches the bus building a new one.
-pub struct V4l2CaptureSource(ProducingSource<Capturing>);
+pub struct V4l2CaptureSource(SourceStage<Capturing>);
 
-produce_source!(V4l2CaptureSource);
+source_stage!(V4l2CaptureSource);
 
 /// What a [`V4l2CaptureSource`] hands on, a picture at a time as the
 /// camera delivers them: all of its work, which the framework makes the
@@ -249,7 +249,7 @@ impl V4l2CaptureSource {
             decoder.format()
         );
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 name,
                 pp_log,
                 input,
@@ -414,7 +414,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }
@@ -462,8 +462,8 @@ mod tests {
     use super::*;
     use crate::bus::Bus;
     use crate::control::{ControlMsg, channel};
-    use crate::element::Sink;
-    use crate::element::{Source, SourceElement};
+    use crate::element::RawSink;
+    use crate::element::{RawSource, SrcPads};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
@@ -506,7 +506,7 @@ mod tests {
         }
     }
 
-    impl Sink for CountingSink {
+    impl RawSink for CountingSink {
         fn consume(&mut self, buffer: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Video(frame) = buffer {
                 self.frames

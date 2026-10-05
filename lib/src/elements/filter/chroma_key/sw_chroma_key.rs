@@ -10,11 +10,11 @@ use crate::{
     buffer::MediaBuffer,
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// How many output frames [`SwChromaKey`] pre-allocates once it learns its
@@ -50,8 +50,8 @@ pub enum SwChromaKeyError {
 
 /// Keys a solid background color out of a decoded BGRA frame into alpha —
 /// the software half of this crate's chroma-key support, the GPU-resident
-/// other half being `D3d11ChromaKey`. A `Filter`:
-/// receives via `Sink`, pushes the keyed frame on through its own (single)
+/// other half being `D3d11ChromaKey`. A `RawFilter`:
+/// receives via `RawSink`, pushes the keyed frame on through its own (single)
 /// src pad.
 ///
 /// Expects `BGRA` input — the same format [`crate::elements::SwVideoCompositor`]/
@@ -61,9 +61,9 @@ pub enum SwChromaKeyError {
 /// through unchanged; only alpha is written, and it is the key's coverage
 /// times the alpha each pixel arrived with, so an opaque picture is keyed as
 /// it always was and one another key already cut into keeps those cuts.
-pub struct SwChromaKey(TransformStage<Keying>);
+pub struct SwChromaKey(FilterStage<Keying>);
 
-transform_filter!(SwChromaKey);
+filter_stage!(SwChromaKey);
 
 /// What a [`SwChromaKey`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -114,7 +114,7 @@ impl SwChromaKey {
         );
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self(TransformStage::new(Keying {
+        let element = Self(FilterStage::new(Keying {
             name,
             pp_log,
             options,
@@ -193,7 +193,7 @@ impl Element for Keying {
     }
 }
 
-impl Transform for Keying {
+impl Filter for Keying {
     /// Keys pixel by pixel on the CPU; the GPU counterpart is D3d11ChromaKey.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -349,7 +349,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{super::options::ChromaKeyMethod, *};
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
 
     fn new_chroma_key(
         options: ChromaKeyOptions,

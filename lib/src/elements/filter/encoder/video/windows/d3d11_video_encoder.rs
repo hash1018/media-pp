@@ -21,7 +21,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     error::{D3d11SharedDeviceError, Result},
     platform::{
@@ -30,7 +30,7 @@ use crate::{
         windows::d3d11_gpu::D3d11Gpu,
         windows::d3d11va::{create_hw_device_ctx, d3d11va_texture, or_frames_bind_flags},
     },
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 // The video-encoder helpers every backend shares, a module up from this one.
@@ -320,7 +320,7 @@ pub struct D3d11VideoEncoderOptions {
 /// [`crate::elements::SwEncoder`], for a pipeline built entirely on one
 /// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own docs
 /// on why that means no explicit fence/sync is needed anywhere in this
-/// stack). A `Filter`: receives via `Sink`, pushes what it produces into
+/// stack). A `RawFilter`: receives via `RawSink`, pushes what it produces into
 /// its own single src pad.
 ///
 /// # Why the input texture is copied rather than handed over directly
@@ -356,9 +356,9 @@ pub struct D3d11VideoEncoderOptions {
 /// arrive, or until `Eos` flushes what's left. `consume` drains
 /// `receive_packet` in a loop after every `send_frame`/`send_eof`, the same
 /// shape as [`crate::elements::SwEncoder`]'s own drain loop.
-pub struct D3d11VideoEncoder(TransformStage<Encoding>);
+pub struct D3d11VideoEncoder(FilterStage<Encoding>);
 
-transform_filter!(D3d11VideoEncoder);
+filter_stage!(D3d11VideoEncoder);
 
 /// What a [`D3d11VideoEncoder`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -605,7 +605,7 @@ impl D3d11VideoEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self(TransformStage::new(Encoding {
+        Ok(Self(FilterStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -866,7 +866,7 @@ impl Element for Encoding {
     }
 }
 
-impl Transform for Encoding {
+impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
@@ -907,7 +907,7 @@ impl Transform for Encoding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::test_support::try_d3d11_gpu as try_device;
 
     fn options(
@@ -1251,7 +1251,7 @@ mod tests {
             .add_stream("video", &encoder)
             .expect("the track is added");
         let mut sinks = muxer.open().expect("the header is written");
-        encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track"));
+        encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track").into_raw());
 
         let (width, height) = (options.width, options.height);
         let mut scaler =

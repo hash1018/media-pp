@@ -13,11 +13,11 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_info},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Why an [`AudioWaveform`] could not be made or could not draw.
@@ -105,9 +105,9 @@ impl Default for AudioWaveformOptions {
 ///
 /// A `Flush` — a seek — forgets what it had, and the next sound it is given
 /// starts the pictures again from there. `Eos` is passed on as it comes.
-pub struct AudioWaveform(TransformStage<Drawing>);
+pub struct AudioWaveform(FilterStage<Drawing>);
 
-transform_filter!(AudioWaveform);
+filter_stage!(AudioWaveform);
 
 /// What an [`AudioWaveform`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -159,7 +159,7 @@ impl AudioWaveform {
         let pp_log = element_pp_log(ElementType::AudioWaveform, &name, None);
         let (width, height) = (options.width, options.height);
         pp_info!(pp_log: &pp_log, "created: {width}x{height} at {rate}");
-        Ok(Self(TransformStage::new(Drawing {
+        Ok(Self(FilterStage::new(Drawing {
             pp_log,
             name,
             options,
@@ -312,7 +312,7 @@ impl Element for Drawing {
     }
 }
 
-impl Transform for Drawing {
+impl Filter for Drawing {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
@@ -346,8 +346,8 @@ impl Transform for Drawing {
 mod tests {
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::Sink;
-    use crate::element::SinkExt;
+    use crate::element::RawSink;
+    use crate::element::RawSinkExt;
     use crate::test_support::capture;
 
     const RATE: u32 = 48_000;

@@ -8,10 +8,10 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::{MediaBuffer, picture_id},
     contract::InputContract,
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
     pool::UnboundObjectPoolRef,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Forwards a video frame only when its picture is not the one it last
@@ -65,9 +65,9 @@ use crate::{
 ///
 /// It reads no pixels, so it works the same on a GPU frame as on one in
 /// system memory, and costs a pointer comparison either way.
-pub struct ChangeGate(TransformStage<Gating>);
+pub struct ChangeGate(FilterStage<Gating>);
 
-transform_filter!(ChangeGate);
+filter_stage!(ChangeGate);
 
 /// What a [`ChangeGate`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -98,7 +98,7 @@ impl ChangeGate {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::ChangeGate, &name, None);
         pp_info!(pp_log: &pp_log, "created: at most one frame per {min_interval:?}");
-        Self(TransformStage::new(Gating {
+        Self(FilterStage::new(Gating {
             pp_log,
             name,
             min_interval,
@@ -164,7 +164,7 @@ impl Element for Gating {
     }
 }
 
-impl Transform for Gating {
+impl Filter for Gating {
     /// Whatever arrives, wherever its pixels live: this compares pointers and
     /// reads nothing, so it passes the upstream contract straight through.
     fn input_contract(&self) -> InputContract {
@@ -201,8 +201,8 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::Sink;
-    use crate::element::SinkExt;
+    use crate::element::RawSink;
+    use crate::element::RawSinkExt;
     use crate::pool::UnboundObjectPool;
 
     /// One frame with its own picture. System memory, because what this gate

@@ -12,9 +12,9 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 use crate::elements::filter::is_codec_drain_boundary;
@@ -241,17 +241,17 @@ pub struct SwEncoderOptions {
 
 /// Encodes `Video` frames in [`SwEncoderOptions::pixel_format`] (`YUV420P`
 /// for most) into `Packet`s via a software encoder (see [`VideoCodec`]) — the mirror image of
-/// [`crate::elements::SwDecoder`]'s decode direction. A `Filter`: receives
-/// via `Sink`, pushes what it produces into its own (single) src pad.
+/// [`crate::elements::SwDecoder`]'s decode direction. A `RawFilter`: receives
+/// via `RawSink`, pushes what it produces into its own (single) src pad.
 ///
 /// One frame can turn into zero or one packets per `send_frame` (B-frame
 /// reordering delays some frames' packets until later ones arrive, or
 /// until `Eos` flushes whatever's left) — `consume` drains `receive_packet`
 /// in a loop after every `send_frame`/`send_eof`, same shape as
 /// `SwDecoder`'s own `receive_frame` drain loop.
-pub struct SwEncoder(TransformStage<Encoding>);
+pub struct SwEncoder(FilterStage<Encoding>);
 
-transform_filter!(SwEncoder);
+filter_stage!(SwEncoder);
 
 /// What a [`SwEncoder`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -397,7 +397,7 @@ impl SwEncoder {
             options.height,
             options.bit_rate
         );
-        Ok(Self(TransformStage::new(Encoding {
+        Ok(Self(FilterStage::new(Encoding {
             name,
             pp_log,
             encoder,
@@ -484,7 +484,7 @@ impl Element for Encoding {
     }
 }
 
-impl Transform for Encoding {
+impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
@@ -558,7 +558,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
 
     #[test]
     fn nominal_frame_duration_is_expressed_in_encoder_time_base_ticks() {
@@ -649,7 +649,7 @@ mod tests {
         }
     }
 
-    impl Sink for CapturingSink {
+    impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = buf {
                 self.packets.lock().unwrap().push(packet);

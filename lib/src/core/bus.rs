@@ -237,6 +237,8 @@ impl Bus {
         );
     }
 
+    /// Puts `event` on the bus for whoever reads it, and records it in the
+    /// log under the identity in `pp_log` — the posting element's own.
     pub fn post(&self, pp_log: &PpLog, event: BusEvent) {
         // Each `pp_*` macro checks `crate::log::enabled` before evaluating its
         // arguments, so posting to a bus nobody is logging costs no `format!`

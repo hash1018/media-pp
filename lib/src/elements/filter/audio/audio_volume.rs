@@ -13,9 +13,9 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::Result,
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -185,9 +185,9 @@ impl AudioVolumeHandle {
 /// Runtime changes made through [`AudioVolumeHandle`] are linearly ramped
 /// per audio sample. This changes parameters only and never changes graph
 /// topology.
-pub struct AudioVolume(TransformStage<Adjusting>);
+pub struct AudioVolume(FilterStage<Adjusting>);
 
-transform_filter!(AudioVolume);
+filter_stage!(AudioVolume);
 
 /// What an [`AudioVolume`] does to each buffer: all of its work, which the
 /// framework makes the filter.
@@ -231,7 +231,7 @@ impl AudioVolume {
             options.ramp_duration
         );
         Ok((
-            Self(TransformStage::new(Adjusting {
+            Self(FilterStage::new(Adjusting {
                 name: name.clone(),
                 pp_log,
                 control,
@@ -340,7 +340,7 @@ impl Element for Adjusting {
     }
 }
 
-impl Transform for Adjusting {
+impl Filter for Adjusting {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -482,7 +482,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
 
     fn new_volume(
         options: AudioVolumeOptions,

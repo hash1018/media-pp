@@ -1,10 +1,10 @@
-//! Writing a source by what it makes alone — see [`Produce`].
+//! Writing a source by what it makes alone — see [`Source`].
 //!
-//! A source written directly, as a [`SourceElement`], runs its own loop:
+//! A source written directly, as a [`RawSource`], runs its own loop:
 //! it takes its control between buffers and hands each request on the one
 //! way every source must, keeps a pause out of the schedule it makes things
 //! on, and ends its stream. Seventeen did, each a little differently —
-//! docs/stream-events.md lists what that cost. A [`Produce`] makes the next
+//! docs/stream-events.md lists what that cost. A [`Source`] makes the next
 //! thing when asked; the framework runs the loop.
 
 use std::{
@@ -18,7 +18,7 @@ use crate::{
     contract::OutputContract,
     control::{ChannelGone, ControlMsg, ControlReceiver, RequestKind, handle_request},
     element::{
-        Context, Element, ElementType, ReversibleSource, SeekableSource, Source, SourceElement,
+        Context, Element, ElementType, RawSource, ReversibleSource, SeekableSource, SrcPads,
     },
     error::Result,
     graph::ElementId,
@@ -42,20 +42,20 @@ use crate::{
 /// Put in a pipeline as any source is, with
 /// [`Pipeline::new`](crate::pipeline::Pipeline::new) or
 /// [`PipelineBuilder::add_source`](crate::pipeline::PipelineBuilder::add_source),
-/// which take a `Produce` as they take a [`SourceElement`] (see
+/// which take a `Source` as they take a [`RawSource`] (see
 /// [`IntoSource`]). One output by default; a source with several — a
 /// stream each, as a demuxer has — says what they are in
 /// [`Self::outputs`] and which each buffer is for in [`Produced::On`].
-pub trait Produce: Element {
+pub trait Source: Element {
     /// Whether it makes what it makes at a rate of its own — a camera, a
     /// clock of its own — rather than as fast as it is asked: see
-    /// [`SourceElement::is_live`].
+    /// [`RawSource::is_live`].
     fn is_live(&self) -> bool;
 
     /// The next thing it makes. Blocks, where it has to, only through
     /// `wait`; let go, it answers [`Produced::Nothing`] and is asked again.
     ///
-    /// An `Err` ends the source, as one [`SourceElement::run`] returns
+    /// An `Err` ends the source, as one [`RawSource::run`] returns
     /// does. What goes wrong with one part of what it makes and not the
     /// rest — a compositor's layer it cannot draw — is posted on the bus
     /// its [`Context`] carries, kept from
@@ -80,13 +80,13 @@ pub trait Produce: Element {
     }
 
     /// Stops what it reads from while the pipeline is paused — see
-    /// [`SourceElement::pausing`]. Nothing by default.
+    /// [`RawSource::pausing`]. Nothing by default.
     fn pausing(&mut self) -> Result<()> {
         Ok(())
     }
 
     /// Starts it again once playback goes on — see
-    /// [`SourceElement::resuming`]. Nothing by default.
+    /// [`RawSource::resuming`]. Nothing by default.
     fn resuming(&mut self) -> Result<()> {
         Ok(())
     }
@@ -94,7 +94,7 @@ pub trait Produce: Element {
     /// This source as a [`SeekableSource`], where it is one — asked as it is
     /// wired, and for each seek, which the framework takes on the source's
     /// thread between one thing made and the next; see
-    /// [`SourceElement::as_seekable`]. A source that can be sought also stays
+    /// [`RawSource::as_seekable`]. A source that can be sought also stays
     /// at its end, rather than ending its thread, until it is stopped or
     /// sought back into what it reads. `None` by default.
     fn as_seekable(&mut self) -> Option<&mut dyn SeekableSource> {
@@ -102,7 +102,7 @@ pub trait Produce: Element {
     }
 
     /// This source as a [`ReversibleSource`], where it is one — see
-    /// [`SourceElement::as_reversible`]. `None` by default.
+    /// [`RawSource::as_reversible`]. `None` by default.
     fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSource> {
         None
     }
@@ -122,13 +122,13 @@ pub trait Produce: Element {
     fn stopping(&mut self) {}
 }
 
-/// What a [`Produce`] made when asked.
+/// What a [`Source`] made when asked.
 pub enum Produced {
     /// A buffer, to go on through the first output — the one a source with
     /// one output has.
     Buffer(MediaBuffer),
     /// A buffer, to go on through the output of this number — see
-    /// [`Produce::outputs`].
+    /// [`Source::outputs`].
     On(usize, MediaBuffer),
     /// A new run of what it makes begins here, through every output ahead
     /// of what it makes next — a [`Segment`](crate::stream::Segment) on the
@@ -154,7 +154,7 @@ pub enum Produced {
     End,
 }
 
-/// How a [`Produce`] waits: on a clock that stands still while the
+/// How a [`Source`] waits: on a clock that stands still while the
 /// pipeline is paused, and letting go as soon as the pipeline has something
 /// for the thread.
 ///
@@ -191,6 +191,13 @@ impl Wait<'_> {
     /// is there; `false`, let go before, where the pipeline has something
     /// for this thread — answer [`Produced::Nothing`] then, and be asked
     /// again.
+    ///
+    /// The only wait a source of your own has: blocking on anything else —
+    /// a channel, a device call with no timeout — keeps a pause or a stop
+    /// waiting for it. A source fed from another thread is
+    /// [`AppSource`](crate::elements::AppSource)'s job; one that must look
+    /// at something of its own waits a few milliseconds at a time here and
+    /// looks again.
     pub fn until(&mut self, at: Instant) -> bool {
         let Some(control) = self.control else {
             std::thread::sleep(at.saturating_duration_since(self.now()));
@@ -288,11 +295,11 @@ pub(crate) enum Received<T> {
     Gone,
 }
 
-/// Errors the framework running a [`Produce`] finds in what it was handed.
+/// Errors the framework running a [`Source`] finds in what it was handed.
 #[derive(Debug, thiserror::Error)]
 pub enum ProduceError {
     /// [`Produced::On`] named an output the source does not have — see
-    /// [`Produce::outputs`].
+    /// [`Source::outputs`].
     #[error("a buffer was made for output {index}, and there are {outputs}")]
     NoOutput {
         /// The output it was made for.
@@ -302,10 +309,10 @@ pub enum ProduceError {
     },
 }
 
-/// What a [`Produce`] is in a pipeline: the source the framework makes of
+/// What a [`Source`] is in a pipeline: the source the framework makes of
 /// it, with the pads and the loop. Nothing to call on it — it is what
 /// [`IntoSource`] hands a pipeline, and what the pipeline's wiring is given.
-pub struct ProducingSource<P> {
+pub struct SourceStage<P> {
     inner: P,
     pads: Vec<SrcPad>,
     /// Time spent paused so far, which [`Wait::now`] leaves out.
@@ -341,7 +348,7 @@ enum Ending {
 /// so. A request from the pipeline ends the wait at once.
 const HELD_POLL: Duration = Duration::from_millis(1);
 
-impl<P: Produce> ProducingSource<P> {
+impl<P: Source> SourceStage<P> {
     pub(crate) fn new(inner: P) -> Self {
         let pads = inner.outputs();
         Self {
@@ -380,7 +387,7 @@ impl<P: Produce> ProducingSource<P> {
 }
 
 /// Reports what went wrong downstream of `inner` on `bus`, as its own.
-fn reporter<'a, P: Produce>(inner: &'a P, bus: &'a Bus) -> impl FnMut(crate::error::Error) + 'a {
+fn reporter<'a, P: Source>(inner: &'a P, bus: &'a Bus) -> impl FnMut(crate::error::Error) + 'a {
     move |error| {
         bus.post(
             inner.pp_log(),
@@ -393,7 +400,7 @@ fn reporter<'a, P: Produce>(inner: &'a P, bus: &'a Bus) -> impl FnMut(crate::err
     }
 }
 
-impl<P: Produce> Element for ProducingSource<P> {
+impl<P: Source> Element for SourceStage<P> {
     fn name(&self) -> Arc<str> {
         self.inner.name()
     }
@@ -420,13 +427,13 @@ impl<P: Produce> Element for ProducingSource<P> {
     }
 }
 
-impl<P: Produce> Source for ProducingSource<P> {
+impl<P: Source> SrcPads for SourceStage<P> {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         &mut self.pads
     }
 }
 
-impl<P: Produce> SourceElement for ProducingSource<P> {
+impl<P: Source> RawSource for SourceStage<P> {
     fn is_live(&self) -> bool {
         self.inner.is_live()
     }
@@ -446,8 +453,8 @@ impl<P: Produce> SourceElement for ProducingSource<P> {
     /// source goes on; a failure to make one ends it. A source that can be
     /// sought stays at its end until it is stopped, or sought back into
     /// what it reads. What it sets up on this thread first it lets go of
-    /// here last, however the loop ended ([`Produce::starting`],
-    /// [`Produce::stopping`]).
+    /// here last, however the loop ended ([`Source::starting`],
+    /// [`Source::stopping`]).
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(pp_log: self.inner.pp_log(), "started");
         self.linked = self.pads.iter().map(SrcPad::is_linked).collect();
@@ -518,8 +525,8 @@ impl<P: Produce> SourceElement for ProducingSource<P> {
     }
 }
 
-impl<P: Produce> ProducingSource<P> {
-    /// The loop itself: [`SourceElement::run`] between the source's own
+impl<P: Source> SourceStage<P> {
+    /// The loop itself: [`RawSource::run`] between the source's own
     /// setting up and letting go.
     fn ask(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         loop {
@@ -796,63 +803,63 @@ impl<P: Produce> ProducingSource<P> {
     }
 }
 
-/// What can be put where a source is asked for: a [`SourceElement`]
-/// itself, or a [`Produce`], which the framework makes one of.
+/// What can be put where a source is asked for: a [`RawSource`]
+/// itself, or a [`Source`], which the framework makes one of.
 ///
 /// `M` says which of the two a type is, and the compiler works it out:
 /// nothing names it. A type that is both is refused as ambiguous —
 /// implement one or the other.
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is neither a `SourceElement` nor a `Produce`",
-    note = "implement `Produce` for a source that makes one thing at a time on one output, or `SourceElement` for one that runs its own loop"
+    message = "`{Self}` is neither a `RawSource` nor a `Source`",
+    note = "implement `Source` for a source of your own; `RawSource` is implemented only by this crate's sources"
 )]
 pub trait IntoSource<M>: sealed::Sealed<M> {
-    /// The source a pipeline is given — `Self` for a [`SourceElement`], a
-    /// [`ProducingSource`] for a [`Produce`] — and what its wiring is
+    /// The source a pipeline is given — `Self` for a [`RawSource`], a
+    /// [`SourceStage`] for a [`Source`] — and what its wiring is
     /// handed.
-    type Source: SourceElement + 'static;
+    type Raw: RawSource + 'static;
 
     /// The source this is.
-    fn into_source(self) -> Self::Source;
+    fn into_source(self) -> Self::Raw;
 }
 
-/// Says a type goes in as the [`SourceElement`] it is — see [`IntoSource`].
-pub enum AsSourceElement {}
+/// Says a type goes in as the [`RawSource`] it is — see [`IntoSource`].
+pub enum AsRawSource {}
 
-/// Says a type goes in as the [`Produce`] it is — see [`IntoSource`].
-pub enum AsProduce {}
+/// Says a type goes in as the [`Source`] it is — see [`IntoSource`].
+pub enum AsSource {}
 
-impl<S: SourceElement + 'static> IntoSource<AsSourceElement> for S {
-    type Source = S;
+impl<S: RawSource + 'static> IntoSource<AsRawSource> for S {
+    type Raw = S;
 
     fn into_source(self) -> S {
         self
     }
 }
 
-impl<P: Produce + 'static> IntoSource<AsProduce> for P {
-    type Source = ProducingSource<P>;
+impl<P: Source + 'static> IntoSource<AsSource> for P {
+    type Raw = SourceStage<P>;
 
-    fn into_source(self) -> ProducingSource<P> {
-        ProducingSource::new(self)
+    fn into_source(self) -> SourceStage<P> {
+        SourceStage::new(self)
     }
 }
 
 mod sealed {
-    use super::{AsProduce, AsSourceElement, Produce, SourceElement};
+    use super::{AsRawSource, AsSource, RawSource, Source};
 
     /// Keeps [`super::IntoSource`] to the two ways in it has.
     pub trait Sealed<M> {}
 
-    impl<S: SourceElement + 'static> Sealed<AsSourceElement> for S {}
-    impl<P: Produce + 'static> Sealed<AsProduce> for P {}
+    impl<S: RawSource + 'static> Sealed<AsRawSource> for S {}
+    impl<P: Source + 'static> Sealed<AsSource> for P {}
 }
 
-/// Makes `$name`, a newtype over `ProducingSource<_>`, the source it is —
+/// Makes `$name`, a newtype over `SourceStage<_>`, the source it is —
 /// every method its own. For an element of this crate that keeps the public
 /// name and constructors it always had while its work moves into a
-/// [`Produce`].
-macro_rules! produce_source {
+/// [`Source`].
+macro_rules! source_stage {
     ($name:ident) => {
         impl $crate::element::Element for $name {
             fn name(&self) -> ::std::sync::Arc<str> {
@@ -875,13 +882,13 @@ macro_rules! produce_source {
             }
         }
 
-        impl $crate::element::Source for $name {
+        impl $crate::element::SrcPads for $name {
             fn src_pads(&mut self) -> &mut [$crate::pad::SrcPad] {
                 self.0.src_pads()
             }
         }
 
-        impl $crate::element::SourceElement for $name {
+        impl $crate::element::RawSource for $name {
             fn is_live(&self) -> bool {
                 self.0.is_live()
             }
@@ -918,7 +925,7 @@ macro_rules! produce_source {
     };
 }
 
-pub(crate) use produce_source;
+pub(crate) use source_stage;
 
 #[cfg(test)]
 mod tests {
@@ -933,7 +940,7 @@ mod tests {
     use ffmpeg_next as ffmpeg;
 
     use super::*;
-    use crate::element::{Sink, element_pp_log};
+    use crate::element::{RawSink, element_pp_log};
     use crate::pipeline::Pipeline;
 
     /// Makes `left` packets, one every `every` on the clock a pause does
@@ -971,7 +978,7 @@ mod tests {
         }
     }
 
-    impl Produce for Ticks {
+    impl Source for Ticks {
         fn is_live(&self) -> bool {
             true
         }
@@ -1017,7 +1024,7 @@ mod tests {
         }
     }
 
-    impl Sink for Arriving {
+    impl RawSink for Arriving {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.1.at.lock().unwrap().push(Instant::now());
             Ok(())
@@ -1054,7 +1061,7 @@ mod tests {
         }
     }
 
-    /// A `Produce` goes where a source does, and the framework runs it:
+    /// A `Source` goes where a source does, and the framework runs it:
     /// everything it makes goes on, then the end of its stream.
     #[test]
     fn a_produce_is_a_source_the_framework_runs() {
@@ -1147,7 +1154,7 @@ mod tests {
         }
     }
 
-    impl Produce for Hooked {
+    impl Source for Hooked {
         fn is_live(&self) -> bool {
             true
         }
@@ -1265,7 +1272,7 @@ mod tests {
         }
     }
 
-    impl Produce for Scripted {
+    impl Source for Scripted {
         fn is_live(&self) -> bool {
             true
         }
@@ -1299,7 +1306,7 @@ mod tests {
         }
     }
 
-    impl Sink for Logged {
+    impl RawSink for Logged {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Packet(packet) = buf {
                 let byte = packet.data().map_or(0, |data| data[0]);

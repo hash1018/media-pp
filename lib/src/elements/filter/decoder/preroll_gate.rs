@@ -320,7 +320,7 @@ mod tests {
 
     use super::*;
     use crate::control::{ControlMsg, PrerollContext};
-    use crate::element::{Element, ElementType, Sink, element_pp_log};
+    use crate::element::{Element, ElementType, RawSink, element_pp_log};
     use crate::pool::UnboundObjectPool;
     use crate::pp_log::PpLog;
 
@@ -377,18 +377,12 @@ mod tests {
         }
     }
 
-    impl Sink for Screen {
+    impl RawSink for Screen {
         fn ready_consume(&mut self) -> bool {
             self.open.load(Ordering::SeqCst)
         }
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-            if self
-                .refusals
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                    left.checked_sub(1)
-                })
-                .is_ok()
-            {
+            if crate::test_support::take_one(&self.refusals) {
                 return Err(ffmpeg::Error::InvalidData.into());
             }
             if let MediaBuffer::Video(frame) = &buf {

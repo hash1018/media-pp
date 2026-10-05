@@ -18,7 +18,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, ReversibleDecoder, SrcPads, element_pp_log},
     error::D3d11SharedDeviceError,
     pad::SrcPad,
     platform::{
@@ -115,7 +115,7 @@ const CODEC_REFERENCE_SURFACES: usize = 16;
 /// `D3d12Decoder`, for a pipeline built entirely on
 /// one shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
 /// docs on why that means no explicit fence/sync is needed anywhere in
-/// this stack, unlike the D3D12 side). A `Filter`, same shape as
+/// this stack, unlike the D3D12 side). A `RawFilter`, same shape as
 /// `SwDecoder`/`D3d12Decoder`.
 pub struct D3d11Decoder {
     pp_log: PpLog,
@@ -504,13 +504,13 @@ impl Element for D3d11Decoder {
     }
 }
 
-impl Source for D3d11Decoder {
+impl SrcPads for D3d11Decoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for D3d11Decoder {
+impl RawSink for D3d11Decoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {
@@ -663,7 +663,7 @@ unsafe extern "C" fn get_format(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::test_support::try_d3d11_gpu;
 
     /// Regression test for a real crash (`STATUS_ACCESS_VIOLATION`/
@@ -910,7 +910,7 @@ mod tests {
         }
     }
 
-    impl Sink for Hoarder {
+    impl RawSink for Hoarder {
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
             self.held.lock().unwrap().push(buf);
             Ok(())

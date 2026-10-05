@@ -11,7 +11,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     elements::VulkanDevice,
     error::Result,
     frame_size::ForSize,
@@ -26,7 +26,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/scale.wgsl");
@@ -130,9 +130,9 @@ impl VulkanScalerInterp {
 ///
 /// The colour description and the timing are carried through unchanged; so
 /// is the layout, since this converts nothing.
-pub struct VulkanScaler(TransformStage<Scaling>);
+pub struct VulkanScaler(FilterStage<Scaling>);
 
-transform_filter!(VulkanScaler);
+filter_stage!(VulkanScaler);
 
 /// What a [`VulkanScaler`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -220,7 +220,7 @@ impl VulkanScaler {
             "opened: to {width}x{height}, {interp:?}, on {}",
             device.name()
         );
-        Ok(Self(TransformStage::new(Scaling {
+        Ok(Self(FilterStage::new(Scaling {
             pp_log,
             name,
             gpu,
@@ -706,7 +706,7 @@ impl Element for Scaling {
     }
 }
 
-impl Transform for Scaling {
+impl Filter for Scaling {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
@@ -757,7 +757,7 @@ impl Drop for Scaling {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::Sink;
+    use crate::element::RawSink;
     use crate::{
         elements::{VulkanDownload, VulkanUpload},
         platform::vulkan::gpu::compile,

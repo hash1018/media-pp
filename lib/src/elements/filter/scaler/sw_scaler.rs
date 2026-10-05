@@ -10,12 +10,12 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract, check_link,
     },
-    element::{Element, ElementType, Output, Sink, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, RawSink, element_pp_log},
     error::Result,
     frame_size::{ForSize, OutputSize},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// How many output frames [`SwScaler`] pre-allocates as soon as it knows
@@ -53,7 +53,7 @@ pub enum SwScalerError {
 /// Converts/resizes decoded video frames — pixel format (e.g. the YUV a
 /// decoder produces -> the RGB most inference models expect) and
 /// resolution (source resolution -> a model's fixed input size) in one
-/// pass via `libswscale`. A `Filter`: receives via `Sink`, pushes the
+/// pass via `libswscale`. A `RawFilter`: receives via `RawSink`, pushes the
 /// converted frame on through its own (single) src pad.
 ///
 /// Typical placement: right before something with a fixed input
@@ -73,9 +73,9 @@ pub enum SwScalerError {
 /// produces planar YUV, which is the case a refused link names most often.
 /// A resolution change is then passed on rather than hidden, so what is
 /// downstream has to be able to take one.
-pub struct SwScaler(TransformStage<Scaling>);
+pub struct SwScaler(FilterStage<Scaling>);
 
-transform_filter!(SwScaler);
+filter_stage!(SwScaler);
 
 /// What a [`SwScaler`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -177,7 +177,7 @@ impl SwScaler {
     pub fn if_needed(
         name: impl Into<String>,
         params: &ffmpeg::codec::Parameters,
-        sink: &(impl Sink + ?Sized),
+        sink: &(impl RawSink + ?Sized),
     ) -> Result<Option<Self>> {
         let decoded = ffmpeg::codec::context::Context::from_parameters(params.clone())?
             .decoder()
@@ -221,7 +221,7 @@ impl SwScaler {
                 "created: dst_format={dst_format:?}, dst=the input's own size"
             ),
         }
-        Self(TransformStage::new(Scaling {
+        Self(FilterStage::new(Scaling {
             name,
             pp_log,
             dst_format,
@@ -270,7 +270,7 @@ impl Element for Scaling {
     }
 }
 
-impl Transform for Scaling {
+impl Filter for Scaling {
     /// swscale reads the planes on the CPU, so a device texture is unreachable memory here rather than merely the wrong format.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
@@ -539,7 +539,7 @@ pub(crate) fn is_rgb(pixel: ffmpeg::format::Pixel) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::element::Source;
+    use crate::element::SrcPads;
     use crate::test_support::CapturingSink;
     use std::sync::Mutex;
 
@@ -898,7 +898,7 @@ mod tests {
         }
     }
 
-    impl Sink for Takes {
+    impl RawSink for Takes {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }

@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, ReversibleDecoder, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, RawSink, ReversibleDecoder, SrcPads, element_pp_log},
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
@@ -62,7 +62,7 @@ pub enum D3d12DecoderError {
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
 /// via D3D12VA hardware acceleration, instead of [`crate::elements::SwDecoder`]'s
-/// plain libavcodec software path. A `Filter`, same shape as `SwDecoder`.
+/// plain libavcodec software path. A `RawFilter`, same shape as `SwDecoder`.
 ///
 /// Frames this produces are still plain `MediaBuffer::Video` — nothing
 /// downstream needs to change to receive them. `Pacer`/`Tee`/
@@ -313,13 +313,13 @@ impl Element for D3d12Decoder {
     }
 }
 
-impl Source for D3d12Decoder {
+impl SrcPads for D3d12Decoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for D3d12Decoder {
+impl RawSink for D3d12Decoder {
     /// Not while a preroll this has already given its sample to is still
     /// running — see `PrerollGate::holding`.
     fn ready_consume(&mut self) -> bool {

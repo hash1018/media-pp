@@ -188,9 +188,10 @@ mod example {
             thread::sleep(Duration::from_millis(33));
         }
 
-        // Stop the feeder and let it push its own `Eos` while the pipeline is
-        // still fully running, before `.stop()` below tears it down — avoids
-        // racing a final `push` against a pipeline that already stopped.
+        // Stop the feeder and let it end its stream with `finish()` while the
+        // pipeline is still fully running, before `.stop()` below tears it
+        // down — avoids racing a final `push` against a pipeline that already
+        // stopped.
         feeding.store(false, Ordering::Relaxed);
         foreground_feeder.join().expect("feeder thread panicked")?;
 

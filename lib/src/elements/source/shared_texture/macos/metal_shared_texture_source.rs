@@ -9,7 +9,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, ProducingSource},
+    element::{Element, ElementType, SourceStage},
     elements::{AppSource, AppSourceHandle, VideoToolboxDevice, source::app_source::Receiving},
     platform::{
         ffmpeg::AvBufferRef,
@@ -21,7 +21,7 @@ use crate::{
     },
     pool::UnboundObjectPool,
     pp_log::pp_info,
-    produce::produce_source,
+    produce::source_stage,
 };
 
 /// Errors specific to `MetalSharedTextureSource`. Converts into the
@@ -106,9 +106,9 @@ pub enum MetalSharedTextureSourceError {
 /// engine composites its page with the alpha already multiplied into the
 /// colour, and a layer drawn from such a frame has to say so — see
 /// [`VideoLayer::premultiplied_alpha`](crate::elements::VideoLayer::premultiplied_alpha).
-pub struct MetalSharedTextureSource(ProducingSource<Receiving>);
+pub struct MetalSharedTextureSource(SourceStage<Receiving>);
 
-produce_source!(MetalSharedTextureSource);
+source_stage!(MetalSharedTextureSource);
 
 /// Pushes surfaces into a [`MetalSharedTextureSource`].
 ///
@@ -329,7 +329,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::Sink,
+        element::RawSink,
         elements::{VideoToolboxDownload, VideoToolboxUpload},
         pipeline::Pipeline,
         test_support::{capture, try_videotoolbox_device},
@@ -503,7 +503,7 @@ mod tests {
     /// cannot ask it for.
     #[test]
     fn it_is_live_where_a_plain_app_source_is_not() {
-        use crate::element::SourceElement;
+        use crate::element::RawSource;
 
         let Some(device) = try_videotoolbox_device() else {
             return;

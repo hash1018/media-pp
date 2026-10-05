@@ -9,11 +9,11 @@
 //! the data, because unlike [`Eos`](crate::stream::StreamEvent::Eos) it has
 //! to reach elements mid-stream, ahead of whatever is already backed up.
 //! An element of your own hears of it through its hooks: a sink's
-//! [`pausing`](crate::element::Sink::pausing),
-//! [`resuming`](crate::element::Sink::resuming) and
-//! [`stopping`](crate::element::Sink::stopping), a seek as the flushed
+//! [`pausing`](crate::element::RawSink::pausing),
+//! [`resuming`](crate::element::RawSink::resuming) and
+//! [`stopping`](crate::element::RawSink::stopping), a seek as the flushed
 //! [`Segment`](crate::stream::Segment) that begins its stream again, and a
-//! [`Produce`](crate::element::Produce)'s through the framework's loop.
+//! [`Source`](crate::element::Source)'s through the framework's loop.
 //!
 //! A source loop of this crate's stays responsive by calling
 //! `drain_control` every iteration. The `ControlOutcome` it returns is not
@@ -34,7 +34,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{
     bus::{Bus, BusEvent},
-    element::{ElementType, Filter, SinkExt, SourceElement},
+    element::{ElementType, RawFilter, RawSinkExt, RawSource},
     error::Result,
     graph::{ElementId, NodeInfo},
     pad::SrcPad,
@@ -43,7 +43,7 @@ use crate::{
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
 /// — travels the same pad-to-pad path `MediaBuffer` does (see
-/// `Sink::flow`), but through a dedicated channel
+/// `RawSink::flow`), but through a dedicated channel
 /// instead of riding along as data: unlike `Eos`, it has to be able to
 /// reach every element even mid-stream, and (for `Queue`) jump ahead of
 /// whatever data is already backed up rather than wait in line behind it.
@@ -740,22 +740,22 @@ pub struct ControlOutcome {
     pub paused_for: Duration,
 }
 
-/// Call once per loop iteration in a [`SourceElement::run`] implementation,
+/// Call once per loop iteration in a [`RawSource::run`] implementation,
 /// right before pulling the next unit of work — mirrors how a natural
 /// `Eos` is pushed into the source's own pads at the end of that same
 /// loop, just for externally-triggered control instead.
 ///
 /// Drains every pending message (see `apply_one` for what "handling
 /// one" means, including `Pause`'s blocking wait). Non-blocking if
-/// nothing's pending — a test source whose own [`SourceElement::run`] loop
+/// nothing's pending — a test source whose own [`RawSource::run`] loop
 /// cannot wait on `control`'s own channel calls this once per turn. Every
-/// source of this crate is a [`crate::element::Produce`], whose loop the
+/// source of this crate is a [`crate::element::Source`], whose loop the
 /// framework runs.
 ///
 /// See [`ControlOutcome`] for what the return value means.
 // Only the test sources that run a loop of their own call it now.
 #[cfg(test)]
-pub fn drain_control<S: SourceElement>(
+pub fn drain_control<S: RawSource>(
     control: &ControlReceiver,
     source: &mut S,
     bus: &Bus,
@@ -781,7 +781,7 @@ pub fn drain_control<S: SourceElement>(
 /// one way every source does, whether it drains the channel between buffers
 /// ([`drain_control`]) or selects on it beside its data: `Finish` ends the
 /// stream in order, `Pause` pauses the source until it is resumed or stopped
-/// (see [`SourceElement::pausing`] and [`SourceElement::resuming`]), and
+/// (see [`RawSource::pausing`] and [`RawSource::resuming`]), and
 /// anything else is applied and passed on.
 ///
 /// One way, because a source that handled a request its own way got it
@@ -789,7 +789,7 @@ pub fn drain_control<S: SourceElement>(
 /// without pausing, read on into the paused queue behind it, and left a
 /// seek waiting on it for good (208af56); three capture sources each kept a
 /// copy of the pause wait to stop and restart their device around it.
-pub(crate) fn handle_request<S: SourceElement>(
+pub(crate) fn handle_request<S: RawSource>(
     control: &ControlReceiver,
     source: &mut S,
     bus: &Bus,
@@ -825,12 +825,12 @@ pub(crate) fn handle_request<S: SourceElement>(
 }
 
 /// Applies one source-only graceful completion request. Unlike
-/// [`apply_one`], this never calls `Sink::flow`: EOS has to sit behind every
+/// [`apply_one`], this never calls `RawSink::flow`: EOS has to sit behind every
 /// already-produced buffer in each data path so queues and stateful elements
 /// drain in order. What the source still owes goes first — what it held
 /// back, and playing backwards the rest of the stretch under way; see
-/// [`crate::element::SourceElement::finishing`].
-pub(crate) fn apply_finish<S: SourceElement>(
+/// [`crate::element::RawSource::finishing`].
+pub(crate) fn apply_finish<S: RawSource>(
     source: &mut S,
     bus: &Bus,
     ack: &Sender<()>,
@@ -878,7 +878,7 @@ pub(crate) fn apply_finish<S: SourceElement>(
 /// one of `source`'s pads (so it cascades through the graph exactly like
 /// a data buffer would), then acks. Returns `true` for `Stop` — same
 /// meaning as [`drain_control`]'s own return.
-pub(crate) fn apply_one<S: SourceElement>(
+pub(crate) fn apply_one<S: RawSource>(
     source: &mut S,
     bus: &Bus,
     msg: &ControlMsg,
@@ -895,7 +895,7 @@ pub(crate) fn apply_one<S: SourceElement>(
 /// acknowledged. [`crate::elements::WasapiCaptureSource`] uses this for
 /// `Resume`: downstream is resumed first, then its capture device is
 /// restarted, and only then may the caller observe the request as done.
-pub(crate) fn apply_one_unacked<S: SourceElement>(
+pub(crate) fn apply_one_unacked<S: RawSource>(
     source: &mut S,
     bus: &Bus,
     msg: &ControlMsg,
@@ -967,7 +967,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
 /// acking) every request seen in between. Returns `true` if `Stop`/`Finish`
 /// ended it (including the sender simply going away, treated the same as
 /// `Stop`); `false` once `Resume` or `Preroll` arrives.
-pub(crate) fn wait_out_pause<S: SourceElement>(
+pub(crate) fn wait_out_pause<S: RawSource>(
     control: &ControlReceiver,
     source: &mut S,
     bus: &Bus,
@@ -985,7 +985,7 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
             // Playback has moved on — to playing, or to a preroll — before
             // this message came to say so; see `crate::playback_state`.
             // Downstream goes on first, then the source itself, and only
-            // then is the request done — see `SourceElement::resuming`.
+            // then is the request done — see `RawSource::resuming`.
             apply_one_unacked(source, bus, &msg, state)?;
             source.resuming()?;
             let _ = ack.send(());
@@ -1007,13 +1007,13 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
 /// graph does for every filter in it, for code that drives one by hand: a
 /// bin of your own passing control to the elements it holds, a test.
 ///
-/// The filter reacts first (`Sink::flow`), so whatever it holds
+/// The filter reacts first (`RawSink::flow`), so whatever it holds
 /// already reflects the message by the time the elements after it see it.
 /// The message goes on even where that reaction failed, and through every
 /// pad even where one of them failed: a `Pause` or `Stop` stopped at the
 /// first failure would leave the rest of the graph running. What comes back
 /// is the first failure.
-pub fn deliver<F: Filter + ?Sized>(filter: &mut F, msg: &ControlMsg) -> Result<()> {
+pub fn deliver<F: RawFilter + ?Sized>(filter: &mut F, msg: &ControlMsg) -> Result<()> {
     let reacted = filter.control(msg);
     let forwarded = forward(filter.src_pads(), msg);
     reacted.and(forwarded)
@@ -1032,7 +1032,7 @@ pub(crate) fn forward(pads: &mut [SrcPad], msg: &ControlMsg) -> Result<()> {
     first
 }
 
-fn apply_seek<S: SourceElement>(
+fn apply_seek<S: RawSource>(
     source: &mut S,
     bus: &Bus,
     msg: &ControlMsg,
@@ -1095,7 +1095,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::MediaBuffer,
-        element::{Element, ElementType, Flow, Sink, Source, element_pp_log},
+        element::{Element, ElementType, Flow, RawSink, SrcPads, element_pp_log},
         pad::SrcPad,
     };
 
@@ -1107,7 +1107,7 @@ mod tests {
         state
     }
 
-    /// A `SourceElement` with no real I/O — just enough surface for
+    /// A `RawSource` with no real I/O — just enough surface for
     /// `drain_control`/`wait_out_pause` to drive, since this module's own
     /// logic doesn't care what the source actually produces.
     struct DummySource {
@@ -1150,13 +1150,13 @@ mod tests {
         }
     }
 
-    impl Source for DummySource {
+    impl SrcPads for DummySource {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl SourceElement for DummySource {
+    impl RawSource for DummySource {
         fn is_live(&self) -> bool {
             false
         }
@@ -1307,13 +1307,13 @@ mod tests {
         }
     }
 
-    impl Source for HookedSource {
+    impl SrcPads for HookedSource {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl SourceElement for HookedSource {
+    impl RawSource for HookedSource {
         fn is_live(&self) -> bool {
             true
         }
@@ -1356,7 +1356,7 @@ mod tests {
         }
     }
 
-    impl Sink for OrderSink {
+    impl RawSink for OrderSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1442,7 +1442,7 @@ mod tests {
         }
     }
 
-    impl Sink for SlowPauseSink {
+    impl RawSink for SlowPauseSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1641,7 +1641,7 @@ mod tests {
         }
     }
 
-    impl Sink for Noting {
+    impl RawSink for Noting {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1679,13 +1679,13 @@ mod tests {
         }
     }
 
-    impl Source for Refusing {
+    impl SrcPads for Refusing {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl Sink for Refusing {
+    impl RawSink for Refusing {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
@@ -1742,13 +1742,13 @@ mod tests {
         }
     }
 
-    impl Source for TwoPads {
+    impl SrcPads for TwoPads {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             &mut self.pads
         }
     }
 
-    impl SourceElement for TwoPads {
+    impl RawSource for TwoPads {
         fn is_live(&self) -> bool {
             false
         }

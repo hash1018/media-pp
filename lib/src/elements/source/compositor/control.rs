@@ -20,7 +20,7 @@ use ffmpeg_next as ffmpeg;
 
 use super::text_layer::TextLayer;
 use super::video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect};
-use crate::{element::Sink, error::Error, pool::UnboundObjectPoolRef};
+use crate::{element::BoxSink, error::Error, pool::UnboundObjectPoolRef};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -34,7 +34,7 @@ pub type LayerFrame = Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>;
 /// showing and restacking it while it runs.
 pub struct CompositorInput<L> {
     /// The terminal sink to end the input's pipeline with.
-    pub sink: Box<dyn Sink>,
+    pub sink: BoxSink,
     /// Runtime control of where and how it is drawn.
     pub layer: L,
 }
@@ -292,7 +292,7 @@ pub(crate) fn an_input_that_ends_is_shown_again<C: VideoCompositorControl>(
     picture: impl Fn() -> crate::buffer::MediaBuffer,
 ) {
     use crate::control::ControlMsg;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
 
     let CompositorInput { mut sink, layer } = handle
         .add_source("ends", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))

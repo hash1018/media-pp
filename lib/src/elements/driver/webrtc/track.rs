@@ -19,11 +19,9 @@ use str0m::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract, PortContract},
-    element::{
-        Element, ElementType, Produce, Produced, ProducingSource, Sink, Wait, element_pp_log,
-    },
+    element::{Element, ElementType, Produced, RawSink, Source, SourceStage, Wait, element_pp_log},
     error::Result,
-    produce::{Received, produce_source},
+    produce::{Received, source_stage},
 };
 
 use super::{
@@ -324,7 +322,7 @@ impl WebRtcHandle {
     }
 }
 
-/// One outbound track. A plain [`Sink`] — no bespoke push API, it links
+/// One outbound track. A plain [`RawSink`] — no bespoke push API, it links
 /// into a [`crate::pipeline::ChainBuilder`] exactly like
 /// [`crate::elements::RtspMuxer`] or any other terminal sink.
 /// `consume()` only ever hands off to `WebRtcPeer::run`'s own thread via a
@@ -522,7 +520,7 @@ impl WebRtcTrackSink {
     /// Prefer [`WebRtcTrackSink::set_source_parameters`] wherever the source
     /// has `parameters()`: this leaves the sink with no headers to put in
     /// front of keyframes, which for H.264, HEVC and VVC means the packets
-    /// themselves must carry their parameter sets in-band. [`Sink::consume`]
+    /// themselves must carry their parameter sets in-band. [`RawSink::consume`]
     /// checks that on the first keyframe rather than letting a peer wait for
     /// configuration that is never coming.
     ///
@@ -581,7 +579,7 @@ impl Element for WebRtcTrackSink {
     }
 }
 
-impl Sink for WebRtcTrackSink {
+impl RawSink for WebRtcTrackSink {
     /// A track carries encoded media to the peer; this sink has no
     /// encoder of its own, so a decoded frame has no route through it.
     fn input_contract(&self) -> InputContract {
@@ -621,10 +619,10 @@ impl Sink for WebRtcTrackSink {
         let buf = self.normalize_packet_timestamp(buf)?;
         // `WebRtcPeer::run` gone (channel disconnected) means this track is
         // dead — surface it as `Err` rather than swallowing it, so whatever
-        // pipeline this `Sink` is plugged into (its own `Queue`, its own
+        // pipeline this `RawSink` is plugged into (its own `Queue`, its own
         // `Bus`) actually learns about it instead of silently sending into
         // a void forever. Non-fatal by the same convention as any other
-        // `Sink::consume` failure (see `Queue`'s own docs) — just no longer
+        // `RawSink::consume` failure (see `Queue`'s own docs) — just no longer
         // an invisible one.
         //
         // A full channel (`WebRtcPeer::run` backed up) drops the newest
@@ -802,9 +800,9 @@ impl WebRtcTrackSink {
 /// The peer going away — whether from `Stop` or the connection dying on
 /// its own — ends the stream the way every `AppSourceHandle` dropped ends
 /// an `AppSource`'s: its end handed on, no error.
-pub struct WebRtcTrackSource(ProducingSource<Receiving>);
+pub struct WebRtcTrackSource(SourceStage<Receiving>);
 
-produce_source!(WebRtcTrackSource);
+source_stage!(WebRtcTrackSource);
 
 /// What a [`WebRtcTrackSource`] hands on, a packet at a time as the peer
 /// receives it: all of its work, which the framework makes the source.
@@ -838,7 +836,7 @@ impl WebRtcTrackSource {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WebRtcPeer, &name, None);
-        Self(ProducingSource::new(Receiving {
+        Self(SourceStage::new(Receiving {
             id,
             name,
             pp_log,
@@ -933,7 +931,7 @@ impl Element for Receiving {
     }
 }
 
-impl Produce for Receiving {
+impl Source for Receiving {
     fn is_live(&self) -> bool {
         true
     }

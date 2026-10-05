@@ -36,7 +36,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     elements::{AvFoundationCaptureFormat, AvFoundationDevice, VideoFormat},
     error::Result,
     platform::macos::{
@@ -44,7 +44,7 @@ use crate::{
         pixel_buffer::{PixelBuffer, PixelBufferError},
     },
     pool::UnboundObjectPool,
-    produce::{Received, produce_source},
+    produce::{Received, source_stage},
 };
 
 /// The unit every emitted `pts` counts in: a microsecond of the host clock
@@ -189,9 +189,9 @@ pub struct AvFoundationCaptureOptions {
 ///
 /// Pictures the source's thread has not taken yet are few: past that, the
 /// next is dropped and reported as [`crate::bus::BusEvent::Dropped`].
-pub struct AvFoundationCaptureSource(ProducingSource<Capturing>);
+pub struct AvFoundationCaptureSource(SourceStage<Capturing>);
 
-produce_source!(AvFoundationCaptureSource);
+source_stage!(AvFoundationCaptureSource);
 
 /// One picture from the capture queue, and when the camera took it.
 struct Captured {
@@ -459,7 +459,7 @@ impl AvFoundationCaptureSource {
             if matches!(output, Output::System(_)) { "" } else { " in VideoToolbox frames" }
         );
         Ok((
-            Self(ProducingSource::new(Capturing {
+            Self(SourceStage::new(Capturing {
                 name,
                 pp_log,
                 bus: None,
@@ -688,7 +688,7 @@ impl Element for Capturing {
     }
 }
 
-impl Produce for Capturing {
+impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
     }

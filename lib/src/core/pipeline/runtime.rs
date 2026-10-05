@@ -88,7 +88,7 @@ pub enum PipelineError {
 /// supplied to a source's own `wire` closure also retains its `Bus`
 /// sender; in that case bus draining intentionally remains blocked until
 /// that extra context is dropped. A source-level failure (returned from
-/// [`crate::element::SourceElement::run`] itself, as opposed to one
+/// [`crate::element::RawSource::run`] itself, as opposed to one
 /// reported from inside a `Queue`) shows up there too, as a
 /// [`BusEvent::Error`](crate::bus::BusEvent::Error) under that source's own name, since there's no
 /// synchronous return path left to carry it.
@@ -192,10 +192,10 @@ impl Pipeline {
     ///
     /// `wire` is called once with the freshly created source and a
     /// [`Context`] bundling this pipeline's `Bus`, `id`, [`PipelineGraph`]
-    /// (already seeded with the source itself), and `Clock` (share it with
-    /// every [`crate::elements::Pacer`] via `Clock::clone` — one clock per
-    /// pipeline, so every paced branch agrees on the same t=0 and the same
-    /// pause/resume timeline) — everything a [`super::ChainBuilder`]/
+    /// (already seeded with the source itself), and the pipeline's clocks —
+    /// one per pipeline, which every [`crate::elements::Pacer`] takes from
+    /// the context as it is wired, so every paced branch agrees on the same
+    /// t=0 and the same pause/resume timeline — everything a [`super::ChainBuilder`]/
     /// [`crate::elements::Tee`] needs, in one `Arc` clone instead of four
     /// separate arguments. `wire` creates detached chains and attaches
     /// them through [`Context::attach`]. Pads left unattached drop data.
@@ -222,7 +222,7 @@ impl Pipeline {
     pub fn new<M, I: IntoSource<M>, T>(
         id: impl Into<String>,
         source: I,
-        wire: impl FnOnce(&mut I::Source, &Arc<Context>) -> Result<T>,
+        wire: impl FnOnce(&mut I::Raw, &Arc<Context>) -> Result<T>,
     ) -> Result<(Arc<Self>, T)> {
         let (builder, wired) = PipelineBuilder::new(id).add_source(source, wire)?;
         Ok((builder.build(), wired))

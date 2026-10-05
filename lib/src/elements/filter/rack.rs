@@ -8,7 +8,9 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Flow, Sink, Source, element_pp_log},
+    element::{
+        BoxFilter, Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads, element_pp_log,
+    },
     error::Result,
     pad::SrcPad,
     stash::OutputStash,
@@ -142,11 +144,11 @@ pub struct Rack {
 /// and released, never held across the work.
 #[derive(Default)]
 struct RackControl {
-    pending: Mutex<Option<Vec<Box<dyn Filter>>>>,
+    pending: Mutex<Option<Vec<Box<dyn RawFilter>>>>,
 }
 
 impl RackControl {
-    fn take(&self) -> Option<Vec<Box<dyn Filter>>> {
+    fn take(&self) -> Option<Vec<Box<dyn RawFilter>>> {
         self.pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -175,10 +177,9 @@ impl RackHandle {
     /// The elements are checked here rather than when they are installed, so
     /// a caller learns about a bad one at the call that handed it over
     /// instead of through a bus event one frame later.
-    pub fn replace(
-        &self,
-        mut elements: Vec<Box<dyn Filter>>,
-    ) -> std::result::Result<(), RackError> {
+    pub fn replace(&self, elements: Vec<BoxFilter>) -> std::result::Result<(), RackError> {
+        let mut elements: Vec<Box<dyn RawFilter>> =
+            elements.into_iter().map(BoxFilter::into_raw).collect();
         for element in &mut elements {
             let count = element.src_pads().len();
             if count != 1 {
@@ -237,7 +238,7 @@ impl Rack {
     }
 
     /// Replaces what is in the rack with `elements`.
-    fn fill(&mut self, elements: Vec<Box<dyn Filter>>) {
+    fn fill(&mut self, elements: Vec<Box<dyn RawFilter>>) {
         // At Info because a fill is a topology change of the same kind a
         // dynamic `Tee` attach is: sparse, caller-driven, and invisible in
         // the pipeline's own diagram, since what a rack holds are not graph
@@ -276,13 +277,13 @@ impl Element for Rack {
     }
 }
 
-impl Source for Rack {
+impl SrcPads for Rack {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for Rack {
+impl RawSink for Rack {
     /// What the first element in it says, as that element would in the
     /// rack's place: a rack that answered yes for an element that cannot take
     /// a buffer yet had the thread in front of it wait inside the push
@@ -361,7 +362,7 @@ mod tests {
 
     use super::*;
     use crate::contract::{MediaKind, MemoryDomain, PortContract};
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::pool::UnboundObjectPool;
 
     /// Records what reached the end of the branch the rack is in.
@@ -386,7 +387,7 @@ mod tests {
         }
     }
 
-    impl Sink for CapturingSink {
+    impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             self.received.lock().unwrap().push(buf);
             Ok(())
@@ -435,13 +436,13 @@ mod tests {
         }
     }
 
-    impl Source for Marker {
+    impl SrcPads for Marker {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl Sink for Marker {
+    impl RawSink for Marker {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             let MediaBuffer::Video(frame) = buf else {
                 return self.pad.push(buf);
@@ -485,13 +486,13 @@ mod tests {
         }
     }
 
-    impl Source for Waiting {
+    impl SrcPads for Waiting {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl Sink for Waiting {
+    impl RawSink for Waiting {
         fn ready_consume(&mut self) -> bool {
             self.ready.load(std::sync::atomic::Ordering::Relaxed)
         }
@@ -511,7 +512,7 @@ mod tests {
         assert!(rack.ready_consume(), "empty, it is a wire");
         let ready = Arc::new(AtomicBool::new(false));
         handle
-            .replace(vec![Box::new(Waiting {
+            .replace(vec![crate::element::BoxFilter::new(Waiting {
                 pp_log: element_pp_log(ElementType::Other, "waiting", None),
                 pad: SrcPad::new("waiting_src"),
                 ready: Arc::clone(&ready),
@@ -540,7 +541,7 @@ mod tests {
         }
     }
 
-    impl crate::element::Transform for Doubles {
+    impl crate::element::Filter for Doubles {
         fn transform(&mut self, buf: MediaBuffer, out: &mut crate::element::Output) -> Result<()> {
             let pts = pts_of(&buf);
             out.push(buf);
@@ -572,7 +573,7 @@ mod tests {
         }
     }
 
-    impl Sink for Shuts {
+    impl RawSink for Shuts {
         fn ready_consume(&mut self) -> bool {
             self.open.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -703,8 +704,8 @@ mod tests {
         let mut rig = rig();
         rig.handle
             .replace(vec![
-                Box::new(Marker::new("first", 1, rig.controls.clone())),
-                Box::new(Marker::new("second", 2, rig.controls.clone())),
+                crate::element::BoxFilter::new(Marker::new("first", 1, rig.controls.clone())),
+                crate::element::BoxFilter::new(Marker::new("second", 2, rig.controls.clone())),
             ])
             .expect("two ordinary filters");
 
@@ -723,7 +724,7 @@ mod tests {
     fn a_replacement_takes_effect_on_the_next_buffer() {
         let mut rig = rig();
         rig.handle
-            .replace(vec![Box::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -732,7 +733,7 @@ mod tests {
         rig.rack.consume(frame(0)).expect("first line");
 
         rig.handle
-            .replace(vec![Box::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "other",
                 3,
                 rig.controls.clone(),
@@ -780,7 +781,7 @@ mod tests {
     fn control_reaches_the_elements_inside_and_then_the_one_after() {
         let mut rig = rig();
         rig.handle
-            .replace(vec![Box::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -831,12 +832,12 @@ mod tests {
                 &mut self.pp_log
             }
         }
-        impl Source for TwoOut {
+        impl SrcPads for TwoOut {
             fn src_pads(&mut self) -> &mut [SrcPad] {
                 &mut self.pads
             }
         }
-        impl Sink for TwoOut {
+        impl RawSink for TwoOut {
             fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
                 Ok(())
             }
@@ -845,7 +846,7 @@ mod tests {
         let rig = rig();
         let error = rig
             .handle
-            .replace(vec![Box::new(TwoOut {
+            .replace(vec![crate::element::BoxFilter::new(TwoOut {
                 pp_log: element_pp_log(ElementType::Other, "two-out", None),
                 pads: vec![SrcPad::new("a"), SrcPad::new("b")],
             })])
@@ -861,7 +862,7 @@ mod tests {
     fn what_waits_on_the_clock_is_refused_and_what_was_held_stays() {
         let mut rig = rig();
         rig.handle
-            .replace(vec![Box::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -872,8 +873,8 @@ mod tests {
         let error = rig
             .handle
             .replace(vec![
-                Box::new(Marker::new("other", 3, rig.controls.clone())),
-                Box::new(crate::elements::Pacer::new("pacer")),
+                crate::element::BoxFilter::new(Marker::new("other", 3, rig.controls.clone())),
+                crate::element::BoxFilter::new(crate::elements::Pacer::new("pacer")),
             ])
             .expect_err("a pacer cannot go in a rack");
         assert!(
@@ -932,13 +933,13 @@ mod tests {
         }
     }
 
-    impl Source for Boom {
+    impl SrcPads for Boom {
         fn src_pads(&mut self) -> &mut [SrcPad] {
             std::slice::from_mut(&mut self.pad)
         }
     }
 
-    impl Sink for Boom {
+    impl RawSink for Boom {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Err(crate::error::Error::Other("this element refuses".into()))
         }
@@ -955,8 +956,8 @@ mod tests {
         let mut rig = rig();
         rig.handle
             .replace(vec![
-                Box::new(Marker::new("first", 1, rig.controls.clone())),
-                Box::new(Boom::new("second")),
+                crate::element::BoxFilter::new(Marker::new("first", 1, rig.controls.clone())),
+                crate::element::BoxFilter::new(Boom::new("second")),
             ])
             .expect("two ordinary filters");
 
@@ -994,12 +995,12 @@ mod tests {
                 &mut self.pp_log
             }
         }
-        impl Source for Deaf {
+        impl SrcPads for Deaf {
             fn src_pads(&mut self) -> &mut [SrcPad] {
                 std::slice::from_mut(&mut self.pad)
             }
         }
-        impl Sink for Deaf {
+        impl RawSink for Deaf {
             fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
                 self.pad.push(buf)
             }
@@ -1010,7 +1011,7 @@ mod tests {
 
         let mut rig = rig();
         rig.handle
-            .replace(vec![Box::new(Marker::new(
+            .replace(vec![crate::element::BoxFilter::new(Marker::new(
                 "first",
                 1,
                 rig.controls.clone(),
@@ -1019,7 +1020,7 @@ mod tests {
         rig.rack.consume(frame(0)).expect("install the line");
 
         rig.handle
-            .replace(vec![Box::new(Deaf {
+            .replace(vec![crate::element::BoxFilter::new(Deaf {
                 pp_log: element_pp_log(ElementType::Other, "deaf", None),
                 pad: SrcPad::new("deaf_src"),
             })])

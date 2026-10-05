@@ -14,7 +14,7 @@
 //! crate) refers to `crate::core::...` directly — `crate::pipeline`,
 //! `crate::clock`, `media_pp::pipeline`, etc. keep working exactly as before.
 //!
-//! [`crate::elements`] (the built-in `Sink`/`Source`/`Filter`
+//! [`crate::elements`] (the built-in `RawSink`/`SrcPads`/`RawFilter`
 //! implementations, e.g. `FileDemuxer`/`SwDecoder`/`RtspMuxer`) is
 //! deliberately its own top-level module, not part of this one — those
 //! are built *on* this framework, not part of it.

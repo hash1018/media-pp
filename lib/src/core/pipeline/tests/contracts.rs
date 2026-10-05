@@ -47,7 +47,7 @@ impl Element for DeclaringSink {
     }
 }
 
-impl Sink for DeclaringSink {
+impl RawSink for DeclaringSink {
     fn input_contract(&self) -> InputContract {
         self.contract
     }
@@ -418,9 +418,9 @@ fn an_audio_filter_refuses_video_frames() {
 /// where it is audio.
 #[test]
 fn the_signal_filters_refuse_video_frames_and_take_audio() {
-    use crate::element::Filter;
+    use crate::element::RawFilter;
 
-    type Make = fn() -> Box<dyn Filter>;
+    type Make = fn() -> Box<dyn RawFilter>;
     let filters: Vec<(&str, Make)> = vec![
         ("gate", || {
             Box::new(crate::elements::AudioGate::new("gate").0)
@@ -1237,13 +1237,13 @@ impl Element for DeclaringFilter {
     }
 }
 
-impl Source for DeclaringFilter {
+impl SrcPads for DeclaringFilter {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for DeclaringFilter {
+impl RawSink for DeclaringFilter {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(cuda_video())
     }

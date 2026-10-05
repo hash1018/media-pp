@@ -54,13 +54,14 @@ pipeline from its wiring closure rather than from imports or filenames.
 - Source the README from an existing crate-level doc comment where available,
   reformatting without changing its claims. Otherwise write only what the
   construction code demonstrates.
-- State the actual graph using `SourceType -> Filter -> SinkType` notation and
+- State the actual graph using `SourceType -> RawFilter -> SinkType` notation and
   account for branches explicitly. Do not infer the graph from imports.
 - Keep general feature tables, installation requirements, and repository-wide
-  build instructions in the root README or type documentation, not the example
-  README.
-- Update the root README example inventory when a public example is added,
-  removed, renamed, or materially changes its purpose.
+  build instructions in `docs/features.md`, `docs/building/` or type
+  documentation, not the example README.
+- Update the example inventory in `docs/examples.md` (and
+  `examples/render/README.md` for a windowed one) when a public example is
+  added, removed, renamed, or materially changes its purpose.
 
 ## Verify end to end
 

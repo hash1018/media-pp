@@ -700,13 +700,13 @@ impl Element for Passthrough {
     }
 }
 
-impl Source for Passthrough {
+impl SrcPads for Passthrough {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for Passthrough {
+impl RawSink for Passthrough {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.pad.push(buf)
     }
@@ -735,7 +735,7 @@ impl Element for AlwaysFailingSink {
     }
 }
 
-impl Sink for AlwaysFailingSink {
+impl RawSink for AlwaysFailingSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Err(crate::Error::Other("the connection went away".into()))
     }

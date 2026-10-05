@@ -12,9 +12,9 @@ use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Render, element_pp_log},
+    element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
-    render::{RenderStage, render_sink},
+    render::{SinkStage, sink_stage},
 };
 
 /// The rate Whisper's own front end works at. Nothing else is accepted, and
@@ -576,9 +576,9 @@ fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTra
 /// can change what the model hears. A caller that stops the pipeline instead
 /// abandons that audio, which is what a stop means everywhere else in this
 /// crate.
-pub struct WhisperTranscriber<F>(RenderStage<Transcribing<F>>);
+pub struct WhisperTranscriber<F>(SinkStage<Transcribing<F>>);
 
-render_sink!(WhisperTranscriber<F> where F: FnMut(&Segment) -> Result<()> + Send + 'static);
+sink_stage!(WhisperTranscriber<F> where F: FnMut(&Segment) -> Result<()> + Send + 'static);
 
 /// What a [`WhisperTranscriber`] does with the audio it is handed:
 /// transcribes it a chunk at a time. All of its work, which the framework
@@ -689,7 +689,7 @@ where
             .map_err(WhisperTranscriberError::State)?;
         let end_of_text = context.token_eot();
 
-        Ok(Self(RenderStage::new(Transcribing {
+        Ok(Self(SinkStage::new(Transcribing {
             pp_log,
             name,
             state,
@@ -852,7 +852,7 @@ where
     }
 }
 
-impl<F> Render for Transcribing<F>
+impl<F> Sink for Transcribing<F>
 where
     F: FnMut(&Segment) -> Result<()> + Send + 'static,
 {

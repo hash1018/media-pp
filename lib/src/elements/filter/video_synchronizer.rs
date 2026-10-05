@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Flow, OwnQueue, Sink, Source, element_pp_log},
+    element::{Element, ElementType, Flow, OwnQueue, RawSink, SrcPads, element_pp_log},
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
     playback_state::PlaybackState,
@@ -292,13 +292,13 @@ impl Element for VideoSynchronizer {
     }
 }
 
-impl Source for VideoSynchronizer {
+impl SrcPads for VideoSynchronizer {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for VideoSynchronizer {
+impl RawSink for VideoSynchronizer {
     /// Scheduling is a delay, not a transform: frames are held until the
     /// playback clock says they are due and forwarded unchanged. No
     /// memory-domain claim, because it never touches the pixels — it
@@ -395,7 +395,7 @@ fn duration_ns(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::SinkExt;
+    use crate::element::RawSinkExt;
     use crate::{
         clock::Clock, control::PrerollContext, playback_clock::PlaybackClock,
         pool::UnboundObjectPool,

@@ -7,9 +7,9 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::OutputContract,
-    element::{Element, ElementType, Produce, Produced, ProducingSource, Wait, element_pp_log},
+    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     error::Result,
-    produce::{Received, produce_source},
+    produce::{Received, source_stage},
 };
 
 /// Errors specific to `AppSource`. Converts into the crate-wide `Error`
@@ -40,9 +40,9 @@ pub enum AppSourceError {
 /// Has no timeline of its own, so it is not a
 /// [`SeekableSource`](crate::element::SeekableSource): there is nothing to
 /// reposition when the app, not a file offset, decides what comes next.
-pub struct AppSource(ProducingSource<Receiving>);
+pub struct AppSource(SourceStage<Receiving>);
 
-produce_source!(AppSource);
+source_stage!(AppSource);
 
 /// What an [`AppSource`] does when asked: waits for the application's next
 /// buffer. All of its work, which the framework makes the source — and
@@ -101,13 +101,13 @@ impl AppSource {
         element_type: ElementType,
         contract: OutputContract,
         live: bool,
-    ) -> (ProducingSource<Receiving>, AppSourceHandle) {
+    ) -> (SourceStage<Receiving>, AppSourceHandle) {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(element_type, &name, None);
         pp_info!(pp_log: &pp_log, "created: capacity={capacity}");
         let (data_tx, data_rx) = bounded(capacity);
         (
-            ProducingSource::new(Receiving {
+            SourceStage::new(Receiving {
                 name: name.clone(),
                 pp_log,
                 element_type,
@@ -175,7 +175,7 @@ impl Element for Receiving {
     }
 }
 
-impl Produce for Receiving {
+impl Source for Receiving {
     fn is_live(&self) -> bool {
         self.live
     }
@@ -236,7 +236,7 @@ mod tests {
         }
     }
 
-    impl crate::element::Sink for CountingSink {
+    impl crate::element::RawSink for CountingSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())

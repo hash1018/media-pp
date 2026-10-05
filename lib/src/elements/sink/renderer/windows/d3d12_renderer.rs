@@ -11,7 +11,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Element, ElementType, RawSink, element_pp_log},
     elements::SubmitError,
     error::Result,
     platform::windows::d3d12va::d3d12va_texture,
@@ -266,7 +266,7 @@ impl Element for D3d12Renderer {
     }
 }
 
-impl Sink for D3d12Renderer {
+impl RawSink for D3d12Renderer {
     /// Presents a device resource; a system-memory frame reaches the GPU
     /// through [`crate::elements::D3d12Upload`], not through a second
     /// path inside this sink.

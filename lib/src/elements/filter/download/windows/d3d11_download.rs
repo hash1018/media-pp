@@ -20,7 +20,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Output, Transform, element_pp_log},
+    element::{Element, ElementType, Filter, Output, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     frame_size::ForSize,
     platform::windows::{
@@ -28,7 +28,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
-    transform::{TransformStage, transform_filter},
+    transform::{FilterStage, filter_stage},
 };
 
 /// Errors specific to `D3d11Download`. Converts into the crate-wide `Error`
@@ -120,9 +120,9 @@ pub enum D3d11DownloadError {
 /// See [`D3d11Gpu`] on why a lone per-element context handle isn't enough to
 /// prevent two unrelated bind/draw/copy sequences from interleaving on the
 /// one underlying immediate context.
-pub struct D3d11Download(TransformStage<Downloading>);
+pub struct D3d11Download(FilterStage<Downloading>);
 
-transform_filter!(D3d11Download);
+filter_stage!(D3d11Download);
 
 /// What a [`D3d11Download`] does to each frame: all of its work, which the
 /// framework makes the filter.
@@ -169,7 +169,7 @@ impl D3d11Download {
         // created it before any command is issued.
         protect_shared_device(device)?;
         pp_info!(pp_log: &pp_log, "opened");
-        Ok(Self(TransformStage::new(Downloading {
+        Ok(Self(FilterStage::new(Downloading {
             name,
             pp_log,
             device: device.clone(),
@@ -310,7 +310,7 @@ impl Element for Downloading {
     }
 }
 
-impl Transform for Downloading {
+impl Filter for Downloading {
     /// The mirror of D3d11Upload: only a device texture has anything to bring back.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -484,7 +484,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::{Sink, Source};
+    use crate::element::{RawSink, SrcPads};
     use crate::platform::windows::d3d11va::wrap_d3d11_texture;
     use crate::test_support::try_d3d11_gpu;
 
@@ -878,7 +878,7 @@ mod tests {
         }
     }
 
-    impl Sink for CapturingSink {
+    impl RawSink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             self.received.lock().unwrap().push(buf);
             Ok(())
