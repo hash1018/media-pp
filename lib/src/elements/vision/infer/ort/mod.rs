@@ -34,10 +34,10 @@ pub use cuda::{
     RuntimeShortfall,
 };
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use metal::{MetalOrtClassifier, MetalOrtDetector};
+pub use metal::{MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions};
 pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
-#[cfg(feature = "ort-cuda")]
+#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 use yolo::decode_batch;
 use yolo::{Letterbox, decode};
 
@@ -250,7 +250,7 @@ pub enum OrtError {
     #[error("a CUDA picture has no surface")]
     MissingSurface,
     /// A detector asked to take no pictures at a time.
-    #[cfg(feature = "ort-cuda")]
+    #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
     #[error("max_batch is 0: a detector takes one picture at a time or more")]
     ZeroMaxBatch,
     /// The driver is missing, or it, the CUDA runtime or cuDNN is too old

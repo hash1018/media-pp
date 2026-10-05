@@ -13,7 +13,7 @@ use ort::{ep::CoreML, ep::coreml::ModelFormat, session::Session};
 use super::OrtError;
 
 pub use metal_ort_classifier::MetalOrtClassifier;
-pub use metal_ort_detector::MetalOrtDetector;
+pub use metal_ort_detector::{MetalOrtDetector, MetalOrtDetectorOptions};
 
 /// A session on the model at `model_path` through Core ML, or none: ONNX
 /// Runtime passes over a provider that fails to register and runs on the

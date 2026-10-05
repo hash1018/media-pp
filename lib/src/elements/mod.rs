@@ -318,4 +318,4 @@ pub use vision::{
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use vision::{MetalDetectionOverlay, MetalDetectionOverlayError};
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use vision::{MetalOrtClassifier, MetalOrtDetector};
+pub use vision::{MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions};

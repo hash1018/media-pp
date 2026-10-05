@@ -134,78 +134,99 @@ impl Fitting {
         &mut self,
         picture: &Picture,
         cuts: &[Cut],
+        affine: ([f32; 3], [f32; 3]),
+    ) -> Result<(), OrtError> {
+        self.fit_each(&[(picture, cuts)], affine)
+    }
+
+    /// [`Self::fit`] for several pictures, each with its own cuts, in one
+    /// pass.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::fit`].
+    pub(super) fn fit_each(
+        &mut self,
+        pictures: &[(&Picture, &[Cut])],
         (scale, bias): ([f32; 3], [f32; 3]),
     ) -> Result<(), OrtError> {
         let read = MTLTextureUsage::ShaderRead;
-        let (kernel, textures): (&Kernel, Vec<Texture>) = if picture.nv12 {
-            (
-                &self.nv12,
-                vec![
-                    self.gpu
-                        .plane(&picture.buffer, 0, MTLPixelFormat::R8Unorm, read)?,
-                    self.gpu
-                        .plane(&picture.buffer, 1, MTLPixelFormat::RG8Unorm, read)?,
-                ],
-            )
-        } else {
-            (
-                &self.bgra,
-                vec![
-                    self.gpu
-                        .plane(&picture.buffer, 0, MTLPixelFormat::BGRA8Unorm, read)?,
-                ],
-            )
-        };
-        let bound: Vec<&Texture> = textures.iter().collect();
+        // Every picture's planes, held until the pass has finished reading
+        // them.
+        let mut planes: Vec<(&Kernel, Vec<Texture>)> = Vec::with_capacity(pictures.len());
+        for &(picture, _) in pictures {
+            planes.push(if picture.nv12 {
+                (
+                    &self.nv12,
+                    vec![
+                        self.gpu
+                            .plane(&picture.buffer, 0, MTLPixelFormat::R8Unorm, read)?,
+                        self.gpu
+                            .plane(&picture.buffer, 1, MTLPixelFormat::RG8Unorm, read)?,
+                    ],
+                )
+            } else {
+                (
+                    &self.bgra,
+                    vec![
+                        self.gpu
+                            .plane(&picture.buffer, 0, MTLPixelFormat::BGRA8Unorm, read)?,
+                    ],
+                )
+            });
+        }
         let mut pass = self.gpu.pass()?;
         pass.bind_buffer(&self.tensor, 1);
-        for cut in cuts {
-            let (left, top, width, height) = cut.crop;
-            assert!(
-                cut.slot < self.capacity,
-                "input {} of {}",
-                cut.slot,
-                self.capacity
-            );
-            assert!(
-                width > 0
-                    && height > 0
-                    && left + width <= picture.size.0
-                    && top + height <= picture.size.1,
-                "{:?} inside a {:?} picture",
-                cut.crop,
-                picture.size
-            );
-            let mut parameters: Vec<u8> = [
-                self.model.0,
-                self.model.1,
-                cut.offset.0,
-                cut.offset.1,
-                cut.scaled.0,
-                cut.scaled.1,
-                width,
-                height,
-                left,
-                top,
-                cut.slot as u32,
-                0,
-            ]
-            .iter()
-            .flat_map(|word| word.to_ne_bytes())
-            .collect();
-            let affine = [
-                [scale[0], scale[1], scale[2], 1.0],
-                [bias[0], bias[1], bias[2], 0.0],
-            ];
-            parameters.extend(
-                picture
-                    .rows
-                    .iter()
-                    .chain(&affine)
-                    .flatten()
-                    .flat_map(|value| value.to_ne_bytes()),
-            );
-            pass.dispatch(kernel, &bound, Some(&parameters), self.model);
+        for (&(picture, cuts), (kernel, textures)) in pictures.iter().zip(&planes) {
+            let bound: Vec<&Texture> = textures.iter().collect();
+            for cut in cuts {
+                let (left, top, width, height) = cut.crop;
+                assert!(
+                    cut.slot < self.capacity,
+                    "input {} of {}",
+                    cut.slot,
+                    self.capacity
+                );
+                assert!(
+                    width > 0
+                        && height > 0
+                        && left + width <= picture.size.0
+                        && top + height <= picture.size.1,
+                    "{:?} inside a {:?} picture",
+                    cut.crop,
+                    picture.size
+                );
+                let mut parameters: Vec<u8> = [
+                    self.model.0,
+                    self.model.1,
+                    cut.offset.0,
+                    cut.offset.1,
+                    cut.scaled.0,
+                    cut.scaled.1,
+                    width,
+                    height,
+                    left,
+                    top,
+                    cut.slot as u32,
+                    0,
+                ]
+                .iter()
+                .flat_map(|word| word.to_ne_bytes())
+                .collect();
+                let affine = [
+                    [scale[0], scale[1], scale[2], 1.0],
+                    [bias[0], bias[1], bias[2], 0.0],
+                ];
+                parameters.extend(
+                    picture
+                        .rows
+                        .iter()
+                        .chain(&affine)
+                        .flatten()
+                        .flat_map(|value| value.to_ne_bytes()),
+                );
+                pass.dispatch(kernel, &bound, Some(&parameters), self.model);
+            }
         }
         pass.finish()?;
         Ok(())

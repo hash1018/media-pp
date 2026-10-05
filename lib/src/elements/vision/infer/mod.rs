@@ -16,4 +16,4 @@ pub use self::ort::{
     SwOrtClassifier, SwOrtDetector,
 };
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use self::ort::{MetalOrtClassifier, MetalOrtDetector};
+pub use self::ort::{MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions};

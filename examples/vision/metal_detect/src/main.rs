@@ -79,9 +79,10 @@ mod example {
             Analytics, AnalyticsOptions, AppSink, BoxColors, COCO_CLASS_LABELS,
             DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
             Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier, MetalOrtDetector,
-            ObjectAnalytics, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions,
-            TrackerOptions, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice,
-            VideoToolboxEncoder, VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
+            MetalOrtDetectorOptions, ObjectAnalytics, ObjectTracker, OrtClassifierOptions,
+            OrtDetectorOptions, TrackerOptions, VideoToolboxCodec, VideoToolboxDecoder,
+            VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
+            VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -269,17 +270,20 @@ mod example {
         let detector = MetalOrtDetector::new(
             "detector",
             &model,
-            OrtDetectorOptions {
-                labels: Some(COCO_CLASS_LABELS.map(String::from).to_vec()),
-                // The tracker matches unconfident detections too, so it is
-                // handed them.
-                conf_threshold: if track {
-                    TrackerOptions::default().low_score
-                } else {
-                    SHOWN
+            MetalOrtDetectorOptions {
+                detector: OrtDetectorOptions {
+                    labels: Some(COCO_CLASS_LABELS.map(String::from).to_vec()),
+                    // The tracker matches unconfident detections too, so it
+                    // is handed them.
+                    conf_threshold: if track {
+                        TrackerOptions::default().low_score
+                    } else {
+                        SHOWN
+                    },
+                    interval,
+                    ..OrtDetectorOptions::default()
                 },
-                interval,
-                ..OrtDetectorOptions::default()
+                ..MetalOrtDetectorOptions::default()
             },
         )?;
         println!("detector ready in {:.1?}", started.elapsed());

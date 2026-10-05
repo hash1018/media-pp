@@ -220,6 +220,10 @@ compile error with no explanation.
   `CudaOrtDetectorOptions::max_batch` runs the pictures of a batch through
   the model at once — with TensorRT, an engine built for every batch up to
   it; a picture with no `BatchSlot` is a batch of its own, as before.
+  `MetalOrtDetectorOptions::max_batch` does the same through Core ML, the
+  batch's pictures fitted in one Metal pass and the model's open batch
+  fixed at that size; `MetalOrtDetector::new` takes those options in place
+  of `OrtDetectorOptions`.
 
 - **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
   TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`

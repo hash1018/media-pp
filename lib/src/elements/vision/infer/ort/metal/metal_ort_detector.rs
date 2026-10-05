@@ -4,25 +4,58 @@
 
 use std::{path::Path, sync::Arc};
 
-use ort::{inputs, session::Session, value::TensorRef};
+use ndarray::{Axis, Slice};
+use ort::{inputs, session::Session, value::TensorRef, value::ValueType};
 
 use crate::ffmpeg;
-use crate::pp_log::{PpLog, pp_info, pp_warn};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
+    bus::BusEvent,
     contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Context, Element, ElementType, element_pp_log},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use crate::elements::Detections;
+use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
-    Interval, Letterbox, OrtDetectorOptions, OrtError, decode, labels, model_input,
+    Interval, Letterbox, OrtDetectorOptions, OrtError, decode_batch, labels, model_input,
 };
 use super::core_ml_session;
 use super::fitting::{Cut, Fitting, Picture};
+
+/// How a [`MetalOrtDetector`] runs its model, beside what every detector is
+/// told.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetalOrtDetectorOptions {
+    /// Thresholds and labels, as every detector takes them.
+    pub detector: OrtDetectorOptions,
+    /// The most pictures the model is run on at once: the pictures of a
+    /// [`StreamMux`](crate::elements::StreamMux)'s batch, up to this many,
+    /// are fitted in one Metal pass and go through the model together —
+    /// DeepStream's `batch-size`. Give it the mux's `max_batch`; a larger
+    /// batch is run in parts this size.
+    ///
+    /// It takes a model whose batch is left open, as an Ultralytics export
+    /// with `dynamic=True` is, and fixes that batch at this size for Core
+    /// ML, which compiles a model of open shape again for each new batch: a
+    /// batch cut short is run at the full size, the inputs past its pictures
+    /// left as they were. A model made for one picture at a time — the
+    /// YOLOv10n release — is run so, with a warning. The default, 1, is a
+    /// detector of one picture at a time.
+    pub max_batch: usize,
+}
+
+impl Default for MetalOrtDetectorOptions {
+    fn default() -> Self {
+        Self {
+            detector: OrtDetectorOptions::default(),
+            max_batch: 1,
+        }
+    }
+}
 
 /// Runs a YOLO detector on each VideoToolbox picture and hands the picture
 /// on unchanged, carrying the [`Detections`] found in it — what
@@ -35,7 +68,9 @@ use super::fitting::{Cut, Fitting, Picture};
 /// camera's, a screen's — from any device, since a pixel buffer belongs to
 /// none; the boxes it finds are fractions of each picture, as
 /// [`Detection`](crate::elements::Detection) describes. The models it reads
-/// are those [`OrtDetectorOptions`] describes.
+/// are those [`OrtDetectorOptions`] describes. The pictures of a
+/// [`StreamMux`](crate::elements::StreamMux)'s batch are run together, as
+/// [`MetalOrtDetectorOptions::max_batch`] says.
 ///
 /// # Where the model runs
 ///
@@ -68,6 +103,17 @@ struct Detecting {
     labels: Arc<[Arc<str>]>,
     /// Which pictures it looks at.
     interval: Interval,
+    /// How many pictures the model is run on at once.
+    max_batch: usize,
+    /// How many inputs the model is handed each run where its batch is
+    /// fixed — by the model or for Core ML — or `None` where it takes as
+    /// many as there are pictures.
+    rows: Option<usize>,
+    /// The pictures of the batch under way, in the order they came.
+    held: Vec<Held>,
+    /// The pipeline's, to report a picture's failure on where others must
+    /// go on in the same call.
+    context: Option<Arc<Context>>,
     fitting: Fitting,
 }
 
@@ -79,20 +125,71 @@ impl MetalOrtDetector {
     pub fn new(
         name: impl Into<String>,
         model_path: impl AsRef<Path>,
-        options: OrtDetectorOptions,
+        options: MetalOrtDetectorOptions,
     ) -> Result<Self> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::MetalOrtDetector, &name, None);
         let path = model_path.as_ref().display().to_string();
+        if options.max_batch == 0 {
+            return Err(OrtError::ZeroMaxBatch.into());
+        }
 
-        let session = core_ml_session(model_path, None)?;
+        // Read on the CPU first, which compiles nothing: whether the model
+        // leaves its batch open, and by what name, to fix it for Core ML.
+        let open = Session::builder()
+            .map_err(OrtError::from)?
+            .commit_from_file(model_path.as_ref())
+            .map_err(OrtError::from)?;
+        let batch = match open.inputs().first().map(|input| input.dtype()) {
+            Some(ValueType::Tensor {
+                shape,
+                dimension_symbols,
+                ..
+            }) => match shape.iter().next().copied() {
+                Some(fixed) if fixed > 0 => Batch::Fixed(fixed as usize),
+                _ => match dimension_symbols.first() {
+                    Some(symbol) if !symbol.is_empty() => Batch::Named(symbol.clone()),
+                    _ => Batch::Unnamed,
+                },
+            },
+            _ => Batch::Fixed(1),
+        };
+        drop(open);
+        let (max_batch, rows) = match &batch {
+            Batch::Fixed(fixed) => {
+                if options.max_batch > *fixed {
+                    pp_warn!(
+                        pp_log: &pp_log,
+                        "the model takes {fixed} picture(s) at a time: a max_batch of {} is run so",
+                        options.max_batch
+                    );
+                }
+                (options.max_batch.min(*fixed), Some(*fixed))
+            }
+            Batch::Named(_) => (options.max_batch, Some(options.max_batch)),
+            Batch::Unnamed => {
+                pp_warn!(
+                    pp_log: &pp_log,
+                    "the model leaves its batch open without a name to fix it by: \
+                     Core ML compiles it again for each number of pictures"
+                );
+                (options.max_batch, None)
+            }
+        };
+        let session = core_ml_session(
+            model_path,
+            match &batch {
+                Batch::Named(symbol) => Some((symbol.as_str(), options.max_batch as i64)),
+                _ => None,
+            },
+        )?;
         let model = model_input(&session)?;
-        let labels = labels(options.labels.as_deref(), &session);
-        let fitting = Fitting::new(model, 1)?;
+        let labels = labels(options.detector.labels.as_deref(), &session);
+        let fitting = Fitting::new(model, rows.unwrap_or(max_batch))?;
 
         pp_info!(
             pp_log: &pp_log,
-            "model loaded: path={path}, input={}x{}, {} labels, on Core ML",
+            "model loaded: path={path}, input={}x{}, batches of up to {max_batch}, {} labels, on Core ML",
             model.0,
             model.1,
             labels.len()
@@ -103,58 +200,174 @@ impl MetalOrtDetector {
                 "the model names no classes and none were given: detections carry class numbers only"
             );
         }
-        let interval = Interval::new(options.interval);
+        let interval = Interval::new(options.detector.interval);
         Ok(Self(FilterStage::new(Detecting {
             name,
             pp_log,
             session,
-            options,
+            options: options.detector,
             labels,
             interval,
+            max_batch,
+            rows,
+            held: Vec::new(),
+            context: None,
             fitting,
         })))
     }
 }
 
-/// Fits the whole of `frame` into `fitting`'s one input as Ultralytics
-/// trains on — scaled to fit, proportions kept, grey around it — and says
-/// how it was fitted.
+/// What a model says of its batch.
+enum Batch {
+    /// Fixed at this many pictures.
+    Fixed(usize),
+    /// Left open, under this name.
+    Named(String),
+    /// Left open, with no name to fix it by.
+    Unnamed,
+}
+
+/// A picture of the batch under way, and where it is looked at, the
+/// picture to fit and how it is to be fitted — or `None` where it is let
+/// by.
+struct Held {
+    buf: MediaBuffer,
+    look: Option<(Picture, Letterbox)>,
+}
+
+/// How the whole of `picture` is fitted into input `slot` as Ultralytics
+/// trains on — scaled to fit, proportions kept, grey around it.
+fn whole(picture: &Picture, letterbox: &Letterbox, slot: usize) -> Cut {
+    Cut {
+        crop: (0, 0, picture.size.0, picture.size.1),
+        offset: letterbox.offset,
+        scaled: letterbox.scaled,
+        slot,
+    }
+}
+
+/// Fits the whole of `frame` into `fitting`'s first input, and says how it
+/// was fitted.
+#[cfg(test)]
 fn fit_whole(
     fitting: &mut Fitting,
     frame: &ffmpeg::frame::Video,
 ) -> std::result::Result<Letterbox, OrtError> {
     let picture = Picture::of(frame)?;
     let letterbox = Letterbox::new(picture.size, fitting.model);
-    let cut = Cut {
-        crop: (0, 0, picture.size.0, picture.size.1),
-        offset: letterbox.offset,
-        scaled: letterbox.scaled,
-        slot: 0,
-    };
-    fitting.fit(&picture, &[cut], ([1.0; 3], [0.0; 3]))?;
+    fitting.fit(
+        &picture,
+        &[whole(&picture, &letterbox, 0)],
+        ([1.0; 3], [0.0; 3]),
+    )?;
     Ok(letterbox)
 }
 
 impl Detecting {
-    /// Looks at `frame`, and says what it found.
+    /// `frame`, to be fitted, and how.
+    fn look(
+        &self,
+        frame: &ffmpeg::frame::Video,
+    ) -> std::result::Result<(Picture, Letterbox), OrtError> {
+        let picture = Picture::of(frame)?;
+        let letterbox = Letterbox::new(picture.size, self.fitting.model);
+        Ok((picture, letterbox))
+    }
+
+    /// How many of the held pictures are looked at.
+    fn looked_at(&self) -> usize {
+        self.held.iter().filter(|held| held.look.is_some()).count()
+    }
+
+    /// Fits `looks` into the first inputs in one pass, runs the model on
+    /// them, and says what it found in each.
     fn detect(
         &mut self,
-        frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<Detections, OrtError> {
-        let letterbox = fit_whole(&mut self.fitting, frame)?;
+        looks: &[(&Picture, Letterbox)],
+    ) -> std::result::Result<Vec<Vec<Detection>>, OrtError> {
+        let cuts: Vec<[Cut; 1]> = looks
+            .iter()
+            .enumerate()
+            .map(|(slot, (picture, letterbox))| [whole(picture, letterbox, slot)])
+            .collect();
+        let pictures: Vec<(&Picture, &[Cut])> = looks
+            .iter()
+            .zip(&cuts)
+            .map(|((picture, _), cut)| (*picture, cut.as_slice()))
+            .collect();
+        self.fitting.fit_each(&pictures, ([1.0; 3], [0.0; 3]))?;
+        // A model of fixed batch is handed exactly that many; one of open
+        // batch, as many as there are.
+        let rows = self.rows.unwrap_or(looks.len());
         let (width, height) = (self.fitting.model.0 as usize, self.fitting.model.1 as usize);
-        let input = TensorRef::from_array_view(([1, 3, height, width], self.fitting.input(1)))?;
+        let input =
+            TensorRef::from_array_view(([rows, 3, height, width], self.fitting.input(rows)))?;
         let outputs = self.session.run(inputs![input])?;
         let output = outputs[0].try_extract_array::<f32>()?;
-        Ok(Detections::new(
-            Arc::clone(&self.name),
-            Arc::clone(&self.labels),
-            decode(output, &letterbox, &self.options)?,
-        ))
+        // The inputs past the batch's pictures hold what they held; what
+        // the model found in them is no picture's.
+        let output = if output.ndim() > 0 && output.shape()[0] > looks.len() {
+            output.slice_axis(Axis(0), Slice::from(0..looks.len()))
+        } else {
+            output
+        };
+        let letterboxes: Vec<Letterbox> = looks.iter().map(|(_, letterbox)| *letterbox).collect();
+        decode_batch(output, &letterboxes, &self.options)
+    }
+
+    /// Runs the model on what is held, and hands every held picture on in
+    /// the order it came — those looked at carrying what was found in them.
+    /// Where the run fails, the pictures it was for go with it.
+    fn run_held(&mut self, out: &mut Output) -> std::result::Result<(), OrtError> {
+        let held = std::mem::take(&mut self.held);
+        let looks: Vec<(&Picture, Letterbox)> = held
+            .iter()
+            .filter_map(|held| held.look.as_ref())
+            .map(|(picture, letterbox)| (picture, *letterbox))
+            .collect();
+        let mut found = if looks.is_empty() {
+            Vec::new()
+        } else {
+            self.detect(&looks)?
+        }
+        .into_iter();
+        drop(looks);
+        for Held { buf, look } in held {
+            match look.and_then(|_| found.next()) {
+                Some(items) => {
+                    let detections =
+                        Detections::new(Arc::clone(&self.name), Arc::clone(&self.labels), items);
+                    out.push(detections.attach_to(buf));
+                }
+                // Let by unlooked-at, carrying nothing, which says so.
+                None => out.push(buf),
+            }
+        }
+        Ok(())
+    }
+
+    /// Puts `error` — one picture's, where the others of its batch go on in
+    /// the same call — on the pipeline's bus.
+    fn report(&self, error: OrtError) {
+        match &self.context {
+            Some(context) => context.bus.post(
+                &self.pp_log,
+                BusEvent::Error {
+                    element_type: ElementType::MetalOrtDetector,
+                    name: Arc::clone(&self.name),
+                    error: error.into(),
+                },
+            ),
+            None => pp_error!(pp_log: &self.pp_log, "{error}"),
+        }
     }
 }
 
 impl Element for Detecting {
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        self.context = Some(Arc::clone(context));
+    }
+
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -181,6 +394,9 @@ impl Filter for Detecting {
         )
     }
 
+    /// A picture with no [`BatchSlot`] is a batch of its own, run at once.
+    /// The pictures of a batch are held and run together when its last has
+    /// come, or as soon as `max_batch` of them are looked at.
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         let MediaBuffer::Video(frame) = &buf else {
             return Err(OrtError::UnsupportedBuffer {
@@ -190,17 +406,56 @@ impl Filter for Detecting {
             }
             .into());
         };
-        if !self.interval.look(&buf) {
-            // Let by unlooked-at, carrying nothing, which says so.
-            out.push(buf);
-            return Ok(());
+        let slot = buf
+            .metadata()
+            .and_then(|metadata| metadata.get::<BatchSlot>())
+            .copied();
+        // What is held is of another batch, whose last picture never came:
+        // it is run as it is rather than kept waiting.
+        let held_batch = self.held.first().and_then(|held| {
+            held.buf
+                .metadata()
+                .and_then(|metadata| metadata.get::<BatchSlot>())
+                .map(|slot| slot.batch)
+        });
+        if !self.held.is_empty() && held_batch != slot.map(|slot| slot.batch) {
+            self.run_held(out)?;
         }
-        let detections = self.detect(frame)?;
-        out.push(detections.attach_to(buf));
+        let last = slot.is_none_or(|slot| slot.is_last());
+
+        let look = if self.interval.look(&buf) {
+            match self.look(frame) {
+                Ok(look) => Some(look),
+                // This picture alone failed. Where nothing else is to go on
+                // from this call, the failure is this call's; where the
+                // batch it closes is, the batch goes on and the failure is
+                // reported beside it.
+                Err(error) if !(last && !self.held.is_empty()) => return Err(error.into()),
+                Err(error) => {
+                    self.report(error);
+                    self.run_held(out)?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        self.held.push(Held { buf, look });
+        // A full batch is run at once: what it holds need not wait for the
+        // rest of a mux's batch larger than it.
+        if last || self.looked_at() == self.max_batch {
+            self.run_held(out)?;
+        }
         Ok(())
     }
 
+    /// The end of the stream: a batch cut short is run as it is.
+    fn drain(&mut self, out: &mut Output) -> Result<()> {
+        Ok(self.run_held(out)?)
+    }
+
     fn reset(&mut self) {
+        self.held.clear();
         self.interval.restart();
     }
 }
@@ -301,6 +556,60 @@ mod tests {
         }
     }
 
+    /// Pictures fitted together in one pass land each in its own input,
+    /// as each fitted alone does. Needs no model; skipped without
+    /// VideoToolbox.
+    #[test]
+    fn pictures_fitted_together_are_each_fitted_as_alone() {
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let model = (64, 64);
+        let mut alone = Fitting::new(model, 1).expect("the kernels compile");
+        let mut together = Fitting::new(model, 2).expect("the kernels compile");
+        let frames: Vec<MediaBuffer> = [
+            pattern(ffmpeg::format::Pixel::NV12, 128, 64),
+            pattern(ffmpeg::format::Pixel::BGRA, 64, 128),
+        ]
+        .into_iter()
+        .map(|picture| upload(&device, picture))
+        .collect();
+        let pictures: Vec<Picture> = frames
+            .iter()
+            .map(|buf| {
+                let MediaBuffer::Video(frame) = buf else {
+                    panic!("a picture is uploaded");
+                };
+                Picture::of(frame).expect("a VideoToolbox picture")
+            })
+            .collect();
+        let cuts: Vec<[Cut; 1]> = pictures
+            .iter()
+            .enumerate()
+            .map(|(slot, picture)| [whole(picture, &Letterbox::new(picture.size, model), slot)])
+            .collect();
+        let each: Vec<(&Picture, &[Cut])> = pictures
+            .iter()
+            .zip(&cuts)
+            .map(|(picture, cut)| (picture, cut.as_slice()))
+            .collect();
+        together
+            .fit_each(&each, ([1.0; 3], [0.0; 3]))
+            .expect("fits");
+        let floats = 3 * (model.0 * model.1) as usize;
+        for (slot, buf) in frames.iter().enumerate() {
+            let MediaBuffer::Video(frame) = buf else {
+                unreachable!();
+            };
+            fit_whole(&mut alone, frame).expect("fits");
+            assert_eq!(
+                &together.input(2)[slot * floats..(slot + 1) * floats],
+                alone.input(1),
+                "input {slot}"
+            );
+        }
+    }
+
     /// A picture in system memory is refused, saying what it is, rather
     /// than read as a pixel buffer it does not hold.
     #[test]
@@ -367,7 +676,7 @@ mod tests {
             "the picture has something in it"
         );
 
-        let mut gpu = MetalOrtDetector::new("gpu", &model, OrtDetectorOptions::default())
+        let mut gpu = MetalOrtDetector::new("gpu", &model, MetalOrtDetectorOptions::default())
             .expect("loads on Core ML");
         for format in [ffmpeg::format::Pixel::NV12, ffmpeg::format::Pixel::BGRA] {
             let actual = found(&mut gpu, upload(&device, nth_picture(&video, 150, format)));
@@ -384,5 +693,193 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Picture `n` of `video`, in a VideoToolbox pixel buffer, as the
+    /// `index`th of a batch of `size` a mux handed on.
+    fn in_batch(
+        device: &crate::elements::VideoToolboxDevice,
+        video: &str,
+        n: usize,
+        index: usize,
+        size: usize,
+    ) -> MediaBuffer {
+        use crate::buffer::Metadata;
+        use crate::elements::vision::batch::{StreamId, StreamOrigin};
+        upload(device, nth_picture(video, n, ffmpeg::format::Pixel::NV12)).with_metadata(
+            Metadata::default()
+                .with(StreamOrigin {
+                    id: StreamId(index as u64),
+                    name: Arc::from(format!("camera {index}")),
+                    generation: 0,
+                })
+                .with(BatchSlot {
+                    batch: 0,
+                    index,
+                    size,
+                }),
+        )
+    }
+
+    /// The confident detections on `buf`: class and corner.
+    fn found_in(buf: &MediaBuffer) -> Vec<(usize, f32, f32)> {
+        buf.metadata()
+            .and_then(|metadata| metadata.get::<Detections>())
+            .expect("carries Detections")
+            .items
+            .iter()
+            .filter(|item| item.score > 0.5)
+            .map(|item| (item.class_id, item.x, item.y))
+            .collect()
+    }
+
+    /// Whether the model at `path` leaves its batch open.
+    fn open_batch(path: &str) -> bool {
+        let probe = Session::builder()
+            .and_then(|mut builder| builder.commit_from_file(path))
+            .expect("loads");
+        probe
+            .inputs()
+            .first()
+            .and_then(|input| input.dtype().tensor_shape())
+            .and_then(|shape| shape.iter().next().copied())
+            .is_some_and(|batch| batch < 0)
+    }
+
+    /// The pictures of a batch are held until its last has come, then
+    /// fitted in one pass and run through the model at once, and handed on
+    /// in order, each carrying what one picture at a time finds in it; a
+    /// batch cut short by the end of the stream is run as it is. Needs a
+    /// model whose batch is left open — YOLO11n exported with
+    /// `dynamic=True` — and a video; skipped, saying so, without them.
+    #[test]
+    fn a_batch_finds_what_one_picture_at_a_time_finds() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        if !open_batch(&model) {
+            eprintln!("skipping: {model} takes one picture at a time");
+            return;
+        }
+        let options = |max_batch| MetalOrtDetectorOptions {
+            max_batch,
+            ..MetalOrtDetectorOptions::default()
+        };
+        let pictures = [100, 150, 200];
+
+        let mut alone = MetalOrtDetector::new("alone", &model, options(1)).expect("loads");
+        let one_at_a_time = capture(&mut alone);
+        for (index, n) in pictures.into_iter().enumerate() {
+            alone
+                .consume(in_batch(&device, &video, n, index, pictures.len()))
+                .expect("detects");
+            assert_eq!(
+                one_at_a_time.lock().unwrap().len(),
+                index + 1,
+                "one at a time, each goes on at once"
+            );
+        }
+
+        let mut batched = MetalOrtDetector::new("batched", &model, options(4)).expect("loads");
+        let together = capture(&mut batched);
+        for (index, n) in pictures.into_iter().enumerate() {
+            batched
+                .consume(in_batch(&device, &video, n, index, pictures.len()))
+                .expect("detects");
+            let last = index + 1 == pictures.len();
+            assert_eq!(
+                together.lock().unwrap().len(),
+                if last { pictures.len() } else { 0 },
+                "held to the last"
+            );
+        }
+        let one_at_a_time = one_at_a_time.lock().unwrap();
+        let together = together.lock().unwrap();
+        for (index, (alone, batched)) in one_at_a_time.iter().zip(together.iter()).enumerate() {
+            assert_eq!(
+                batched
+                    .metadata()
+                    .and_then(|m| m.get::<BatchSlot>())
+                    .map(|s| s.index),
+                Some(index),
+                "in the order they came"
+            );
+            let (alone, batched) = (found_in(alone), found_in(batched));
+            assert!(!alone.is_empty(), "picture {index} has something in it");
+            assert_eq!(alone.len(), batched.len(), "picture {index}");
+            for (a, b) in alone.iter().zip(&batched) {
+                assert_eq!(a.0, b.0, "picture {index}");
+                assert!(
+                    (a.1 - b.1).abs() < 0.01 && (a.2 - b.2).abs() < 0.01,
+                    "picture {index}: {a:?} against {b:?}"
+                );
+            }
+        }
+        drop(together);
+
+        // Two of a batch of three, then the end: both go on, looked at.
+        let mut cut = MetalOrtDetector::new("cut short", &model, options(4)).expect("loads");
+        let ended = capture(&mut cut);
+        for (index, n) in pictures.into_iter().take(2).enumerate() {
+            cut.consume(in_batch(&device, &video, n, index, 3))
+                .expect("detects");
+        }
+        assert!(ended.lock().unwrap().is_empty(), "waiting for the third");
+        cut.stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("drained");
+        let ended = ended.lock().unwrap();
+        assert_eq!(ended.len(), 2);
+        assert!(ended.iter().all(|buf| !found_in(buf).is_empty()));
+    }
+
+    /// A model made for one picture at a time, given a `max_batch`, runs
+    /// each picture of a batch as it comes rather than holding any, and
+    /// finds what it finds alone. Needs such a model — the YOLOv10n
+    /// release — and a video; skipped, saying so, without them.
+    #[test]
+    fn a_model_of_one_picture_runs_a_batch_one_by_one() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        if open_batch(&model) {
+            eprintln!("skipping: {model} leaves its batch open");
+            return;
+        }
+        let mut detector = MetalOrtDetector::new(
+            "fixed",
+            &model,
+            MetalOrtDetectorOptions {
+                max_batch: 4,
+                ..MetalOrtDetectorOptions::default()
+            },
+        )
+        .expect("loads");
+        let kept = capture(&mut detector);
+        for (index, n) in [100, 150, 200].into_iter().enumerate() {
+            detector
+                .consume(in_batch(&device, &video, n, index, 3))
+                .expect("detects");
+            assert_eq!(kept.lock().unwrap().len(), index + 1, "goes on at once");
+        }
+        assert!(
+            kept.lock()
+                .unwrap()
+                .iter()
+                .any(|buf| !found_in(buf).is_empty())
+        );
     }
 }
