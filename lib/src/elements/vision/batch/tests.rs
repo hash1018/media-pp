@@ -339,3 +339,157 @@ fn a_handle_outliving_its_mux_says_so() {
     ));
     assert_eq!(handle.source_count(), 0);
 }
+
+/// A terminal for one stream after a demux: the timestamps it was handed,
+/// and whether its stream ended.
+struct StreamSink {
+    pp_log: crate::pp_log::PpLog,
+    pictures: Arc<Mutex<Vec<(StreamId, i64)>>>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::element::Element for StreamSink {
+    fn name(&self) -> Arc<str> {
+        "stream-sink".into()
+    }
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+    fn pp_log(&self) -> &crate::pp_log::PpLog {
+        &self.pp_log
+    }
+    fn pp_log_mut(&mut self) -> &mut crate::pp_log::PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl crate::element::RawSink for StreamSink {
+    fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+        self.pictures
+            .lock()
+            .unwrap()
+            .push((origin(&buf).id, pts(&buf)));
+        Ok(())
+    }
+    fn stream_event(&mut self, event: &StreamEvent) -> crate::error::Result<()> {
+        if matches!(event, StreamEvent::Eos) {
+            self.ended.store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+type Seen = (
+    Arc<Mutex<Vec<(StreamId, i64)>>>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
+
+fn stream_sink() -> (StreamSink, Seen) {
+    let pictures = Arc::new(Mutex::new(Vec::new()));
+    let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sink = StreamSink {
+        pp_log: element_pp_log(ElementType::Other, "stream-sink", None),
+        pictures: pictures.clone(),
+        ended: ended.clone(),
+    };
+    (sink, (pictures, ended))
+}
+
+/// A mux's pipeline ending in a demux, and the demux's handle.
+fn demuxed(mux: StreamMux, handle: &StreamMuxHandle) -> (Arc<Pipeline>, StreamDemuxHandle) {
+    Pipeline::new("mux", mux, |source, ctx| {
+        let (branch, demux) = handle.demux(ctx, "demux")?;
+        ctx.attach(source, 0, branch)?;
+        Ok(demux)
+    })
+    .unwrap()
+}
+
+fn wait_for(limit: Duration, done: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    done()
+}
+
+/// Each stream's branch is handed that stream's pictures alone, in order; a
+/// stream that ends early has its branch ended while the others go on; a
+/// stream with no branch is dropped.
+#[test]
+fn a_demux_hands_each_stream_to_its_own_branch() {
+    use std::sync::atomic::Ordering;
+
+    let (mux, handle) = StreamMux::new("mux", offline()).unwrap();
+    let (_a, long, long_id) = feed(&handle, "long");
+    let (_b, short, short_id) = feed(&handle, "short");
+    let (_c, unwatched, _) = feed(&handle, "unwatched");
+    let (pipeline, demux) = demuxed(mux, &handle);
+    let (long_sink, (long_seen, long_ended)) = stream_sink();
+    let (short_sink, (short_seen, short_ended)) = stream_sink();
+    demux
+        .attach(long_id, demux.branch().unwrap().to(long_sink).unwrap())
+        .unwrap();
+    demux
+        .attach(short_id, demux.branch().unwrap().to(short_sink).unwrap())
+        .unwrap();
+    assert_eq!(demux.streams(), [long_id, short_id]);
+    pipeline.run().unwrap();
+
+    for pts in 0..2 {
+        short.push(picture(pts)).unwrap();
+    }
+    short.finish().unwrap();
+    for pts in 0..6 {
+        long.push(picture(pts)).unwrap();
+        unwatched.push(picture(pts)).unwrap();
+    }
+    // The short stream's branch ends while the long one still runs: the
+    // long input has not finished yet.
+    assert!(
+        wait_for(Duration::from_secs(5), || short_ended
+            .load(Ordering::Acquire)),
+        "the short stream's branch ends with its stream"
+    );
+    assert!(!long_ended.load(Ordering::Acquire));
+    long.finish().unwrap();
+    unwatched.finish().unwrap();
+    assert!(wait_for(Duration::from_secs(5), || long_ended
+        .load(Ordering::Acquire)));
+
+    let long_seen = long_seen.lock().unwrap().clone();
+    let short_seen = short_seen.lock().unwrap().clone();
+    assert_eq!(
+        long_seen,
+        (0..6).map(|pts| (long_id, pts)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        short_seen,
+        (0..2).map(|pts| (short_id, pts)).collect::<Vec<_>>()
+    );
+    assert_eq!(demux.streams(), [], "ended streams leave the demux");
+    pipeline.stop();
+}
+
+/// A stream has one branch at a time.
+#[test]
+fn a_second_branch_for_a_stream_is_refused() {
+    let (mux, handle) = StreamMux::new("mux", StreamMuxOptions::default()).unwrap();
+    let (_sink, id) = handle.add_source("cam").unwrap();
+    let (pipeline, demux) = demuxed(mux, &handle);
+    let (first, _) = stream_sink();
+    let (second, _) = stream_sink();
+    demux
+        .attach(id, demux.branch().unwrap().to(first).unwrap())
+        .unwrap();
+    let refused = demux.attach(id, demux.branch().unwrap().to(second).unwrap());
+    assert!(matches!(
+        refused,
+        Err(crate::error::Error::StreamMuxError(StreamMuxError::AlreadyAttached(stream))) if stream == id
+    ));
+    assert_eq!(demux.streams(), [id]);
+    drop(pipeline);
+}

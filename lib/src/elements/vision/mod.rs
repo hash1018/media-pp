@@ -32,8 +32,8 @@ mod track;
 
 pub use analytics::{AnalyticsOptions, Line, ObjectAnalytics, ObjectAnalyticsError, Zone};
 pub use batch::{
-    BatchSlot, StreamId, StreamMux, StreamMuxError, StreamMuxHandle, StreamMuxInput,
-    StreamMuxOptions, StreamOrigin,
+    BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,
+    StreamMuxInput, StreamMuxOptions, StreamOrigin,
 };
 #[cfg(feature = "ort")]
 pub use infer::*;

@@ -6,6 +6,7 @@
 //! after another, each carrying [`StreamOrigin`] and [`BatchSlot`]; every
 //! element that does not care passes them on as it would any picture.
 
+mod demux;
 mod input;
 mod meta;
 
@@ -28,6 +29,7 @@ use crate::{
     produce::source_stage,
 };
 
+pub use demux::StreamDemuxHandle;
 pub use input::StreamMuxInput;
 pub use meta::{BatchSlot, StreamId, StreamOrigin};
 
@@ -44,6 +46,10 @@ pub enum StreamMuxError {
     /// [`StreamMuxOptions`] that no mux can run with.
     #[error("invalid stream mux options: {0}")]
     InvalidOptions(&'static str),
+    /// [`StreamDemuxHandle::attach`] was given a stream that already has a
+    /// branch.
+    #[error("{0} already has a branch")]
+    AlreadyAttached(StreamId),
 }
 
 /// How a [`StreamMux`] makes its batches.
@@ -134,7 +140,6 @@ impl MuxShared {
     }
 
     /// The streams that have ended since the last call.
-    #[allow(dead_code)] // read by the demux, which comes next
     pub(crate) fn take_ended(&self) -> Vec<Ended> {
         std::mem::take(&mut *self.ended.lock().unwrap())
     }

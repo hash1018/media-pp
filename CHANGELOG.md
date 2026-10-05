@@ -204,6 +204,16 @@ compile error with no explanation.
 
 ### Added
 
+- **`StreamMux`: several streams through one model,** DeepStream's
+  `nvstreammux` and `nvstreamdemux` — see docs/stream-mux.md. Inputs come
+  from other pipelines through `StreamMuxHandle::add_source`; every picture
+  goes on with `StreamOrigin` and `BatchSlot` metadata, a batch being its
+  pictures one after another. Live, a batch waits for every input or
+  `batch_timeout`; offline, for every input that has not ended.
+  `StreamMuxHandle::demux` makes a `Tee` that hands each stream to a branch
+  of its own and ends a stream's branch when the stream ends. Running a
+  batch through a model at once comes next.
+
 - **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
   TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`
   does, with the picture never leaving the GPU: a kernel fits each NV12 or

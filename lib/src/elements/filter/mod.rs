@@ -31,7 +31,7 @@ mod pacer;
 mod pause_gate;
 mod rack;
 pub(crate) mod scaler;
-mod tee;
+pub(crate) mod tee;
 mod timestamp_origin;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod tone_map;

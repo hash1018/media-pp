@@ -40,6 +40,12 @@ pub struct Tee {
     pp_log: PpLog,
     id: ElementId,
     name: Arc<str>,
+    /// What it reports itself as: `Tee`, or an element of this crate built
+    /// on one — see [`TeeBuilder::routed`].
+    kind: ElementType,
+    /// Shown every item before it is handed out, by an element of this
+    /// crate built on a `Tee` — see [`TeeBuilder::routed`].
+    observe: Option<Observer>,
     shared: Arc<TeeShared>,
     /// What arrived for a branch — by its root — while a preroll held it,
     /// in order, owed to it once playback goes on. See [`Tee::consume`].
@@ -57,6 +63,15 @@ pub struct Tee {
 /// is dropped as it used to be — with a warning, since that branch will
 /// show a gap.
 const MAX_OWED: usize = 512;
+
+/// Which buffers a branch is handed, for an element of this crate built on
+/// a `Tee` — see [`TeeHandle::attach_routed`]. Stream events reach every
+/// branch whatever it says.
+pub(crate) type Route = Arc<dyn Fn(&MediaBuffer) -> bool + Send + Sync>;
+
+/// What an element built on a `Tee` is shown of each item, on the thread
+/// handing it out, before any branch is — see [`TeeBuilder::routed`].
+pub(crate) type Observer = Box<dyn FnMut(&Item) + Send>;
 
 struct TeeShared {
     branches: Mutex<Vec<Arc<TeeBranch>>>,
@@ -114,6 +129,8 @@ impl Drop for TeeShared {
 struct TeeBranch {
     id: Option<BranchId>,
     root_id: ElementId,
+    /// The buffers it takes, where not all — see [`Route`].
+    route: Option<Route>,
     active: AtomicBool,
     /// Whether this branch has been handed the stream's segment, which one
     /// attached while the stream runs has not.
@@ -162,9 +179,9 @@ pub struct TeeHandle {
 }
 
 impl Tee {
-    fn new(name: impl Into<String>, context: Arc<Context>) -> (Self, TeeHandle) {
+    fn new(name: impl Into<String>, context: Arc<Context>, kind: ElementType) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::Tee, &name, Some(&context.pipeline_id));
+        let pp_log = element_pp_log(kind, &name, Some(&context.pipeline_id));
         pp_info!(pp_log: &pp_log, "created");
         let id = context.graph.reserve_element_id();
         let shared = Arc::new(TeeShared {
@@ -179,6 +196,8 @@ impl Tee {
                 id,
                 name: name.clone(),
                 pp_log: pp_log.clone(),
+                kind,
+                observe: None,
                 shared: shared.clone(),
                 owed: Vec::new(),
                 segment: None,
@@ -208,7 +227,7 @@ impl Tee {
         peer: Option<(ElementType, Arc<str>)>,
         error: crate::error::Error,
     ) {
-        let (element_type, name) = peer.unwrap_or((ElementType::Tee, self.name.clone()));
+        let (element_type, name) = peer.unwrap_or((self.kind, self.name.clone()));
         self.shared.context.bus.for_element(root_id).post(
             &self.pp_log,
             BusEvent::Error {
@@ -244,7 +263,27 @@ impl Context {
 
 impl TeeBuilder {
     fn new(name: impl Into<String>, context: Arc<Context>) -> Self {
-        let (tee, handle) = Tee::new(name, context);
+        let (tee, handle) = Tee::new(name, context, ElementType::Tee);
+        Self {
+            tee,
+            handle,
+            initial_branches: Vec::new(),
+        }
+    }
+
+    /// A `Tee` for an element of this crate to be built on: one reporting
+    /// itself as `kind`, whose branches are attached with a [`Route`] each
+    /// ([`TeeHandle::attach_routed`]), and which shows every item to the
+    /// observer `observe` makes — given the `Tee`'s own handle — before
+    /// handing it out, on the same thread.
+    pub(crate) fn routed(
+        name: impl Into<String>,
+        context: Arc<Context>,
+        kind: ElementType,
+        observe: impl FnOnce(TeeHandle) -> Observer,
+    ) -> Self {
+        let (mut tee, handle) = Tee::new(name, context, kind);
+        tee.observe = Some(observe(handle.clone()));
         Self {
             tee,
             handle,
@@ -320,6 +359,7 @@ impl TeeBuilder {
             runtime_branches.push(Arc::new(TeeBranch {
                 id: None,
                 root_id,
+                route: None,
                 active: AtomicBool::new(true),
                 has_segment: AtomicBool::new(false),
                 pad: Mutex::new(pad),
@@ -353,6 +393,16 @@ impl TeeHandle {
     /// [`GraphError::TimelineOperationInProgress`] immediately; build a fresh
     /// detached branch and retry after the operation finishes.
     pub fn attach(&self, branch: DetachedBranch) -> Result<BranchId> {
+        self.attach_routed(branch, None)
+    }
+
+    /// [`Self::attach`], with the buffers the branch takes limited by
+    /// `route` — for an element of this crate built on a `Tee`.
+    pub(crate) fn attach_routed(
+        &self,
+        branch: DetachedBranch,
+        route: Option<Route>,
+    ) -> Result<BranchId> {
         let shared = self
             .shared
             .upgrade()
@@ -382,6 +432,7 @@ impl TeeHandle {
                 branches.push(Arc::new(TeeBranch {
                     id: Some(branch_id),
                     root_id,
+                    route: route.clone(),
                     active: AtomicBool::new(true),
                     has_segment: AtomicBool::new(false),
                     pad: Mutex::new(pad),
@@ -569,7 +620,7 @@ impl Element for Tee {
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::Tee
+        self.kind
     }
 
     fn graph_id(&self) -> Option<ElementId> {
@@ -653,6 +704,11 @@ impl Tee {
     /// branch itself stays wired and gets retried on the next one. Whoever's
     /// watching the bus decides whether to call `TeeHandle::detach` for it.
     fn hand_out(&mut self, item: Item) {
+        // Before the branches are looked at: what the observer does — end a
+        // branch — is then already in the list taken below.
+        if let Some(observe) = &mut self.observe {
+            observe(&item);
+        }
         let branches = lock_unpoisoned(&self.shared.branches).clone();
         // The preroll, if one is running, holds the branches that have
         // their sample — the pipeline's to say.
@@ -666,6 +722,13 @@ impl Tee {
         }
         for branch in branches {
             if !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            // A buffer the branch's route keeps from it. Its stream events
+            // still reach it, below.
+            if let (Some(route), Item::Buffer(buf)) = (&branch.route, &item)
+                && !route(buf)
+            {
                 continue;
             }
             // A branch attached since the stream's segment went past is

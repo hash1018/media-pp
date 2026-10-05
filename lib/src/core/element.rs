@@ -97,6 +97,9 @@ pub enum ElementType {
     /// in the pipeline that feeds it — its own variant for the reason
     /// [`ElementType::AudioMixerInput`] is.
     StreamMuxInput,
+    /// Splits a [`ElementType::StreamMux`]'s streams out again, a branch
+    /// each.
+    StreamDemux,
     /// CPU video compositor source.
     SwVideoCompositor,
     /// CUDA video compositor source.
