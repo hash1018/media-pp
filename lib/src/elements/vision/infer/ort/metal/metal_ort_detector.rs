@@ -481,9 +481,8 @@ impl Filter for Detecting {
 mod tests {
     use std::sync::Mutex;
 
-    use super::super::fitting::tests::{pattern, upload};
+    use super::super::fitting::tests::{covered, mean_rgb, pattern, upload};
     use super::*;
-    use crate::color::ColorDescription;
     use crate::element::{RawSink, SrcPads};
     use crate::elements::{AppSink, SwOrtDetector};
     use crate::test_support::{nth_picture, try_videotoolbox_device};
@@ -500,40 +499,18 @@ mod tests {
     }
 
     /// What the kernels are to write for `frame`: each pixel of the scaled
-    /// picture the sample under its centre, made RGB by the frame's own
-    /// rows, and the margins grey — three planes, R, G and B.
+    /// picture the mean of the pixels it covers, made RGB by the frame's
+    /// own rows, and the margins grey — three planes, R, G and B.
     fn expected(frame: &ffmpeg::frame::Video, model: (u32, u32)) -> Vec<f32> {
         let (width, height) = (frame.width(), frame.height());
         let letterbox = Letterbox::new((width, height), model);
-        let rows = ColorDescription::of(frame).yuv_to_rgb_rows(height);
         let plane = (model.0 * model.1) as usize;
         let mut tensor = vec![114.0 / 255.0; 3 * plane];
         for y in 0..letterbox.scaled.1 {
             for x in 0..letterbox.scaled.0 {
-                let sx = (((x as f32 + 0.5) * width as f32 / letterbox.scaled.0 as f32) as u32)
-                    .min(width - 1) as usize;
-                let sy = (((y as f32 + 0.5) * height as f32 / letterbox.scaled.1 as f32) as u32)
-                    .min(height - 1) as usize;
-                let rgb = if frame.format() == ffmpeg::format::Pixel::NV12 {
-                    let luma = frame.data(0)[sy * frame.stride(0) + sx];
-                    let chroma = &frame.data(1)[(sy / 2) * frame.stride(1) + (sx / 2) * 2..];
-                    let yuv = [
-                        f32::from(luma) / 255.0,
-                        f32::from(chroma[0]) / 255.0,
-                        f32::from(chroma[1]) / 255.0,
-                        1.0,
-                    ];
-                    rows.map(|row| {
-                        row.iter()
-                            .zip(yuv)
-                            .map(|(a, b)| a * b)
-                            .sum::<f32>()
-                            .clamp(0.0, 1.0)
-                    })
-                } else {
-                    let bgra = &frame.data(0)[sy * frame.stride(0) + sx * 4..];
-                    [bgra[2], bgra[1], bgra[0]].map(|value| f32::from(value) / 255.0)
-                };
+                let (x0, x1) = covered(x, width, letterbox.scaled.0);
+                let (y0, y1) = covered(y, height, letterbox.scaled.1);
+                let rgb = mean_rgb(frame, x0..x1, y0..y1);
                 let at = ((letterbox.offset.1 + y) * model.0 + letterbox.offset.0 + x) as usize;
                 for (channel, value) in rgb.into_iter().enumerate() {
                     tensor[channel * plane + at] = value;
@@ -544,9 +521,9 @@ mod tests {
     }
 
     /// The kernels write, from NV12 and from BGRA alike, the very input the
-    /// CPU reads the picture as: the sample under each pixel's centre in
-    /// the right channel and plane, made RGB by the picture's own colour,
-    /// and grey around it. Needs no model; skipped without VideoToolbox.
+    /// CPU reads the picture as: the mean of the pixels each covers in the
+    /// right channel and plane, made RGB by the picture's own colour, and
+    /// grey around it. Needs no model; skipped without VideoToolbox.
     #[test]
     fn a_picture_is_fitted_as_the_cpu_reads_it() {
         let Some(device) = try_videotoolbox_device() else {
@@ -555,8 +532,8 @@ mod tests {
         let model = (64, 64);
         let mut fitting = Fitting::new(model, 1).expect("the kernels compile");
         for format in [ffmpeg::format::Pixel::NV12, ffmpeg::format::Pixel::BGRA] {
-            // Twice as wide as high: grey above and below, and every pixel
-            // centre at an exact sample, so no rounding can pick another.
+            // Twice as wide as high: grey above and below, and each input
+            // pixel covering two by two.
             let picture = pattern(format, 128, 64);
             let wanted = expected(&picture, model);
             let MediaBuffer::Video(frame) = upload(&device, picture) else {

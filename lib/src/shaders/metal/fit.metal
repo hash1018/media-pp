@@ -8,12 +8,15 @@
 // What is fitted is the rectangle of the picture at `origin`, `source` in
 // size — the whole of it for a detector, an object's box for a classifier —
 // scaled inside the input at `offset` to `scaled` in size; a pixel outside it
-// is the grey Ultralytics trains on, 114 of 255. Inside, each pixel takes the
-// source sample at its centre — nearest rather than filtered, as the CUDA
-// kernels do. An NV12 sample is made RGB by the three rows its own colour
-// description gives — `color::yuv_to_rgb_rows`, what `convert.metal`
-// converts with; a BGRA one is read as it is, through a `bgra8Unorm` view
-// that hands it over as RGBA.
+// is the grey Ultralytics trains on, 114 of 255. Inside, each pixel is the
+// mean of the source pixels it covers — three by three where a 1080p picture
+// is shrunk to 640 — or, enlarging, of the one it falls in, as the CUDA
+// kernels make it: the sample at its centre alone, one pixel in nine, lost
+// thin objects there. An NV12 pixel is averaged as Y', Cb and Cr — each
+// source pixel with the chroma sample it shares — and made RGB by the three
+// rows its own colour description gives — `color::yuv_to_rgb_rows`, what
+// `convert.metal` converts with; a BGRA one is averaged as it is, read
+// through a `bgra8Unorm` view that hands it over as RGBA.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -42,9 +45,11 @@ struct Fit {
 
 constant float MARGIN = 114.0 / 255.0;
 
-// Where in the picture input pixel `id` takes its sample, or false where it
-// is in the margin.
-static bool sample_of(constant Fit &fit, uint2 id, thread uint2 &at) {
+// The source pixels input pixel `id` covers, `[lo, hi)` in the picture —
+// `d * source / scaled` to `(d + 1) * source / scaled` rounded up, at least
+// one pixel and none past the rectangle — or false where it is in the
+// margin.
+static bool covered(constant Fit &fit, uint2 id, thread uint2 &lo, thread uint2 &hi) {
     if (id.x < fit.offset.x || id.y < fit.offset.y) {
         return false;
     }
@@ -52,8 +57,11 @@ static bool sample_of(constant Fit &fit, uint2 id, thread uint2 &at) {
     if (inside.x >= fit.scaled.x || inside.y >= fit.scaled.y) {
         return false;
     }
-    float2 centre = (float2(inside) + 0.5) * float2(fit.source) / float2(fit.scaled);
-    at = fit.origin + min(uint2(centre), fit.source - 1);
+    uint2 first = inside * fit.source / fit.scaled;
+    uint2 last = ((inside + 1) * fit.source + fit.scaled - 1) / fit.scaled;
+    last = max(min(last, fit.source), first + 1);
+    lo = fit.origin + first;
+    hi = fit.origin + last;
     return true;
 }
 
@@ -75,9 +83,16 @@ kernel void fit_nv12(texture2d<float, access::read> luma [[texture(0)]],
         return;
     }
     float3 rgb = float3(MARGIN);
-    uint2 at;
-    if (sample_of(fit, id, at)) {
-        float4 yuv = float4(luma.read(at).r, chroma.read(at / 2).rg, 1.0);
+    uint2 lo, hi;
+    if (covered(fit, id, lo, hi)) {
+        float3 sum = float3(0.0);
+        for (uint y = lo.y; y < hi.y; y++) {
+            for (uint x = lo.x; x < hi.x; x++) {
+                uint2 at = uint2(x, y);
+                sum += float3(luma.read(at).r, chroma.read(at / 2).rg);
+            }
+        }
+        float4 yuv = float4(sum / float((hi.x - lo.x) * (hi.y - lo.y)), 1.0);
         rgb = clamp(float3(dot(fit.r, yuv), dot(fit.g, yuv), dot(fit.b, yuv)),
                     float3(0.0), float3(1.0));
     }
@@ -92,9 +107,15 @@ kernel void fit_bgra(texture2d<float, access::read> pixels [[texture(0)]],
         return;
     }
     float3 rgb = float3(MARGIN);
-    uint2 at;
-    if (sample_of(fit, id, at)) {
-        rgb = pixels.read(at).rgb;
+    uint2 lo, hi;
+    if (covered(fit, id, lo, hi)) {
+        float3 sum = float3(0.0);
+        for (uint y = lo.y; y < hi.y; y++) {
+            for (uint x = lo.x; x < hi.x; x++) {
+                sum += pixels.read(uint2(x, y)).rgb;
+            }
+        }
+        rgb = sum / float((hi.x - lo.x) * (hi.y - lo.y));
     }
     store(tensor, fit, id, rgb);
 }

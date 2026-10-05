@@ -332,18 +332,42 @@ pub(super) mod tests {
         frame
     }
 
-    /// The RGB the CPU reads at `(x, y)` of `frame`, 0 to 1.
-    fn rgb_at(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> [f32; 3] {
+    /// The source pixels output pixel `d` of `scaled` covers, of `source`:
+    /// `[lo, hi)`, as the kernels find them.
+    pub(crate) fn covered(d: u32, source: u32, scaled: u32) -> (usize, usize) {
+        let lo = d * source / scaled;
+        let hi = ((d + 1) * source).div_ceil(scaled).min(source).max(lo + 1);
+        (lo as usize, hi as usize)
+    }
+
+    /// The RGB the kernels are to make of the pixels `xs` by `ys` of
+    /// `frame`, 0 to 1: their mean — of Y', Cb and Cr, made RGB by the
+    /// frame's own rows, for NV12.
+    pub(crate) fn mean_rgb(
+        frame: &ffmpeg::frame::Video,
+        xs: std::ops::Range<usize>,
+        ys: std::ops::Range<usize>,
+    ) -> [f32; 3] {
+        let count = (xs.len() * ys.len()) as f32;
+        let mut sum = [0.0f32; 3];
+        for y in ys {
+            for x in xs.clone() {
+                let sample = if frame.format() == ffmpeg::format::Pixel::NV12 {
+                    let chroma = &frame.data(1)[(y / 2) * frame.stride(1) + (x / 2) * 2..];
+                    [frame.data(0)[y * frame.stride(0) + x], chroma[0], chroma[1]]
+                } else {
+                    let bgra = &frame.data(0)[y * frame.stride(0) + x * 4..];
+                    [bgra[2], bgra[1], bgra[0]]
+                };
+                for (sum, value) in sum.iter_mut().zip(sample) {
+                    *sum += f32::from(value) / 255.0;
+                }
+            }
+        }
+        let mean = sum.map(|sum| sum / count);
         if frame.format() == ffmpeg::format::Pixel::NV12 {
             let rows = ColorDescription::of(frame).yuv_to_rgb_rows(frame.height());
-            let luma = frame.data(0)[y * frame.stride(0) + x];
-            let chroma = &frame.data(1)[(y / 2) * frame.stride(1) + (x / 2) * 2..];
-            let yuv = [
-                f32::from(luma) / 255.0,
-                f32::from(chroma[0]) / 255.0,
-                f32::from(chroma[1]) / 255.0,
-                1.0,
-            ];
+            let yuv = [mean[0], mean[1], mean[2], 1.0];
             rows.map(|row| {
                 row.iter()
                     .zip(yuv)
@@ -352,15 +376,15 @@ pub(super) mod tests {
                     .clamp(0.0, 1.0)
             })
         } else {
-            let bgra = &frame.data(0)[y * frame.stride(0) + x * 4..];
-            [bgra[2], bgra[1], bgra[0]].map(|value| f32::from(value) / 255.0)
+            mean
         }
     }
 
     /// Boxes of a picture, each stretched into its own input of a batch and
-    /// put in ImageNet's scale, are what the CPU reads of them: the sample
-    /// under each pixel's centre, from the box's own corner — an odd one on
-    /// NV12 too — in the input its slot says, the other inputs untouched.
+    /// put in ImageNet's scale, are what the CPU reads of them: the mean of
+    /// the pixels each input pixel covers, from the box's own corner — an
+    /// odd one on NV12 too — in the input its slot says, the other inputs
+    /// untouched.
     #[test]
     fn boxes_are_cut_into_their_inputs_and_scaled() {
         let Some(device) = try_videotoolbox_device() else {
@@ -371,8 +395,8 @@ pub(super) mod tests {
         let (scale, bias) = InputScale::ImageNet.affine();
         for format in [ffmpeg::format::Pixel::NV12, ffmpeg::format::Pixel::BGRA] {
             let source = pattern(format, 96, 64);
-            // Twice the input's size each way, so every centre is an exact
-            // sample; the second starts on odd pixels.
+            // Twice the input's size each way, so each input pixel covers
+            // two by two; the second starts on odd pixels.
             let crops = [(4, 6, 32, 32), (33, 17, 32, 32)];
             let MediaBuffer::Video(frame) = upload(&device, source.clone()) else {
                 panic!("a picture is uploaded");
@@ -394,11 +418,10 @@ pub(super) mod tests {
             for (cut, (left, top, width, height)) in cuts.iter().zip(crops) {
                 for y in 0..model.1 as usize {
                     for x in 0..model.0 as usize {
-                        let sx =
-                            left as usize + (x * 2 + 1) * width as usize / (2 * model.0 as usize);
-                        let sy =
-                            top as usize + (y * 2 + 1) * height as usize / (2 * model.1 as usize);
-                        let wanted = rgb_at(&source, sx, sy);
+                        let (x0, x1) = covered(x as u32, width, model.0);
+                        let (y0, y1) = covered(y as u32, height, model.1);
+                        let (left, top) = (left as usize, top as usize);
+                        let wanted = mean_rgb(&source, left + x0..left + x1, top + y0..top + y1);
                         for channel in 0..3 {
                             let at =
                                 cut.slot * 3 * plane + channel * plane + y * model.0 as usize + x;
@@ -413,6 +436,46 @@ pub(super) mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A picture shrunk to a third is read from every pixel, not one in
+    /// nine: of every third column white, each input pixel is a third
+    /// white, where the sample at its centre read it all white. The
+    /// regression the CUDA kernels have too.
+    #[test]
+    fn a_shrunk_picture_is_the_mean_of_what_it_covers() {
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let model = (32, 16);
+        let mut fitting = Fitting::new(model, 1).expect("the kernels compile");
+        let mut source = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 96, 48);
+        let stride = source.stride(0);
+        for row in source.data_mut(0).chunks_mut(stride).take(48) {
+            for (x, pixel) in row[..96 * 4].chunks_mut(4).enumerate() {
+                let value = if x % 3 == 1 { 255 } else { 0 };
+                pixel.copy_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let MediaBuffer::Video(frame) = upload(&device, source) else {
+            panic!("a picture is uploaded");
+        };
+        let picture = Picture::of(&frame).expect("readable");
+        let cut = Cut {
+            crop: (0, 0, 96, 48),
+            offset: (0, 0),
+            scaled: model,
+            slot: 0,
+        };
+        fitting
+            .fit(&picture, &[cut], ([1.0; 3], [0.0; 3]))
+            .expect("fits");
+        for (index, value) in fitting.input(1).iter().enumerate() {
+            assert!(
+                (value - 1.0 / 3.0).abs() < 1e-3,
+                "float {index} is {value}, not a third"
+            );
         }
     }
 }
