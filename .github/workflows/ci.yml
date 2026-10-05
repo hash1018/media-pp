@@ -404,7 +404,18 @@ jobs:
           cargo clippy -p media-pp --all-targets --features screencapturekit-capture -- -D warnings
           cargo clippy -p media-pp --all-targets --features coreaudio-capture -- -D warnings
           cargo clippy -p media-pp --all-targets --features coreaudio-renderer -- -D warnings
+
+      # The Core ML detector, checked as the other jobs check ONNX Runtime:
+      # `DOCS_RS` keeps `ort-sys` from downloading it, which neither linting
+      # nor documenting links. So its tests, which would, are left out of
+      # the run below and run on a Mac of one's own.
+      - name: Check (ONNX Runtime on Core ML)
+        env:
+          DOCS_RS: "1"
+          RUSTDOCFLAGS: -D warnings
+        run: |
           cargo clippy -p media-pp --all-targets --features ort-coreml -- -D warnings
+          cargo doc -p media-pp --no-deps --features ort-coreml
 
       # `-D warnings` on top of the rpath `setup-ffmpeg` exported, which
       # only matters to what runs.
@@ -413,7 +424,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc -p media-pp --no-deps
-          cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,ort-coreml
+          cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
 
       # Only what macOS alone can run: the tests of its backends, and of the
       # code only they compile. The platform-independent suite is the other
@@ -430,7 +441,7 @@ jobs:
       - name: Test (macOS backends)
         run: >-
           cargo test -p media-pp
-          --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,ort-coreml
+          --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
           --
           macos videotoolbox metal app::player upload::nv12 presentation_delay appkit platform::ffmpeg
           --skip a_capture_is_continuous_at_the_device_rate_and_a_pause_costs_nothing
