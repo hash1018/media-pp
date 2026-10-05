@@ -5,14 +5,21 @@
 //! Neural Engine — and prints what each picture carries on, then how fast it
 //! went. The macOS counterpart of `cuda_detect`.
 //!
+//! With `--out`, a Tee after the detector also draws what was found onto
+//! each picture and records it, still on the GPU:
+//! `Tee -> MetalDetectionOverlay -> Queue -> VideoToolboxEncoder ->
+//! FileMuxer`. The overlay draws on copies, so the branch printing beside it
+//! sees the pictures as the detector handed them on.
+//!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26. Built with `ort-coreml`, on an Apple silicon Mac. The
 //! file's video has to be one VideoToolbox decodes to NV12 — 8-bit H.264 or
 //! HEVC, say: a 10-bit one is refused as the pipeline is wired, the decoder's
-//! P010 being a layout the detector does not take. `pictures` stops it after
-//! about that many.
+//! P010 being a layout the detector does not take. `--pictures` stops it
+//! after about that many.
 //!
-//!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 [pictures]
+//!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
+//!         [--out boxes.mp4] [--pictures N]
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -38,12 +45,58 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            AppSink, COCO_CLASS_LABELS, Detections, FileDemuxer, MetalOrtDetector,
-            OrtDetectorOptions, VideoToolboxDecoder, VideoToolboxDevice,
+            AppSink, COCO_CLASS_LABELS, DetectionOverlayOptions, Detections, FileDemuxer,
+            FileMuxer, LabelStyle, MetalDetectionOverlay, MetalOrtDetector, OrtDetectorOptions,
+            VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice, VideoToolboxEncoder,
+            VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
-        ffmpeg::media,
+        ffmpeg::{Rational, media},
         pipeline::Pipeline,
     };
+
+    /// Where the labels' font is looked for; without one, boxes alone.
+    const FONTS: [&str; 2] = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ];
+
+    struct Args {
+        model: String,
+        video: String,
+        out: Option<String>,
+        pictures: usize,
+    }
+
+    fn args() -> Args {
+        let usage = || -> ! {
+            eprintln!(
+                "usage: metal_detect <model.onnx> <video.mp4> [--out boxes.mp4] [--pictures N]"
+            );
+            std::process::exit(1);
+        };
+        let mut positional = Vec::new();
+        let (mut out, mut pictures) = (None, usize::MAX);
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
+                "--pictures" => {
+                    pictures = args
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or_else(|| usage())
+                }
+                _ => positional.push(arg),
+            }
+        }
+        let [model, video] = <[String; 2]>::try_from(positional).unwrap_or_else(|_| usage());
+        Args {
+            model,
+            video,
+            out,
+            pictures,
+        }
+    }
 
     pub(super) fn run() -> Result<()> {
         let _log_guard = media_pp::log::init(
@@ -52,15 +105,12 @@ mod example {
             media_pp::log::Level::Trace,
             7,
         )?;
-        let mut args = std::env::args().skip(1);
-        let (Some(model), Some(video)) = (args.next(), args.next()) else {
-            eprintln!("usage: metal_detect <model.onnx> <video.mp4> [pictures]");
-            std::process::exit(1);
-        };
-        let limit: usize = args
-            .next()
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(usize::MAX);
+        let Args {
+            model,
+            video,
+            out,
+            pictures: limit,
+        } = args();
 
         let device = VideoToolboxDevice::new()?;
         let started = Instant::now();
@@ -105,15 +155,71 @@ mod example {
             Ok(())
         });
 
+        // The recording, if asked for: an overlay, and the media engine's
+        // H.264 at the file's own size and rate.
+        let recording = match &out {
+            Some(path) => {
+                let font = FONTS.iter().find_map(|path| std::fs::read(path).ok());
+                if font.is_none() {
+                    println!("no font found: boxes without labels");
+                }
+                let overlay = MetalDetectionOverlay::new(
+                    "overlay",
+                    &device,
+                    DetectionOverlayOptions {
+                        line_width: 4,
+                        labels: font.map(|font| LabelStyle {
+                            size: 22.0,
+                            ..LabelStyle::new(font)
+                        }),
+                        ..DetectionOverlayOptions::default()
+                    },
+                )?;
+                let (width, height) = stream.size().expect("a video stream says its size");
+                let encoder = VideoToolboxEncoder::new(
+                    "encoder",
+                    &device,
+                    VideoToolboxEncoderOptions {
+                        codec: VideoToolboxCodec::H264,
+                        format: VideoToolboxFrameFormat::Nv12,
+                        width,
+                        height,
+                        frame_rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
+                        bit_rate: 8_000_000,
+                        gop_size: 60,
+                        max_b_frames: None,
+                    },
+                )?;
+                let mut muxer = FileMuxer::create(path)?;
+                let track = muxer.add_stream("video", &encoder)?;
+                let muxer_sink = muxer.open()?.take(track)?;
+                Some((overlay, encoder, muxer_sink))
+            }
+            None => None,
+        };
+
         let params = stream.parameters.clone();
         let (pipeline, ()) = Pipeline::new("metal-detect", source, |source, ctx| {
             let decoder = VideoToolboxDecoder::new("decoder", params, &device)?;
-            let branch = ctx
+            let detecting = ctx
                 .branch()
                 .pipe(decoder)
                 .queue("pictures", 8)
-                .pipe(detector)
-                .to(sink)?;
+                .pipe(detector);
+            let branch = match recording {
+                None => detecting.to(sink)?,
+                Some((overlay, encoder, muxer_sink)) => {
+                    let print = ctx.branch().to(sink)?;
+                    let record = ctx
+                        .branch()
+                        .pipe(overlay)
+                        .queue("drawn", 8)
+                        .pipe(encoder)
+                        .to(muxer_sink)?;
+                    let tee = ctx.tee("tee").branch(print).branch(record).build()?;
+                    detecting.to_branch(tee)?
+                }
+            };
             ctx.attach(source, stream.index, branch)?;
             Ok(())
         })?;
@@ -121,7 +227,8 @@ mod example {
         let running = Instant::now();
         pipeline.run()?;
         // Woken every 50 ms as well as by an event, since a run that goes
-        // well posts none until it finishes, and `pictures` is counted here.
+        // well posts none until it finishes, and `--pictures` is counted
+        // here.
         loop {
             if seen.load(Ordering::Relaxed) >= limit {
                 pipeline.stop();
@@ -146,6 +253,9 @@ mod example {
             "{n} pictures in {elapsed:.1?}: {:.1} pictures a second, decode and detection together",
             n as f64 / elapsed.as_secs_f64()
         );
+        if let Some(path) = out {
+            println!("recorded with boxes: {path}");
+        }
         Ok(())
     }
 }
