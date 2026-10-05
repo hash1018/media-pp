@@ -299,6 +299,10 @@ pub use vision::{
     ObjectAnalyticsError, ObjectTracker, SwDetectionOverlay, SwDetectionOverlayError,
     TrackerOptions, Zone, ZoneCount,
 };
+pub use vision::{
+    BatchSlot, StreamId, StreamMux, StreamMuxError, StreamMuxHandle, StreamMuxInput,
+    StreamMuxOptions, StreamOrigin,
+};
 #[cfg(feature = "cuda")]
 pub use vision::{CudaDetectionOverlay, CudaDetectionOverlayError};
 #[cfg(feature = "ort-cuda")]

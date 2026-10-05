@@ -90,6 +90,13 @@ pub enum ElementType {
     /// topology diagram with four of them in it is a diagram nobody can count
     /// the mixers from.
     AudioMixerInput,
+    /// Gathers pictures from several streams into batches, for a model to
+    /// take at once.
+    StreamMux,
+    /// One input registered with an [`ElementType::StreamMux`], a `RawSink`
+    /// in the pipeline that feeds it — its own variant for the reason
+    /// [`ElementType::AudioMixerInput`] is.
+    StreamMuxInput,
     /// CPU video compositor source.
     SwVideoCompositor,
     /// CUDA video compositor source.

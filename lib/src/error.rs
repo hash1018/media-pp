@@ -52,6 +52,7 @@ use crate::elements::PipeWireDeviceError;
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspMuxerError;
+use crate::elements::StreamMuxError;
 use crate::elements::SwDetectionOverlayError;
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 use crate::elements::V4l2CaptureSourceError;
@@ -598,6 +599,10 @@ pub enum Error {
     /// An audio mixer operation failed.
     #[error(transparent)]
     AudioMixerError(#[from] AudioMixerError),
+
+    /// A stream mux operation failed.
+    #[error(transparent)]
+    StreamMuxError(#[from] StreamMuxError),
 
     /// A software video compositor operation failed.
     #[error(transparent)]
