@@ -234,6 +234,7 @@ objc2-metal = { version = "0.3", optional = true, default-features = false, feat
     "objc2-io-surface",
     "MTLAllocation",
     "MTLBlitCommandEncoder",
+    "MTLBuffer",
     "MTLCommandBuffer",
     "MTLCommandEncoder",
     "MTLCommandQueue",
@@ -547,7 +548,7 @@ cuda-visual-tracking = ["cuda"]
 # kernel fits each picture into the model's input, and ONNX Runtime's Core ML
 # provider runs the model on the GPU or the Neural Engine. Its build is
 # fetched as the CPU one is; there is one for Apple silicon Macs only.
-ort-coreml = ["ort", "metal", "ort/coreml", "objc2-metal/MTLBuffer"]
+ort-coreml = ["ort", "metal", "ort/coreml"]
 # Noise suppression for speech, through RNNoise. Pure Rust and no model file:
 # the network's weights are part of the crate.
 rnnoise = ["dep:nnnoiseless"]

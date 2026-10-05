@@ -7,6 +7,10 @@ pub(crate) mod avfoundation;
 /// record through.
 #[cfg(any(feature = "coreaudio-renderer", feature = "coreaudio-capture"))]
 pub(crate) mod coreaudio;
+/// Following objects by how they look on VideoToolbox pictures, for
+/// `ObjectTracker`: correlation filters on the GPU.
+#[cfg(feature = "metal")]
+pub(crate) mod dcf;
 /// Metal, for `MetalVideoCompositor` and `MetalWindowRenderer`: the device,
 /// its kernels, and textures over the pixel buffers VideoToolbox frames
 /// hold.

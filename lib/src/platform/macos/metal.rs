@@ -29,7 +29,6 @@ pub(crate) type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 /// A compiled compute kernel.
 pub(crate) type Kernel = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 /// A buffer, as Metal hands one out.
-#[cfg(feature = "ort-coreml")]
 pub(crate) type Buffer = Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>;
 
 /// Why Metal would not do what a Metal element asked of it.
@@ -159,7 +158,6 @@ impl MetalGpu {
     /// A buffer of `bytes` bytes in shared memory: what a kernel writes the
     /// CPU reads where it is, once the pass that wrote it has finished —
     /// on Apple silicon the one memory both use, so nothing is copied.
-    #[cfg(feature = "ort-coreml")]
     pub(crate) fn shared_buffer(&self, bytes: usize) -> Result<Buffer, MetalError> {
         self.device
             .newBufferWithLength_options(bytes, objc2_metal::MTLResourceOptions::StorageModeShared)
@@ -337,6 +335,60 @@ impl Pass {
             self.encoder
                 .setBuffer_offset_atIndex(Some(buffer), 0, index)
         };
+    }
+
+    /// Runs `kernel` as `groups` threadgroups of `per_group` threads each,
+    /// with `textures` bound from index 0, `bytes` at buffer 0 and
+    /// `buffers`, each from its byte offset, from buffer 1 — after
+    /// everything already encoded has written its textures and buffers. The
+    /// kernel bounds-checks its own threads.
+    ///
+    /// Each texture and buffer must be alive until [`Self::finish`]
+    /// returns.
+    pub(crate) fn dispatch_groups(
+        &mut self,
+        kernel: &Kernel,
+        textures: &[&Texture],
+        buffers: &[(&Buffer, usize)],
+        bytes: Option<&[u8]>,
+        groups: (usize, usize, usize),
+        per_group: (usize, usize, usize),
+    ) {
+        let encoder = &self.encoder;
+        encoder.memoryBarrierWithScope(MTLBarrierScope::Textures | MTLBarrierScope::Buffers);
+        encoder.setComputePipelineState(kernel);
+        for (index, texture) in textures.iter().enumerate() {
+            // SAFETY: a live texture, at an index the kernel declares.
+            unsafe { encoder.setTexture_atIndex(Some(texture), index) };
+        }
+        for (index, (buffer, offset)) in buffers.iter().enumerate() {
+            // SAFETY: a live buffer, at an index the kernel declares, read
+            // from an offset the caller keeps within it.
+            unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), *offset, index + 1) };
+        }
+        if let Some(bytes) = bytes {
+            // SAFETY: Metal copies `bytes` before returning; they are live
+            // for the call.
+            unsafe {
+                encoder.setBytes_length_atIndex(
+                    NonNull::from(bytes).cast::<c_void>(),
+                    bytes.len(),
+                    0,
+                )
+            };
+        }
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(
+            MTLSize {
+                width: groups.0,
+                height: groups.1,
+                depth: groups.2,
+            },
+            MTLSize {
+                width: per_group.0,
+                height: per_group.1,
+                depth: per_group.2,
+            },
+        );
     }
 
     /// Puts `drawable` on the screen once what was encoded has drawn it.

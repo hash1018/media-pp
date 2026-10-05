@@ -10,7 +10,10 @@ mod assign;
 mod byte_track;
 mod dcf;
 mod fft;
-#[cfg(feature = "cuda-visual-tracking")]
+#[cfg(any(
+    feature = "cuda-visual-tracking",
+    all(target_os = "macos", feature = "metal")
+))]
 mod gpu;
 mod kalman;
 mod luma;
@@ -60,9 +63,11 @@ pub struct TrackerOptions {
     ///
     /// It reads the pixels around each object: of 8-bit YUV, grey and RGB
     /// pictures in system memory; with the `cuda` feature of NV12 and BGRA
-    /// CUDA pictures, copying down only those regions; and with `metal` of
-    /// NV12 and BGRA VideoToolbox pictures, read where they are, which the
-    /// CPU of an Apple silicon Mac shares with its GPU. Pictures it cannot
+    /// CUDA pictures, copying down only those regions — or with
+    /// `cuda-visual-tracking`, every object's filter run on the GPU at once;
+    /// and with `metal` of NV12 and BGRA VideoToolbox pictures, every
+    /// object's filter run on the GPU at once by Metal, which macOS ships, or
+    /// where Metal cannot, read where they are by the CPU. Pictures it cannot
     /// read are followed by motion alone.
     pub visual: bool,
 }

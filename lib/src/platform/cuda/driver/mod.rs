@@ -34,7 +34,7 @@ mod load;
 mod ptx;
 
 #[cfg(feature = "cuda-visual-tracking")]
-pub(crate) use dcf::{CudaDcf, DcfJob, DcfSource, cufft_version};
+pub(crate) use dcf::{CudaDcf, DcfSource, cufft_version};
 #[cfg(feature = "ort-cuda")]
 pub(crate) use fit::{CudaTensor, Fit, FitKernels};
 

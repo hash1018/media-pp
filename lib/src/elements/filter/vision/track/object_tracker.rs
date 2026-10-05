@@ -114,45 +114,174 @@ struct Tracking {
     driver: Option<crate::platform::cuda::driver::CudaDriver>,
     /// Whether it has said that it cannot read a picture's pixels.
     unreadable_said: bool,
-    /// The filters of objects followed on CUDA pictures, on the GPU, made at
-    /// the first such picture.
-    #[cfg(feature = "cuda-visual-tracking")]
-    gpu: Option<super::gpu::GpuLooks>,
-    /// Whether the GPU's filters could not be made, and CUDA pictures are
-    /// read down to the CPU's instead.
-    #[cfg(feature = "cuda-visual-tracking")]
-    gpu_failed: bool,
+    /// The filters of objects followed on a GPU.
+    gpus: Gpus,
 }
 
-#[cfg(feature = "cuda-visual-tracking")]
-impl Tracking {
-    /// Where `frame`'s brightness is on the device, with the GPU's filters
-    /// ready, where it is a CUDA picture they can follow on.
-    fn on_gpu(
-        &mut self,
-        frame: &ffmpeg::frame::Video,
-    ) -> Option<crate::platform::cuda::driver::DcfSource> {
-        let source = super::gpu::GpuLooks::source(frame)?;
-        if self.gpu.is_none() && !self.gpu_failed {
-            match super::gpu::GpuLooks::new() {
-                Ok(gpu) => {
+/// The GPUs' filters, by the pictures each follows on.
+#[derive(Default)]
+struct Gpus {
+    /// CUDA pictures', made at the first such picture.
+    #[cfg(feature = "cuda-visual-tracking")]
+    cuda: OnGpu<super::gpu::CudaLooks>,
+    /// VideoToolbox pictures', with Metal.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    metal: OnGpu<super::gpu::MetalLooks>,
+}
+
+/// One GPU's filters, made at the first picture they can follow on — or,
+/// where they cannot be made, said once and not tried again, the pictures
+/// read down to the CPU's filters instead.
+#[cfg(any(
+    feature = "cuda-visual-tracking",
+    all(target_os = "macos", feature = "metal")
+))]
+struct OnGpu<D> {
+    looks: Option<super::gpu::GpuLooks<D>>,
+    failed: bool,
+}
+
+#[cfg(any(
+    feature = "cuda-visual-tracking",
+    all(target_os = "macos", feature = "metal")
+))]
+impl<D> Default for OnGpu<D> {
+    fn default() -> Self {
+        Self {
+            looks: None,
+            failed: false,
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "cuda-visual-tracking",
+    all(target_os = "macos", feature = "metal")
+))]
+impl<D: super::gpu::DcfDevice> OnGpu<D> {
+    /// The filters, made now if they are not yet and can be.
+    fn open(&mut self, pp_log: &PpLog) -> Option<&mut super::gpu::GpuLooks<D>> {
+        if self.looks.is_none() && !self.failed {
+            match super::gpu::GpuLooks::<D>::open() {
+                Ok(looks) => {
                     pp_info!(
-                        pp_log: &self.pp_log,
-                        "following by look on the GPU, cuFFT {}",
-                        super::gpu::GpuLooks::cufft()
+                        pp_log: pp_log,
+                        "following by look on the GPU, {}",
+                        looks.describe()
                     );
-                    self.gpu = Some(gpu);
+                    self.looks = Some(looks);
                 }
                 Err(error) => {
                     pp_warn!(
-                        pp_log: &self.pp_log,
-                        "cannot follow by look on the GPU ({error}): reading CUDA pictures down instead"
+                        pp_log: pp_log,
+                        "cannot follow by look on the GPU ({error}): reading the pictures down instead"
                     );
-                    self.gpu_failed = true;
+                    self.failed = true;
                 }
             }
         }
-        self.gpu.as_ref().map(|_| source)
+        self.looks.as_mut()
+    }
+}
+
+/// A picture the GPU's filters follow on, and which GPU's.
+enum OnGpuSource {
+    #[cfg(feature = "cuda-visual-tracking")]
+    Cuda(<super::gpu::CudaLooks as super::gpu::DcfDevice>::Source),
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    Metal(<super::gpu::MetalLooks as super::gpu::DcfDevice>::Source),
+}
+
+#[cfg_attr(
+    not(any(
+        feature = "cuda-visual-tracking",
+        all(target_os = "macos", feature = "metal")
+    )),
+    allow(
+        unused_variables,
+        clippy::unused_self,
+        clippy::needless_pass_by_ref_mut
+    )
+)]
+impl Gpus {
+    /// Where `frame`'s brightness is for a GPU's filters, with them made,
+    /// where it is a picture one can follow on.
+    fn source(&mut self, frame: &ffmpeg::frame::Video, pp_log: &PpLog) -> Option<OnGpuSource> {
+        #[cfg(feature = "cuda-visual-tracking")]
+        if let Some(source) = <super::gpu::CudaLooks as super::gpu::DcfDevice>::source(frame) {
+            return self.cuda.open(pp_log).map(|_| OnGpuSource::Cuda(source));
+        }
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        if let Some(source) = <super::gpu::MetalLooks as super::gpu::DcfDevice>::source(frame) {
+            return self.metal.open(pp_log).map(|_| OnGpuSource::Metal(source));
+        }
+        None
+    }
+
+    /// [`follow_by_look`], on the GPU `source` is for.
+    fn follow(
+        &mut self,
+        tracker: &mut ByteTrack,
+        source: &OnGpuSource,
+    ) -> std::result::Result<Vec<Expected>, String> {
+        match *source {
+            #[cfg(feature = "cuda-visual-tracking")]
+            OnGpuSource::Cuda(ref source) => self
+                .cuda
+                .looks
+                .as_mut()
+                .expect("made with the source")
+                .follow(tracker, source, MIN_PSR, LOOK_DOUBT)
+                .map_err(|error| error.to_string()),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            OnGpuSource::Metal(ref source) => self
+                .metal
+                .looks
+                .as_mut()
+                .expect("made with the source")
+                .follow(tracker, source, MIN_PSR, LOOK_DOUBT)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    /// Learns `matched` on the GPU `source` is for, forgetting the objects
+    /// not among `alive`.
+    fn detected(
+        &mut self,
+        source: &OnGpuSource,
+        matched: &[(u64, [f64; 4])],
+        alive: &[u64],
+    ) -> std::result::Result<(), String> {
+        match *source {
+            #[cfg(feature = "cuda-visual-tracking")]
+            OnGpuSource::Cuda(ref source) => self
+                .cuda
+                .looks
+                .as_mut()
+                .expect("made with the source")
+                .detected(source, matched, alive)
+                .map_err(|error| error.to_string()),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            OnGpuSource::Metal(ref source) => self
+                .metal
+                .looks
+                .as_mut()
+                .expect("made with the source")
+                .detected(source, matched, alive)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    /// Forgets every filter.
+    fn clear(&mut self) {
+        #[cfg(feature = "cuda-visual-tracking")]
+        if let Some(looks) = self.cuda.looks.as_mut() {
+            looks.clear();
+        }
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        if let Some(looks) = self.metal.looks.as_mut() {
+            looks.clear();
+        }
     }
 }
 
@@ -230,10 +359,7 @@ impl ObjectTracker {
             #[cfg(feature = "cuda")]
             driver: None,
             unreadable_said: false,
-            #[cfg(feature = "cuda-visual-tracking")]
-            gpu: None,
-            #[cfg(feature = "cuda-visual-tracking")]
-            gpu_failed: false,
+            gpus: Gpus::default(),
         }))
     }
 }
@@ -283,14 +409,11 @@ impl Filter for Tracking {
         }
 
         self.tracker.advance(steps);
-        #[cfg(feature = "cuda-visual-tracking")]
         let gpu_source = if self.options.visual {
-            self.on_gpu(frame)
+            self.gpus.source(frame, &self.pp_log)
         } else {
             None
         };
-        #[cfg(not(feature = "cuda-visual-tracking"))]
-        let gpu_source: Option<()> = None;
         let mut pixels = if self.options.visual && gpu_source.is_none() {
             luma(
                 frame,
@@ -316,15 +439,15 @@ impl Filter for Tracking {
             Some(luma) => follow_by_look(&mut self.tracker, &mut self.filters, luma),
             None => self.tracker.expected(),
         };
-        #[cfg(feature = "cuda-visual-tracking")]
-        let expected = match (gpu_source, self.gpu.as_mut()) {
-            (Some(source), Some(gpu)) => gpu
-                .follow(&mut self.tracker, source, MIN_PSR, LOOK_DOUBT)
+        let expected = match &gpu_source {
+            Some(source) => self
+                .gpus
+                .follow(&mut self.tracker, source)
                 .unwrap_or_else(|error| {
                     pp_warn!(pp_log: &self.pp_log, "following by look on the GPU failed: {error}");
                     expected
                 }),
-            _ => expected,
+            None => expected,
         };
 
         let Some(mut found) = found else {
@@ -392,14 +515,14 @@ impl Filter for Tracking {
             let alive = self.tracker.ids();
             self.filters.retain(|id, _| alive.contains(id));
         }
-        #[cfg(feature = "cuda-visual-tracking")]
-        if let (Some(source), Some(gpu)) = (gpu_source, self.gpu.as_mut()) {
+        if let Some(source) = &gpu_source {
             let matched: Vec<(u64, [f64; 4])> = seen
                 .iter()
                 .zip(&ids)
                 .filter_map(|(seen, id)| Some(((*id)?, seen.tlwh)))
                 .collect();
-            if let Err(error) = gpu.detected(source, &matched, &self.tracker.ids()) {
+            let alive = self.tracker.ids();
+            if let Err(error) = self.gpus.detected(source, &matched, &alive) {
                 pp_warn!(pp_log: &self.pp_log, "learning on the GPU failed: {error}");
             }
         }
@@ -421,10 +544,7 @@ impl Filter for Tracking {
         self.pace = Pace::default();
         self.last = None;
         self.filters.clear();
-        #[cfg(feature = "cuda-visual-tracking")]
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.clear();
-        }
+        self.gpus.clear();
     }
 }
 

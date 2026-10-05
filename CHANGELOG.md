@@ -396,6 +396,18 @@ compile error with no explanation.
   both walking clips — and costs nothing to see: on the 1080p concert, 8.1
   seconds against 8.2 for motion alone, where the CPU took 24.
 
+  With `metal`, VideoToolbox pictures are followed by look on the GPU the
+  same way, by Metal kernels of this crate's own — the 64-point transforms
+  among them, rows then columns, as Metal has no cuFFT — and nothing more
+  is linked, Metal being part of macOS; where Metal cannot, the CPU reads
+  the pictures where they are. What a picture asks of the GPU goes in one
+  pass, run when the peaks are wanted and before the picture is let go of:
+  two round trips a picture followed, one a picture detected, where asking
+  each step apart took nine. On an M5 it finds what the CPU finds to the
+  sixth decimal, and with 1080p pictures of 25 objects takes 1.7 ms a
+  picture against the CPU's 9.3, of 100, 2.9 against 37; with a few, the
+  round trips cost it about a millisecond a picture more than the CPU.
+
   `BoxColors::ByTrack` colours each object by its number, and a label shows
   the number — `person #7 0.87`; a class the model names none of is
   labelled `class 3` rather than `#3`.
