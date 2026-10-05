@@ -204,37 +204,46 @@ compile error with no explanation.
 
 ### Added
 
-- **`CudaOrtDetector`: detection on CUDA pictures, through TensorRT**
-  (feature `ort-cuda`). What `SwOrtDetector` does, with the picture never
-  leaving the GPU: a kernel fits each NV12 or BGRA CUDA picture into the
-  model's input in device memory, and ONNX Runtime's TensorRT provider
-  reads it there, with CUDA as its fallback. The engine TensorRT builds for
-  a model and GPU — minutes, once — is kept in the user's cache directory
-  (`CudaOrtDetectorOptions::engine_cache`). Needs at run time what the
-  ONNX Runtime build was made against, or newer within the same majors: a
-  driver for CUDA 13.0, the CUDA 13.2 runtime with cuBLAS and cuRAND,
-  cuDNN 9.23.2 and TensorRT 10.15.1. On an RTX 3050 a 1080p file is decoded
-  by NVDEC and run through YOLOv10n at about 540 pictures a second. The
-  `cuda_detect` example runs it over a file.
+- **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
+  TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`
+  does, with the picture never leaving the GPU: a kernel fits each NV12 or
+  BGRA CUDA picture into the model's input in device memory, and ONNX
+  Runtime's CUDA provider reads it there — or with `ort-tensorrt` its
+  TensorRT provider, with CUDA for what TensorRT cannot run. The engine
+  TensorRT builds for a model and GPU — minutes, once — is kept in the
+  user's cache directory (`CudaOrtDetectorOptions::engine_cache`). On an
+  RTX 3050 a 1080p file is decoded by NVDEC and run through YOLOv10n at
+  about 540 pictures a second through TensorRT, and about 190 on CUDA
+  alone. The `cuda_detect` example runs it over a file.
 
-  `CudaOrtDetector::runtime` says what a machine can run one on —
-  `CudaRuntime::TensorRt`, `CudaOnly` or `Unavailable` — without a model or
-  a session, in about a millisecond where nothing is installed and under
-  100 ms where everything is: for an application deciding at start whether
-  to offer detection on the GPU. It asks the loader for each library and
-  the driver, CUDA runtime, cuDNN and TensorRT for their versions, and
-  says what falls short as a `RuntimeShortfall`: `Missing`, naming the
-  libraries the loader could not open, or `Outdated`, naming the library
-  with the `LibraryVersion` it reports and the one needed. `new` asks it
-  first, refusing with `OrtDetectorError::CudaRuntimeUnavailable` where the
-  CUDA side falls short. Where TensorRT does,
-  `CudaOrtDetectorOptions::tensorrt` decides: the default
-  `UseTensorRtPolicy::Preferred` runs on CUDA alone with a warning,
-  `Required` refuses with `OrtDetectorError::TensorRtUnavailable` — and with
-  the provider's own error where TensorRT is there but cannot start, rather
-  than ONNX Runtime passing over it to CUDA — and `Off` never uses it. On
-  the same RTX 3050 and file, CUDA alone runs at about 190 pictures a
-  second.
+  The NVIDIA libraries the providers need are linked into the program:
+  CUDA 13's runtime, cuBLAS and cuRAND, and cuDNN 9 with `ort-cuda`, and
+  TensorRT 10 and its ONNX parser besides with `ort-tensorrt`. An
+  application built with them is one for NVIDIA GPUs, and like a missing
+  FFmpeg a missing library stops it before it starts, by name. Building
+  needs them where the linker finds them — `MEDIA_PP_NVIDIA_LIB_DIRS`,
+  `LD_LIBRARY_PATH` or `LIB`, the CUDA installation or the system's
+  directories — and the build script warns of any it could not find; a
+  check, which never links, needs none. Where the program finds them at run
+  time is the application's to arrange, as with FFmpeg: installed, on the
+  loader's path, or beside it under an `$ORIGIN` run path.
+
+  What linking cannot say is age. `CudaOrtDetector::runtime` asks each
+  linked library and the driver, which is opened rather than linked, for
+  its version, and says what this machine can run a detector on —
+  `CudaRuntime::TensorRt`, `CudaOnly` or `Unavailable` — with a
+  `RuntimeShortfall` for what falls short: the driver `Missing`, or a
+  library `Outdated`, with the `LibraryVersion` it reports and the one
+  needed, or TensorRT `NotBuilt`. The versions taken are those ONNX
+  Runtime's build was made against: a driver for CUDA 13.0, the CUDA 13.2
+  runtime, cuDNN 9.23.2 and TensorRT 10.15.1. `new` asks it first,
+  refusing with `OrtDetectorError::CudaRuntimeUnavailable` where the CUDA
+  side falls short. Where TensorRT does, `CudaOrtDetectorOptions::tensorrt`
+  decides: the default `UseTensorRtPolicy::Preferred` runs on CUDA alone
+  with a warning, `Required` refuses with
+  `OrtDetectorError::TensorRtUnavailable` — and with the provider's own
+  error where TensorRT will not start, rather than ONNX Runtime passing
+  over it to CUDA — and `Off` never uses it.
 
 - **`Detections`: what a detector found in a picture, as its metadata.**
   `SwOrtDetector` puts one on every picture it hands on — the detector's name,

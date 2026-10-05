@@ -28,7 +28,8 @@ unprefixed type works the same on every platform.
 | `coreaudio-capture` | System, per-application and microphone audio capture; the first two need macOS 14.2 | macOS |
 | `coreaudio-renderer` | Audio playback | macOS |
 | `ort` | ONNX Runtime object detection on the CPU, `SwOrtDetector` | All |
-| `ort-cuda` | Object detection on CUDA pictures through TensorRT, `CudaOrtDetector`; enables `ort` and `cuda` | Linux, Windows |
+| `ort-cuda` | Object detection on CUDA pictures, `CudaOrtDetector`, on ONNX Runtime's CUDA provider; links CUDA and cuDNN; enables `ort` and `cuda` | Linux, Windows |
+| `ort-tensorrt` | `CudaOrtDetector` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All |
@@ -56,10 +57,15 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
   [`transcribe`](../examples/core/transcribe/README.md).
 - **`ort`**: a YOLO model exported to ONNX — YOLOv8 and YOLO11, or YOLOv10
   and YOLO26.
-- **`ort-cuda`**: at run time, where the loader finds them, a driver for
-  CUDA 13.0, the CUDA 13.2 runtime, cuDNN 9.23 and TensorRT 10.15, or newer
-  within those majors; `CudaOrtDetector::runtime` says which of them a
-  machine lacks.
+- **`ort-cuda`, `ort-tensorrt`**: CUDA 13's runtime, cuBLAS and cuRAND,
+  and cuDNN 9 — and with `ort-tensorrt`, TensorRT 10 — are linked into the
+  program, so building needs them where the linker finds them
+  (`MEDIA_PP_NVIDIA_LIB_DIRS`, `LD_LIBRARY_PATH` or `LIB`, the CUDA
+  installation, or the system's directories), and the program does not
+  start without them, as it does not without FFmpeg. At run time it also
+  needs a driver for CUDA 13.0 and at least the CUDA 13.2 runtime, cuDNN
+  9.23 and TensorRT 10.15; `CudaOrtDetector::runtime` says what falls
+  short.
 
 What an element needs at run time — one shared `D3d11Gpu`, one `CudaDevice`
 per process, a portal for screen capture on Linux, a server to publish RTSP

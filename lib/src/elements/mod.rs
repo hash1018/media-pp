@@ -102,6 +102,8 @@ pub use driver::{
     AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
     WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
 };
+#[cfg(feature = "ort-tensorrt")]
+pub use filter::UseTensorRtPolicy;
 pub use filter::{
     AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,
     AudioCompressorOptions, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions,
@@ -132,7 +134,6 @@ pub use filter::{
 #[cfg(feature = "ort-cuda")]
 pub use filter::{
     CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
-    UseTensorRtPolicy,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{

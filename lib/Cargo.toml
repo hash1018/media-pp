@@ -529,11 +529,15 @@ wasapi-renderer = [
     "windows/Win32_UI_Shell_PropertiesSystem",
 ]
 ort = ["dep:ort", "dep:ndarray"]
-# Detection on CUDA pictures, through TensorRT with CUDA as its fallback:
+# Detection on CUDA pictures, on ONNX Runtime's CUDA provider:
 # `CudaOrtDetector`. ONNX Runtime's build for it is fetched as `ort` fetches
-# the CPU one, and at run time needs CUDA 13, cuDNN 9 and TensorRT 10 where
-# the loader finds them.
-ort-cuda = ["ort", "cuda", "ort/cuda", "ort/tensorrt"]
+# the CPU one, and CUDA 13's runtime, cuBLAS and cuRAND, and cuDNN 9 are
+# linked into the program — see `build.rs`: building needs them where the
+# linker finds them, and the program does not start without them.
+ort-cuda = ["ort", "cuda", "ort/cuda"]
+# The same through TensorRT, with CUDA for what it cannot run, and TensorRT
+# 10 and its ONNX parser linked as well.
+ort-tensorrt = ["ort-cuda", "ort/tensorrt"]
 # Noise suppression for speech, through RNNoise. Pure Rust and no model file:
 # the network's weights are part of the crate.
 rnnoise = ["dep:nnnoiseless"]

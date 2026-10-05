@@ -1,14 +1,15 @@
 //! [`CudaOrtDetector`]: object detection on CUDA pictures, each handed on
 //! with what was found in it, without the picture leaving the GPU.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+#[cfg(feature = "ort-tensorrt")]
+use std::path::PathBuf;
+use std::{path::Path, sync::Arc};
 
 use ffmpeg_next::{self as ffmpeg, ffi};
+#[cfg(feature = "ort-tensorrt")]
+use ort::ep::TensorRT;
 use ort::{
-    ep::{CUDA, TensorRT},
+    ep::CUDA,
     inputs,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
@@ -36,7 +37,8 @@ use super::super::{
 };
 use super::runtime::{self, CudaRuntime};
 
-/// Whether a [`CudaOrtDetector`] runs its model through TensorRT.
+/// Whether a [`CudaOrtDetector`] runs its model through TensorRT, with
+/// the `ort-tensorrt` feature.
 ///
 /// TensorRT compiles the model into an engine for this GPU — fused layers,
 /// the fastest kernel for each found by timing them, half precision where
@@ -45,23 +47,29 @@ use super::runtime::{self, CudaRuntime};
 /// first time and TensorRT's libraries at run time. CUDA alone runs the
 /// model operator by operator on cuDNN and cuBLAS, and starts at once.
 /// Either way an operator TensorRT cannot run falls to CUDA.
+///
+/// TensorRT's libraries are linked with the feature, so a program built
+/// with it does not start without them; what is left to decide is a
+/// TensorRT older than the one taken, and a provider that will not start.
+#[cfg(feature = "ort-tensorrt")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UseTensorRtPolicy {
     /// CUDA alone.
     Off,
-    /// TensorRT where the machine has it; CUDA alone, with a warning,
-    /// where it does not.
+    /// TensorRT where it can run; CUDA alone where it cannot — with a
+    /// warning where TensorRT is too old, and without one where ONNX
+    /// Runtime passes over a provider that will not start.
     #[default]
     Preferred,
     /// TensorRT, or no detector: [`CudaOrtDetector::new`] refuses with
-    /// [`OrtDetectorError::TensorRtUnavailable`] where its libraries are
-    /// missing or too old, and with the provider's own error where they are
-    /// there but it cannot start.
+    /// [`OrtDetectorError::TensorRtUnavailable`] where TensorRT is too old,
+    /// and with the provider's own error where it will not start.
     Required,
 }
 
 /// Whether to run on TensorRT, from what the machine has and what was
 /// asked; the warning, if one is due, is the caller's to say.
+#[cfg(feature = "ort-tensorrt")]
 fn choose(
     runtime: CudaRuntime,
     policy: UseTensorRtPolicy,
@@ -82,21 +90,26 @@ fn choose(
 /// How a [`CudaOrtDetector`] runs its model, beside what every detector is
 /// told.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(feature = "ort-tensorrt"), derive(Default))]
 pub struct CudaOrtDetectorOptions {
     /// Thresholds and labels, as every detector takes them.
     pub detector: OrtDetectorOptions,
     /// Whether TensorRT runs the model, and what happens where it cannot.
+    #[cfg(feature = "ort-tensorrt")]
     pub tensorrt: UseTensorRtPolicy,
     /// Whether TensorRT may run in half precision — about twice as fast on
     /// a GPU with tensor cores, at a detector's tolerance.
+    #[cfg(feature = "ort-tensorrt")]
     pub fp16: bool,
     /// Where TensorRT keeps the engine it builds for this model and GPU.
     /// Building one takes minutes; the first detector to start builds it
     /// and every later one loads it in under a second. `None` keeps it in
     /// the user's cache directory, under `media-pp/tensorrt`.
+    #[cfg(feature = "ort-tensorrt")]
     pub engine_cache: Option<PathBuf>,
 }
 
+#[cfg(feature = "ort-tensorrt")]
 impl Default for CudaOrtDetectorOptions {
     fn default() -> Self {
         Self {
@@ -112,7 +125,8 @@ impl Default for CudaOrtDetectorOptions {
 /// unchanged, carrying the [`Detections`] found in it — what
 /// [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU, with the
 /// picture never leaving the GPU: a kernel fits it into the model's input
-/// in device memory, and TensorRT reads it there.
+/// in device memory, and ONNX Runtime's CUDA provider — or with
+/// `ort-tensorrt`, TensorRT — reads it there.
 ///
 /// It takes NV12 or BGRA CUDA pictures of any size from the same
 /// [`CudaDevice`] as the rest of the pipeline — a decoder's, a compositor's
@@ -121,16 +135,18 @@ impl Default for CudaOrtDetectorOptions {
 ///
 /// # Requirements
 ///
-/// The `ort-cuda` feature, which fetches ONNX Runtime's CUDA and TensorRT
-/// build, and at run time a driver for CUDA 13, the CUDA 13.2 runtime,
-/// cuDNN 9.23 and TensorRT 10.15, or newer within those majors, where the
-/// loader finds them (`LD_LIBRARY_PATH` on Linux). Without TensorRT it runs
-/// on CUDA alone, saying so, unless [`UseTensorRtPolicy::Required`] says not
-/// to; without CUDA it cannot run, and says that —
-/// [`CudaOrtDetector::runtime`] tells which before a model is loaded.
+/// The `ort-cuda` feature, which fetches ONNX Runtime's CUDA build and
+/// links CUDA 13's runtime, cuBLAS and cuRAND, and cuDNN 9, into the
+/// program; `ort-tensorrt` adds TensorRT 10 and its ONNX parser. Building
+/// needs them where the linker finds them, and a program built with them
+/// does not start without them, as it does not without FFmpeg. At run time
+/// it also needs a driver for CUDA 13.0, and versions no older than ONNX
+/// Runtime's build was made against: the CUDA 13.2 runtime, cuDNN 9.23.2
+/// and TensorRT 10.15.1 — [`CudaOrtDetector::runtime`] says which falls
+/// short, before a model is loaded.
 ///
 /// The first start with TensorRT builds an engine for the model and GPU,
-/// which takes minutes — see [`CudaOrtDetectorOptions::engine_cache`].
+/// which takes minutes — see `CudaOrtDetectorOptions::engine_cache`.
 pub struct CudaOrtDetector(FilterStage<Detecting>);
 
 filter_stage!(CudaOrtDetector);
@@ -164,25 +180,19 @@ struct Detecting {
 unsafe impl Send for Detecting {}
 
 impl CudaOrtDetector {
-    /// What this machine can run a detector on, found by asking the loader
-    /// for the libraries ONNX Runtime's providers open — the driver, CUDA 13
-    /// with cuBLAS and cuRAND, cuDNN 9, and TensorRT 10 — and those that
-    /// say their version for it, without a model, a device or a session.
-    /// For an application deciding whether to offer detection on the GPU at
-    /// all; [`Self::new`] asks the same question first.
+    /// What this machine can run a detector on, without a model, a device
+    /// or a session: whether the driver is there, and whether it and the
+    /// linked libraries are new enough — each asked its own version. For an
+    /// application deciding whether to offer detection on the GPU at all;
+    /// [`Self::new`] asks the same question first.
     ///
-    /// The versions taken are those ONNX Runtime's build was made against:
-    /// a driver for CUDA 13.0 or newer, the CUDA 13.2 runtime, cuDNN 9.23.2
-    /// and TensorRT 10.15.1. Whether there is a GPU, [`CudaDevice::new`]
-    /// answers.
+    /// The linked libraries are there if the program started, so what this
+    /// can find short of them is age: the versions taken are those ONNX
+    /// Runtime's build was made against — a driver for CUDA 13.0 or newer,
+    /// the CUDA 13.2 runtime, cuDNN 9.23.2 and TensorRT 10.15.1. Whether
+    /// there is a GPU, [`CudaDevice::new`] answers.
     pub fn runtime() -> CudaRuntime {
-        if let Some(cuda) = runtime::shortfall(runtime::CUDA) {
-            return CudaRuntime::Unavailable { cuda };
-        }
-        match runtime::shortfall(runtime::TENSORRT) {
-            None => CudaRuntime::TensorRt,
-            Some(tensorrt) => CudaRuntime::CudaOnly { tensorrt },
-        }
+        runtime::runtime(&runtime::Linked::ask())
     }
 
     /// Loads the model at `model_path` to run on `device`'s GPU — the same
@@ -197,21 +207,30 @@ impl CudaOrtDetector {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaOrtDetector, &name, None);
         let path = model_path.as_ref().display().to_string();
-        let cache = options
-            .engine_cache
-            .clone()
-            .unwrap_or_else(default_engine_cache);
 
-        let runtime = Self::runtime();
-        if let (CudaRuntime::CudaOnly { tensorrt }, UseTensorRtPolicy::Preferred) =
-            (&runtime, options.tensorrt)
-        {
-            pp_warn!(pp_log: &pp_log, "TensorRT cannot be used ({tensorrt}): running on CUDA alone");
+        let linked = runtime::Linked::ask();
+        let runtime = runtime::runtime(&linked);
+        #[cfg(feature = "ort-tensorrt")]
+        let tensorrt = {
+            if let (CudaRuntime::CudaOnly { tensorrt }, UseTensorRtPolicy::Preferred) =
+                (&runtime, options.tensorrt)
+            {
+                pp_warn!(pp_log: &pp_log, "TensorRT cannot be used ({tensorrt}): running on CUDA alone");
+            }
+            choose(runtime, options.tensorrt)?
+        };
+        #[cfg(not(feature = "ort-tensorrt"))]
+        if let CudaRuntime::Unavailable { cuda } = runtime {
+            return Err(OrtDetectorError::CudaRuntimeUnavailable(cuda).into());
         }
-        let tensorrt = choose(runtime, options.tensorrt)?;
 
         let mut providers = Vec::new();
-        if tensorrt {
+        #[cfg(feature = "ort-tensorrt")]
+        let provider = if tensorrt {
+            let cache = options
+                .engine_cache
+                .clone()
+                .unwrap_or_else(default_engine_cache);
             if let Err(error) = std::fs::create_dir_all(&cache) {
                 pp_warn!(pp_log: &pp_log, "no engine cache at {}: {error}", cache.display());
             }
@@ -232,7 +251,16 @@ impl CudaOrtDetector {
             } else {
                 provider
             });
-        }
+            format!(
+                "TensorRT, fp16={}, engine_cache={}",
+                options.fp16,
+                cache.display()
+            )
+        } else {
+            "CUDA".to_owned()
+        };
+        #[cfg(not(feature = "ort-tensorrt"))]
+        let provider = "CUDA";
         providers.push(CUDA::default().with_device_id(0).build().error_on_failure());
         let session = Session::builder()
             .map_err(OrtDetectorError::from)?
@@ -264,13 +292,10 @@ impl CudaOrtDetector {
 
         pp_info!(
             pp_log: &pp_log,
-            "model loaded: path={path}, input={}x{}, {} labels, tensorrt={}, fp16={}, engine_cache={}",
+            "model loaded: path={path}, input={}x{}, {} labels, on {provider}; {linked}",
             model.0,
             model.1,
-            labels.len(),
-            tensorrt,
-            options.fp16,
-            cache.display()
+            labels.len()
         );
         if labels.is_empty() {
             pp_warn!(
@@ -297,6 +322,7 @@ impl CudaOrtDetector {
 
 /// `$XDG_CACHE_HOME/media-pp/tensorrt`, or the platform's own cache
 /// directory, or the temporary one where there is neither.
+#[cfg(feature = "ort-tensorrt")]
 fn default_engine_cache() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -425,16 +451,19 @@ impl Filter for Detecting {
 mod tests {
     use std::sync::Mutex;
 
-    use super::super::runtime::{LibraryVersion, RuntimeShortfall};
+    #[cfg(feature = "ort-tensorrt")]
+    use super::super::runtime::LibraryVersion;
+    use super::super::runtime::RuntimeShortfall;
     use super::*;
     use crate::element::{RawSink, SrcPads};
     use crate::elements::{AppSink, CudaUpload, SwOrtDetector};
     use crate::platform::cuda::CudaFrameFormat;
 
+    #[cfg(feature = "ort-tensorrt")]
     #[test]
     fn tensorrt_is_used_where_the_machine_has_it_and_policy_allows() {
         let old_tensorrt = RuntimeShortfall::Outdated {
-            library: "libnvinfer.so.10",
+            library: "TensorRT",
             found: LibraryVersion {
                 major: 10,
                 minor: 3,
@@ -567,8 +596,8 @@ mod tests {
     }
 
     /// Whatever this machine has, the answer is one of the three, and asking
-    /// costs a few loads — printed, for whoever runs it with the libraries
-    /// there.
+    /// costs a load of the driver — printed, for whoever runs it. A build
+    /// without `ort-tensorrt` never answers TensorRT.
     #[test]
     fn the_runtime_is_told_without_a_model() {
         let asked = std::time::Instant::now();
@@ -580,6 +609,8 @@ mod tests {
         {
             assert!(!libraries.is_empty());
         }
+        #[cfg(not(feature = "ort-tensorrt"))]
+        assert!(!matches!(runtime, CudaRuntime::TensorRt));
     }
 
     /// The point of the element: on the GPU it finds what the CPU detector
@@ -605,6 +636,7 @@ mod tests {
             return;
         }
         let options = CudaOrtDetectorOptions {
+            #[cfg(feature = "ort-tensorrt")]
             tensorrt: UseTensorRtPolicy::Off,
             ..CudaOrtDetectorOptions::default()
         };

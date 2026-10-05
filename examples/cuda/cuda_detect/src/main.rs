@@ -7,8 +7,9 @@
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26. The first run builds a TensorRT engine for the model
 //! and this GPU, which takes minutes; later runs load it from the cache in
-//! under a second. Needs CUDA 13, cuDNN 9 and TensorRT 10 where the loader
-//! finds them — `LD_LIBRARY_PATH` pointing at them.
+//! under a second. Built with `ort-tensorrt`, which links CUDA 13, cuDNN 9
+//! and TensorRT 10 into it: building and running need them where the
+//! linker and the loader find them — `LD_LIBRARY_PATH` pointing at them.
 //!
 //!     cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 [pictures]
 

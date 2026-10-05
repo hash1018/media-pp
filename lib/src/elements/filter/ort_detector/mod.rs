@@ -23,10 +23,11 @@ use crate::ffmpeg;
 mod cuda;
 mod sw_ort_detector;
 
+#[cfg(feature = "ort-tensorrt")]
+pub use cuda::UseTensorRtPolicy;
 #[cfg(feature = "ort-cuda")]
 pub use cuda::{
     CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
-    UseTensorRtPolicy,
 };
 pub use sw_ort_detector::SwOrtDetector;
 
@@ -240,14 +241,14 @@ pub enum OrtDetectorError {
     #[cfg(feature = "ort-cuda")]
     #[error("a CUDA picture has no surface")]
     MissingSurface,
-    /// The driver, the CUDA runtime or cuDNN that the CUDA provider needs
-    /// is missing or too old: CUDA 13 with cuBLAS and cuRAND, and cuDNN 9.
+    /// The driver is missing, or it, the CUDA runtime or cuDNN is too old
+    /// for the CUDA provider.
     #[cfg(feature = "ort-cuda")]
     #[error("the CUDA runtime cannot be used: {0}")]
     CudaRuntimeUnavailable(RuntimeShortfall),
-    /// TensorRT was required and is missing or too old, so the detector
-    /// would have run on CUDA alone.
-    #[cfg(feature = "ort-cuda")]
+    /// TensorRT was required and is too old, so the detector would have
+    /// run on CUDA alone.
+    #[cfg(feature = "ort-tensorrt")]
     #[error("TensorRT is required and cannot be used: {0}")]
     TensorRtUnavailable(RuntimeShortfall),
 }

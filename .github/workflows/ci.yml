@@ -270,11 +270,15 @@ jobs:
         run: cargo check -p media-pp --all-targets --features ort,webrtc
 
       # The CUDA detector: ONNX Runtime's CUDA and TensorRT build, which, like
-      # the CPU one above, checking never needs downloaded.
+      # the CPU one above, checking never needs downloaded, and the NVIDIA
+      # libraries it links, which checking never needs either. Each feature
+      # alone, since `ort-tensorrt` gates code `ort-cuda` builds without.
       - name: Check (ONNX Runtime on CUDA)
         env:
           DOCS_RS: "1"
-        run: cargo check -p media-pp --all-targets --features ort-cuda
+        run: |
+          cargo check -p media-pp --all-targets --features ort-cuda
+          cargo check -p media-pp --all-targets --features ort-tensorrt
 
       # Keep cross-backend links honest: an all-features build would resolve
       # links that are broken in the feature-specific docs users actually see.

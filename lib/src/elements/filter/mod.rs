@@ -112,6 +112,8 @@ pub use encoder::{
 #[cfg(feature = "vulkan")]
 pub use encoder::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};
 pub use frame_rate_limiter::{FrameRateLimiter, FrameRateLimiterError};
+#[cfg(feature = "ort-tensorrt")]
+pub use ort_detector::UseTensorRtPolicy;
 #[cfg(feature = "ort")]
 pub use ort_detector::{
     COCO_CLASS_LABELS, Detection, Detections, OrtDetectorError, OrtDetectorOptions, SwOrtDetector,
@@ -119,7 +121,6 @@ pub use ort_detector::{
 #[cfg(feature = "ort-cuda")]
 pub use ort_detector::{
     CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
-    UseTensorRtPolicy,
 };
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};

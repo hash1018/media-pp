@@ -1,5 +1,6 @@
-//! Rejects an FFmpeg older than 8.0 at build time, and with the `vulkan`
-//! feature generates the bindings to FFmpeg's Vulkan hardware context.
+//! Rejects an FFmpeg older than 8.0 at build time, with the `vulkan`
+//! feature generates the bindings to FFmpeg's Vulkan hardware context, and
+//! with `ort-cuda` links the NVIDIA libraries ONNX Runtime's providers need.
 //!
 //! `ffmpeg-sys-next` (`links = "ffmpeg"`) probes the installed libraries and
 //! republishes what it found as build metadata. Cargo forwards that metadata
@@ -29,6 +30,9 @@ fn main() {
     if std::env::var_os("DOCS_RS").is_some() {
         return;
     }
+
+    #[cfg(feature = "ort-cuda")]
+    nvidia::link();
 
     if std::env::var(DETECTED_FFMPEG_8_0).as_deref() != Ok("true") {
         println!(
@@ -159,5 +163,135 @@ mod vulkan {
             .map(|dir| Path::new(&sdk).join(dir))
             .filter(|dir| dir.is_dir())
             .collect()
+    }
+}
+
+/// Links the libraries ONNX Runtime's CUDA provider needs — CUDA 13's
+/// runtime, cuBLAS and cuRAND, and cuDNN 9 — and with `ort-tensorrt` those
+/// its TensorRT provider needs besides, TensorRT 10 and its ONNX parser.
+///
+/// Linked rather than left to the providers, which open them only when a
+/// detector starts: an application built with the feature is one for
+/// NVIDIA GPUs, and like a missing FFmpeg, a missing library stops it
+/// before it starts, by name, rather than when a detector is asked for.
+/// What linking cannot say, a version too old, `CudaOrtDetector::runtime`
+/// asks each library at run time. The driver is not linked: a build
+/// machine has none.
+///
+/// The link keeps a library only while the program calls into it — rustc
+/// passes `--as-needed` — and `CudaOrtDetector::runtime` calls each for
+/// its version, so an application that never makes a detector does not
+/// need them either.
+///
+/// The libraries are looked for in `MEDIA_PP_NVIDIA_LIB_DIRS`, a path
+/// list, then where the loader will look for them — `LD_LIBRARY_PATH` on
+/// Linux, `LIB` and `PATH` on Windows — then the CUDA installation and the
+/// system's directories. One not found is said in a warning and linked by
+/// name anyway, which leaves the linker to look and to fail: a check, which
+/// never links, still passes. Where the program finds them at run time is
+/// the application's to arrange, as with FFmpeg.
+#[cfg(feature = "ort-cuda")]
+mod nvidia {
+    use std::path::PathBuf;
+
+    /// Each library as the linker looks for it on Linux — the versioned
+    /// name, since NVIDIA's pip wheels ship no unversioned one — and on
+    /// Windows, as its import library.
+    const CUDA: &[(&str, &str)] = &[
+        ("libcudart.so.13", "cudart"),
+        ("libcublasLt.so.13", "cublasLt"),
+        ("libcublas.so.13", "cublas"),
+        ("libcurand.so.10", "curand"),
+        ("libcudnn.so.9", "cudnn"),
+    ];
+    #[cfg(feature = "ort-tensorrt")]
+    const TENSORRT: &[(&str, &str)] = &[
+        ("libnvinfer.so.10", "nvinfer_10"),
+        ("libnvonnxparser.so.10", "nvonnxparser_10"),
+    ];
+
+    pub(super) fn link() {
+        let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+        for variable in [
+            "MEDIA_PP_NVIDIA_LIB_DIRS",
+            "LD_LIBRARY_PATH",
+            "LIB",
+            "PATH",
+            "CUDA_PATH",
+        ] {
+            println!("cargo:rerun-if-env-changed={variable}");
+        }
+
+        #[allow(unused_mut)]
+        let mut libraries = CUDA.to_vec();
+        #[cfg(feature = "ort-tensorrt")]
+        libraries.extend_from_slice(TENSORRT);
+
+        let places = places(windows);
+        let mut found: Vec<&PathBuf> = Vec::new();
+        let mut missing = Vec::new();
+        for &(linux, import) in &libraries {
+            let file = if windows {
+                format!("{import}.lib")
+            } else {
+                linux.to_owned()
+            };
+            match places.iter().find(|dir| dir.join(&file).is_file()) {
+                Some(dir) if !found.contains(&dir) => found.push(dir),
+                Some(_) => {}
+                None => missing.push(file),
+            }
+            if windows {
+                println!("cargo:rustc-link-lib=dylib={import}");
+            } else {
+                println!("cargo:rustc-link-lib=dylib:+verbatim={linux}");
+            }
+        }
+        for dir in found {
+            println!("cargo:rustc-link-search=native={}", dir.display());
+        }
+        if !missing.is_empty() {
+            println!(
+                "cargo::warning=`ort-cuda` links {missing:?}, which were not found: linking \
+                 will fail. Name their directories in MEDIA_PP_NVIDIA_LIB_DIRS."
+            );
+        }
+    }
+
+    /// Where to look, in order: what the builder named, where the loader
+    /// will look, the CUDA installation, and the system's directories —
+    /// the last only for a build for this machine.
+    fn places(windows: bool) -> Vec<PathBuf> {
+        let mut places = Vec::new();
+        let mut list = |variable: &str| {
+            if let Some(value) = std::env::var_os(variable) {
+                places.extend(std::env::split_paths(&value));
+            }
+        };
+        list("MEDIA_PP_NVIDIA_LIB_DIRS");
+        if windows {
+            list("LIB");
+            list("PATH");
+        } else {
+            list("LD_LIBRARY_PATH");
+        }
+        if let Some(cuda) = std::env::var_os("CUDA_PATH") {
+            let cuda = PathBuf::from(cuda);
+            places.extend([cuda.join("lib").join("x64"), cuda.join("lib64")]);
+        }
+        let native = std::env::var("HOST").ok() == std::env::var("TARGET").ok();
+        if native && !windows {
+            places.extend(
+                [
+                    "/usr/local/cuda/lib64",
+                    "/usr/lib/x86_64-linux-gnu",
+                    "/usr/lib/aarch64-linux-gnu",
+                    "/usr/lib64",
+                    "/usr/lib",
+                ]
+                .map(PathBuf::from),
+            );
+        }
+        places
     }
 }
