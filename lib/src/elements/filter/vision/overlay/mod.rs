@@ -4,7 +4,8 @@
 //!
 //! One element per place a picture lives, as the detectors are:
 //! [`SwDetectionOverlay`] draws on pictures in system memory, and
-//! `CudaDetectionOverlay` on CUDA pictures without them leaving the GPU.
+//! `CudaDetectionOverlay` on CUDA pictures and `MetalDetectionOverlay` on
+//! VideoToolbox ones without them leaving the GPU.
 //! What they share is here: the options, where each box and label goes in a
 //! picture of a given size, and the colours.
 //!
@@ -18,9 +19,13 @@ mod sw_detection_overlay;
 
 #[cfg(feature = "cuda")]
 mod cuda;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+mod metal;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaDetectionOverlay, CudaDetectionOverlayError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use metal::{MetalDetectionOverlay, MetalDetectionOverlayError};
 pub use sw_detection_overlay::{SwDetectionOverlay, SwDetectionOverlayError};
 
 use crate::color::Color;

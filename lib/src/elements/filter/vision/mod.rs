@@ -11,7 +11,8 @@
 //!   `ort` features, as `SwOrtDetector`, `CudaOrtDetector` and
 //!   `MetalOrtDetector`.
 //! - [`overlay`] — drawing what was found onto the pictures:
-//!   [`SwDetectionOverlay`] and `CudaDetectionOverlay`.
+//!   [`SwDetectionOverlay`], `CudaDetectionOverlay` and
+//!   `MetalDetectionOverlay`.
 //!
 //! The data and the overlays need no feature of their own; only inference
 //! brings a runtime with it.
@@ -29,3 +30,5 @@ pub use overlay::{
 };
 #[cfg(feature = "cuda")]
 pub use overlay::{CudaDetectionOverlay, CudaDetectionOverlayError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use overlay::{MetalDetectionOverlay, MetalDetectionOverlayError};

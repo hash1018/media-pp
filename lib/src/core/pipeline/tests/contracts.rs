@@ -1472,3 +1472,65 @@ fn a_detection_overlay_keeps_the_format_it_was_handed() {
         ))
         .expect("NV12 through an overlay into an NV12-only sink");
 }
+
+/// The Metal overlay keeps the format it was handed as the others do — an
+/// uploaded NV12 picture reaches a sink taking VideoToolbox NV12 alone —
+/// and refuses a picture still in system memory, which has no pixel buffer
+/// to draw on.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[test]
+fn a_metal_detection_overlay_keeps_the_format_and_takes_videotoolbox_frames_only() {
+    use crate::elements::{
+        DetectionOverlayOptions, MetalDetectionOverlay, SwScaler, VideoToolboxUpload,
+    };
+
+    let Some(device) = crate::test_support::try_videotoolbox_device() else {
+        return;
+    };
+    let scaler = || {
+        SwScaler::new(
+            "scaler",
+            ffmpeg::format::Pixel::NV12,
+            64,
+            64,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )
+    };
+    let overlay = || {
+        MetalDetectionOverlay::new("overlay", &device, DetectionOverlayOptions::default())
+            .expect("an overlay without labels")
+    };
+    let nv12_only = || {
+        DeclaringSink::boxed(
+            "encoder",
+            InputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
+                    .with_layouts(PixelLayoutSet::NV12),
+            ),
+        )
+    };
+
+    contract_context()
+        .branch()
+        .pipe(scaler())
+        .pipe(VideoToolboxUpload::new("upload", &device))
+        .pipe(overlay())
+        .to(nv12_only())
+        .expect("NV12 through the overlay into an NV12-only sink");
+
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(scaler())
+        .pipe(overlay())
+        .to(nv12_only())
+    else {
+        panic!("a picture in system memory has no pixel buffer to draw on");
+    };
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!((&*producer, &*consumer), ("scaler", "overlay"));
+}

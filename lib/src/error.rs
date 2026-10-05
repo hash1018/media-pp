@@ -815,6 +815,11 @@ pub enum Error {
     #[error(transparent)]
     CudaDetectionOverlayError(#[from] CudaDetectionOverlayError),
 
+    /// Drawing detections onto a VideoToolbox picture failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalDetectionOverlayError(#[from] crate::elements::MetalDetectionOverlayError),
+
     /// Loading a speech model, or transcribing with it, failed.
     #[cfg(feature = "whisper")]
     #[error(transparent)]

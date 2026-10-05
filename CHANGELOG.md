@@ -293,6 +293,16 @@ compile error with no explanation.
   decodes, detects, draws and encodes a 1080p file at about 420 pictures a
   second.
 
+- **`MetalDetectionOverlay`: what was found, drawn onto VideoToolbox
+  pictures** (feature `metal`). What the other two overlays do, on NV12
+  and BGRA VideoToolbox pictures with Metal: a copy from a pool of its own,
+  rectangle fills for the lines and bands, and each label rasterized once
+  and blended from a coverage mask, so `MetalOrtDetector`'s pictures go on
+  to `VideoToolboxEncoder` or a Metal renderer with their boxes. It passes
+  its input's contract through, as they do. On an M5 it draws on a 720p
+  picture in under a millisecond, and `metal_detect --out` decodes,
+  detects, draws and encodes a 720p file at 150 to 200 pictures a second.
+
 - **`Metadata`: what an element found out about a buffer, carried with
   it.** Every buffer can carry one — `MediaBuffer::metadata`,
   `with_metadata`, `set_metadata` — holding one value per type, so an

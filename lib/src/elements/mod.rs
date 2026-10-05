@@ -166,6 +166,8 @@ pub use filter::{
     MetalChromaKey, MetalChromaKeyError, MetalConverter, MetalConverterError, MetalScaler,
     MetalScalerError, MetalScalerInterp, MetalVideoEffect, MetalVideoEffectError,
 };
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use filter::{MetalDetectionOverlay, MetalDetectionOverlayError};
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 #[cfg(feature = "ort")]

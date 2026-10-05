@@ -282,6 +282,9 @@ pub enum ElementType {
     SwDetectionOverlay,
     /// Draws a detector's boxes and labels onto CUDA pictures.
     CudaDetectionOverlay,
+    /// Draws a detector's boxes and labels onto VideoToolbox pictures, with
+    /// Metal.
+    MetalDetectionOverlay,
     /// Speech-to-text sink, through whisper.cpp.
     WhisperTranscriber,
     /// HTTP Live Streaming muxer sink.
