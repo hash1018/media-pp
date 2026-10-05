@@ -286,9 +286,12 @@ impl Filter for Classifying {
             out.push(buf);
             return Ok(());
         };
-        let plan: Plan =
-            self.memory
-                .plan(&detections, &self.options, (frame.width(), frame.height()));
+        let plan: Plan = self.memory.plan(
+            &buf,
+            &detections,
+            &self.options,
+            (frame.width(), frame.height()),
+        );
         let crops: Vec<Crop> = plan.classify.iter().map(|(_, crop)| *crop).collect();
         let found = if crops.is_empty() {
             Vec::new()

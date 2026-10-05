@@ -9,7 +9,7 @@
 mod demux;
 mod input;
 mod meta;
-mod per_stream;
+pub(crate) mod per_stream;
 
 use std::collections::VecDeque;
 use std::sync::{

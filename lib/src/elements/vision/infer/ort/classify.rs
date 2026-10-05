@@ -10,6 +10,9 @@ use std::sync::Arc;
 use ort::session::Session;
 
 use super::OrtError;
+use crate::buffer::MediaBuffer;
+use crate::elements::vision::batch::StreamId;
+use crate::elements::vision::batch::per_stream::{PerStream, stream_of};
 use crate::elements::{Classification, Detections};
 
 /// How a classifier decides what to classify, and what its answers are.
@@ -136,13 +139,22 @@ pub(crate) type Crop = (u32, u32, u32, u32);
 pub(crate) struct Plan {
     pub(crate) classify: Vec<(usize, Crop)>,
     pub(crate) remembered: Vec<(usize, Classification)>,
+    /// The stream the picture is of, whose memory its answers go into.
+    stream: Option<StreamId>,
 }
 
-/// What a classifier knows of the objects it has classified, by a tracker's
-/// number.
-#[derive(Debug, Default)]
+/// What a classifier knows of the objects it has classified, kept for each
+/// stream after a [`StreamMux`](crate::elements::StreamMux): what an answer
+/// ages by is its own stream's pictures, not every stream's.
+#[derive(Default)]
 pub(crate) struct Memory {
-    /// Pictures so far.
+    streams: PerStream<Answers>,
+}
+
+/// What a classifier knows of one stream's objects, by a tracker's number.
+#[derive(Debug, Default)]
+struct Answers {
+    /// The stream's pictures so far.
     picture: u64,
     /// Each followed object's answer, the picture it was given on, and the
     /// last picture the object was seen on.
@@ -154,8 +166,40 @@ pub(crate) struct Memory {
 const FORGET_AFTER: u64 = 300;
 
 impl Memory {
-    /// What to do with `detections`, on a picture `width` by `height`.
+    /// What to do with `detections`, on `buf`, a picture `width` by
+    /// `height`.
     pub(crate) fn plan(
+        &mut self,
+        buf: &MediaBuffer,
+        detections: &Detections,
+        options: &OrtClassifierOptions,
+        size: (u32, u32),
+    ) -> Plan {
+        // A stream sought keeps what it knew: its objects after the seek
+        // are numbered anew, and the answers of those before age out.
+        let (answers, _) = self.streams.get(buf, |_| Answers::default());
+        Plan {
+            stream: stream_of(buf).0,
+            ..answers.plan(detections, options, size)
+        }
+    }
+
+    /// Remembers `answer` for object `id`, given on the picture `plan` was
+    /// made for.
+    fn remember(&mut self, plan: &Plan, id: u64, answer: Classification) {
+        if let Some(answers) = self.streams.of(plan.stream) {
+            answers.remember(id, answer);
+        }
+    }
+
+    /// Forgets everything: after a seek, the numbers are a new tracker's.
+    pub(crate) fn clear(&mut self) {
+        self.streams.clear();
+    }
+}
+
+impl Answers {
+    fn plan(
         &mut self,
         detections: &Detections,
         options: &OrtClassifierOptions,
@@ -209,14 +253,9 @@ impl Memory {
     }
 
     /// Remembers `answer` for object `id`, given on this picture.
-    pub(crate) fn remember(&mut self, id: u64, answer: Classification) {
+    fn remember(&mut self, id: u64, answer: Classification) {
         self.answers
             .insert(id, (answer, self.picture, self.picture));
-    }
-
-    /// Forgets everything: after a seek, the numbers are a new tracker's.
-    pub(crate) fn clear(&mut self) {
-        self.answers.clear();
     }
 }
 
@@ -225,10 +264,10 @@ impl Memory {
 pub(crate) fn apply(
     detections: &mut Detections,
     memory: &mut Memory,
-    plan: Plan,
+    mut plan: Plan,
     answers: Vec<(usize, Option<Classification>)>,
 ) {
-    for (index, answer) in plan.remembered {
+    for (index, answer) in std::mem::take(&mut plan.remembered) {
         detections.items[index].classes.push(answer);
     }
     for (index, answer) in answers {
@@ -236,7 +275,7 @@ pub(crate) fn apply(
             continue;
         };
         if let Some(id) = detections.items[index].track_id {
-            memory.remember(id, answer.clone());
+            memory.remember(&plan, id, answer.clone());
         }
         detections.items[index].classes.push(answer);
     }
@@ -277,6 +316,47 @@ mod tests {
         Classification::new("classifier", Arc::from([Arc::from("red")]), 0, 0.8)
     }
 
+    /// A picture of `stream`, as a mux hands it on, or of no mux's.
+    fn on(stream: Option<u64>) -> MediaBuffer {
+        use crate::buffer::Metadata;
+        use crate::elements::vision::batch::StreamOrigin;
+        let buf = MediaBuffer::video(crate::ffmpeg::frame::Video::empty());
+        match stream {
+            Some(stream) => buf.with_metadata(Metadata::default().with(StreamOrigin {
+                id: StreamId(stream),
+                name: Arc::from(format!("camera {stream}")),
+                generation: 0,
+            })),
+            None => buf,
+        }
+    }
+
+    /// An answer ages by its own stream's pictures: another stream's coming
+    /// between do not make it due again.
+    #[test]
+    fn an_answer_ages_by_its_own_streams_pictures() {
+        let options = OrtClassifierOptions {
+            reclassify: 3,
+            ..OrtClassifierOptions::default()
+        };
+        let mut memory = Memory::default();
+        let size = (640, 360);
+        let mut first = found(vec![tracked(Some(7), 0)], false);
+        let plan = memory.plan(&on(Some(1)), &first, &options, size);
+        apply(&mut first, &mut memory, plan, vec![(0, Some(red()))]);
+        for _ in 0..5 {
+            let other = found(vec![tracked(Some(8), 0)], false);
+            memory.plan(&on(Some(2)), &other, &options, size);
+        }
+        let again = found(vec![tracked(Some(7), 0)], false);
+        let plan = memory.plan(&on(Some(1)), &again, &options, size);
+        assert!(plan.classify.is_empty(), "one picture of its own on");
+        assert_eq!(plan.remembered.len(), 1);
+        memory.plan(&on(Some(1)), &again, &options, size);
+        let plan = memory.plan(&on(Some(1)), &again, &options, size);
+        assert_eq!(plan.classify.len(), 1, "three of its own on, asked again");
+    }
+
     #[test]
     fn scores_are_read_as_probabilities_or_through_a_softmax() {
         assert_eq!(best(&[0.1, 0.7, 0.2]), Some((1, 0.7)));
@@ -308,7 +388,7 @@ mod tests {
         let mut memory = Memory::default();
         let size = (640, 360);
         let mut picture = found(vec![tracked(Some(7), 0), tracked(None, 0)], false);
-        let plan = memory.plan(&picture, &options, size);
+        let plan = memory.plan(&on(None), &picture, &options, size);
         assert_eq!(plan.classify.len(), 2);
         let classify: Vec<usize> = plan.classify.iter().map(|(i, _)| *i).collect();
         apply(
@@ -320,19 +400,19 @@ mod tests {
         assert_eq!(picture.items[0].classes, vec![red()]);
 
         let expected = found(vec![tracked(Some(7), 0)], true);
-        let plan = memory.plan(&expected, &options, size);
+        let plan = memory.plan(&on(None), &expected, &options, size);
         assert!(plan.classify.is_empty(), "not on a tracker's expectation");
         assert_eq!(plan.remembered.len(), 1, "but remembered there");
 
         let again = found(vec![tracked(Some(7), 0), tracked(None, 0)], false);
-        let plan = memory.plan(&again, &options, size);
+        let plan = memory.plan(&on(None), &again, &options, size);
         assert_eq!(plan.remembered.len(), 1);
         assert_eq!(
             plan.classify.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
             [1]
         );
 
-        let plan = memory.plan(&again, &options, size);
+        let plan = memory.plan(&on(None), &again, &options, size);
         assert_eq!(
             plan.classify.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
             [0, 1],
@@ -356,7 +436,7 @@ mod tests {
             ],
             false,
         );
-        let plan = memory.plan(&picture, &options, (640, 360));
+        let plan = memory.plan(&on(None), &picture, &options, (640, 360));
         assert_eq!(plan.classify.len(), 1);
         let (index, (left, top, width, height)) = plan.classify[0];
         assert_eq!(index, 1);

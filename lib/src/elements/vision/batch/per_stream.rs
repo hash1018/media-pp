@@ -94,6 +94,12 @@ impl<T> PerStream<T> {
         }
     }
 
+    /// The state of `stream`, if it has one, without counting it as seen.
+    #[cfg(feature = "ort")] // only the classifiers look a stream up again
+    pub(crate) fn of(&mut self, stream: Option<StreamId>) -> Option<&mut T> {
+        self.states.get_mut(&stream).map(|kept| &mut kept.state)
+    }
+
     /// Every stream's state.
     pub(crate) fn values(&self) -> impl Iterator<Item = &T> {
         self.states.values().map(|kept| &kept.state)

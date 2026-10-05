@@ -254,9 +254,12 @@ impl Filter for Classifying {
             out.push(buf);
             return Ok(());
         };
-        let mut plan: Plan =
-            self.memory
-                .plan(&detections, &self.options, (frame.width(), frame.height()));
+        let mut plan: Plan = self.memory.plan(
+            &buf,
+            &detections,
+            &self.options,
+            (frame.width(), frame.height()),
+        );
         // A box of no width or height, which a `min_size` of 0 lets by, has
         // nothing to cut.
         plan.classify
