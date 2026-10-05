@@ -117,7 +117,7 @@ impl Default for CudaOrtDetectorOptions {
 /// It takes NV12 or BGRA CUDA pictures of any size from the same
 /// [`CudaDevice`] as the rest of the pipeline — a decoder's, a compositor's
 /// — and the boxes it finds are fractions of each picture, as
-/// [the module docs](super::super) describe.
+/// [`Detections`] describes.
 ///
 /// # Requirements
 ///

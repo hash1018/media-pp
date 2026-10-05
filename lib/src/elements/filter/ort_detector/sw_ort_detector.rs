@@ -32,7 +32,7 @@ const MARGIN: f32 = 114.0 / 255.0;
 ///
 /// It takes decoded video in system memory, any pixel format and size: each
 /// picture is fitted to the model's input inside the element (see
-/// [the module docs](super) for the models it reads and how), and the
+/// [`Detections`] for the models it reads and how), and the
 /// boxes are mapped back onto the picture as fractions of it. What goes on
 /// is the picture it was handed, not the fitted copy.
 ///

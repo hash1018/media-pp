@@ -8,22 +8,8 @@
 //! its [`Metadata`](crate::buffer::Metadata), how a model's output is read
 //! into them, and how a picture is fitted to a model's input.
 //!
-//! # Models
-//!
-//! A YOLO detector exported to ONNX with one image input, `[1, 3, height,
-//! width]`, RGB scaled to 0–1, and one output in either of the two layouts
-//! Ultralytics exports:
-//!
-//! - `[1, 4 + classes, boxes]` — YOLOv8 and YOLO11: a box's centre, width
-//!   and height, then a score per class. Boxes are thresholded and put
-//!   through non-maximum suppression here.
-//! - `[1, boxes, 6]` — YOLOv10 and YOLO26, which suppress duplicates
-//!   themselves: each row a box's corners, its score and its class.
-//!
-//! A picture is fitted to the model's input the way Ultralytics trains it:
-//! scaled to fit inside, keeping its proportions, and the rest filled with
-//! grey (114). The boxes are mapped back, so they describe the picture the
-//! detector was handed, whatever its size.
+//! The models they read are described on [`Detections`], since this
+//! module is not public.
 
 use std::sync::Arc;
 
@@ -72,6 +58,23 @@ pub struct Detection {
 ///
 /// An empty list is an answer — the detector looked and found nothing —
 /// where a picture carrying no `Detections` was not looked at.
+///
+/// # Models
+///
+/// A YOLO detector exported to ONNX with one image input, `[1, 3, height,
+/// width]`, RGB scaled to 0–1, and one output in either of the two layouts
+/// Ultralytics exports:
+///
+/// - `[1, 4 + classes, boxes]` — YOLOv8 and YOLO11: a box's centre, width
+///   and height, then a score per class. Boxes are thresholded and put
+///   through non-maximum suppression by the detector.
+/// - `[1, boxes, 6]` — YOLOv10 and YOLO26, which suppress duplicates
+///   themselves: each row a box's corners, its score and its class.
+///
+/// A picture is fitted to the model's input the way Ultralytics trains it:
+/// scaled to fit inside, keeping its proportions, and the rest filled with
+/// grey (114). The boxes are mapped back, so they describe the picture the
+/// detector was handed, whatever its size.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Detections {
     /// The name of the element that looked.
