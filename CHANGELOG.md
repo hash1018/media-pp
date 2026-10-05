@@ -226,7 +226,8 @@ compile error with no explanation.
   `MetalOrtDetectorOptions::max_batch` does the same through Core ML, the
   batch's pictures fitted in one Metal pass and the model's open batch
   fixed at that size; `MetalOrtDetector::new` takes those options in place
-  of `OrtDetectorOptions`.
+  of `OrtDetectorOptions`; the `metal_multi_detect` example is
+  `cuda_multi_detect` on macOS.
 
 - **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
   TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`

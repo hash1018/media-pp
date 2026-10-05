@@ -1,0 +1,8 @@
+[package]
+name = "metal_multi_detect"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["ort-coreml"] }

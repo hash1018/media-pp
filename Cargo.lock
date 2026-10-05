@@ -2135,6 +2135,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "metal_multi_detect"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "metal_window_render"
 version = "0.1.0"
 dependencies = [
