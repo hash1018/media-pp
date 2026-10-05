@@ -5,7 +5,7 @@ finds objects in a file's pictures with the pictures fitted on the GPU —
 VideoToolbox decodes, a Metal kernel fits each picture into the model's input
 where it is, Core ML runs the model on the GPU or the Neural Engine — and
 prints what each picture carries on, then how fast it went. The macOS
-counterpart of [`cuda_detect`](../../cuda/cuda_detect).
+counterpart of [`cuda_detect`](../cuda_detect).
 
 With `--out boxes.mp4`, a Tee after the detector also records each picture
 with what was found drawn on it, still on the GPU: `MetalDetectionOverlay ->
