@@ -21,8 +21,10 @@ use crate::{
 use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
-    Interval, Letterbox, OrtDetectorOptions, OrtError, decode_batch, labels, model_input,
+    Interval, Letterbox, OrtDetectorOptions, OrtError, decode_batch, decode_best, labels,
+    model_input,
 };
+use super::best_class::BestClass;
 use super::core_ml_session;
 use super::fitting::{Cut, Fitting, Picture};
 
@@ -117,6 +119,9 @@ struct Detecting {
     /// go on in the same call.
     context: Option<Arc<Context>>,
     fitting: Fitting,
+    /// Each box's best class of a `[batch, 4 + classes, boxes]` output,
+    /// found on the GPU.
+    best: BestClass,
 }
 
 impl MetalOrtDetector {
@@ -230,6 +235,7 @@ impl MetalOrtDetector {
             held: Vec::new(),
             context: None,
             fitting,
+            best: BestClass::new()?,
         })))
     }
 }
@@ -320,16 +326,30 @@ impl Detecting {
         let input =
             TensorRef::from_array_view(([rows, 3, height, width], self.fitting.input(rows)))?;
         let outputs = self.session.run(inputs![input])?;
-        let output = outputs[0].try_extract_array::<f32>()?;
-        // The inputs past the batch's pictures hold what they held; what
-        // the model found in them is no picture's.
-        let output = if output.ndim() > 0 && output.shape()[0] > looks.len() {
-            output.slice_axis(Axis(0), Slice::from(0..looks.len()))
-        } else {
-            output
-        };
         let letterboxes: Vec<Letterbox> = looks.iter().map(|(_, letterbox)| *letterbox).collect();
-        decode_batch(output, &letterboxes, &self.options)
+        let (shape, floats) = outputs[0].try_extract_tensor::<f32>()?;
+        match **shape {
+            // `[batch, 4 + classes, boxes]`: each box's best class found on
+            // the GPU, of the batch's pictures alone — the inputs past them
+            // hold what they held, and what the model found there is no
+            // picture's.
+            [batch, rows, boxes] if batch as usize >= looks.len() && boxes != 6 && rows > 4 => {
+                let boxes = boxes as usize;
+                let best = self.best.find(floats, looks.len(), rows as usize, boxes)?;
+                Ok(decode_best(best, boxes, &letterboxes, &self.options))
+            }
+            // `[batch, boxes, 6]`, a few hundred boxes a picture, read as it
+            // is — or a shape the reading refuses.
+            _ => {
+                let output = outputs[0].try_extract_array::<f32>()?;
+                let output = if output.ndim() > 0 && output.shape()[0] > looks.len() {
+                    output.slice_axis(Axis(0), Slice::from(0..looks.len()))
+                } else {
+                    output
+                };
+                decode_batch(output, &letterboxes, &self.options)
+            }
+        }
     }
 
     /// Runs the model on what is held, and hands every held picture on in

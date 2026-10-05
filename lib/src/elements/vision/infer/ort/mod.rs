@@ -39,7 +39,7 @@ pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
 #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 use yolo::decode_batch;
-#[cfg(feature = "ort-cuda")]
+#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 use yolo::decode_best;
 use yolo::{Letterbox, decode};
 

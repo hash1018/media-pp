@@ -2,6 +2,7 @@
 //! and [`MetalOrtClassifier`], each fitting what it reads into its model's
 //! input with Metal.
 
+mod best_class;
 mod fitting;
 mod metal_ort_classifier;
 mod metal_ort_detector;

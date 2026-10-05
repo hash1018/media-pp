@@ -234,7 +234,9 @@ compile error with no explanation.
   back to the CPU: YOLO11n went from 38 pictures a second to 232. The
   `metal_multi_detect` example is `cuda_multi_detect` on macOS: on an M5,
   eight streams went from 142 pictures a second one at a time to 310
-  batched.
+  batched. Each box's best class of a YOLOv8 or YOLO11 output is found on
+  the GPU there too, from a copy in memory the GPU shares — a batch of
+  eight read in 0.9 ms rather than 1.9.
 
 - **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
   TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`

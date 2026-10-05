@@ -163,7 +163,7 @@ fn decode_one(
 /// best classes were found where it is, on the GPU: six floats a box —
 /// centre, width and height, the best class's score, that class — `boxes`
 /// boxes a picture, one picture after another.
-#[cfg(feature = "ort-cuda")]
+#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 pub(crate) fn decode_best(
     best: &[f32],
     boxes: usize,
@@ -361,7 +361,7 @@ mod tests {
     /// The boxes' best classes found on the GPU — six floats a box, as
     /// `best_class` writes them — read to what the whole output reads to on
     /// the CPU, ties and all.
-    #[cfg(feature = "ort-cuda")]
+    #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
     #[test]
     fn best_classes_found_on_the_gpu_read_as_the_whole_output_does() {
         let letterboxes = [
