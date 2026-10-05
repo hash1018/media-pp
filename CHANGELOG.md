@@ -276,6 +276,26 @@ compile error with no explanation.
   `Detections::attach_to`. Both are non-exhaustive, so that what a tracker
   or a second model learns of an object can be added to them later.
 
+- **`ObjectAnalytics`: objects counted in zones and across lines.**
+  DeepStream's `nvdsanalytics`, on the `Detections` a picture carries: for
+  each `Zone` — a polygon in fractions of the picture, of some classes or
+  all — the objects standing in it, and whether as many as its
+  `crowded_at` are; for each `Line` the objects followed across it, each
+  way apart, with running totals and the crossings of each picture. It
+  puts what it counted beside them as `Analytics`, with a `ZoneCount` per
+  zone and a `LineCount` and its `Crossing`s per line. An object is where
+  the bottom middle of its box is, and a line is crossed by an object an
+  `ObjectTracker` before it has numbered; the pictures a tracker filled in
+  count as well. An object is on a side of a line only once it is
+  `Line::margin` past it — a tenth of its own box's height by default — so
+  a box trembling about the line is not counted crossing back and forth.
+  On Intel's `people-detection.mp4`, seven people walking away from the
+  camera, a line across the middle of the floor counts the seven with or
+  without it; one near the far wall, where the boxes tremble as people turn
+  for the doors, counted a crossing back that never happened without it,
+  and one along the wall's foot, which nobody crosses, four. It reads metadata alone, so it takes pictures wherever
+  they live, and needs no feature. `metal_detect --line` counts with it.
+
 - **`ObjectTracker`: what a detector found, numbered across pictures.**
   ByteTrack — a Kalman filter per object, and matching by overlap with the
   Hungarian method, confident detections first and then the unconfident a

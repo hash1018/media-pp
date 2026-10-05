@@ -820,6 +820,10 @@ pub enum Error {
     #[error(transparent)]
     MetalDetectionOverlayError(#[from] crate::elements::MetalDetectionOverlayError),
 
+    /// An analytics element was given a zone or line it cannot count.
+    #[error(transparent)]
+    ObjectAnalyticsError(#[from] crate::elements::ObjectAnalyticsError),
+
     /// Loading a speech model, or transcribing with it, failed.
     #[cfg(feature = "whisper")]
     #[error(transparent)]

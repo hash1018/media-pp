@@ -114,6 +114,64 @@ impl Detections {
     }
 }
 
+/// What an [`ObjectAnalytics`](crate::elements::ObjectAnalytics) made of one
+/// picture's [`Detections`]: for each of its zones the objects inside, and
+/// for each of its lines how many objects have crossed it so far and which
+/// crossed on this picture — the [`Metadata`](crate::buffer::Metadata) it
+/// puts beside them. Read it with `buffer.metadata()?.get::<Analytics>()`.
+///
+/// The zones and lines are in the order the element was given them.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Analytics {
+    /// Each zone, and what is in it on this picture.
+    pub zones: Vec<ZoneCount>,
+    /// Each line, and what has crossed it.
+    pub lines: Vec<LineCount>,
+}
+
+/// One zone of an [`Analytics`] on one picture.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ZoneCount {
+    /// The zone's name.
+    pub name: Arc<str>,
+    /// The objects inside it, as indices into the picture's
+    /// [`Detections::items`].
+    pub objects: Vec<usize>,
+    /// Whether at least the zone's `crowded_at` objects are inside.
+    pub crowded: bool,
+}
+
+/// One line of an [`Analytics`]: how many objects have crossed it each way
+/// since the element started, and which crossed on this picture.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct LineCount {
+    /// The line's name.
+    pub name: Arc<str>,
+    /// Crossings from its left to its right, as seen going from its start
+    /// to its end — so a line drawn left to right counts what moves down
+    /// the picture.
+    pub forward: u64,
+    /// Crossings the other way.
+    pub backward: u64,
+    /// The crossings on this picture.
+    pub crossed: Vec<Crossing>,
+}
+
+/// An object crossing a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Crossing {
+    /// The object, by [`Detection::track_id`].
+    pub track_id: u64,
+    /// Its class.
+    pub class_id: usize,
+    /// Whether it crossed forward — see [`LineCount::forward`].
+    pub forward: bool,
+}
+
 /// The 80 COCO classes stock Ultralytics weights are trained on, in their
 /// order. Meaningless for a model trained on another set: index
 /// [`Detection::class_id`] into its own labels instead.

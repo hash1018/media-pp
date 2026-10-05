@@ -13,6 +13,8 @@
 //! - [`track`] — following what was found from picture to picture:
 //!   [`ObjectTracker`], which numbers each object and fills in the pictures
 //!   a detector let by.
+//! - [`analytics`] — making sense of it: [`ObjectAnalytics`], which counts
+//!   the objects in zones of the picture and across lines.
 //! - [`overlay`] — drawing what was found onto the pictures:
 //!   [`SwDetectionOverlay`], `CudaDetectionOverlay` and
 //!   `MetalDetectionOverlay`.
@@ -20,15 +22,19 @@
 //! The data and the overlays need no feature of their own; only inference
 //! brings a runtime with it.
 
+mod analytics;
 #[cfg(feature = "ort")]
 mod infer;
 mod meta;
 mod overlay;
 mod track;
 
+pub use analytics::{AnalyticsOptions, Line, ObjectAnalytics, ObjectAnalyticsError, Zone};
 #[cfg(feature = "ort")]
 pub use infer::*;
-pub use meta::{COCO_CLASS_LABELS, Detection, Detections};
+pub use meta::{
+    Analytics, COCO_CLASS_LABELS, Crossing, Detection, Detections, LineCount, ZoneCount,
+};
 pub use overlay::{
     BoxColors, DetectionOverlayOptions, LabelStyle, SwDetectionOverlay, SwDetectionOverlayError,
 };

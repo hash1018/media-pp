@@ -15,6 +15,12 @@ where it expects each object on them — DeepStream's `interval`, as
 when it is first seen rather than on its second sighting, which a long
 interval needs. Either implies `--track`.
 
+`--line X1,Y1,X2,Y2`, in fractions of the picture and once per line, puts an
+`ObjectAnalytics` after the tracker that counts the objects crossing each line
+— forward from its left to its right as seen from its start, so a line drawn
+left to right counts what moves down — and prints each crossing as it happens
+and the totals at the end. It implies `--track`.
+
 With `--out boxes.mp4`, a Tee at the end also records each picture with what
 was found drawn on it, still on the GPU: `MetalDetectionOverlay -> Queue ->
 VideoToolboxEncoder -> FileMuxer`, each object tracked in a colour of its own
@@ -29,7 +35,8 @@ them. It is built with `ort-coreml`, on an Apple silicon Mac.
 
 ```sh
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-  [--track] [--interval N] [--confirm N] [--out boxes.mp4] [--pictures N]
+  [--track] [--interval N] [--confirm N] [--line X1,Y1,X2,Y2]... \
+  [--out boxes.mp4] [--pictures N]
 ```
 
 The file's video has to be one VideoToolbox decodes to NV12 — 8-bit H.264 or

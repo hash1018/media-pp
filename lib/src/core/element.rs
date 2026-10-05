@@ -288,6 +288,8 @@ pub enum ElementType {
     /// Numbers a detector's objects across pictures, and fills in the
     /// pictures it let by.
     ObjectTracker,
+    /// Counts a detector's objects in zones of the picture and across lines.
+    ObjectAnalytics,
     /// Speech-to-text sink, through whisper.cpp.
     WhisperTranscriber,
     /// HTTP Live Streaming muxer sink.

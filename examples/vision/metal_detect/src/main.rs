@@ -13,6 +13,13 @@
 //! numbers a new object when it is first seen rather than on its second
 //! sighting, which a long interval needs. Either implies `--track`.
 //!
+//! `--line X1,Y1,X2,Y2`, in fractions of the picture and as many times as
+//! there are lines, puts an `ObjectAnalytics` after the tracker that counts
+//! the objects crossing each — forward being from its left to its right as
+//! seen from its start, so a line drawn left to right counts what moves down
+//! — and prints each crossing as it happens and the totals at the end. It
+//! implies `--track`, since a crossing is an object followed across.
+//!
 //! With `--out`, a Tee at the end also draws what was found onto each
 //! picture and records it, still on the GPU:
 //! `Tee -> MetalDetectionOverlay -> Queue -> VideoToolboxEncoder ->
@@ -29,7 +36,8 @@
 //! not take. `--pictures` stops it after about that many.
 //!
 //!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--track] [--interval N] [--confirm N] [--out boxes.mp4] [--pictures N]
+//!         [--track] [--interval N] [--confirm N] [--line X1,Y1,X2,Y2]... \
+//!         [--out boxes.mp4] [--pictures N]
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -56,11 +64,12 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            AppSink, BoxColors, COCO_CLASS_LABELS, DetectionOverlayOptions, Detections,
-            FileDemuxer, FileMuxer, LabelStyle, MetalDetectionOverlay, MetalOrtDetector,
-            ObjectTracker, OrtDetectorOptions, TrackerOptions, VideoToolboxCodec,
-            VideoToolboxDecoder, VideoToolboxDevice, VideoToolboxEncoder,
-            VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
+            Analytics, AnalyticsOptions, AppSink, BoxColors, COCO_CLASS_LABELS,
+            DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, LabelStyle, Line,
+            LineCount, MetalDetectionOverlay, MetalOrtDetector, ObjectAnalytics, ObjectTracker,
+            OrtDetectorOptions, TrackerOptions, VideoToolboxCodec, VideoToolboxDecoder,
+            VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
+            VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -83,6 +92,7 @@ mod example {
         track: bool,
         interval: u32,
         confirm: u32,
+        lines: Vec<Line>,
         out: Option<String>,
         pictures: usize,
     }
@@ -91,13 +101,14 @@ mod example {
         let usage = || -> ! {
             eprintln!(
                 "usage: metal_detect <model.onnx> <video.mp4> [--track] [--interval N] \
-                 [--confirm N] [--out boxes.mp4] [--pictures N]"
+                 [--confirm N] [--line X1,Y1,X2,Y2]... [--out boxes.mp4] [--pictures N]"
             );
             std::process::exit(1);
         };
         let mut positional = Vec::new();
         let (mut track, mut interval, mut out, mut pictures) = (false, 0, None, usize::MAX);
         let mut confirm = TrackerOptions::default().confirm_after;
+        let mut lines = Vec::new();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -116,6 +127,21 @@ mod example {
                         .and_then(|n| n.parse().ok())
                         .unwrap_or_else(|| usage())
                 }
+                "--line" => {
+                    track = true;
+                    let ends: Vec<f32> = args
+                        .next()
+                        .unwrap_or_else(|| usage())
+                        .split(',')
+                        .map(|n| n.parse().unwrap_or_else(|_| usage()))
+                        .collect();
+                    let [x1, y1, x2, y2] = <[f32; 4]>::try_from(ends).unwrap_or_else(|_| usage());
+                    lines.push(Line::new(
+                        format!("line {}", lines.len() + 1),
+                        (x1, y1),
+                        (x2, y2),
+                    ));
+                }
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
                 "--pictures" => {
                     pictures = args
@@ -133,6 +159,7 @@ mod example {
             track,
             interval,
             confirm,
+            lines,
             out,
             pictures,
         }
@@ -151,9 +178,21 @@ mod example {
             track,
             interval,
             confirm,
+            lines,
             out,
             pictures: limit,
         } = args();
+        let analytics = (!lines.is_empty())
+            .then(|| {
+                ObjectAnalytics::new(
+                    "analytics",
+                    AnalyticsOptions {
+                        lines,
+                        ..AnalyticsOptions::default()
+                    },
+                )
+            })
+            .transpose()?;
 
         let device = VideoToolboxDevice::new()?;
         let started = Instant::now();
@@ -184,6 +223,8 @@ mod example {
         let counted = Arc::clone(&seen);
         let followed: Arc<Mutex<HashSet<u64>>> = Arc::default();
         let numbered = Arc::clone(&followed);
+        let totals: Arc<Mutex<Vec<LineCount>>> = Arc::default();
+        let counting = Arc::clone(&totals);
         let sink = AppSink::new("print", move |buf| {
             let n = counted.fetch_add(1, Ordering::Relaxed) + 1;
             let MediaBuffer::Video(frame) = &buf else {
@@ -199,6 +240,27 @@ mod example {
                 .lock()
                 .unwrap()
                 .extend(found.items.iter().filter_map(|item| item.track_id));
+            if let Some(analytics) = buf
+                .metadata()
+                .and_then(|metadata| metadata.get::<Analytics>())
+            {
+                for line in &analytics.lines {
+                    for crossing in &line.crossed {
+                        let label = found.labels.get(crossing.class_id).map_or("?", |l| &**l);
+                        println!(
+                            "picture {n}: {label} #{} crossed {} {}",
+                            crossing.track_id,
+                            line.name,
+                            if crossing.forward {
+                                "forward"
+                            } else {
+                                "backward"
+                            }
+                        );
+                    }
+                }
+                *counting.lock().unwrap() = analytics.lines.clone();
+            }
             if n % 30 == 1 {
                 let names: Vec<String> = found
                     .items
@@ -289,6 +351,9 @@ mod example {
                     },
                 ));
             }
+            if let Some(analytics) = analytics {
+                detecting = detecting.pipe(analytics);
+            }
             let branch = match recording {
                 None => detecting.to(sink)?,
                 Some((overlay, encoder, muxer_sink)) => {
@@ -340,6 +405,12 @@ mod example {
             println!(
                 "{} objects followed, interval {interval}",
                 followed.lock().unwrap().len()
+            );
+        }
+        for line in totals.lock().unwrap().iter() {
+            println!(
+                "{}: {} forward, {} backward",
+                line.name, line.forward, line.backward
             );
         }
         if let Some(path) = out {
