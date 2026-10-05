@@ -40,7 +40,9 @@ pub struct MetalOrtDetectorOptions {
     ///
     /// It takes a model whose batch is left open, as an Ultralytics export
     /// with `dynamic=True` is, and fixes that batch at this size for Core
-    /// ML, which compiles a model of open shape again for each new batch: a
+    /// ML — the height and width such an export leaves open beside it at
+    /// 640 — as Core ML compiles a model of open shape again for each new
+    /// batch, and runs much of one it has no bound for on the CPU: a
     /// batch cut short is run at the full size, the inputs past its pictures
     /// left as they were. A model made for one picture at a time — the
     /// YOLOv10n release — is run so, with a warning. The default, 1, is a
@@ -135,24 +137,38 @@ impl MetalOrtDetector {
         }
 
         // Read on the CPU first, which compiles nothing: whether the model
-        // leaves its batch open, and by what name, to fix it for Core ML.
+        // leaves its batch open, and by what name, to fix it for Core ML —
+        // and its height and width, which an Ultralytics export with
+        // `dynamic=True` leaves open too, and which Core ML, given no bound
+        // for them, hands much of the model back to the CPU over.
         let open = Session::builder()
             .map_err(OrtError::from)?
             .commit_from_file(model_path.as_ref())
             .map_err(OrtError::from)?;
-        let batch = match open.inputs().first().map(|input| input.dtype()) {
+        let (width, height) = model_input(&open)?;
+        let (batch, mut fixed) = match open.inputs().first().map(|input| input.dtype()) {
             Some(ValueType::Tensor {
                 shape,
                 dimension_symbols,
                 ..
-            }) => match shape.iter().next().copied() {
-                Some(fixed) if fixed > 0 => Batch::Fixed(fixed as usize),
-                _ => match dimension_symbols.first() {
-                    Some(symbol) if !symbol.is_empty() => Batch::Named(symbol.clone()),
-                    _ => Batch::Unnamed,
-                },
-            },
-            _ => Batch::Fixed(1),
+            }) => {
+                let named = |axis: usize| {
+                    dimension_symbols
+                        .get(axis)
+                        .filter(|symbol| !symbol.is_empty() && shape[axis] <= 0)
+                        .cloned()
+                };
+                let batch = match shape.iter().next().copied() {
+                    Some(fixed) if fixed > 0 => Batch::Fixed(fixed as usize),
+                    _ => named(0).map_or(Batch::Unnamed, Batch::Named),
+                };
+                let sides = [(2, height), (3, width)]
+                    .into_iter()
+                    .filter_map(|(axis, side)| Some((named(axis)?, i64::from(side))))
+                    .collect::<Vec<_>>();
+                (batch, sides)
+            }
+            _ => (Batch::Fixed(1), Vec::new()),
         };
         drop(open);
         let (max_batch, rows) = match &batch {
@@ -176,13 +192,14 @@ impl MetalOrtDetector {
                 (options.max_batch, None)
             }
         };
-        let session = core_ml_session(
-            model_path,
-            match &batch {
-                Batch::Named(symbol) => Some((symbol.as_str(), options.max_batch as i64)),
-                _ => None,
-            },
-        )?;
+        if let Batch::Named(symbol) = &batch {
+            fixed.push((symbol.clone(), options.max_batch as i64));
+        }
+        let fixed: Vec<(&str, i64)> = fixed
+            .iter()
+            .map(|(symbol, size)| (symbol.as_str(), *size))
+            .collect();
+        let session = core_ml_session(model_path, &fixed)?;
         let model = model_input(&session)?;
         let labels = labels(options.detector.labels.as_deref(), &session);
         let fitting = Fitting::new(model, rows.unwrap_or(max_batch))?;

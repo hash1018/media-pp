@@ -126,7 +126,10 @@ impl MetalOrtClassifier {
         drop(open);
         let session = core_ml_session(
             model_path,
-            batch.as_deref().map(|name| (name, CORE_ML_BATCH as i64)),
+            batch
+                .as_deref()
+                .map(|name| (name, CORE_ML_BATCH as i64))
+                .as_slice(),
         )?;
         let input = classifier_input(&session)?;
         let labels = labels(options.labels.as_deref(), &session);

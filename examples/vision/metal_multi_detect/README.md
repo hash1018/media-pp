@@ -39,3 +39,13 @@ exported with `dynamic=True` — which Core ML compiles once, fixed at
 `--batch`; one made for a single picture, such as the YOLOv10n release, runs
 one picture at a time, with a warning. It is built with `ort-coreml` and runs
 on Apple silicon, as [`metal_detect`](../metal_detect/README.md) does.
+
+On an M5, YOLO11n exported with `dynamic=True` over copies of Intel's 768x432
+`people-detection.mp4`, decoding included, in pictures a second:
+
+| streams | one at a time (`--batch 1`) | batched |
+|---|---|---|
+| 4 | 182 | 300 (`--batch 4`) |
+| 8 | 142 | 310 (`--batch 8`) |
+
+One stream on its own runs about 240.

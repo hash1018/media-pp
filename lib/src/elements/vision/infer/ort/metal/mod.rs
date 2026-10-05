@@ -21,18 +21,18 @@ pub use metal_ort_detector::{MetalOrtDetector, MetalOrtDetectorOptions};
 /// runs on the Neural Engine, the GPU or the CPU as it chooses, and what it
 /// does not take ONNX Runtime runs on the CPU — both allowed.
 ///
-/// `fixed`, a dimension the model leaves open by its name, and the size it
-/// is fixed at for this session.
+/// `fixed`, the dimensions the model leaves open by their names, and the
+/// size each is fixed at for this session.
 fn core_ml_session(
     model_path: impl AsRef<Path>,
-    fixed: Option<(&str, i64)>,
+    fixed: &[(&str, i64)],
 ) -> Result<Session, OrtError> {
     let provider = CoreML::default()
         .with_model_format(ModelFormat::MLProgram)
         .build()
         .error_on_failure();
     let mut builder = Session::builder()?;
-    if let Some((name, size)) = fixed {
+    for &(name, size) in fixed {
         builder = builder
             .with_dimension_override(name, size)
             .map_err(|error| OrtError::Ort(error.into()))?;

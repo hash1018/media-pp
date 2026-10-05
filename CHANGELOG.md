@@ -226,8 +226,13 @@ compile error with no explanation.
   `MetalOrtDetectorOptions::max_batch` does the same through Core ML, the
   batch's pictures fitted in one Metal pass and the model's open batch
   fixed at that size; `MetalOrtDetector::new` takes those options in place
-  of `OrtDetectorOptions`; the `metal_multi_detect` example is
-  `cuda_multi_detect` on macOS.
+  of `OrtDetectorOptions`. An open height and width — an Ultralytics export
+  with `dynamic=True` leaves both open beside the batch — are fixed at the
+  model's size too, where Core ML would otherwise hand much of the model
+  back to the CPU: YOLO11n went from 38 pictures a second to 232. The
+  `metal_multi_detect` example is `cuda_multi_detect` on macOS: on an M5,
+  eight streams went from 142 pictures a second one at a time to 310
+  batched.
 
 - **`CudaOrtDetector`: detection on CUDA pictures, on CUDA or through
   TensorRT** (features `ort-cuda` and `ort-tensorrt`). What `SwOrtDetector`
