@@ -538,6 +538,11 @@ ort-cuda = ["ort", "cuda", "ort/cuda"]
 # The same through TensorRT, with CUDA for what it cannot run, and TensorRT
 # 10 and its ONNX parser linked as well.
 ort-tensorrt = ["ort-cuda", "ort/tensorrt"]
+# Detection on VideoToolbox pictures, on macOS: `MetalOrtDetector`. A Metal
+# kernel fits each picture into the model's input, and ONNX Runtime's Core ML
+# provider runs the model on the GPU or the Neural Engine. Its build is
+# fetched as the CPU one is; there is one for Apple silicon Macs only.
+ort-coreml = ["ort", "metal", "ort/coreml", "objc2-metal/MTLBuffer"]
 # Noise suppression for speech, through RNNoise. Pure Rust and no model file:
 # the network's weights are part of the crate.
 rnnoise = ["dep:nnnoiseless"]

@@ -28,6 +28,9 @@ use super::pixel_buffer::PixelBuffer;
 pub(crate) type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 /// A compiled compute kernel.
 pub(crate) type Kernel = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
+/// A buffer, as Metal hands one out.
+#[cfg(feature = "ort-coreml")]
+pub(crate) type Buffer = Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>;
 
 /// Why Metal would not do what a Metal element asked of it.
 #[derive(Debug, ThisError)]
@@ -151,6 +154,16 @@ impl MetalGpu {
                 height,
                 format,
             })
+    }
+
+    /// A buffer of `bytes` bytes in shared memory: what a kernel writes the
+    /// CPU reads where it is, once the pass that wrote it has finished —
+    /// on Apple silicon the one memory both use, so nothing is copied.
+    #[cfg(feature = "ort-coreml")]
+    pub(crate) fn shared_buffer(&self, bytes: usize) -> Result<Buffer, MetalError> {
+        self.device
+            .newBufferWithLength_options(bytes, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .ok_or(MetalError::Unavailable("buffer"))
     }
 
     /// A texture over plane `plane` of `buffer`'s surface, seen as `format`
@@ -309,6 +322,21 @@ impl Pass {
                 depth: 1,
             },
         );
+    }
+
+    /// Binds `buffer` at buffer index `index` for the dispatches encoded
+    /// after this — beside the parameters [`Self::dispatch`] binds at 0.
+    ///
+    /// The buffer must be alive until [`Self::finish`] returns, as for a
+    /// texture.
+    #[cfg(feature = "ort-coreml")]
+    pub(crate) fn bind_buffer(&mut self, buffer: &Buffer, index: usize) {
+        // SAFETY: a live buffer, at an index the kernel declares, read from
+        // its start.
+        unsafe {
+            self.encoder
+                .setBuffer_offset_atIndex(Some(buffer), 0, index)
+        };
     }
 
     /// Puts `drawable` on the screen once what was encoded has drawn it.

@@ -404,6 +404,7 @@ jobs:
           cargo clippy -p media-pp --all-targets --features screencapturekit-capture -- -D warnings
           cargo clippy -p media-pp --all-targets --features coreaudio-capture -- -D warnings
           cargo clippy -p media-pp --all-targets --features coreaudio-renderer -- -D warnings
+          cargo clippy -p media-pp --all-targets --features ort-coreml -- -D warnings
 
       # `-D warnings` on top of the rpath `setup-ffmpeg` exported, which
       # only matters to what runs.
@@ -412,7 +413,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc -p media-pp --no-deps
-          cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
+          cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,ort-coreml
 
       # Only what macOS alone can run: the tests of its backends, and of the
       # code only they compile. The platform-independent suite is the other
@@ -429,7 +430,7 @@ jobs:
       - name: Test (macOS backends)
         run: >-
           cargo test -p media-pp
-          --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
+          --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,ort-coreml
           --
           macos videotoolbox metal app::player upload::nv12 presentation_delay appkit platform::ffmpeg
           --skip a_capture_is_continuous_at_the_device_rate_and_a_pause_costs_nothing

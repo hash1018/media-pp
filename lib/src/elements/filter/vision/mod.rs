@@ -8,7 +8,8 @@
 //! stage, each with its software and GPU members:
 //!
 //! - [`infer`] — models that look at pictures: ONNX Runtime's, with the
-//!   `ort` features, as `SwOrtDetector` and `CudaOrtDetector`.
+//!   `ort` features, as `SwOrtDetector`, `CudaOrtDetector` and
+//!   `MetalOrtDetector`.
 //! - [`overlay`] — drawing what was found onto the pictures:
 //!   [`SwDetectionOverlay`] and `CudaDetectionOverlay`.
 //!

@@ -245,6 +245,19 @@ compile error with no explanation.
   error where TensorRT will not start, rather than ONNX Runtime passing
   over it to CUDA — and `Off` never uses it.
 
+- **`MetalOrtDetector`: detection on VideoToolbox pictures, through Core
+  ML** (feature `ort-coreml`, Apple silicon). What `SwOrtDetector` does,
+  with each NV12 or BGRA picture — a decoder's, a camera's, a screen's —
+  fitted into the model's input by a Metal kernel, in memory the CPU and
+  GPU share, and the model run by ONNX Runtime's Core ML provider, which
+  reads it there. Core ML chooses between the Neural Engine, the GPU and
+  the CPU layer by layer, and ONNX Runtime gives the CPU what Core ML does
+  not take; what it refuses is running without Core ML at all — `new` fails
+  where the provider will not start rather than run the whole model on the
+  CPU, which is `SwOrtDetector`'s job. On an M5 YOLOv10n
+  looks at a 720p picture in about 7 ms through Core ML, against about 19
+  ms on the CPU, and loads in under half a second.
+
 - **`Detections`: what a detector found in a picture, as its metadata.**
   `SwOrtDetector` puts one on every picture it hands on — the detector's name,
   the model's class names, and a `Detection` per object, most confident

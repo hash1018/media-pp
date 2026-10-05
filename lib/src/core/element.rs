@@ -275,6 +275,9 @@ pub enum ElementType {
     /// ONNX Runtime object-detection filter on CUDA pictures, on CUDA or
     /// through TensorRT.
     CudaOrtDetector,
+    /// ONNX Runtime object-detection filter on VideoToolbox pictures,
+    /// through Core ML.
+    MetalOrtDetector,
     /// Draws a detector's boxes and labels onto pictures in system memory.
     SwDetectionOverlay,
     /// Draws a detector's boxes and labels onto CUDA pictures.

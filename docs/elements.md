@@ -16,6 +16,7 @@ Each type's own documentation says what it accepts, owns and how it fails.
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` | `MetalVideoCompositor` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | `VulkanChromaKey`, `VulkanVideoEffect` | `MetalChromaKey`, `MetalVideoEffect` |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` | `VideoToolboxUpload`, `VideoToolboxDownload` |
+| Detect | `SwOrtDetector` | | | `CudaOrtDetector` | | `MetalOrtDetector` |
 | Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | `MetalWindowRenderer`, `MetalRenderer` |
 
 - `VideoDecodeBin` and `VideoEncodeBin` pick among these for a stream: the
@@ -50,10 +51,10 @@ Each type's own documentation says what it accepts, owns and how it fails.
   cameras: `MfVirtualCamera` on Windows, `V4l2VirtualCamera` on Linux.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
-- **Analysis**: `SwOrtDetector` and `CudaOrtDetector`, filters that put what a
-  YOLO model finds on each picture as `Detections` metadata;
-  `SwDetectionOverlay` and `CudaDetectionOverlay`, which draw those boxes and
-  labels onto the picture; `WhisperTranscriber`, `FrameCounter`,
+- **Analysis**: `SwOrtDetector`, `CudaOrtDetector` and `MetalOrtDetector`,
+  filters that put what a YOLO model finds on each picture as `Detections`
+  metadata; `SwDetectionOverlay` and `CudaDetectionOverlay`, which draw those
+  boxes and labels onto the picture; `WhisperTranscriber`, `FrameCounter`,
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 

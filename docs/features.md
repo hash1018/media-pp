@@ -30,6 +30,7 @@ unprefixed type works the same on every platform.
 | `ort` | ONNX Runtime object detection on the CPU, `SwOrtDetector`; `Detections` and the detection overlays need no feature | All |
 | `ort-cuda` | Object detection on CUDA pictures, `CudaOrtDetector`, on ONNX Runtime's CUDA provider; links CUDA and cuDNN; enables `ort` and `cuda` | Linux, Windows |
 | `ort-tensorrt` | `CudaOrtDetector` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
+| `ort-coreml` | Object detection on VideoToolbox pictures, `MetalOrtDetector`, through ONNX Runtime's Core ML provider; enables `ort` and `metal` | macOS (Apple silicon) |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All |
@@ -57,6 +58,9 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
   [`transcribe`](../examples/core/transcribe/README.md).
 - **`ort`**: a YOLO model exported to ONNX — YOLOv8 and YOLO11, or YOLOv10
   and YOLO26.
+- **`ort-coreml`**: an Apple silicon Mac. ONNX Runtime's build with Core
+  ML is fetched as the CPU one is, and there is none for Intel Macs; Core ML
+  itself is part of macOS.
 - **`ort-cuda`, `ort-tensorrt`**: CUDA 13's runtime, cuBLAS and cuRAND,
   and cuDNN 9 — and with `ort-tensorrt`, TensorRT 10 — are linked into the
   program, so building needs them where the linker finds them

@@ -4,6 +4,8 @@
 
 mod ort;
 
+#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+pub use self::ort::MetalOrtDetector;
 #[cfg(feature = "ort-tensorrt")]
 pub use self::ort::UseTensorRtPolicy;
 #[cfg(feature = "ort-cuda")]

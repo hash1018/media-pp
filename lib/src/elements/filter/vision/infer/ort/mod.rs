@@ -3,8 +3,9 @@
 //!
 //! One element per place a picture lives, as the scalers are:
 //! [`SwOrtDetector`] reads pictures in system memory and infers on the CPU,
-//! and `CudaOrtDetector` reads CUDA pictures and infers on CUDA or through
-//! TensorRT. What they share is here: their options and errors, how a
+//! `CudaOrtDetector` reads CUDA pictures and infers on CUDA or through
+//! TensorRT, and `MetalOrtDetector` reads VideoToolbox pictures and infers
+//! through Core ML. What they share is here: their options and errors, how a
 //! model's class names are read, and in `yolo` how its output is read and a
 //! picture fitted to its input.
 
@@ -16,6 +17,8 @@ use crate::ffmpeg;
 
 #[cfg(feature = "ort-cuda")]
 mod cuda;
+#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+mod metal;
 mod sw_ort_detector;
 mod yolo;
 
@@ -25,6 +28,8 @@ pub use cuda::UseTensorRtPolicy;
 pub use cuda::{
     CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
+#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+pub use metal::MetalOrtDetector;
 pub use sw_ort_detector::SwOrtDetector;
 use yolo::{Letterbox, decode};
 
@@ -187,6 +192,29 @@ pub enum OrtDetectorError {
     #[cfg(feature = "ort-tensorrt")]
     #[error("TensorRT is required and cannot be used: {0}")]
     TensorRtUnavailable(RuntimeShortfall),
+    /// Metal refused a kernel, a buffer or a pass.
+    #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+    #[error(transparent)]
+    Metal(#[from] crate::platform::macos::metal::MetalError),
+    /// Not an NV12 or BGRA VideoToolbox picture: what it is, or for a
+    /// VideoToolbox picture what it holds.
+    #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+    #[error("MetalOrtDetector takes NV12 or BGRA VideoToolbox pictures, got {0:?}")]
+    UnsupportedPicture(ffmpeg::format::Pixel),
+    /// A VideoToolbox picture with no frames context to say what it holds,
+    /// or no pixel buffer in it.
+    #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+    #[error("a VideoToolbox picture has no {0}")]
+    MissingPixelBuffer(&'static str),
+    /// A VideoToolbox picture larger than the pixel buffer behind it.
+    #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+    #[error("a {picture:?} picture is larger than its {surface:?} pixel buffer")]
+    PictureOutsideSurface {
+        /// The picture's size.
+        picture: (u32, u32),
+        /// The pixel buffer's.
+        surface: (u32, u32),
+    },
 }
 
 /// The model's input size, from its first input's `[1, 3, height, width]`;
