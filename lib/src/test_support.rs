@@ -1133,7 +1133,7 @@ pub(crate) fn one_frame(
 
 /// The `n`th picture of `video`, from 1, as `format` in system memory,
 /// stamped `n`.
-#[cfg(feature = "ort-cuda")]
+#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 pub(crate) fn nth_picture(
     video: &str,
     n: usize,

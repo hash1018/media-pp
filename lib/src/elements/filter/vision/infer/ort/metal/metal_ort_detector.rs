@@ -4,32 +4,25 @@
 
 use std::{path::Path, sync::Arc};
 
-use objc2_metal::{MTLBuffer, MTLPixelFormat, MTLTextureUsage};
-use ort::{ep::CoreML, ep::coreml::ModelFormat, inputs, session::Session, value::TensorRef};
+use ort::{inputs, session::Session, value::TensorRef};
 
 use crate::ffmpeg;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
-    color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
     element::{Element, ElementType, element_pp_log},
     error::Result,
-    platform::macos::{
-        metal::{Buffer, Kernel, MetalGpu, Texture},
-        pixel_buffer::PixelBuffer,
-        videotoolbox::{NotVideoToolbox, sw_format_of},
-    },
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
 use crate::elements::Detections;
 
 use super::super::{
-    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input,
+    Interval, Letterbox, OrtDetectorOptions, OrtError, decode, labels, model_input,
 };
-
-const SHADER: &str = include_str!("../../../../../../shaders/metal/fit.metal");
+use super::core_ml_session;
+use super::fitting::{Cut, Fitting, Picture};
 
 /// Runs a YOLO detector on each VideoToolbox picture and hands the picture
 /// on unchanged, carrying the [`Detections`] found in it — what
@@ -78,25 +71,6 @@ struct Detecting {
     fitting: Fitting,
 }
 
-/// The kernels that fit a picture into a model's input, and the input they
-/// fit it into — apart from the session, so a test can check them without
-/// a model.
-struct Fitting {
-    model: (u32, u32),
-    gpu: MetalGpu,
-    nv12: Kernel,
-    bgra: Kernel,
-    /// The model's input, three planes of `f32`, which the kernels write and
-    /// the session reads.
-    tensor: Buffer,
-}
-
-// SAFETY: the kernels and buffer are used by the one thread transforming at
-// a time, through `&mut self`; Metal's objects are thread-safe, and the
-// buffer is written only by a pass this waits for before it is read — the
-// reasoning `MetalPass` gives for its own.
-unsafe impl Send for Fitting {}
-
 impl MetalOrtDetector {
     /// Loads the model at `model_path` to run through Core ML.
     ///
@@ -111,22 +85,10 @@ impl MetalOrtDetector {
         let pp_log = element_pp_log(ElementType::MetalOrtDetector, &name, None);
         let path = model_path.as_ref().display().to_string();
 
-        // ONNX Runtime passes over a provider that fails to register and
-        // runs on the CPU in its place, which is what this refuses.
-        let provider = CoreML::default()
-            .with_model_format(ModelFormat::MLProgram)
-            .build()
-            .error_on_failure();
-        let session = Session::builder()
-            .map_err(OrtDetectorError::from)?
-            .with_execution_providers([provider])
-            .map_err(|error| OrtDetectorError::Ort(error.into()))?
-            .commit_from_file(model_path)
-            .map_err(OrtDetectorError::from)?;
-
+        let session = core_ml_session(model_path, None)?;
         let model = model_input(&session)?;
         let labels = labels(options.labels.as_deref(), &session);
-        let fitting = Fitting::new(model)?;
+        let fitting = Fitting::new(model, 1)?;
 
         pp_info!(
             pp_log: &pp_log,
@@ -154,109 +116,23 @@ impl MetalOrtDetector {
     }
 }
 
-impl Fitting {
-    /// The kernels, and an input of `model`'s size in shared memory.
-    fn new(model: (u32, u32)) -> std::result::Result<Self, OrtDetectorError> {
-        let gpu = MetalGpu::new()?;
-        let [nv12, bgra] = <[Kernel; 2]>::try_from(gpu.kernels(SHADER, &["fit_nv12", "fit_bgra"])?)
-            .unwrap_or_else(|_| unreachable!("two kernels for two names"));
-        let tensor =
-            gpu.shared_buffer(3 * model.0 as usize * model.1 as usize * size_of::<f32>())?;
-        Ok(Self {
-            model,
-            gpu,
-            nv12,
-            bgra,
-            tensor,
-        })
-    }
-
-    /// Fits `frame` into the input and says how it was fitted.
-    fn fit(
-        &mut self,
-        frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<Letterbox, OrtDetectorError> {
-        let layout = match sw_format_of(frame) {
-            Ok(layout @ (ffmpeg::format::Pixel::NV12 | ffmpeg::format::Pixel::BGRA)) => layout,
-            Ok(other) | Err(NotVideoToolbox::Format(other)) => {
-                return Err(OrtDetectorError::UnsupportedPicture(other));
-            }
-            Err(NotVideoToolbox::NoFramesContext) => {
-                return Err(OrtDetectorError::MissingPixelBuffer("frames context"));
-            }
-        };
-        let buffer =
-            PixelBuffer::of_frame(frame).ok_or(OrtDetectorError::MissingPixelBuffer("pixels"))?;
-        let size = (frame.width(), frame.height());
-        let surface = buffer.size();
-        if size.0 > surface.0 || size.1 > surface.1 {
-            return Err(OrtDetectorError::PictureOutsideSurface {
-                picture: size,
-                surface,
-            });
-        }
-
-        let letterbox = Letterbox::new(size, self.model);
-        let rows = if layout == ffmpeg::format::Pixel::NV12 {
-            ColorDescription::of(frame).yuv_to_rgb_rows(frame.height())
-        } else {
-            [[0.0; 4]; 3]
-        };
-        let mut parameters: Vec<u8> = [
-            self.model.0,
-            self.model.1,
-            letterbox.offset.0,
-            letterbox.offset.1,
-            letterbox.scaled.0,
-            letterbox.scaled.1,
-            size.0,
-            size.1,
-        ]
-        .iter()
-        .flat_map(|word| word.to_ne_bytes())
-        .collect();
-        parameters.extend(rows.iter().flatten().flat_map(|value| value.to_ne_bytes()));
-
-        let read = MTLTextureUsage::ShaderRead;
-        let (kernel, textures): (&Kernel, Vec<Texture>) = if layout == ffmpeg::format::Pixel::NV12 {
-            (
-                &self.nv12,
-                vec![
-                    self.gpu.plane(&buffer, 0, MTLPixelFormat::R8Unorm, read)?,
-                    self.gpu.plane(&buffer, 1, MTLPixelFormat::RG8Unorm, read)?,
-                ],
-            )
-        } else {
-            (
-                &self.bgra,
-                vec![
-                    self.gpu
-                        .plane(&buffer, 0, MTLPixelFormat::BGRA8Unorm, read)?,
-                ],
-            )
-        };
-        let bound: Vec<&Texture> = textures.iter().collect();
-        let mut pass = self.gpu.pass()?;
-        pass.bind_buffer(&self.tensor, 1);
-        pass.dispatch(kernel, &bound, Some(&parameters), self.model);
-        pass.finish()?;
-        Ok(letterbox)
-    }
-
-    /// The input, as the last [`Self::fit`] left it: R, G and B planes of
-    /// the model's width by height.
-    fn input(&self) -> &[f32] {
-        // SAFETY: the buffer is this fitting's own, three planes of the
-        // model's size of `f32` in shared memory, and the pass that wrote it
-        // has finished; nothing writes it again until the next `fit`, which
-        // takes `&mut self` and so waits for this borrow to end.
-        unsafe {
-            std::slice::from_raw_parts(
-                self.tensor.contents().as_ptr().cast::<f32>(),
-                3 * self.model.0 as usize * self.model.1 as usize,
-            )
-        }
-    }
+/// Fits the whole of `frame` into `fitting`'s one input as Ultralytics
+/// trains on — scaled to fit, proportions kept, grey around it — and says
+/// how it was fitted.
+fn fit_whole(
+    fitting: &mut Fitting,
+    frame: &ffmpeg::frame::Video,
+) -> std::result::Result<Letterbox, OrtError> {
+    let picture = Picture::of(frame)?;
+    let letterbox = Letterbox::new(picture.size, fitting.model);
+    let cut = Cut {
+        crop: (0, 0, picture.size.0, picture.size.1),
+        offset: letterbox.offset,
+        scaled: letterbox.scaled,
+        slot: 0,
+    };
+    fitting.fit(&picture, &[cut], ([1.0; 3], [0.0; 3]))?;
+    Ok(letterbox)
 }
 
 impl Detecting {
@@ -264,10 +140,10 @@ impl Detecting {
     fn detect(
         &mut self,
         frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<Detections, OrtDetectorError> {
-        let letterbox = self.fitting.fit(frame)?;
+    ) -> std::result::Result<Detections, OrtError> {
+        let letterbox = fit_whole(&mut self.fitting, frame)?;
         let (width, height) = (self.fitting.model.0 as usize, self.fitting.model.1 as usize);
-        let input = TensorRef::from_array_view(([1, 3, height, width], self.fitting.input()))?;
+        let input = TensorRef::from_array_view(([1, 3, height, width], self.fitting.input(1)))?;
         let outputs = self.session.run(inputs![input])?;
         let output = outputs[0].try_extract_array::<f32>()?;
         Ok(Detections::new(
@@ -307,7 +183,7 @@ impl Filter for Detecting {
 
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
         let MediaBuffer::Video(frame) = &buf else {
-            return Err(OrtDetectorError::UnsupportedBuffer {
+            return Err(OrtError::UnsupportedBuffer {
                 detector: "MetalOrtDetector",
                 wanted: "VideoToolbox video frames",
                 got: buf.kind(),
@@ -333,10 +209,12 @@ impl Filter for Detecting {
 mod tests {
     use std::sync::Mutex;
 
+    use super::super::fitting::tests::{pattern, upload};
     use super::*;
+    use crate::color::ColorDescription;
     use crate::element::{RawSink, SrcPads};
-    use crate::elements::{AppSink, SwOrtDetector, VideoToolboxDevice, VideoToolboxUpload};
-    use crate::test_support::try_videotoolbox_device;
+    use crate::elements::{AppSink, SwOrtDetector};
+    use crate::test_support::{nth_picture, try_videotoolbox_device};
 
     /// Everything `stage` hands on, kept.
     fn capture(stage: &mut dyn SrcPads) -> Arc<Mutex<Vec<MediaBuffer>>> {
@@ -347,60 +225,6 @@ mod tests {
             Ok(())
         })));
         kept
-    }
-
-    /// `frame` uploaded to `device`, as a VideoToolbox picture of its layout.
-    fn upload(device: &VideoToolboxDevice, frame: ffmpeg::frame::Video) -> MediaBuffer {
-        let mut upload = VideoToolboxUpload::new("upload", device);
-        let uploaded = capture(&mut upload);
-        upload.consume(MediaBuffer::video(frame)).expect("uploads");
-        uploaded.lock().unwrap().remove(0)
-    }
-
-    /// A `format` picture in system memory in which no sample is its
-    /// neighbour's, so a kernel reading the wrong one is caught.
-    fn pattern(format: ffmpeg::format::Pixel, width: u32, height: u32) -> ffmpeg::frame::Video {
-        let mut frame = ffmpeg::frame::Video::new(format, width, height);
-        frame.set_pts(Some(150));
-        let (width, height) = (width as usize, height as usize);
-        if format == ffmpeg::format::Pixel::NV12 {
-            let stride = frame.stride(0);
-            for (y, row) in frame
-                .data_mut(0)
-                .chunks_mut(stride)
-                .take(height)
-                .enumerate()
-            {
-                for (x, luma) in row[..width].iter_mut().enumerate() {
-                    *luma = (x * 7 + y * 13) as u8;
-                }
-            }
-            let stride = frame.stride(1);
-            for (y, row) in frame
-                .data_mut(1)
-                .chunks_mut(stride)
-                .take(height / 2)
-                .enumerate()
-            {
-                for (x, pair) in row[..width].chunks_mut(2).enumerate() {
-                    pair[0] = (x * 11 + 40) as u8;
-                    pair[1] = (y * 17 + 60) as u8;
-                }
-            }
-        } else {
-            let stride = frame.stride(0);
-            for (y, row) in frame
-                .data_mut(0)
-                .chunks_mut(stride)
-                .take(height)
-                .enumerate()
-            {
-                for (x, pixel) in row[..width * 4].chunks_mut(4).enumerate() {
-                    pixel.copy_from_slice(&[(x * 5) as u8, (y * 9) as u8, (x + y * 3) as u8, 255]);
-                }
-            }
-        }
-        frame
     }
 
     /// What the kernels are to write for `frame`: each pixel of the scaled
@@ -457,7 +281,7 @@ mod tests {
             return;
         };
         let model = (64, 64);
-        let mut fitting = Fitting::new(model).expect("the kernels compile");
+        let mut fitting = Fitting::new(model, 1).expect("the kernels compile");
         for format in [ffmpeg::format::Pixel::NV12, ffmpeg::format::Pixel::BGRA] {
             // Twice as wide as high: grey above and below, and every pixel
             // centre at an exact sample, so no rounding can pick another.
@@ -466,9 +290,9 @@ mod tests {
             let MediaBuffer::Video(frame) = upload(&device, picture) else {
                 panic!("a picture is uploaded");
             };
-            let letterbox = fitting.fit(&frame).expect("fits");
+            let letterbox = fit_whole(&mut fitting, &frame).expect("fits");
             assert_eq!(letterbox, Letterbox::new((128, 64), model));
-            for (index, (actual, wanted)) in fitting.input().iter().zip(&wanted).enumerate() {
+            for (index, (actual, wanted)) in fitting.input(1).iter().zip(&wanted).enumerate() {
                 assert!(
                     (actual - wanted).abs() < 1e-3,
                     "{format:?}: float {index} is {actual}, not {wanted}"
@@ -484,55 +308,11 @@ mod tests {
         if try_videotoolbox_device().is_none() {
             return;
         }
-        let mut fitting = Fitting::new((64, 64)).expect("the kernels compile");
         let picture = pattern(ffmpeg::format::Pixel::NV12, 128, 64);
         assert!(matches!(
-            fitting.fit(&picture),
-            Err(OrtDetectorError::UnsupportedPicture(
-                ffmpeg::format::Pixel::NV12
-            ))
+            Picture::of(&picture),
+            Err(OrtError::UnsupportedPicture(ffmpeg::format::Pixel::NV12))
         ));
-    }
-
-    /// The 150th picture of `video`, as `format` in system memory.
-    fn picture(video: &str, format: ffmpeg::format::Pixel) -> ffmpeg::frame::Video {
-        let mut input = ffmpeg::format::input(video).expect("the video opens");
-        let stream = input
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .expect("a video stream");
-        let index = stream.index();
-        let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .and_then(|context| context.decoder().video())
-            .expect("a decoder");
-        let mut decoded = ffmpeg::frame::Video::empty();
-        let mut seen = 0;
-        for (stream, packet) in input.packets() {
-            if stream.index() != index {
-                continue;
-            }
-            decoder.send_packet(&packet).expect("decodes");
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                seen += 1;
-                if seen == 150 {
-                    let mut converted = ffmpeg::frame::Video::empty();
-                    ffmpeg::software::scaling::Context::get(
-                        decoded.format(),
-                        decoded.width(),
-                        decoded.height(),
-                        format,
-                        decoded.width(),
-                        decoded.height(),
-                        ffmpeg::software::scaling::Flags::BILINEAR,
-                    )
-                    .and_then(|mut context| context.run(&decoded, &mut converted))
-                    .expect("converts");
-                    converted.set_pts(Some(150));
-                    return converted;
-                }
-            }
-        }
-        panic!("the video is shorter than 150 pictures");
     }
 
     /// What `detector` found in `buf`, the picture it handed on checked to
@@ -580,7 +360,7 @@ mod tests {
             SwOrtDetector::new("cpu", &model, OrtDetectorOptions::default()).expect("loads");
         let expected = found(
             &mut cpu,
-            MediaBuffer::video(picture(&video, ffmpeg::format::Pixel::NV12)),
+            MediaBuffer::video(nth_picture(&video, 150, ffmpeg::format::Pixel::NV12)),
         );
         assert!(
             expected.items.iter().any(|found| found.score > 0.5),
@@ -590,7 +370,7 @@ mod tests {
         let mut gpu = MetalOrtDetector::new("gpu", &model, OrtDetectorOptions::default())
             .expect("loads on Core ML");
         for format in [ffmpeg::format::Pixel::NV12, ffmpeg::format::Pixel::BGRA] {
-            let actual = found(&mut gpu, upload(&device, picture(&video, format)));
+            let actual = found(&mut gpu, upload(&device, nth_picture(&video, 150, format)));
             for wanted in expected.items.iter().filter(|found| found.score > 0.5) {
                 let best = actual
                     .items

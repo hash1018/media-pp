@@ -16,6 +16,14 @@
 //! pixels around it, read from the VideoToolbox picture where it is
 //! (`TrackerOptions::visual`). Each implies `--track`.
 //!
+//! `--classifier imagenet.onnx` puts a `MetalOrtClassifier` after the
+//! tracker — DeepStream's secondary inference — so that each object is also
+//! named by a second model, once per object it follows, and labelled with
+//! it: `car #5 87% | minivan 48%`. `--classifier-labels` names its classes,
+//! one a line, and `--classify 2,5,7` limits it to the detector's classes
+//! listed. The classifier is taken for an ImageNet one, as the public models
+//! are. It implies `--track`.
+//!
 //! `--line X1,Y1,X2,Y2`, in fractions of the picture and as many times as
 //! there are lines, puts an `ObjectAnalytics` after the tracker that counts
 //! the objects crossing each — forward being from its left to its right as
@@ -40,6 +48,7 @@
 //!
 //!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
 //!         [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
+//!         [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
 //!         [--out boxes.mp4] [--pictures N]
 
 #[cfg(not(target_os = "macos"))]
@@ -68,11 +77,11 @@ mod example {
         bus::BusEvent,
         elements::{
             Analytics, AnalyticsOptions, AppSink, BoxColors, COCO_CLASS_LABELS,
-            DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, LabelStyle, Line,
-            LineCount, MetalDetectionOverlay, MetalOrtDetector, ObjectAnalytics, ObjectTracker,
-            OrtDetectorOptions, TrackerOptions, VideoToolboxCodec, VideoToolboxDecoder,
-            VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
-            VideoToolboxFrameFormat,
+            DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
+            Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier, MetalOrtDetector,
+            ObjectAnalytics, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions,
+            TrackerOptions, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice,
+            VideoToolboxEncoder, VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -96,6 +105,9 @@ mod example {
         interval: u32,
         confirm: u32,
         visual: bool,
+        classifier: Option<String>,
+        classifier_labels: Option<String>,
+        classify: Option<Vec<usize>>,
         lines: Vec<Line>,
         out: Option<String>,
         pictures: usize,
@@ -105,8 +117,9 @@ mod example {
         let usage = || -> ! {
             eprintln!(
                 "usage: metal_detect <model.onnx> <video.mp4> [--track] [--interval N] \
-                 [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... [--out boxes.mp4] \
-                 [--pictures N]"
+                 [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
+                 [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
+                 [--out boxes.mp4] [--pictures N]"
             );
             std::process::exit(1);
         };
@@ -115,6 +128,7 @@ mod example {
         let mut confirm = TrackerOptions::default().confirm_after;
         let mut lines = Vec::new();
         let mut visual = false;
+        let (mut classifier, mut classifier_labels, mut classify) = (None, None, None);
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -122,6 +136,22 @@ mod example {
                 "--visual" => {
                     track = true;
                     visual = true;
+                }
+                "--classifier" => {
+                    track = true;
+                    classifier = Some(args.next().unwrap_or_else(|| usage()));
+                }
+                "--classifier-labels" => {
+                    classifier_labels = Some(args.next().unwrap_or_else(|| usage()))
+                }
+                "--classify" => {
+                    classify = Some(
+                        args.next()
+                            .unwrap_or_else(|| usage())
+                            .split(',')
+                            .map(|n| n.parse().unwrap_or_else(|_| usage()))
+                            .collect(),
+                    )
                 }
                 "--interval" => {
                     track = true;
@@ -170,6 +200,9 @@ mod example {
             interval,
             confirm,
             visual,
+            classifier,
+            classifier_labels,
+            classify,
             lines,
             out,
             pictures,
@@ -190,10 +223,32 @@ mod example {
             interval,
             confirm,
             visual,
+            classifier,
+            classifier_labels,
+            classify,
             lines,
             out,
             pictures: limit,
         } = args();
+        // A second model on what was found, if asked for: an ImageNet
+        // classifier, as the public ones are, on the classes asked for.
+        let classifier = classifier
+            .map(|path| {
+                MetalOrtClassifier::new(
+                    "classifier",
+                    path,
+                    OrtClassifierOptions {
+                        labels: classifier_labels
+                            .and_then(|path| std::fs::read_to_string(path).ok())
+                            .map(|text| text.lines().map(str::to_owned).collect()),
+                        classes: classify,
+                        input: InputScale::ImageNet,
+                        min_score: 0.3,
+                        ..OrtClassifierOptions::default()
+                    },
+                )
+            })
+            .transpose()?;
         let analytics = (!lines.is_empty())
             .then(|| {
                 ObjectAnalytics::new(
@@ -280,10 +335,18 @@ mod example {
                     .filter(|item| item.score >= SHOWN)
                     .map(|item| {
                         let label = found.label(item).unwrap_or("?");
-                        match item.track_id {
+                        let mut said = match item.track_id {
                             Some(id) => format!("{label} #{id} {:.0}%", item.score * 100.0),
                             None => format!("{label} {:.0}%", item.score * 100.0),
+                        };
+                        for class in &item.classes {
+                            match class.label() {
+                                Some(name) => said += &format!(" | {name}"),
+                                None => said += &format!(" | class {}", class.class_id),
+                            }
+                            said += &format!(" {:.0}%", class.score * 100.0);
                         }
+                        said
                     })
                     .collect();
                 println!(
@@ -363,6 +426,9 @@ mod example {
                         ..TrackerOptions::default()
                     },
                 ));
+            }
+            if let Some(classifier) = classifier {
+                detecting = detecting.pipe(classifier);
             }
             if let Some(analytics) = analytics {
                 detecting = detecting.pipe(analytics);

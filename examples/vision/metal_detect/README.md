@@ -17,6 +17,14 @@ interval needs. `--visual` follows each object by how it looks as well as by
 its motion — a correlation filter on the pixels around it, read from the
 VideoToolbox picture where it is. Each implies `--track`.
 
+`--classifier imagenet.onnx` puts a `MetalOrtClassifier` after the tracker —
+DeepStream's secondary inference — so that each object is also named by a
+second model, once per object it follows, and labelled with it:
+`car #5 87% | minivan 48%`. `--classifier-labels` names its classes, one a
+line, and `--classify 2,5,7` limits it to the detector's classes listed. The
+classifier is taken for an ImageNet one, as the public models are, such as the
+ONNX model zoo's MobileNetV2. It implies `--track`.
+
 `--line X1,Y1,X2,Y2`, in fractions of the picture and once per line, puts an
 `ObjectAnalytics` after the tracker that counts the objects crossing each line
 — forward from its left to its right as seen from its start, so a line drawn
@@ -38,6 +46,7 @@ them. It is built with `ort-coreml`, on an Apple silicon Mac.
 ```sh
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
   [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
+  [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
   [--out boxes.mp4] [--pictures N]
 ```
 

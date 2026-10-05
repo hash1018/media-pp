@@ -120,8 +120,6 @@ pub use filter::{
 };
 // Video analysis: the data every detector writes, and the overlays, for
 // any build; inference with the runtime its feature brings.
-#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use filter::MetalOrtDetector;
 #[cfg(feature = "ort-tensorrt")]
 pub use filter::UseTensorRtPolicy;
 pub use filter::{
@@ -176,6 +174,8 @@ pub use filter::{
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use filter::{MetalDetectionOverlay, MetalDetectionOverlayError};
+#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+pub use filter::{MetalOrtClassifier, MetalOrtDetector};
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]

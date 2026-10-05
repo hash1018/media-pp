@@ -5,7 +5,8 @@
 //! [`SwOrtDetector`] reads pictures in system memory and infers on the CPU,
 //! `CudaOrtDetector` reads CUDA pictures and infers on CUDA or through
 //! TensorRT, and `MetalOrtDetector` reads VideoToolbox pictures and infers
-//! through Core ML. What they share is here: their options and errors, how a
+//! through Core ML — and a classifier beside each, which looks again at what
+//! a detector found. What they share is here: their options and errors, how a
 //! model's class names are read, and in `yolo` how its output is read and a
 //! picture fitted to its input.
 
@@ -33,7 +34,7 @@ pub use cuda::{
     RuntimeShortfall,
 };
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use metal::MetalOrtDetector;
+pub use metal::{MetalOrtClassifier, MetalOrtDetector};
 pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
 use yolo::{Letterbox, decode};
@@ -254,7 +255,7 @@ pub enum OrtError {
     /// Not an NV12 or BGRA VideoToolbox picture: what it is, or for a
     /// VideoToolbox picture what it holds.
     #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-    #[error("MetalOrtDetector takes NV12 or BGRA VideoToolbox pictures, got {0:?}")]
+    #[error("takes NV12 or BGRA VideoToolbox pictures, got {0:?}")]
     UnsupportedPicture(ffmpeg::format::Pixel),
     /// A VideoToolbox picture with no frames context to say what it holds,
     /// or no pixel buffer in it.

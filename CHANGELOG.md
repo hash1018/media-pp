@@ -300,6 +300,23 @@ compile error with no explanation.
   `OrtDetectorError` is `OrtError`, the old name kept as an alias, since
   the classifiers' errors are the same.
 
+- **`MetalOrtClassifier`: what a detector found, named by a second model on
+  VideoToolbox pictures** (feature `ort-coreml`). What the other two
+  classifiers do, with each object's box cut from the picture and
+  stretched into the model's input by the Metal kernel the detector fits
+  with — now able to take a rectangle of the picture, write any input of a
+  batch, and scale each channel as ImageNet's normalisation wants — and
+  the model run through Core ML. A model that leaves its batch open is
+  fixed to take four through Core ML (`with_dimension_override`): open, it
+  was compiled again for every new number of objects, 0.6 seconds a time,
+  ran no faster than the CPU, and took a batch of one through an error it
+  recovered from; fixed, it compiles once and runs on the Neural Engine.
+  On an M5, MobileNetV2 says what it says on the CPU of the same input to
+  within 2·10⁻⁵, names the zebra and the macaw of a test clip from the
+  boxes YOLOv10n put round them, and behind YOLOv10n and a tracker keeps
+  Intel's walking people at 195 pictures a second. `metal_detect
+  --classifier` runs it.
+
 - **`ObjectAnalytics`: objects counted in zones and across lines.**
   DeepStream's `nvdsanalytics`, on the `Detections` a picture carries: for
   each `Zone` — a polygon in fractions of the picture, of some classes or

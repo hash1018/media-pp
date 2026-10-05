@@ -17,6 +17,7 @@ Each type's own documentation says what it accepts, owns and how it fails.
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | `VulkanChromaKey`, `VulkanVideoEffect` | `MetalChromaKey`, `MetalVideoEffect` |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` | `VideoToolboxUpload`, `VideoToolboxDownload` |
 | Detect | `SwOrtDetector` | | | `CudaOrtDetector` | | `MetalOrtDetector` |
+| Classify what was found | `SwOrtClassifier` | | | `CudaOrtClassifier` | | `MetalOrtClassifier` |
 | Draw detections | `SwDetectionOverlay` | | | `CudaDetectionOverlay` | | `MetalDetectionOverlay` |
 | Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | `MetalWindowRenderer`, `MetalRenderer` |
 
@@ -54,8 +55,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
 - **Analysis**: `SwOrtDetector`, `CudaOrtDetector` and `MetalOrtDetector`,
   filters that put what a YOLO model finds on each picture as `Detections`
-  metadata; `SwOrtClassifier` and `CudaOrtClassifier`, which name each
-  object found with a second model; `ObjectTracker`, which numbers each
+  metadata; `SwOrtClassifier`, `CudaOrtClassifier` and
+  `MetalOrtClassifier`, which name each object found with a second model; `ObjectTracker`, which numbers each
   object across pictures and fills in the pictures a detector let by;
   `ObjectAnalytics`, which counts the objects in zones of the picture and
   across lines; `SwDetectionOverlay`,
