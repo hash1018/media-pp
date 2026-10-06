@@ -272,7 +272,40 @@ fn cpu_seconds() -> Option<f64> {
     Some(seconds(usage.ru_utime) + seconds(usage.ru_stime))
 }
 
-#[cfg(not(unix))]
+/// The CPU time this process has spent, user and kernel together.
+#[cfg(windows)]
+fn cpu_seconds() -> Option<f64> {
+    use windows::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    // SAFETY: the pseudo-handle of the current process needs no closing, and
+    // each pointer is to a FILETIME of this frame, read only once the call
+    // has said it succeeded.
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+        .ok()?;
+    }
+    // Hundreds of nanoseconds.
+    let seconds = |t: FILETIME| {
+        ((u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)) as f64 / 1e7
+    };
+    Some(seconds(kernel) + seconds(user))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn cpu_seconds() -> Option<f64> {
     None
 }

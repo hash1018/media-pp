@@ -45,7 +45,7 @@ What a `RESULT` line says:
 | Key | Meaning |
 |---|---|
 | `fps` | Pictures a second through the sinks, all streams together, after the warm-up. |
-| `cpu` | The process's CPU time over the same span, in cores: 1.00 is one core kept busy. |
+| `cpu` | The process's CPU time over the same span, in cores: 1.00 is one core kept busy. `getrusage` on Unix, `GetProcessTimes` on Windows. |
 | `objects` | Objects on each picture that reached the sink, on average. |
 | `found` | Objects over the whole run: two builds that should find the same find exactly the same number. |
 | `ready` | Seconds to build the pipeline, a TensorRT engine's loading included. |

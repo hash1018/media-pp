@@ -17,6 +17,11 @@ media-pp = { path = "../../../lib", features = ["ort"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The process's CPU time, as getrusage gives it on Unix: the version the
+# library takes, so nothing new is fetched.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 media-pp = { path = "../../../lib", features = ["ort-tensorrt"] }
 # model_only runs the model through ONNX Runtime directly: the version

@@ -4467,6 +4467,7 @@ dependencies = [
  "libc",
  "media-pp",
  "ort",
+ "windows",
 ]
 
 [[package]]

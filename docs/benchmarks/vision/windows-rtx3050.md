@@ -20,9 +20,9 @@ TensorRT on both.
 | FFmpeg | 8.0.1 |
 | Rust | 1.99.0, release profile |
 
-`vision_bench` reads the process's CPU time through `getrusage`, which
-Windows does not have, so the CPU column is left out here.
-
+`vision_bench` read the process's CPU time only through Unix's
+`getrusage` when this was measured, so the CPU column is left out here;
+it reads Windows's `GetProcessTimes` now.
 ## Summary
 
 - **Where one thing runs at a time, Windows is 15–30% slower.** The model
