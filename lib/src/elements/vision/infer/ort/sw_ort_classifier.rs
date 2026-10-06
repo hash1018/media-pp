@@ -22,6 +22,7 @@ use super::classify::{
 };
 use super::sw_ort_detector::{is_hardware, to_rgb24};
 use super::{OrtError, labels};
+use crate::orientation::{Orientation, Orientations};
 
 /// The most objects classified in one run of a model that takes any
 /// number at once.
@@ -77,6 +78,8 @@ struct Classifying {
     input: Input,
     memory: Memory,
     converting: Option<Converting>,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
 }
 
 impl SwOrtClassifier {
@@ -119,6 +122,7 @@ impl SwOrtClassifier {
             input,
             memory: Memory::default(),
             converting: None,
+            orientations: Orientations::default(),
         })))
     }
 }
@@ -160,6 +164,7 @@ impl Classifying {
         let (width, height) = self.input.size;
         let (scale, bias) = self.options.input.affine();
         let batch = self.input.batch.unwrap_or(MAX_BATCH).max(1);
+        let orientation = self.orientations.of(frame, &self.pp_log);
         let rgb = self.rgb(frame)?.clone();
         let mut answers = Vec::with_capacity(crops.len());
         for group in crops.chunks(batch) {
@@ -168,7 +173,16 @@ impl Classifying {
             let rows = self.input.batch.unwrap_or(group.len());
             let mut tensor = Array4::<f32>::zeros((rows, 3, height as usize, width as usize));
             for (slot, crop) in group.iter().enumerate() {
-                cut(&rgb, *crop, (width, height), scale, bias, &mut tensor, slot);
+                cut(
+                    &rgb,
+                    *crop,
+                    orientation,
+                    (width, height),
+                    scale,
+                    bias,
+                    &mut tensor,
+                    slot,
+                );
             }
             let outputs = self
                 .session
@@ -192,8 +206,9 @@ impl Classifying {
     }
 }
 
-/// `crop` of the RGB24 picture `rgb`, stretched to `size` and scaled per
-/// channel, into input `slot` of `tensor`.
+/// `crop` of the RGB24 picture `rgb`, turned the way the picture is shown,
+/// stretched to `size` and scaled per channel, into input `slot` of
+/// `tensor`.
 ///
 /// Each input pixel is the mean of the source pixels it covers — from
 /// `d * source / size` to `(d + 1) * source / size` rounded up, at least
@@ -201,9 +216,11 @@ impl Classifying {
 /// centre read four pixels of the dozen a person's box gives each input
 /// pixel, so the same box reached the model as another picture on the CPU
 /// than on the GPU, and an unsure model named it otherwise.
+#[allow(clippy::too_many_arguments)]
 fn cut(
     rgb: &ffmpeg::frame::Video,
     (left, top, width, height): Crop,
+    orientation: Orientation,
     size: (u32, u32),
     scale: [f32; 3],
     bias: [f32; 3],
@@ -218,20 +235,31 @@ fn cut(
         let last = last.min(u64::from(source)).max(first + 1);
         (first as usize, last as usize)
     };
+    // The crop as shown, and where each of its pixels is stored.
+    let shown = orientation.display_size(width, height);
+    let [xx, xy, x0, yx, yy, y0] = orientation.sampling(width, height);
+    let stored = |x: usize, y: usize| {
+        let (x, y) = (x as i32, y as i32);
+        (
+            left as usize + (xx * x + xy * y + x0) as usize,
+            top as usize + (yx * x + yy * y + y0) as usize,
+        )
+    };
     for y in 0..size.1 {
-        let (y0, y1) = covered(y, height, size.1);
+        let (top_row, bottom_row) = covered(y, shown.1, size.1);
         for x in 0..size.0 {
-            let (x0, x1) = covered(x, width, size.0);
+            let (first, last) = covered(x, shown.0, size.0);
             let mut sum = [0u32; 3];
-            for row in y0..y1 {
-                let at = (top as usize + row) * stride + (left as usize + x0) * 3;
-                for pixel in data[at..at + (x1 - x0) * 3].as_chunks::<3>().0 {
+            for row in top_row..bottom_row {
+                for column in first..last {
+                    let (column, row) = stored(column, row);
+                    let pixel = &data[row * stride + column * 3..][..3];
                     for channel in 0..3 {
                         sum[channel] += u32::from(pixel[channel]);
                     }
                 }
             }
-            let count = ((x1 - x0) * (y1 - y0)) as f32;
+            let count = ((last - first) * (bottom_row - top_row)) as f32;
             for channel in 0..3 {
                 tensor[[slot, channel, y as usize, x as usize]] =
                     sum[channel] as f32 / count / 255.0 * scale[channel] + bias[channel];

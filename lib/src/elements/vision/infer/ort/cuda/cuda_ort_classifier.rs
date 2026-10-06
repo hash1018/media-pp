@@ -35,6 +35,7 @@ use super::super::classify::{
 };
 use super::super::{OrtError, labels};
 use super::runtime::{self, CudaRuntime};
+use crate::orientation::{Orientation, Orientations};
 
 /// The batch TensorRT builds a classifier's engine to be quickest at: a
 /// picture has a few objects to classify at once, seldom the most there is
@@ -100,6 +101,8 @@ struct Classifying {
     /// pointer.
     device_ctx: *mut ffi::AVHWDeviceContext,
     _hw_device_ctx: Arc<AvBufferRef>,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
 }
 
 // SAFETY: the session, buffer and kernels are used by the one thread
@@ -242,23 +245,27 @@ impl CudaOrtClassifier {
             device_memory,
             device_ctx,
             _hw_device_ctx: hw_device_ctx,
+            orientations: Orientations::default(),
         })))
     }
 }
 
 impl Classifying {
-    /// Cuts `crop` of `frame` into input `slot` of the tensor.
+    /// Cuts `crop` of `frame`, turned the way the picture is shown, into
+    /// input `slot` of the tensor.
     fn cut(
         &self,
         frame: &ffmpeg::frame::Video,
         nv12: bool,
         (left, top, width, height): Crop,
+        orientation: Orientation,
         slot: usize,
     ) -> std::result::Result<(), OrtError> {
         let fit = Fit {
             model: self.input.size,
             offset: (0, 0),
             scaled: self.input.size,
+            orientation,
         };
         if nv12 {
             // On whole 2x2 blocks, so that the chroma the crop starts on is
@@ -314,10 +321,11 @@ impl Classifying {
         let nv12 = surface.layout == ffmpeg::format::Pixel::NV12;
         let (width, height) = self.input.size;
         let (scale, bias) = self.options.input.affine();
+        let orientation = self.orientations.of(frame, &self.pp_log);
         let mut answers = Vec::with_capacity(crops.len());
         for group in crops.chunks(self.capacity) {
             for (slot, crop) in group.iter().enumerate() {
-                self.cut(frame, nv12, *crop, slot)?;
+                self.cut(frame, nv12, *crop, orientation, slot)?;
             }
             // A model of fixed batch is handed exactly that many; one of
             // open batch, as many as there are.

@@ -118,6 +118,37 @@ impl StreamInfo {
             })
     }
 
+    /// Which way up a video stream's pictures are shown — the display
+    /// matrix its container keeps beside them, which a phone's portrait
+    /// recording carries — and upright where it keeps none, or for sound.
+    /// Each decoded picture carries it too, read by
+    /// [`Orientation::of`](crate::orientation::Orientation::of); what a file
+    /// its pictures are re-encoded to is to say is this, given to
+    /// [`TrackFormat::with_orientation`](crate::elements::TrackFormat::with_orientation).
+    ///
+    /// # Errors
+    ///
+    /// Where the matrix turns the pictures by other than quarter turns.
+    pub fn orientation(
+        &self,
+    ) -> Result<crate::orientation::Orientation, crate::orientation::UnsupportedOrientation> {
+        // SAFETY: plain fields of parameters this value owns; the side data
+        // is FFmpeg's own, a display matrix being nine `i32`s by its
+        // definition, which the size check makes sure of.
+        unsafe {
+            let raw = self.parameters.as_ptr();
+            let data = ffmpeg::ffi::av_packet_side_data_get(
+                (*raw).coded_side_data,
+                (*raw).nb_coded_side_data,
+                ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+            );
+            if data.is_null() || (*data).size < 9 * size_of::<i32>() {
+                return Ok(crate::orientation::Orientation::UPRIGHT);
+            }
+            crate::orientation::Orientation::of_matrix(&*((*data).data as *const [i32; 9]))
+        }
+    }
+
     /// A video stream's picture size, width then height, as its parameters
     /// say — what an encoder re-encoding it is opened at. `None` for sound,
     /// and for a video stream that does not say.

@@ -343,8 +343,8 @@ pub use app::player;
 pub use core::diagnostics::{log, pp_log, stats};
 pub use core::timing::{clock, playback_clock, rate};
 pub use core::{
-    buffer, bus, color, contract, driver, element, graph, pad, pipeline, pool, queue, stream,
-    subtitle,
+    buffer, bus, color, contract, driver, element, graph, orientation, pad, pipeline, pool, queue,
+    stream, subtitle,
 };
 
 /// Why a pipeline refused a seek, and why a preroll did not finish.

@@ -68,6 +68,47 @@ impl TrackFormat {
             time_base,
         }
     }
+
+    /// The same track, its pictures shown turned as `orientation` says:
+    /// the display matrix a container keeps beside a video track — what a
+    /// re-encoded phone recording has to carry on, given
+    /// [`StreamInfo::orientation`](crate::elements::StreamInfo::orientation)
+    /// of the stream it came from. An upright one takes away any matrix
+    /// the track carried. Only a container that keeps one writes it — MP4
+    /// and MOV do.
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: crate::orientation::Orientation) -> Self {
+        let kind = ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX;
+        // SAFETY: the parameters are this value's own; FFmpeg's side-data
+        // functions keep its list and count in step, and a new entry's
+        // `data` is the `size` bytes asked for, which the matrix fills.
+        unsafe {
+            let raw = self.parameters.as_mut_ptr();
+            ffmpeg::ffi::av_packet_side_data_remove(
+                (*raw).coded_side_data,
+                &mut (*raw).nb_coded_side_data,
+                kind,
+            );
+            if !orientation.is_upright() {
+                let matrix = orientation.matrix();
+                let size = size_of_val(&matrix);
+                let entry = ffmpeg::ffi::av_packet_side_data_new(
+                    &mut (*raw).coded_side_data,
+                    &mut (*raw).nb_coded_side_data,
+                    kind,
+                    size,
+                    0,
+                );
+                if entry.is_null() {
+                    std::alloc::handle_alloc_error(
+                        std::alloc::Layout::array::<i32>(matrix.len()).expect("nine i32s"),
+                    );
+                }
+                std::ptr::copy_nonoverlapping(matrix.as_ptr().cast::<u8>(), (*entry).data, size);
+            }
+        }
+        self
+    }
 }
 
 impl std::fmt::Debug for TrackFormat {

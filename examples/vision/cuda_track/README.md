@@ -14,6 +14,9 @@ by how it looks as well as by its motion (`TrackerOptions::visual`), on the
 GPU: the example is built with `cuda-visual-tracking`, which links cuFFT 12
 beside the libraries `ort-tensorrt` links.
 
+A phone's portrait recording, stored on its side, is looked at and labelled
+the right way up, and recorded saying it is turned, as the file does.
+
 `--hide person=blur` hides a class in the recording instead, as
 [`cuda_detect`](../cuda_detect/README.md)'s does. Hide with the detector on
 every picture, `--interval 0`: a box the tracker filled in is where it

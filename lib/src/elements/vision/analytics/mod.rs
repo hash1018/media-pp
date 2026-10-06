@@ -45,6 +45,12 @@ pub struct StreamAnalyticsOptions {
 /// width and height, in order around it. An object is inside when the
 /// bottom middle of its box is — where a person stands, as DeepStream
 /// places it.
+///
+/// The corners are of the picture as it is stored, as every box is — see
+/// [`Detection`](crate::elements::Detection); for a picture shown turned,
+/// [`Orientation::from_display`](crate::orientation::Orientation::from_display)
+/// puts corners drawn on what is shown there. Where an object stands is the
+/// bottom of its box as the picture is shown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Zone {
     /// What the zone is called in the [`Analytics`](crate::elements::Analytics)
@@ -71,7 +77,8 @@ impl Zone {
 }
 
 /// A line across the picture, from `start` to `end` in fractions of the
-/// picture's width and height. An object crosses it when the bottom middle
+/// picture's width and height as it is stored, as a [`Zone`]'s corners
+/// are. An object crosses it when the bottom middle
 /// of its box passes from one side of it to the other, as it is followed
 /// through the pictures — which takes an
 /// [`ObjectTracker`](crate::elements::ObjectTracker) before the analytics:

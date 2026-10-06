@@ -23,10 +23,11 @@ use crate::{
 
 use super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, bt709_limited, cell_edge, hides, marks, rasterize,
+    Rect, bt709_limited, cell_edge, hides, marks_turned, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, TextMask, load_font};
+use crate::orientation::Orientations;
 
 /// The pixel formats it draws on.
 const LAYOUTS: PixelLayoutSet = PixelLayoutSet::from_slice(&[
@@ -91,6 +92,8 @@ struct Overlaying {
     /// Whether it has said that a rule names a class the detections
     /// carry no names for.
     warned_names: bool,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
 }
 
 impl SwDetectionOverlay {
@@ -127,6 +130,7 @@ impl SwDetectionOverlay {
             font,
             masks: HashMap::new(),
             warned_names: false,
+            orientations: Orientations::default(),
         })))
     }
 }
@@ -464,10 +468,16 @@ impl Overlaying {
         if self.masks.len() >= LABEL_CACHE {
             self.masks.clear();
         }
+        let orientation = self.orientations.of(frame, &self.pp_log);
         let (masks, font, pp_log) = (&mut self.masks, self.font.as_ref(), &self.pp_log);
-        let marks = marks(canvas, &self.options, detections, analytics, &mut |key| {
-            mask(masks, font, pp_log, key).map(|mask| (mask.width, mask.height))
-        });
+        let marks = marks_turned(
+            canvas,
+            orientation,
+            &self.options,
+            detections,
+            analytics,
+            &mut |key| mask(masks, font, pp_log, key).map(|mask| (mask.width, mask.height)),
+        );
         let mut copy = frame.clone();
         // What is hidden first, so that a box and its label are drawn over
         // it where they are asked for.
@@ -793,6 +803,80 @@ mod tests {
     /// A picture's labels are all still there when it is drawn, the cache
     /// filling up on the way: it was emptied mid-picture, and the masks
     /// made before were drawn as solid blocks.
+    /// A picture stored turned is drawn on as it is shown: boxes and their
+    /// labels, drawn on it and turned back the way it is shown, are the
+    /// very bytes drawn on the picture stored the right way up — the
+    /// labels upright and above their boxes as the picture is seen — for
+    /// each of the eight ways it can be turned.
+    #[test]
+    fn a_turned_picture_is_drawn_on_as_it_is_shown() {
+        use super::super::tests::{every_orientation, system_font, turn};
+        let Some(font) = system_font() else {
+            eprintln!("skipping: no system font to draw labels in");
+            return;
+        };
+        let options = DetectionOverlayOptions {
+            font: Some(font),
+            others: Treatment::boxes(BoxStyle {
+                line_width: 2,
+                label: Some(super::super::LabelStyle::new(14.0)),
+                ..BoxStyle::default()
+            }),
+            ..DetectionOverlayOptions::default()
+        };
+        // As shown: one box low in the picture, one at its top edge, whose
+        // label goes inside it.
+        let shown = Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("thing")]),
+            vec![
+                Detection::new(0, 0.9, 0.25, 0.5, 0.5, 0.375),
+                Detection::new(0, 0.6, 0.625, 0.0, 0.25, 0.25),
+            ],
+        );
+        for format in [Pixel::NV12, Pixel::BGRA] {
+            let mut upright = ffmpeg::frame::Video::new(format, 160, 96);
+            for plane in 0..upright.planes() {
+                for (index, byte) in upright.data_mut(plane).iter_mut().enumerate() {
+                    *byte = (index * 7 % 251) as u8;
+                }
+            }
+            let draw = |picture: ffmpeg::frame::Video, found: Detections| {
+                let mut overlay = SwDetectionOverlay::new("overlay", options.clone()).unwrap();
+                let kept = capture(&mut overlay);
+                overlay.consume(carrying(picture, found)).expect("drawn");
+                let MediaBuffer::Video(drawn) = kept.lock().unwrap().remove(0) else {
+                    panic!("a picture");
+                };
+                (**drawn).clone()
+            };
+            let expected = draw(upright.clone(), shown.clone());
+            for orientation in every_orientation() {
+                let mut stored = shown.clone();
+                for item in &mut stored.items {
+                    [item.x, item.y, item.width, item.height] =
+                        orientation.from_display([item.x, item.y, item.width, item.height]);
+                }
+                let drawn = draw(turn(&upright, orientation, false), stored);
+                let back = turn(&drawn, orientation, true);
+                for plane in 0..expected.planes() {
+                    let rows = if plane == 0 { 96 } else { 48 };
+                    let bytes = if format == Pixel::NV12 { 160 } else { 640 };
+                    for row in 0..rows {
+                        let at = |frame: &ffmpeg::frame::Video| {
+                            frame.data(plane)[row * frame.stride(plane)..][..bytes].to_vec()
+                        };
+                        assert_eq!(
+                            at(&back),
+                            at(&expected),
+                            "{format:?} {orientation:?}: plane {plane}, row {row}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_full_cache_keeps_every_mask_of_the_picture_being_drawn() {
         let Some(font) = super::super::tests::system_font() else {
@@ -825,6 +909,7 @@ mod tests {
                 })
                 .collect(),
             warned_names: false,
+            orientations: Orientations::default(),
         };
         let names: Vec<Arc<str>> = ["one", "two", "three"].map(Arc::from).to_vec();
         let items = (0..3)

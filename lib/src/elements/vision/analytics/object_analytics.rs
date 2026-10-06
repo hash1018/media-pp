@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::{AnalyticsOptions, Line, ObjectAnalyticsError, StreamAnalyticsOptions, Zone};
+use crate::orientation::{Orientation, Orientations};
 
 /// How many pictures an object may go unseen before its last place is
 /// forgotten — a tracker forgets it sooner, so this only bounds memory.
@@ -110,6 +111,8 @@ struct Analysing {
     /// Those of the streams given their own, by the streams' names.
     by_stream: HashMap<Arc<str>, Arc<Rules>>,
     streams: PerStream<Watch>,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
 }
 
 fn finite(point: (f32, f32)) -> bool {
@@ -241,16 +244,19 @@ impl ObjectAnalytics {
             rules: Arc::new(rules),
             by_stream,
             streams: PerStream::default(),
+            orientations: Orientations::default(),
         })))
     }
 }
 
-/// Where an object is: the bottom middle of its box.
-fn anchor(detection: &Detection) -> (f32, f32) {
-    (
-        detection.x + detection.width / 2.0,
-        detection.y + detection.height,
-    )
+/// Where an object is: the bottom middle of its box as the picture is
+/// shown — where a person stands, the right way up — in the picture as
+/// stored, where the zones and lines are.
+fn anchor(detection: &Detection, orientation: Orientation) -> (f32, f32) {
+    let [x, y, width, height] =
+        orientation.to_display([detection.x, detection.y, detection.width, detection.height]);
+    let [x, y, ..] = orientation.from_display([x + width / 2.0, y + height, 0.0, 0.0]);
+    (x, y)
 }
 
 fn counts(classes: &Option<Vec<usize>>, class_id: usize) -> bool {
@@ -298,8 +304,14 @@ impl Watch {
         }
     }
 
-    /// What `found`, on a picture of `size` pixels, counts as.
-    fn analyse(&mut self, found: &Detections, size: (u32, u32)) -> Analytics {
+    /// What `found`, on a picture of `size` pixels shown turned as
+    /// `orientation` says, counts as.
+    fn analyse(
+        &mut self,
+        found: &Detections,
+        size: (u32, u32),
+        orientation: Orientation,
+    ) -> Analytics {
         self.pictures += 1;
         let rules = &*self.rules;
         let zones = rules
@@ -311,7 +323,8 @@ impl Watch {
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| {
-                        counts(&zone.classes, item.class_id) && inside(&zone.corners, anchor(item))
+                        counts(&zone.classes, item.class_id)
+                            && inside(&zone.corners, anchor(item, orientation))
                     })
                     .map(|(index, _)| index)
                     .collect();
@@ -333,7 +346,10 @@ impl Watch {
             let Some(track_id) = item.track_id else {
                 continue;
             };
-            let at = pixels(anchor(item));
+            let at = pixels(anchor(item, orientation));
+            // The box's height as the picture is shown, in pixels.
+            let tall = orientation.to_display([item.x, item.y, item.width, item.height])[3]
+                * orientation.display_size(size.0, size.1).1 as f32;
             let last = self.last.entry(track_id).or_insert_with(|| Last {
                 picture: 0,
                 sides: vec![None; rules.lines.len()],
@@ -354,7 +370,7 @@ impl Watch {
                 let distance = side(start, end, at) / length;
                 // Within the margin the object is on neither side yet: a
                 // box trembling about the line moves nothing.
-                if distance.abs() < line.margin * item.height * height {
+                if distance.abs() < line.margin * tall {
                     continue;
                 }
                 let right = distance >= 0.0;
@@ -435,6 +451,7 @@ impl Filter for Analysing {
             out.push(buf);
             return Ok(());
         };
+        let orientation = self.orientations.of(frame, &self.pp_log);
         let (rules, by_stream) = (&self.rules, &self.by_stream);
         let (watch, moved) = self.streams.get(&buf, |origin| {
             let rules = origin
@@ -446,7 +463,7 @@ impl Filter for Analysing {
             // That stream was sought, as `reset` is for all of them.
             watch.last.clear();
         }
-        let analytics = watch.analyse(found, (frame.width(), frame.height()));
+        let analytics = watch.analyse(found, (frame.width(), frame.height()), orientation);
         let metadata = buf.metadata().cloned().unwrap_or_default().with(analytics);
         out.push(buf.with_metadata(metadata));
         Ok(())
@@ -516,6 +533,67 @@ mod tests {
             .iter()
             .map(|buf| analytics(buf).clone())
             .collect()
+    }
+
+    /// On a picture stored on its side, an object stands where the bottom
+    /// of its box is as the picture is shown: with a quarter turn
+    /// clockwise, the stored box's right edge. A zone — of the picture as
+    /// stored — holding that edge counts it; one holding the stored
+    /// bottom edge does not.
+    #[test]
+    fn an_object_stands_where_the_picture_shows_its_feet() {
+        use crate::orientation::Rotation;
+        let zone = |name: &str, corners: Vec<(f32, f32)>| Zone::new(name, corners);
+        let mut element = ObjectAnalytics::new(
+            "analytics",
+            AnalyticsOptions {
+                zones: vec![
+                    // A stripe of the stored picture across the box's right
+                    // edge, and the stored picture's bottom fifth.
+                    zone("feet", vec![(0.5, 0.0), (0.7, 0.0), (0.7, 1.0), (0.5, 1.0)]),
+                    zone(
+                        "bottom",
+                        vec![(0.0, 0.8), (1.0, 0.8), (1.0, 1.0), (0.0, 1.0)],
+                    ),
+                ],
+                lines: vec![],
+                ..AnalyticsOptions::default()
+            },
+        )
+        .expect("zones");
+        let kept = capture(&mut element);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, 64, 32);
+        let matrix = Orientation::rotated(Rotation::Clockwise90).matrix();
+        // SAFETY: a live frame; FFmpeg allocates the 36 bytes asked for,
+        // which the matrix fills.
+        unsafe {
+            let data = ffmpeg::ffi::av_frame_new_side_data(
+                frame.as_mut_ptr(),
+                ffmpeg::ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX,
+                size_of_val(&matrix),
+            );
+            std::ptr::copy_nonoverlapping(
+                matrix.as_ptr().cast::<u8>(),
+                (*data).data,
+                size_of_val(&matrix),
+            );
+        }
+        // Stored lying from x 0.1 to 0.6, down to the stored bottom edge.
+        let lying = Detection::new(0, 0.9, 0.1, 0.5, 0.5, 0.5);
+        let buf = Detections::new("detector", Arc::from([]), vec![lying])
+            .attach_to(MediaBuffer::video(frame));
+        element.consume(buf).expect("analysed");
+        let kept = kept.lock().unwrap();
+        let zones = &analytics(&kept[0]).zones;
+        assert_eq!(
+            zones[0].objects,
+            vec![0],
+            "its feet as shown are at the stored right"
+        );
+        assert!(
+            zones[1].objects.is_empty(),
+            "the stored bottom is not where it stands"
+        );
     }
 
     /// A zone counts what stands in it, of its classes, and says when it is

@@ -39,6 +39,9 @@ labelled with its crossings each way. The overlay draws on copies, so the
 printing branch beside it is handed the pictures as they were. Labels are
 drawn in Arial, which macOS ships.
 
+A phone's portrait recording, stored on its side, is looked at and labelled
+the right way up, and recorded saying it is turned, as the file does.
+
 `--hide person=blur` hides a class in the recording instead of boxing it:
 `mosaic`, `blur` or `fill` (black), a mosaic where none is said, and once
 for each class to hide, by the name the model gives it. On the people clip,

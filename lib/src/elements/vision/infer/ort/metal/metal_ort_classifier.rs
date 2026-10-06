@@ -2,6 +2,7 @@
 //! model on VideoToolbox pictures, each object cut from the picture on the
 //! GPU.
 
+use crate::orientation::Orientations;
 use std::{path::Path, sync::Arc};
 
 use ort::{
@@ -87,6 +88,8 @@ struct Classifying {
     input: Input,
     memory: Memory,
     fitting: Fitting,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
 }
 
 impl MetalOrtClassifier {
@@ -159,6 +162,7 @@ impl MetalOrtClassifier {
             input,
             memory: Memory::default(),
             fitting,
+            orientations: Orientations::default(),
         })))
     }
 }
@@ -171,6 +175,7 @@ impl Classifying {
         crops: &[Crop],
     ) -> std::result::Result<Vec<Option<(usize, f32)>>, OrtError> {
         let picture = Picture::of(frame)?;
+        let orientation = self.orientations.of(frame, &self.pp_log);
         let (width, height) = self.input.size;
         let affine = self.options.input.affine();
         let mut answers = Vec::with_capacity(crops.len());
@@ -182,6 +187,7 @@ impl Classifying {
                 .enumerate()
                 .map(|(slot, &crop)| Cut {
                     crop,
+                    orientation,
                     offset: (0, 0),
                     scaled: self.input.size,
                     slot,

@@ -17,7 +17,8 @@ Media Foundation next on Windows, `h264_videotoolbox` on macOS, and software
 otherwise; both say which they chose, and the example prints it, as
 `decoding Hardware, encoding Nvenc`. The encoder is opened at the picture's own size and rate and told
 its colour, all read off the input's `StreamInfo`, and the muxer takes its
-track from the encode bin itself.
+track from the encode bin itself, told which way up the pictures are shown —
+a phone's portrait recording, stored on its side, stays turned.
 
 The file's source waits at its end rather than ending, so the example stops
 the pipeline on `Finished` — every packet has reached the file — or on an

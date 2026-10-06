@@ -70,6 +70,19 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 
+A phone's portrait recording is stored on its side, with a display matrix
+saying to turn it. Every decoder hands that on with each picture
+(`Orientation::of`), and the demuxer says it of the stream
+(`StreamInfo::orientation`). The pictures stay as they are stored, and so
+does everything said about them — a box, a track, a zone, a mosaic. The
+detectors and classifiers fit each picture into the model the right way up,
+the detection overlays lay labels out as the picture is shown, and
+`ObjectAnalytics` stands an object on the bottom of its box as shown. A
+recording re-encoded from such a file keeps the matrix only when told, with
+`TrackFormat::with_orientation(stream.orientation()?)`; a stream copied
+through keeps it as it is. The renderers and `Player` do not turn pictures
+yet.
+
 Elements of your own are a `Source`, a `Filter` or a `Sink`; the crate
 documentation's first page says what each is handed, and
 [`custom_element`](../examples/core/custom_element) writes one of each.

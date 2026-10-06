@@ -30,10 +30,11 @@ use crate::{
 
 use super::super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, bt709_limited, hides, marks, rasterize,
+    Rect, bt709_limited, hides, marks_turned, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
+use crate::orientation::Orientations;
 
 const SHADER: &str = include_str!("../../../../shaders/metal/overlay.metal");
 const REDACT: &str = include_str!("../../../../shaders/metal/redact.metal");
@@ -139,6 +140,8 @@ struct Overlaying {
     /// Whether it has said that a rule names a class the detections
     /// carry no names for.
     warned_names: bool,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
     gpu: MetalGpu,
     kernels: Kernels,
     /// `cell_means` and `cell_paint`, where a rule hides by a mosaic or a
@@ -223,6 +226,7 @@ impl MetalDetectionOverlay {
             font,
             masks: HashMap::new(),
             warned_names: false,
+            orientations: Orientations::default(),
             gpu,
             kernels: Kernels {
                 copy_nv12,
@@ -408,9 +412,15 @@ impl Overlaying {
         // The options out of `self` while the marks are placed, as placing
         // them makes masks through `self`; nothing returns in between.
         let options = std::mem::take(&mut self.options);
-        let strokes = marks(canvas, &options, detections, analytics, &mut |key| {
-            self.mask(key)
-        });
+        let orientation = self.orientations.of(source, &self.pp_log);
+        let strokes = marks_turned(
+            canvas,
+            orientation,
+            &options,
+            detections,
+            analytics,
+            &mut |key| self.mask(key),
+        );
         // What is hidden, in the order the CPU hides it: before every mark,
         // so that a box and its label are drawn over it where asked for.
         let hidden = detections

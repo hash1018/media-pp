@@ -22,6 +22,7 @@ use crate::elements::Detections;
 use super::{
     Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input,
 };
+use crate::orientation::{Orientation, Orientations};
 
 /// The grey a fitted picture's margins are filled with, as Ultralytics
 /// trains on: 114 of 255.
@@ -56,6 +57,8 @@ struct Detecting {
     /// Which pictures it looks at.
     interval: Interval,
     fitting: Option<Fitting>,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
     /// The model's input, kept from one picture to the next.
     input: Array4<f32>,
 }
@@ -69,8 +72,10 @@ struct Fitting {
         ffmpeg::color::Space,
         ffmpeg::color::Range,
     ),
+    orientation: Orientation,
     letterbox: Letterbox,
     context: ffmpeg::software::scaling::Context,
+    /// The picture at the size it is fitted at, still as it is stored.
     scaled: ffmpeg::frame::Video,
 }
 
@@ -119,6 +124,7 @@ impl SwOrtDetector {
             labels,
             model,
             fitting: None,
+            orientations: Orientations::default(),
             input: Array4::zeros((1, 3, model.1 as usize, model.0 as usize)),
             interval,
         })))
@@ -136,9 +142,10 @@ impl Detecting {
             frame.color_space(),
             frame.color_range(),
         );
+        let orientation = self.orientations.of(frame, &self.pp_log);
         let fitting = match &mut self.fitting {
-            Some(fitting) if fitting.from == from => fitting,
-            slot => slot.insert(fitting(from, self.model)?),
+            Some(fitting) if fitting.from == from && fitting.orientation == orientation => fitting,
+            slot => slot.insert(fitting(from, orientation, self.model)?),
         };
         fitting
             .context
@@ -151,12 +158,28 @@ impl Detecting {
         let stride = fitting.scaled.stride(0);
         let data = fitting.scaled.data(0);
         self.input.fill(MARGIN);
-        for y in 0..height {
-            let row = &data[y * stride..y * stride + width * 3];
-            for (x, pixel) in row.as_chunks::<3>().0.iter().enumerate() {
-                for (channel, value) in pixel.iter().enumerate() {
-                    self.input[[0, channel, offset_y + y, offset_x + x]] =
-                        f32::from(*value) / 255.0;
+        if orientation.is_upright() {
+            for y in 0..height {
+                let row = &data[y * stride..y * stride + width * 3];
+                for (x, pixel) in row.as_chunks::<3>().0.iter().enumerate() {
+                    for (channel, value) in pixel.iter().enumerate() {
+                        self.input[[0, channel, offset_y + y, offset_x + x]] =
+                            f32::from(*value) / 255.0;
+                    }
+                }
+            }
+        } else {
+            // Each pixel of the input from where the turn stored it.
+            let [xx, xy, x0, yx, yy, y0] =
+                orientation.sampling(fitting.scaled.width(), fitting.scaled.height());
+            for y in 0..height as i32 {
+                for x in 0..width as i32 {
+                    let at = (yx * x + yy * y + y0) as usize * stride
+                        + (xx * x + xy * y + x0) as usize * 3;
+                    for channel in 0..3 {
+                        self.input[[0, channel, offset_y + y as usize, offset_x + x as usize]] =
+                            f32::from(data[at + channel]) / 255.0;
+                    }
                 }
             }
         }
@@ -183,8 +206,9 @@ impl Detecting {
     }
 }
 
-/// A conversion of pictures shaped `from` to RGB24 at the size they fit the
-/// model's input at.
+/// A conversion of pictures shaped `from`, shown turned as `orientation`
+/// says, to RGB24 at the size they fit the model's input at — still as they
+/// are stored, the input being read from it turned.
 fn fitting(
     from: (
         ffmpeg::format::Pixel,
@@ -193,20 +217,20 @@ fn fitting(
         ffmpeg::color::Space,
         ffmpeg::color::Range,
     ),
+    orientation: Orientation,
     model: (u32, u32),
 ) -> std::result::Result<Fitting, OrtDetectorError> {
     let (width, height) = (from.1, from.2);
-    let letterbox = Letterbox::new((width, height), model);
-    let context = to_rgb24(from, letterbox.scaled)?;
+    let letterbox = Letterbox::shown((width, height), model, orientation);
+    // The turned size, turned back: a quarter turn swaps the sides back.
+    let stored = orientation.display_size(letterbox.scaled.0, letterbox.scaled.1);
+    let context = to_rgb24(from, stored)?;
     Ok(Fitting {
         from,
+        orientation,
         letterbox,
         context,
-        scaled: ffmpeg::frame::Video::new(
-            ffmpeg::format::Pixel::RGB24,
-            letterbox.scaled.0,
-            letterbox.scaled.1,
-        ),
+        scaled: ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, stored.0, stored.1),
     })
 }
 

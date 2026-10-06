@@ -6,39 +6,53 @@ use ndarray::{ArrayView2, ArrayViewD, Axis, Ix3};
 
 use super::{OrtDetectorError, OrtDetectorOptions};
 use crate::elements::Detection;
+use crate::orientation::Orientation;
 
-/// How a picture is fitted inside the model's input: scaled to fit,
-/// proportions kept, centred, the rest grey.
+/// How a picture is fitted inside the model's input: turned the way it is
+/// shown, scaled to fit, proportions kept, centred, the rest grey.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Letterbox {
-    /// The picture's size.
+    /// The picture's size, as stored.
     pub(crate) frame: (u32, u32),
     /// The model's input size.
     pub(crate) model: (u32, u32),
-    /// The size the picture is scaled to inside the input.
+    /// The size the picture is scaled to inside the input, turned.
     pub(crate) scaled: (u32, u32),
     /// Where the scaled picture's top-left corner sits in the input.
     pub(crate) offset: (u32, u32),
+    /// How the picture is turned to be shown, and so into the input.
+    pub(crate) orientation: Orientation,
 }
 
 impl Letterbox {
+    /// A picture shown as stored.
+    #[cfg(test)]
     pub(crate) fn new(frame: (u32, u32), model: (u32, u32)) -> Self {
+        Self::shown(frame, model, Orientation::UPRIGHT)
+    }
+
+    /// A picture stored `frame` in size and shown turned as `orientation`
+    /// says: the model is handed it the right way up, as it was trained on
+    /// pictures, and what it finds is read back onto the stored picture.
+    pub(crate) fn shown(frame: (u32, u32), model: (u32, u32), orientation: Orientation) -> Self {
+        let shown = orientation.display_size(frame.0, frame.1);
         let scale =
-            (model.0 as f32 / frame.0.max(1) as f32).min(model.1 as f32 / frame.1.max(1) as f32);
+            (model.0 as f32 / shown.0.max(1) as f32).min(model.1 as f32 / shown.1.max(1) as f32);
         let scaled = (
-            ((frame.0 as f32 * scale).round() as u32).clamp(1, model.0),
-            ((frame.1 as f32 * scale).round() as u32).clamp(1, model.1),
+            ((shown.0 as f32 * scale).round() as u32).clamp(1, model.0),
+            ((shown.1 as f32 * scale).round() as u32).clamp(1, model.1),
         );
         Self {
             frame,
             model,
             scaled,
             offset: ((model.0 - scaled.0) / 2, (model.1 - scaled.1) / 2),
+            orientation,
         }
     }
 
-    /// A point of the model's input, as fractions of the picture, clamped
-    /// to it.
+    /// A point of the model's input, as fractions of the picture as shown,
+    /// clamped to it.
     fn onto_frame(&self, x: f32, y: f32) -> (f32, f32) {
         (
             ((x - self.offset.0 as f32) / self.scaled.0 as f32).clamp(0.0, 1.0),
@@ -47,11 +61,12 @@ impl Letterbox {
     }
 
     /// A box of the model's input by its corners, as a [`Detection`] on the
-    /// picture.
+    /// stored picture.
     fn detection(&self, class_id: usize, score: f32, corners: [f32; 4]) -> Detection {
         let (x1, y1) = self.onto_frame(corners[0], corners[1]);
         let (x2, y2) = self.onto_frame(corners[2], corners[3]);
-        Detection::new(class_id, score, x1, y1, x2 - x1, y2 - y1)
+        let [x, y, width, height] = self.orientation.from_display([x1, y1, x2 - x1, y2 - y1]);
+        Detection::new(class_id, score, x, y, width, height)
     }
 }
 
@@ -314,6 +329,32 @@ mod tests {
             .map(|found| (found.class_id, found.score))
             .collect();
         assert_eq!(classes, vec![(0, 0.9), (1, 0.7)]);
+    }
+
+    /// A portrait recording stored on its side is fitted the right way up —
+    /// tall in the input, as it is shown — and what is found in it is read
+    /// back onto the stored picture: a box at the top of what is shown is at
+    /// the stored picture's left, for a quarter turn clockwise.
+    #[test]
+    fn a_turned_picture_is_fitted_upright_and_read_back_as_stored() {
+        use crate::orientation::Rotation;
+        let turned = Letterbox::shown(
+            (1920, 1080),
+            (640, 640),
+            Orientation::rotated(Rotation::Clockwise90),
+        );
+        assert_eq!(turned.scaled, (360, 640));
+        assert_eq!(turned.offset, (140, 0));
+        // The top tenth of what is shown, across its whole width.
+        let found = turned.detection(0, 0.9, [140.0, 0.0, 500.0, 64.0]);
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(
+            near(found.x, 0.0)
+                && near(found.y, 0.0)
+                && near(found.width, 0.1)
+                && near(found.height, 1.0),
+            "{found:?}"
+        );
     }
 
     /// A batch's output is read a picture at a time, each through its own

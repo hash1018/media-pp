@@ -33,10 +33,11 @@ use crate::{
 
 use super::super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, hides, marks, rasterize,
+    Rect, hides, marks_turned, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
+use crate::orientation::Orientations;
 
 /// Errors specific to `CudaDetectionOverlay`. Converts into the crate-wide
 /// `Error` via `?`.
@@ -123,6 +124,8 @@ struct Overlaying {
     /// Whether it has said that a rule names a class the detections
     /// carry no names for.
     warned_names: bool,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
     /// The kernels a mosaic or a blur is painted with, and the buffer its
     /// cells' means go through, grown as a larger box needs: made with the
     /// element where it hides by cells.
@@ -199,6 +202,7 @@ impl CudaDetectionOverlay {
             font,
             masks: HashMap::new(),
             warned_names: false,
+            orientations: Orientations::default(),
             cells,
             driver,
             hw_device_ctx,
@@ -441,9 +445,15 @@ impl Overlaying {
             &self.driver,
             &self.pp_log,
         );
-        let marks = marks(canvas, &self.options, detections, analytics, &mut |key| {
-            mask(masks, font, driver, pp_log, key).map(|mask| (mask.width, mask.height))
-        });
+        let orientation = self.orientations.of(source, &self.pp_log);
+        let marks = marks_turned(
+            canvas,
+            orientation,
+            &self.options,
+            detections,
+            analytics,
+            &mut |key| mask(masks, font, driver, pp_log, key).map(|mask| (mask.width, mask.height)),
+        );
         // What is hidden first, so that a box and its label are drawn over
         // it where they are asked for.
         if let Some(detections) = detections {
@@ -937,6 +947,75 @@ mod tests {
                         "{format:?} {style:?}, plane {plane}: {differ} bytes differ"
                     );
                 }
+            }
+        }
+    }
+
+    /// A picture stored turned is drawn on as it is shown, on the GPU as on
+    /// the CPU: boxes and labels drawn on it and turned back are the bytes
+    /// drawn on the picture stored the right way up, for each of the eight
+    /// ways it can be turned.
+    #[test]
+    fn a_turned_picture_is_drawn_on_as_it_is_shown() {
+        use super::super::super::tests::{every_orientation, system_font, turn};
+        let Some((device, _serial)) = try_cuda_device() else {
+            return;
+        };
+        let Some(font) = system_font() else {
+            eprintln!("skipping: no system font to draw labels in");
+            return;
+        };
+        let options = DetectionOverlayOptions {
+            font: Some(font),
+            others: Treatment::boxes(BoxStyle {
+                label: Some(LabelStyle::new(14.0)),
+                ..BoxStyle::default()
+            }),
+            ..DetectionOverlayOptions::default()
+        };
+        let found = Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("thing")]),
+            vec![
+                Detection::new(0, 0.9, 0.25, 0.5, 0.5, 0.375),
+                Detection::new(0, 0.6, 0.625, 0.0, 0.25, 0.25),
+            ],
+        );
+        for (format, pixel) in [
+            (CudaFrameFormat::Nv12, ffmpeg::format::Pixel::NV12),
+            (CudaFrameFormat::Bgra, ffmpeg::format::Pixel::BGRA),
+        ] {
+            let draw = |picture: ffmpeg::frame::Video, found: Detections| {
+                let mut upload = CudaUpload::new("upload", &device, format);
+                let uploaded = capture(&mut upload);
+                upload
+                    .consume(MediaBuffer::video(picture))
+                    .expect("uploads");
+                let input = uploaded
+                    .lock()
+                    .unwrap()
+                    .remove(0)
+                    .with_metadata(Metadata::new().with(found));
+                let mut gpu =
+                    CudaDetectionOverlay::new("gpu", &device, options.clone()).expect("opens");
+                let on_gpu = capture(&mut gpu);
+                gpu.consume(input).expect("drawn");
+                download(&device, format, on_gpu.lock().unwrap().remove(0))
+            };
+            let upright = noise(pixel);
+            let expected = shown(&draw(upright.clone(), found.clone()));
+            for orientation in every_orientation() {
+                let mut stored = found.clone();
+                for item in &mut stored.items {
+                    [item.x, item.y, item.width, item.height] =
+                        orientation.from_display([item.x, item.y, item.width, item.height]);
+                }
+                let drawn = draw(turn(&upright, orientation, false), stored);
+                assert_eq!(
+                    shown(&turn(&drawn, orientation, true)),
+                    expected,
+                    "{format:?} {orientation:?}"
+                );
             }
         }
     }

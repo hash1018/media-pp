@@ -10,6 +10,10 @@
 //! following each object from picture to picture as the tracker does, and
 //! may be given once for each class.
 //!
+//! A phone's portrait recording, stored on its side, is looked at and
+//! labelled the right way up, and recorded saying it is turned, as the
+//! file does.
+//!
 //! `--eval 1,2,4,9` measures how good the filled-in pictures are. It runs
 //! the file once with the detector on every picture, which is the
 //! reference, and then once per interval with the tracker; on each picture
@@ -51,8 +55,8 @@ mod example {
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, Detection,
             DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
-            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, RedactStyle, TrackerOptions,
-            Treatment,
+            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, RedactStyle, TrackFormat,
+            TrackerOptions, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -252,6 +256,9 @@ mod example {
         )?;
         let (source, _) = FileDemuxer::open("demux", &args.video)?;
         let stream = source.best(media::Type::Video)?;
+        // A phone's portrait recording is stored on its side and says so;
+        // what is recorded says so too, so it is shown the same way up.
+        let orientation = stream.orientation()?;
 
         let seen: Arc<Mutex<Seen>> = Arc::default();
         let kept = Arc::clone(&seen);
@@ -299,7 +306,10 @@ mod example {
                     },
                 )?;
                 let mut muxer = FileMuxer::create(path)?;
-                let track = muxer.add_stream("video", &encoder)?;
+                let track = muxer.add_stream(
+                    "video",
+                    TrackFormat::from(&encoder).with_orientation(orientation),
+                )?;
                 Some((overlay, encoder, muxer.open()?.take(track)?))
             }
             None => None,

@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::super::OrtError;
+use crate::orientation::Orientation;
 
 const SHADER: &str = include_str!("../../../../../shaders/metal/fit.metal");
 
@@ -66,11 +67,13 @@ impl Picture {
 }
 
 /// One rectangle of a picture fitted into one input: `crop` — left, top,
-/// width, height, inside the picture — scaled to `scaled` and placed at
-/// `offset` in input `slot`, the rest grey.
+/// width, height, inside the picture as stored — turned as `orientation`
+/// says, scaled to `scaled` and placed at `offset` in input `slot`, the
+/// rest grey.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Cut {
     pub(super) crop: (u32, u32, u32, u32),
+    pub(super) orientation: Orientation,
     pub(super) offset: (u32, u32),
     pub(super) scaled: (u32, u32),
     pub(super) slot: usize,
@@ -195,6 +198,8 @@ impl Fitting {
                     cut.crop,
                     picture.size
                 );
+                let shown = cut.orientation.display_size(width, height);
+                let [xx, xy, x0, yx, yy, y0] = cut.orientation.sampling(width, height);
                 let mut parameters: Vec<u8> = [
                     self.model.0,
                     self.model.1,
@@ -202,8 +207,8 @@ impl Fitting {
                     cut.offset.1,
                     cut.scaled.0,
                     cut.scaled.1,
-                    width,
-                    height,
+                    shown.0,
+                    shown.1,
                     left,
                     top,
                     cut.slot as u32,
@@ -212,6 +217,13 @@ impl Fitting {
                 .iter()
                 .flat_map(|word| word.to_ne_bytes())
                 .collect();
+                // `x_of` and `y_of`, each an `int4`, after the twelve words
+                // — 48 bytes, where an `int4` may start.
+                parameters.extend(
+                    [xx, xy, x0, 0, yx, yy, y0, 0]
+                        .iter()
+                        .flat_map(|word| word.to_ne_bytes()),
+                );
                 let affine = [
                     [scale[0], scale[1], scale[2], 1.0],
                     [bias[0], bias[1], bias[2], 0.0],
@@ -406,6 +418,7 @@ pub(super) mod tests {
                 .enumerate()
                 .map(|(slot, &crop)| Cut {
                     crop,
+                    orientation: Orientation::UPRIGHT,
                     offset: (0, 0),
                     scaled: model,
                     slot: slot * 2,
@@ -463,6 +476,7 @@ pub(super) mod tests {
         let picture = Picture::of(&frame).expect("readable");
         let cut = Cut {
             crop: (0, 0, 96, 48),
+            orientation: Orientation::UPRIGHT,
             offset: (0, 0),
             scaled: model,
             slot: 0,

@@ -11,6 +11,7 @@ use super::{
     Nv12Surface, YuvToBgra, arg, check, cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cuMemAlloc_v2,
     cuMemFree_v2, cuMemcpyDtoH_v2, cuModuleUnload, launch, load_module,
 };
+use crate::orientation::Orientation;
 
 /// The fitting kernels, JIT-compiled into the driver's context. Dropped
 /// before the driver that made them, which is what keeps their context
@@ -82,12 +83,25 @@ impl Drop for CudaTensor {
 
 /// Where a picture sits in the model's input: the input's size, the scaled
 /// picture's corner and size — a detector's letterbox, in the numbers the
-/// kernels take.
+/// kernels take — and how the picture is turned to be shown, which is how
+/// it is fitted: the corner and size are of it turned.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Fit {
     pub(crate) model: (u32, u32),
     pub(crate) offset: (u32, u32),
     pub(crate) scaled: (u32, u32),
+    pub(crate) orientation: Orientation,
+}
+
+impl Fit {
+    /// The source's size as shown, and where each shown pixel of it is
+    /// stored, for a source stored `size`: what the kernels read it by.
+    fn reading(self, size: (u32, u32)) -> ((u32, u32), [i32; 6]) {
+        (
+            self.orientation.display_size(size.0, size.1),
+            self.orientation.sampling(size.0, size.1),
+        )
+    }
 }
 
 impl CudaDriver {
@@ -142,8 +156,8 @@ impl CudaDriver {
         })
     }
 
-    /// Fits an NV12 picture, `size` in pixels, into the `slot`th input of
-    /// `tensor` as `fit` says, made RGB by `colour`'s rows.
+    /// Fits an NV12 picture, stored `size` in pixels, into the `slot`th
+    /// input of `tensor` as `fit` says, made RGB by `colour`'s rows.
     #[allow(clippy::too_many_arguments)]
     ///
     /// Launches asynchronously: [`CudaDriver::synchronize`] is what makes
@@ -166,7 +180,7 @@ impl CudaDriver {
         let mut luma_pitch = source.luma_pitch as u32;
         let mut chroma = source.chroma;
         let mut chroma_pitch = source.chroma_pitch as u32;
-        let (mut src_w, mut src_h) = size;
+        let ((mut src_w, mut src_h), mut sampling) = fit.reading(size);
         let mut rows = colour.rows;
         self.with_context(|| {
             let mut params: Vec<*mut c_void> = vec![
@@ -184,10 +198,12 @@ impl CudaDriver {
                 arg(&mut src_w),
                 arg(&mut src_h),
             ];
+            params.extend(sampling.iter_mut().map(arg));
             params.extend(rows.iter_mut().flatten().map(arg));
             // SAFETY: one pointer per parameter `fit_nv12` declares, in that
-            // order — thirteen buffer, size and placement values, then twelve
-            // row coefficients — each at a live local; the context is current
+            // order — thirteen buffer, size and placement values, six of
+            // sampling, then twelve row coefficients — each at a live local;
+            // the context is current
             // inside `with_context`, and the kernel is this context's.
             unsafe { launch(kernels.nv12, grid, block, &mut params) }
         })
@@ -209,7 +225,7 @@ impl CudaDriver {
         let (mut scaled_w, mut scaled_h) = fit.scaled;
         let mut src = source.pixels;
         let mut src_pitch = source.pitch as u32;
-        let (mut src_w, mut src_h) = size;
+        let ((mut src_w, mut src_h), mut sampling) = fit.reading(size);
         self.with_context(|| {
             let mut params: Vec<*mut c_void> = vec![
                 arg(&mut dst),
@@ -224,6 +240,7 @@ impl CudaDriver {
                 arg(&mut src_w),
                 arg(&mut src_h),
             ];
+            params.extend(sampling.iter_mut().map(arg));
             // SAFETY: one pointer per parameter `fit_bgra` declares, in that
             // order, each at a live local; the context is current inside
             // `with_context`, and the kernel is this context's.

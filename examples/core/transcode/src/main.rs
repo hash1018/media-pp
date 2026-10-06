@@ -13,7 +13,8 @@
 //! they chose, and this prints it. The encoder is
 //! opened at the picture's own size and rate and told its colour, all read
 //! off the input's `StreamInfo`, and the muxer takes its track from the
-//! encode bin itself. The sound's packets go into the new file as they are.
+//! encode bin itself, told which way up the pictures are shown — a phone's
+//! portrait recording, stored on its side, stays turned. The sound's packets go into the new file as they are.
 //!
 //! The file's source waits at its end rather than ending, so this stops the
 //! pipeline on `Finished` — every packet has reached the file — or on an
@@ -29,8 +30,8 @@ mod example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, VideoDecodeBin, VideoEncodeBin,
-            VideoEncodeOptions,
+            DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, TrackFormat, VideoDecodeBin,
+            VideoEncodeBin, VideoEncodeOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
@@ -57,6 +58,9 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &input_path)?;
         let video = source.best(ffmpeg::media::Type::Video)?;
+        // A phone's portrait recording is stored on its side and says so;
+        // what is recorded says so too, so it is shown the same way up.
+        let orientation = video.orientation()?;
         let audio = source.best(ffmpeg::media::Type::Audio).ok();
         let (width, height) = video.size().ok_or_else(|| {
             media_pp::Error::Other(format!("{input_path} does not say its picture size"))
@@ -97,7 +101,10 @@ mod example {
         );
 
         let mut muxer = FileMuxer::create(&output_path)?;
-        let video_track = muxer.add_stream("video", &encoder)?;
+        let video_track = muxer.add_stream(
+            "video",
+            TrackFormat::from(&encoder).with_orientation(orientation),
+        )?;
         let audio_track = audio
             .as_ref()
             .map(|audio| muxer.add_stream("audio", audio))

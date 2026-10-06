@@ -204,6 +204,31 @@ compile error with no explanation.
 
 ### Added
 
+- **A phone's portrait recording is analysed the right way up, and stays
+  turned when re-encoded.** `media_pp::orientation::Orientation` is which
+  way up a picture is shown — a quarter-turn `Rotation` and whether it is
+  mirrored — read from a picture with `Orientation::of` and from a stream
+  with `StreamInfo::orientation`, and written into a re-encoded track with
+  `TrackFormat::with_orientation`; `Orientation::to_display` and
+  `from_display` move a box between the picture as stored and as shown. A
+  matrix that turns by other than quarter turns is
+  `UnsupportedOrientation`, which `Error` converts from. The pictures, and
+  every box, track, zone and mosaic, stay as stored. What changes with a
+  turned picture:
+
+  - The detectors and classifiers — on the CPU, CUDA and Metal — fit it
+    into the model the right way up, and read what the model found back
+    onto the stored picture: a portrait recording's people had been handed
+    to the model lying down. On a test clip turned a quarter, CUDA and the
+    CPU each found the boxes of the upright clip again, at an IoU of 0.99.
+  - The detection overlays lay labels, and the zones' and lines' labels,
+    out as the picture is shown: upright, and above their boxes as seen.
+  - `ObjectAnalytics` stands an object on the bottom of its box as shown.
+  - `cuda_detect`, `cuda_track`, `metal_detect` and `transcode` keep the
+    file's orientation in what they record.
+
+  The renderers and `Player` do not turn pictures yet.
+
 - **An element of your own can work on CUDA pictures without them
   leaving the GPU.** `CudaSurfaceView::new(&device, &frame)` asks of a
   picture what the CUDA elements here ask — CUDA, from this device, NV12,

@@ -39,6 +39,7 @@ use thiserror::Error as ThisError;
 use crate::color::Color;
 use crate::elements::source::{TextMask, TextRasterError, rasterize_coverage};
 use crate::elements::{Analytics, Detection, Detections};
+use crate::orientation::Orientation;
 
 /// What a detection overlay does with each picture: per class of what was
 /// found, whether its box is drawn and how, whether it is hidden and how,
@@ -801,6 +802,15 @@ pub(crate) enum MaskKey {
         to: (i32, i32),
         width: u32,
     },
+    /// The top-left `width` by `height` of `key`'s mask, made for the
+    /// picture as shown, turned back the way the picture is stored — what a
+    /// label or a line laid out on a turned picture is painted through.
+    Turned {
+        key: Box<MaskKey>,
+        width: u32,
+        height: u32,
+        orientation: Orientation,
+    },
 }
 
 /// What a mask is made of: a label in the overlay's font, at the size its
@@ -821,6 +831,33 @@ pub(crate) fn rasterize(
             to,
             width,
         } => Ok(Some(stroke_mask(rect, from, to, width))),
+        MaskKey::Turned {
+            key,
+            width,
+            height,
+            orientation,
+        } => Ok(rasterize(key, font)?.map(|shown| turned(&shown, *width, *height, *orientation))),
+    }
+}
+
+/// The top-left `width` by `height` of `shown`, a mask made for the
+/// picture as shown, as it lies in the picture as stored.
+fn turned(shown: &TextMask, width: u32, height: u32, orientation: Orientation) -> TextMask {
+    let (width, height) = (width.min(shown.width), height.min(shown.height));
+    let stored = orientation.display_size(width, height);
+    let [xx, xy, x0, yx, yy, y0] = orientation.sampling(stored.0, stored.1);
+    let mut coverage = vec![0; (stored.0 * stored.1) as usize];
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let (sx, sy) = (xx * x + xy * y + x0, yx * x + yy * y + y0);
+            coverage[(sy as u32 * stored.0 + sx as u32) as usize] =
+                shown.coverage[(y as u32 * shown.width + x as u32) as usize];
+        }
+    }
+    TextMask {
+        width: stored.0,
+        height: stored.1,
+        coverage,
     }
 }
 
@@ -1027,6 +1064,100 @@ pub(crate) fn marks(
     marks
 }
 
+/// [`marks`] for a picture `canvas` describes as stored and shown turned
+/// as `orientation` says: laid out on the picture as shown — so that a
+/// label is the right way up and above its box as the picture is seen, a
+/// line's label likewise — and each mark then put where it lies in the
+/// picture as stored, its mask turned with it. The boxes, zones and lines
+/// are all of the picture as stored, as everything a pipeline says of a
+/// picture is.
+pub(crate) fn marks_turned(
+    canvas: Canvas,
+    orientation: Orientation,
+    options: &DetectionOverlayOptions,
+    detections: Option<&Detections>,
+    analytics: Option<&Analytics>,
+    mask: &mut dyn FnMut(&MaskKey) -> Option<(u32, u32)>,
+) -> Vec<Mark> {
+    if orientation.is_upright() {
+        return marks(canvas, options, detections, analytics, mask);
+    }
+    let (width, height) = orientation.display_size(canvas.width, canvas.height);
+    let shown = Canvas {
+        width,
+        height,
+        block: canvas.block,
+    };
+    let detections = detections.map(|detections| {
+        let mut turned = detections.clone();
+        for item in &mut turned.items {
+            [item.x, item.y, item.width, item.height] =
+                orientation.to_display([item.x, item.y, item.width, item.height]);
+        }
+        turned
+    });
+    let point = |(x, y): (f32, f32)| {
+        let [x, y, ..] = orientation.to_display([x, y, 0.0, 0.0]);
+        (x, y)
+    };
+    let analytics = analytics.map(|analytics| {
+        let mut turned = analytics.clone();
+        for zone in &mut turned.zones {
+            zone.corners = zone.corners.iter().copied().map(point).collect();
+        }
+        for line in &mut turned.lines {
+            (line.start, line.end) = (point(line.start), point(line.end));
+        }
+        turned
+    });
+    let laid = marks(
+        shown,
+        options,
+        detections.as_ref(),
+        analytics.as_ref(),
+        mask,
+    );
+    // Where each shown pixel is stored: a rectangle's two far corners
+    // there, and the rectangle between them.
+    let [xx, xy, x0, yx, yy, y0] = orientation.sampling(canvas.width, canvas.height);
+    let stored = |x: u32, y: u32| {
+        let (x, y) = (x as i32, y as i32);
+        ((xx * x + xy * y + x0) as u32, (yx * x + yy * y + y0) as u32)
+    };
+    laid.into_iter()
+        .filter_map(|mark| {
+            let rect = mark.rect;
+            let a = stored(rect.x, rect.y);
+            let b = stored(rect.x + rect.width - 1, rect.y + rect.height - 1);
+            let placed = Rect {
+                x: a.0.min(b.0),
+                y: a.1.min(b.1),
+                width: a.0.abs_diff(b.0) + 1,
+                height: a.1.abs_diff(b.1) + 1,
+            };
+            let mask_key = match mark.mask {
+                None => None,
+                Some(key) => {
+                    let key = MaskKey::Turned {
+                        key: Box::new(key),
+                        width: rect.width,
+                        height: rect.height,
+                        orientation,
+                    };
+                    // Made now, as every mask a mark names is.
+                    mask(&key)?;
+                    Some(key)
+                }
+            };
+            Some(Mark {
+                rect: placed,
+                mask: mask_key,
+                ..mark
+            })
+        })
+        .collect()
+}
+
 /// A line `line_width` thick from `from` to `to`, in pixels, as pieces each
 /// painted through a mask of the rectangle around it.
 fn stroke(
@@ -1130,6 +1261,97 @@ mod tests {
         ]
         .iter()
         .find_map(|path| std::fs::read(path).ok())
+    }
+
+    /// `frame`, an NV12 or BGRA picture in system memory as shown, stored
+    /// as `orientation` turns it and carrying the display matrix that says
+    /// so — or, `back`, a stored one as it is shown, carrying none.
+    pub(super) fn turn(
+        frame: &ffmpeg_next::frame::Video,
+        orientation: Orientation,
+        back: bool,
+    ) -> ffmpeg_next::frame::Video {
+        use ffmpeg_next::{ffi, format::Pixel};
+        let (width, height) = orientation.display_size(frame.width(), frame.height());
+        let mut out = ffmpeg_next::frame::Video::new(frame.format(), width, height);
+        let stored = if back {
+            (frame.width(), frame.height())
+        } else {
+            (width, height)
+        };
+        let [xx, xy, x0, yx, yy, y0] = orientation.sampling(stored.0, stored.1);
+        let at = |x: u32, y: u32| {
+            let (x, y) = (x as i32, y as i32);
+            (
+                (xx * x + xy * y + x0) as usize,
+                (yx * x + yy * y + y0) as usize,
+            )
+        };
+        // Each shown pixel (x, y) and where it is stored; a 2x2 block's
+        // chroma goes where its top-left pixel does, in the block that is.
+        let shown = if back {
+            (width, height)
+        } else {
+            (frame.width(), frame.height())
+        };
+        let nv12 = frame.format() == Pixel::NV12;
+        let bytes = if nv12 { 1 } else { 4 };
+        for y in 0..shown.1 {
+            for x in 0..shown.0 {
+                let (sx, sy) = at(x, y);
+                let (from, to) = if back {
+                    ((sx, sy), (x as usize, y as usize))
+                } else {
+                    ((x as usize, y as usize), (sx, sy))
+                };
+                let (fs, ts) = (frame.stride(0), out.stride(0));
+                for byte in 0..bytes {
+                    out.data_mut(0)[to.1 * ts + to.0 * bytes + byte] =
+                        frame.data(0)[from.1 * fs + from.0 * bytes + byte];
+                }
+                if nv12 && x % 2 == 0 && y % 2 == 0 {
+                    let (fs, ts) = (frame.stride(1), out.stride(1));
+                    for byte in 0..2 {
+                        out.data_mut(1)[to.1 / 2 * ts + to.0 / 2 * 2 + byte] =
+                            frame.data(1)[from.1 / 2 * fs + from.0 / 2 * 2 + byte];
+                    }
+                }
+            }
+        }
+        out.set_pts(frame.pts());
+        if !back && !orientation.is_upright() {
+            let matrix = orientation.matrix();
+            // SAFETY: `out` is a live frame; FFmpeg allocates the 36 bytes
+            // asked for, which the matrix fills.
+            unsafe {
+                let data = ffi::av_frame_new_side_data(
+                    out.as_mut_ptr(),
+                    ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX,
+                    size_of_val(&matrix),
+                );
+                assert!(!data.is_null());
+                std::ptr::copy_nonoverlapping(
+                    matrix.as_ptr().cast::<u8>(),
+                    (*data).data,
+                    size_of_val(&matrix),
+                );
+            }
+        }
+        out
+    }
+
+    /// Every way a picture can be turned.
+    pub(super) fn every_orientation() -> Vec<Orientation> {
+        use crate::orientation::Rotation;
+        [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Half,
+            Rotation::Clockwise270,
+        ]
+        .into_iter()
+        .flat_map(|rotation| [false, true].map(|mirrored| Orientation { rotation, mirrored }))
+        .collect()
     }
 
     fn detection(x: f32, y: f32, width: f32, height: f32) -> Detection {
@@ -1284,6 +1506,133 @@ mod tests {
         assert!(text.x + text.width <= 100);
     }
 
+    /// On a picture stored on its side and shown a quarter turn clockwise,
+    /// a box's label is laid out as the picture is seen — above the box —
+    /// which in the picture as stored is beside it on the left, ending
+    /// where the box does at the bottom; its text is painted through its
+    /// mask turned, and the box itself is where it is stored.
+    #[test]
+    fn a_label_on_a_turned_picture_is_above_its_box_as_shown() {
+        use crate::orientation::Rotation;
+        let canvas = Canvas {
+            width: 200,
+            height: 320,
+            block: 2,
+        };
+        let options = DetectionOverlayOptions {
+            others: Treatment::boxes(BoxStyle {
+                label: Some(LabelStyle::new(16.0)),
+                ..BoxStyle::default()
+            }),
+            ..DetectionOverlayOptions::default()
+        };
+        let detections = Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("person")]),
+            vec![Detection::new(0, 0.9, 0.5, 0.25, 0.2, 0.5)],
+        );
+        let mut measure = |key: &MaskKey| match key {
+            MaskKey::Text { text, .. } => Some((text.len() as u32 * 8, 12)),
+            MaskKey::Stroke { rect, .. } => Some((rect.width, rect.height)),
+            MaskKey::Turned {
+                width,
+                height,
+                orientation,
+                ..
+            } => Some(orientation.display_size(*width, *height)),
+        };
+        let turned = Orientation::rotated(Rotation::Clockwise90);
+        let marks = marks_turned(
+            canvas,
+            turned,
+            &options,
+            Some(&detections),
+            None,
+            &mut measure,
+        );
+        let placed = canvas.place(&detections.items[0]).unwrap();
+        // The four edges, then the band, then the text.
+        assert_eq!(marks.len(), 6, "{marks:?}");
+        let [top, bottom, left, right] = [0, 1, 2, 3].map(|n| marks[n].rect);
+        let edges = [top, bottom, left, right];
+        let span = |pick: fn(&Rect) -> (u32, u32)| {
+            edges
+                .iter()
+                .map(pick)
+                .fold((u32::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)))
+        };
+        assert_eq!(
+            span(|r| (r.x, r.x + r.width)),
+            (placed.x, placed.x + placed.width)
+        );
+        assert_eq!(
+            span(|r| (r.y, r.y + r.height)),
+            (placed.y, placed.y + placed.height)
+        );
+        let (band, text) = (marks[4].rect, marks[5].rect);
+        assert_eq!(
+            band.x + band.width,
+            placed.x,
+            "beside the box: {band:?} {placed:?}"
+        );
+        assert_eq!(
+            band.y + band.height,
+            placed.y + placed.height,
+            "{band:?} {placed:?}"
+        );
+        // "person 90%" is 88 by 12 as laid out: 12 across and 88 down, stored.
+        assert_eq!((text.width, text.height), (12, 88));
+        assert!(matches!(
+            &marks[5].mask,
+            Some(MaskKey::Turned { width: 88, height: 12, orientation, .. }) if *orientation == turned
+        ));
+    }
+
+    /// A mask turned back the way a picture is stored puts each shown
+    /// pixel's coverage where that pixel is stored, for each of the eight
+    /// ways a picture can be turned, and keeps only the part asked for.
+    #[test]
+    fn a_turned_mask_lies_where_the_picture_is_stored() {
+        use crate::orientation::Rotation;
+        let shown = TextMask {
+            width: 5,
+            height: 3,
+            coverage: (0..15).collect(),
+        };
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Half,
+            Rotation::Clockwise270,
+        ] {
+            for mirrored in [false, true] {
+                let orientation = Orientation { rotation, mirrored };
+                // The left four columns of the five.
+                let stored = turned(&shown, 4, 3, orientation);
+                assert_eq!(
+                    (stored.width, stored.height),
+                    orientation.display_size(4, 3)
+                );
+                for y in 0..stored.height {
+                    for x in 0..stored.width {
+                        let [left, top, ..] = orientation.to_display([
+                            (x as f32 + 0.5) / stored.width as f32,
+                            (y as f32 + 0.5) / stored.height as f32,
+                            0.0,
+                            0.0,
+                        ]);
+                        let (sx, sy) = ((left * 4.0) as u32, (top * 3.0) as u32);
+                        assert_eq!(
+                            stored.coverage[(y * stored.width + x) as usize],
+                            shown.coverage[(sy * 5 + sx) as usize],
+                            "{orientation:?} at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// A label says what its style asks for, each part in its place, and
     /// nothing at all where it asks for none.
     #[test]
@@ -1360,6 +1709,7 @@ mod tests {
         let mut measure = |key: &MaskKey| match key {
             MaskKey::Text { text, .. } => Some((text.len() as u32 * 8, 12)),
             MaskKey::Stroke { rect, .. } => Some((rect.width, rect.height)),
+            MaskKey::Turned { .. } => None,
         };
         let marks = marks(
             canvas,
@@ -1687,6 +2037,7 @@ mod tests {
         let mut measure = |key: &MaskKey| match key {
             MaskKey::Text { text, .. } => Some((text.len() as u32 * 8, 12)),
             MaskKey::Stroke { rect, .. } => Some((rect.width, rect.height)),
+            MaskKey::Turned { .. } => None,
         };
         let mut analytics = watched();
         let drawn = marks(

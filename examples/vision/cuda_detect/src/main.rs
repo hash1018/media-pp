@@ -12,6 +12,10 @@
 //! class there instead of boxing it — `mosaic`, `blur` or `fill`, a mosaic
 //! where none is said — and may be given once for each class.
 //!
+//! A phone's portrait recording, stored on its side, is looked at and
+//! labelled the right way up, and recorded saying it is turned, as the
+//! file does.
+//!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26. The first run builds a TensorRT engine for the model
 //! and this GPU, which takes minutes; later runs load it from the cache in
@@ -54,7 +58,7 @@ mod example {
             AppSink, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtDetector, CudaOrtDetectorOptions, DetectionOverlayOptions, Detections,
-            FileDemuxer, FileMuxer, LabelStyle, RedactStyle, Treatment,
+            FileDemuxer, FileMuxer, LabelStyle, RedactStyle, TrackFormat, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -159,6 +163,9 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &video)?;
         let stream = source.best(media::Type::Video)?;
+        // A phone's portrait recording is stored on its side and says so;
+        // what is recorded says so too, so it is shown the same way up.
+        let orientation = stream.orientation()?;
         let seen = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&seen);
         let sink = AppSink::new("print", move |buf| {
@@ -233,7 +240,10 @@ mod example {
                     },
                 )?;
                 let mut muxer = FileMuxer::create(path)?;
-                let track = muxer.add_stream("video", &encoder)?;
+                let track = muxer.add_stream(
+                    "video",
+                    TrackFormat::from(&encoder).with_orientation(orientation),
+                )?;
                 let muxer_sink = muxer.open()?.take(track)?;
                 Some((overlay, encoder, muxer_sink))
             }

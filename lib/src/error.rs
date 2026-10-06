@@ -874,6 +874,10 @@ pub enum Error {
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg_next::Error),
 
+    /// A picture or stream is turned by other than quarter turns.
+    #[error(transparent)]
+    UnsupportedOrientation(#[from] crate::orientation::UnsupportedOrientation),
+
     /// An application-defined error message without a more specific category.
     #[error("{0}")]
     Other(String),

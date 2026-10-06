@@ -42,6 +42,10 @@
 //! `mosaic`, `blur` or `fill`, a mosaic where none is said — and may be
 //! given once for each class.
 //!
+//! A phone's portrait recording, stored on its side, is looked at and
+//! labelled the right way up, and recorded saying it is turned, as the
+//! file does.
+//!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26 — of the stock weights: the boxes are named with
 //! COCO's 80 classes, whatever the model says. Built with `ort-coreml`, on
@@ -85,8 +89,8 @@ mod example {
             ClassRule, DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale,
             LabelStyle, Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier,
             MetalOrtDetector, MetalOrtDetectorOptions, ObjectAnalytics, ObjectTracker,
-            OrtClassifierOptions, OrtDetectorOptions, OverlayParts, RedactStyle, TrackerOptions,
-            Treatment, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice,
+            OrtClassifierOptions, OrtDetectorOptions, OverlayParts, RedactStyle, TrackFormat,
+            TrackerOptions, Treatment, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice,
             VideoToolboxEncoder, VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
@@ -322,6 +326,9 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &video)?;
         let stream = source.best(media::Type::Video)?;
+        // A phone's portrait recording is stored on its side and says so;
+        // what is recorded says so too, so it is shown the same way up.
+        let orientation = stream.orientation()?;
         let seen = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&seen);
         let followed: Arc<Mutex<HashSet<u64>>> = Arc::default();
@@ -448,7 +455,10 @@ mod example {
                     },
                 )?;
                 let mut muxer = FileMuxer::create(path)?;
-                let track = muxer.add_stream("video", &encoder)?;
+                let track = muxer.add_stream(
+                    "video",
+                    TrackFormat::from(&encoder).with_orientation(orientation),
+                )?;
                 let muxer_sink = muxer.open()?.take(track)?;
                 Some((overlay, encoder, muxer_sink))
             }

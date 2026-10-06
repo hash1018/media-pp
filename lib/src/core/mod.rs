@@ -29,6 +29,7 @@ pub mod driver;
 pub mod element;
 pub(crate) mod frame_size;
 pub mod graph;
+pub mod orientation;
 pub mod pad;
 pub(crate) mod parking;
 pub mod pipeline;

@@ -2,6 +2,7 @@
 //! with what was found in it, without the picture leaving the GPU.
 
 #[cfg(feature = "ort-tensorrt")]
+use crate::orientation::Orientations;
 use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
 
@@ -194,6 +195,8 @@ struct Detecting {
     model: (u32, u32),
     /// Which pictures it looks at.
     interval: Interval,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
     /// How many pictures the tensor holds, and the model is run on at
     /// once.
     /// The model's input and output, which a run binds by name.
@@ -415,6 +418,7 @@ impl CudaOrtDetector {
             device_ctx,
             _hw_device_ctx: hw_device_ctx,
             interval,
+            orientations: Orientations::default(),
             max_batch,
             held: Vec::new(),
             context: None,
@@ -485,11 +489,13 @@ impl Detecting {
             CudaSurfaces::NV12_OR_BGRA,
         )?;
         let size = (frame.width(), frame.height());
-        let letterbox = Letterbox::new(size, self.model);
+        let orientation = self.orientations.of(frame, &self.pp_log);
+        let letterbox = Letterbox::shown(size, self.model, orientation);
         let fit = Fit {
             model: self.model,
             offset: letterbox.offset,
             scaled: letterbox.scaled,
+            orientation,
         };
         if surface.layout == ffmpeg::format::Pixel::NV12 {
             let source = Nv12Surface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?;

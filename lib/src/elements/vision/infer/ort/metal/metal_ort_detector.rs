@@ -2,6 +2,7 @@
 //! handed on with what was found in it, the picture fitted to the model on
 //! the GPU.
 
+use crate::orientation::Orientations;
 use std::{path::Path, sync::Arc};
 
 use ndarray::{Axis, Slice};
@@ -125,6 +126,8 @@ struct Detecting {
     /// go on in the same call.
     context: Option<Arc<Context>>,
     fitting: Fitting,
+    /// How each picture is turned to be shown.
+    orientations: Orientations,
     /// Each box's best class of a `[batch, 4 + classes, boxes]` output,
     /// found on the GPU.
     best: BestClass,
@@ -242,6 +245,7 @@ impl MetalOrtDetector {
             held: Vec::new(),
             context: None,
             fitting,
+            orientations: Orientations::default(),
             best: BestClass::new()?,
         })))
     }
@@ -266,10 +270,12 @@ struct Held {
 }
 
 /// How the whole of `picture` is fitted into input `slot` as Ultralytics
-/// trains on — scaled to fit, proportions kept, grey around it.
+/// trains on — turned the way it is shown, scaled to fit, proportions
+/// kept, grey around it.
 fn whole(picture: &Picture, letterbox: &Letterbox, slot: usize) -> Cut {
     Cut {
         crop: (0, 0, picture.size.0, picture.size.1),
+        orientation: letterbox.orientation,
         offset: letterbox.offset,
         scaled: letterbox.scaled,
         slot,
@@ -296,11 +302,12 @@ fn fit_whole(
 impl Detecting {
     /// `frame`, to be fitted, and how.
     fn look(
-        &self,
+        &mut self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<(Picture, Letterbox), OrtError> {
         let picture = Picture::of(frame)?;
-        let letterbox = Letterbox::new(picture.size, self.fitting.model);
+        let orientation = self.orientations.of(frame, &self.pp_log);
+        let letterbox = Letterbox::shown(picture.size, self.fitting.model, orientation);
         Ok((picture, letterbox))
     }
 

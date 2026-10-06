@@ -677,6 +677,84 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// A copied stream given an orientation comes out of the file saying
+    /// so — to the demuxer, and on every picture decoded from it — and one
+    /// given upright again says nothing: what a re-encoded portrait
+    /// recording needs to be shown the right way up.
+    #[test]
+    fn a_track_carries_the_orientation_it_is_given() {
+        use crate::elements::{FileDemuxer, SwDecoder};
+        use crate::orientation::{Orientation, Rotation};
+        use crate::pipeline::Pipeline;
+
+        let Some(source) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let turned = Orientation::rotated(Rotation::Clockwise90);
+        for (name, orientation) in [("turned", turned), ("upright", Orientation::UPRIGHT)] {
+            let path = std::env::temp_dir().join(format!("media-pp-orientation-{name}.mp4"));
+            let _ = std::fs::remove_file(&path);
+            let (demuxer, _) = FileDemuxer::open("demuxer", &source).expect("open the fixture");
+            let video = demuxer.best(ffmpeg::media::Type::Video).expect("video");
+            // Turned first, then set again: the last one given is the one kept.
+            let format = TrackFormat::from(&video)
+                .with_orientation(Orientation::rotated(Rotation::Half))
+                .with_orientation(orientation);
+            let mut muxer = FileMuxer::create(&path).expect("create");
+            let track = muxer.add_stream("video", format).expect("add");
+            let sink = muxer.open().expect("header").take(track).expect("track");
+            let index = video.index;
+            let (pipeline, ()) = Pipeline::new("remux", demuxer, move |source, context| {
+                let branch = context.branch().to(sink)?;
+                context.attach(source, index, branch)?;
+                Ok(())
+            })
+            .expect("wire");
+            pipeline.run().expect("run");
+            for event in pipeline.bus().iter() {
+                if matches!(event, crate::bus::BusEvent::Eos { .. }) {
+                    break;
+                }
+            }
+            pipeline.stop();
+
+            let (written, _) =
+                FileDemuxer::open("written", path.to_str().unwrap()).expect("reopen");
+            let stream = written.best(ffmpeg::media::Type::Video).expect("video");
+            assert_eq!(stream.orientation(), Ok(orientation), "{name}: the stream");
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let kept = seen.clone();
+            let decoder = SwDecoder::new("decoder", stream.parameters.clone()).expect("decoder");
+            let sink = crate::elements::AppSink::new("sink", move |buf| {
+                if let MediaBuffer::Video(frame) = &buf {
+                    kept.lock().unwrap().push(Orientation::of(frame));
+                }
+                Ok(())
+            });
+            let index = stream.index;
+            let (pipeline, ()) = Pipeline::new("decode", written, move |source, context| {
+                let branch = context.branch().pipe(decoder).to(sink)?;
+                context.attach(source, index, branch)?;
+                Ok(())
+            })
+            .expect("wire");
+            pipeline.run().expect("run");
+            for event in pipeline.bus().iter() {
+                if matches!(event, crate::bus::BusEvent::Finished) {
+                    break;
+                }
+            }
+            pipeline.stop();
+            let seen = seen.lock().unwrap();
+            assert!(!seen.is_empty(), "{name}: pictures were decoded");
+            assert!(
+                seen.iter().all(|read| *read == Ok(orientation)),
+                "{name}: every picture"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     /// Packets whose `dts` and `pts` differ, remuxed, still differ.
     ///
     /// A B-frame is coded from frames on both sides of it, so a container

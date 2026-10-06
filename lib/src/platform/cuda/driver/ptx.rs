@@ -1663,6 +1663,11 @@ BMDONE:
 /// `fit_nv12` is handed, the same `(Y', Cb, Cr, 1)` rows `nv12_to_bgra`
 /// reads; a BGRA one is averaged as it is.
 ///
+/// Both read the picture the way it is shown: `src_w` and `src_h` are its
+/// size turned, and each pixel of it turned is read from the stored pixel
+/// the six sampling numbers name — `x_of_x * x + x_of_y * y + x_0`, and so
+/// for y — which for a picture shown as stored are the pixel itself.
+///
 /// `best_class` reads what a YOLOv8 or YOLO11 model made of a batch where
 /// it is, on the device — `rows` (four, then a score per class) by `boxes`
 /// floats a picture — and writes each box as six floats: its centre, width
@@ -1693,6 +1698,12 @@ pub(super) const FIT_PTX: &str = r#"
     .param .u32 chroma_pitch,
     .param .u32 src_w,
     .param .u32 src_h,
+    .param .s32 x_of_x,
+    .param .s32 x_of_y,
+    .param .s32 x_0,
+    .param .s32 y_of_x,
+    .param .s32 y_of_y,
+    .param .s32 y_0,
     .param .f32 red_y,
     .param .f32 red_cb,
     .param .f32 red_cr,
@@ -1709,7 +1720,7 @@ pub(super) const FIT_PTX: &str = r#"
 {
     .reg .pred  %p<6>;
     .reg .b16   %rs<4>;
-    .reg .b32   %r<40>;
+    .reg .b32   %r<48>;
     .reg .f32   %f<32>;
     .reg .b64   %rd<16>;
 
@@ -1778,6 +1789,15 @@ pub(super) const FIT_PTX: &str = r#"
     ld.param.u64    %rd2, [chroma];
     ld.param.u32    %r26, [chroma_pitch];
 
+    // Where each pixel of the picture as shown is stored: x and y of it,
+    // each one of the shown x, the shown y, and a start.
+    ld.param.s32    %r40, [x_of_x];
+    ld.param.s32    %r41, [x_of_y];
+    ld.param.s32    %r42, [x_0];
+    ld.param.s32    %r43, [y_of_x];
+    ld.param.s32    %r44, [y_of_y];
+    ld.param.s32    %r45, [y_0];
+
     // Sums of Y', Cb and Cr, each source pixel taking the chroma sample it
     // shares with three others.
     mov.f32         %f1, 0f00000000;
@@ -1787,15 +1807,22 @@ pub(super) const FIT_PTX: &str = r#"
     mov.u32         %r30, %r24;
 FIT_NV12_ROW:
     mov.u32         %r31, %r21;
-    mul.lo.s32      %r27, %r30, %r25;
-    shr.u32         %r28, %r30, 1;
-    mul.lo.s32      %r29, %r28, %r26;
 FIT_NV12_PIXEL:
-    add.s32         %r32, %r27, %r31;
+    // The stored pixel (%r46, %r47) of shown pixel (%r31, %r30).
+    mul.lo.s32      %r46, %r40, %r31;
+    mad.lo.s32      %r46, %r41, %r30, %r46;
+    add.s32         %r46, %r46, %r42;
+    mul.lo.s32      %r47, %r43, %r31;
+    mad.lo.s32      %r47, %r44, %r30, %r47;
+    add.s32         %r47, %r47, %r45;
+    mul.lo.s32      %r27, %r47, %r25;
+    shr.u32         %r28, %r47, 1;
+    mul.lo.s32      %r29, %r28, %r26;
+    add.s32         %r32, %r27, %r46;
     cvt.u64.u32     %rd3, %r32;
     add.s64         %rd4, %rd1, %rd3;
     ld.global.u8    %rs1, [%rd4];
-    shr.u32         %r33, %r31, 1;
+    shr.u32         %r33, %r46, 1;
     shl.b32         %r33, %r33, 1;
     add.s32         %r33, %r29, %r33;
     cvt.u64.u32     %rd5, %r33;
@@ -1882,12 +1909,18 @@ FIT_NV12_DONE:
     .param .u64 src,
     .param .u32 src_pitch,
     .param .u32 src_w,
-    .param .u32 src_h
+    .param .u32 src_h,
+    .param .s32 x_of_x,
+    .param .s32 x_of_y,
+    .param .s32 x_0,
+    .param .s32 y_of_x,
+    .param .s32 y_of_y,
+    .param .s32 y_0
 )
 {
     .reg .pred  %p<6>;
     .reg .b16   %rs<4>;
-    .reg .b32   %r<40>;
+    .reg .b32   %r<48>;
     .reg .f32   %f<8>;
     .reg .b64   %rd<16>;
 
@@ -1948,6 +1981,12 @@ FIT_NV12_DONE:
 
     ld.param.u64    %rd1, [src];
     ld.param.u32    %r25, [src_pitch];
+    ld.param.s32    %r40, [x_of_x];
+    ld.param.s32    %r41, [x_of_y];
+    ld.param.s32    %r42, [x_0];
+    ld.param.s32    %r43, [y_of_x];
+    ld.param.s32    %r44, [y_of_y];
+    ld.param.s32    %r45, [y_0];
 
     // B, G, R in memory; summed as R, G, B.
     mov.f32         %f4, 0f00000000;
@@ -1957,9 +1996,17 @@ FIT_NV12_DONE:
     mov.u32         %r30, %r24;
 FIT_BGRA_ROW:
     mov.u32         %r31, %r21;
-    mul.lo.s32      %r27, %r30, %r25;
 FIT_BGRA_PIXEL:
-    shl.b32         %r26, %r31, 2;
+    // The stored pixel (%r46, %r47) of shown pixel (%r31, %r30), as
+    // `fit_nv12` finds it.
+    mul.lo.s32      %r46, %r40, %r31;
+    mad.lo.s32      %r46, %r41, %r30, %r46;
+    add.s32         %r46, %r46, %r42;
+    mul.lo.s32      %r47, %r43, %r31;
+    mad.lo.s32      %r47, %r44, %r30, %r47;
+    add.s32         %r47, %r47, %r45;
+    mul.lo.s32      %r27, %r47, %r25;
+    shl.b32         %r26, %r46, 2;
     add.s32         %r26, %r27, %r26;
     cvt.u64.u32     %rd2, %r26;
     add.s64         %rd3, %rd1, %rd2;

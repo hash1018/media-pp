@@ -13,6 +13,15 @@ use crate::buffer::MediaBuffer;
 /// height for pixels — which holds whatever the picture is scaled to
 /// afterwards.
 ///
+/// The box is of the picture as it is stored. A phone's portrait recording
+/// is stored on its side and shown turned — see [`Orientation`] — and a
+/// detector looks at it the right way up, but says where it found things
+/// in the stored picture, where every element after it works;
+/// [`Orientation::to_display`] puts a box where it is shown.
+///
+/// [`Orientation`]: crate::orientation::Orientation
+/// [`Orientation::to_display`]: crate::orientation::Orientation::to_display
+///
 /// Non-exhaustive, so that what later elements learn of an object can be
 /// added to it — which track it belongs to, what a second model says it is;
 /// make one with [`Detection::new`].

@@ -702,6 +702,7 @@ fn fitted_stripes(device: &crate::elements::CudaDevice, bgra: bool) -> Vec<f32> 
         model: (16, 16),
         offset: (0, 4),
         scaled: (16, 8),
+        orientation: crate::orientation::Orientation::UPRIGHT,
     };
     if bgra {
         let source = BgraSurface::from_frame(frame).expect("surface");
@@ -747,6 +748,103 @@ fn a_picture_is_fitted_from_every_pixel_it_is_shrunk_from() {
                     (value - expected).abs() < 0.01,
                     "bgra={bgra}, row {row}: {values:?}"
                 );
+            }
+        }
+    }
+}
+
+/// What the fitting kernels make of a picture of `size` as shown, given
+/// stored so that turned by `orientation` it shows `shown(x, y)` as luma —
+/// and grey chroma — or as BGRA: the red plane of a 16 by 16 input it is
+/// stretched across.
+#[cfg(feature = "ort-cuda")]
+fn fitted_turned(
+    device: &crate::elements::CudaDevice,
+    orientation: crate::orientation::Orientation,
+    size: (u32, u32),
+    bgra: bool,
+    shown: impl Fn(u32, u32) -> u8,
+) -> Vec<f32> {
+    // Where each stored pixel is shown, from where each shown one is stored.
+    let stored = orientation.display_size(size.0, size.1);
+    let [xx, xy, x0, yx, yy, y0] = orientation.sampling(stored.0, stored.1);
+    let mut at = vec![(0, 0); (stored.0 * stored.1) as usize];
+    for y in 0..size.1 as i32 {
+        for x in 0..size.0 as i32 {
+            let (sx, sy) = (xx * x + xy * y + x0, yx * x + yy * y + y0);
+            at[(sy * stored.0 as i32 + sx) as usize] = (x as u32, y as u32);
+        }
+    }
+    let value = |x: u32, y: u32| {
+        let (x, y) = at[(y * stored.0 + x) as usize];
+        shown(x, y)
+    };
+    let buf = if bgra {
+        cuda_bgra_surface(device, stored.0, stored.1, |x, y| {
+            let v = value(x, y);
+            [v, v, v, 255]
+        })
+    } else {
+        cuda_surface_with(device, stored.0, stored.1, value, 128)
+    }
+    .expect("uploaded");
+    let MediaBuffer::Video(frame) = &buf else {
+        panic!("a picture");
+    };
+    let driver = CudaDriver::retain_primary().expect("driver");
+    let kernels = driver.fit_kernels().expect("kernels");
+    let tensor = driver.batch_tensor(16, 16, 1).expect("tensor");
+    let fit = Fit {
+        model: (16, 16),
+        offset: (0, 0),
+        scaled: (16, 16),
+        orientation,
+    };
+    if bgra {
+        let source = BgraSurface::from_frame(frame).expect("surface");
+        driver
+            .fit_bgra(&kernels, &tensor, 0, fit, source, stored)
+            .expect("fits");
+    } else {
+        let colour = YuvToBgra::of(ffmpeg::color::Space::BT709, ffmpeg::color::Range::JPEG, 24);
+        let source = Nv12Surface::from_frame(frame).expect("surface");
+        driver
+            .fit_nv12(&kernels, &tensor, 0, fit, source, stored, &colour)
+            .expect("fits");
+    }
+    driver.synchronize().expect("ran");
+    let mut planes = vec![0.0; 3 * 16 * 16];
+    driver.download(&tensor, &mut planes).expect("copied down");
+    planes.truncate(16 * 16);
+    planes
+}
+
+/// A picture stored turned is fitted the way it is shown: whichever of
+/// the eight ways it is stored, the model is handed what the upright
+/// picture gives it, float for float — the sums are of whole numbers, so
+/// the order the pixels are read in changes nothing.
+#[cfg(feature = "ort-cuda")]
+#[test]
+fn a_turned_picture_is_fitted_the_way_it_is_shown() {
+    use crate::orientation::{Orientation, Rotation};
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    // Wider than tall, shrunk by three and by two, no two pixels alike.
+    let size = (48, 32);
+    let shown = |x: u32, y: u32| ((x * 5 + y * 11) % 251) as u8;
+    for bgra in [false, true] {
+        let upright = fitted_turned(&device, Orientation::UPRIGHT, size, bgra, shown);
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Half,
+            Rotation::Clockwise270,
+        ] {
+            for mirrored in [false, true] {
+                let orientation = Orientation { rotation, mirrored };
+                let turned = fitted_turned(&device, orientation, size, bgra, shown);
+                assert_eq!(turned, upright, "bgra={bgra}, {orientation:?}");
             }
         }
     }
