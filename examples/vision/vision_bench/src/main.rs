@@ -642,6 +642,7 @@ fn run() -> Result<()> {
         match args.backend {
             _ if args.model.is_none() => "-",
             Backend::Cpu => "fp32",
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             _ if args.fp32 => "fp32",
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Backend::Cuda => "fp32",

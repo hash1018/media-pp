@@ -7,3 +7,6 @@
 # Example recordings: each writes its result into the repo root
 /*.mp4
 /hls_output
+
+# Python bytecode from the benchmark scripts
+__pycache__/
