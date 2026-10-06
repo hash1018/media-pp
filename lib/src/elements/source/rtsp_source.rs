@@ -167,7 +167,8 @@ impl Source for Reading {
             .collect()
     }
 
-    /// The next packet the session delivers, on its stream's output.
+    /// The next packet the session delivers, on its stream's output, or
+    /// nothing for a stream it has no output for.
     ///
     /// Waits inside the read, which the connection's own timeout bounds —
     /// see [`RtspOptions::timeout`] — rather than through `wait`: a `Stop`
@@ -178,6 +179,12 @@ impl Source for Reading {
         match packet.read(&mut self.input) {
             Ok(()) => {
                 let index = packet.stream();
+                // A stream the session started after it was opened has no
+                // output to go on — `FileDemuxer` passes such a one over
+                // the same way.
+                if index >= self.contracts.len() {
+                    return Ok(Produced::Nothing);
+                }
                 // FFmpeg does not guarantee a demuxer fills
                 // `AVPacket::time_base`, and the packet contract is that
                 // one carries it — what a decoder downstream hands on to

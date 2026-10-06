@@ -1013,6 +1013,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A stream that appears after a file or RTSP session was opened is
+  passed over.** `FileDemuxer` and `RtspSource` have an output for each
+  stream there was when they opened; MPEG-TS and FLV, which have no header
+  to list their streams, may announce another later. A packet of one was
+  handed to an output that does not exist, which ended the source with
+  `ProduceError::NoOutput`, a whole recording or session lost to a stream
+  nothing could have been linked to. Its packets are now dropped.
+
 - **A panic on a pipeline's thread is told on the bus.** A queue's worker
   that panicked — an element behind it, or something it called — ended
   its thread with nothing posted, and so did the source's thread: the

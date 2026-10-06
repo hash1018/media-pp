@@ -532,11 +532,7 @@ impl Source for Demuxing {
             return self.read_backwards();
         }
         let next = self.ahead.pop_front().or_else(|| {
-            let (index, time_base, mut packet) = self
-                .input
-                .packets()
-                .next()
-                .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))?;
+            let (index, time_base, mut packet) = self.next_packet()?;
             self.stamp_lap(index, time_base, &mut packet);
             Some((index, time_base, packet))
         });
@@ -654,6 +650,21 @@ impl Demuxing {
     #[cfg(test)]
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
+    }
+
+    /// The next packet of a stream this source has an output for, with its
+    /// stream's number and time base; `None` at the end of the file.
+    ///
+    /// The outputs are the streams the file was opened with. A container
+    /// that has no header to list them — MPEG-TS, FLV — may announce
+    /// another one later, which has no output to go on: its packets are
+    /// passed over, as nothing linked to them would read them either.
+    fn next_packet(&mut self) -> Option<(usize, ffmpeg::Rational, ffmpeg::Packet)> {
+        let outputs = self.contracts.len();
+        self.input
+            .packets()
+            .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))
+            .find(|&(index, _, _)| index < outputs)
     }
 
     /// A packet read, stamped with its stream's time base, on its stream's
@@ -806,12 +817,7 @@ impl Demuxing {
         let nanos = ffmpeg::Rational::new(1, 1_000_000_000);
         let mut first = None;
         for _ in 0..READ_LIMIT {
-            let Some((index, time_base, mut packet)) = self
-                .input
-                .packets()
-                .next()
-                .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))
-            else {
+            let Some((index, time_base, mut packet)) = self.next_packet() else {
                 break;
             };
             // Read before `stamp_lap` moves it: where a seek landed is a
@@ -877,6 +883,7 @@ impl Demuxing {
             .streams()
             .best(ffmpeg::media::Type::Video)
             .map(|stream| stream.index())
+            .filter(|&index| index < self.contracts.len())
     }
 
     /// Seeks to the stretch before the one just read — see [`Backwards`].
@@ -957,12 +964,7 @@ impl Demuxing {
             self.start_stretch()?;
             return Ok(Produced::Nothing);
         }
-        let next = self.ahead.pop_front().or_else(|| {
-            self.input
-                .packets()
-                .next()
-                .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))
-        });
+        let next = self.ahead.pop_front().or_else(|| self.next_packet());
         let Some(backwards) = self.backwards.as_mut() else {
             return Ok(Produced::End);
         };
@@ -1747,6 +1749,36 @@ mod tests {
     /// basic contract on its own: every packet on a linked pad's stream
     /// arrives, and running off the end of the file delivers a final
     /// `Eos` rather than just stopping silently.
+    /// A stream the file announces after it was opened — as MPEG-TS and
+    /// FLV may — has no output, and its packets are passed over rather
+    /// than ending the source. Played here by forgetting the last stream's
+    /// output, as if it had not been there at the start.
+    #[test]
+    fn a_stream_with_no_output_is_passed_over() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+        let late = streams.len() - 1;
+        let mut read_late = 0;
+        while let Some((index, _, _)) = demuxer.0.inner_mut().next_packet() {
+            read_late += usize::from(index == late);
+        }
+        assert!(
+            late > 0 && read_late > 0,
+            "the fixture has a second stream, with packets"
+        );
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+        demuxer.0.inner_mut().contracts.truncate(late);
+        let mut read = 0;
+        while let Some((index, _, _)) = demuxer.0.inner_mut().next_packet() {
+            assert!(
+                index < late,
+                "a packet of stream {index}, which has no output"
+            );
+            read += 1;
+        }
+        assert!(read > 0, "the other streams are still read");
+    }
+
     #[test]
     fn run_delivers_every_packet_on_a_linked_pad_then_eos() {
         let Some(path) = try_test_video() else { return };
