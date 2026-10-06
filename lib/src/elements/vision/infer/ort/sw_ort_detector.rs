@@ -136,14 +136,10 @@ impl Detecting {
             frame.color_space(),
             frame.color_range(),
         );
-        if self
-            .fitting
-            .as_ref()
-            .is_none_or(|fitting| fitting.from != from)
-        {
-            self.fitting = Some(fitting(from, self.model)?);
-        }
-        let fitting = self.fitting.as_mut().expect("made above");
+        let fitting = match &mut self.fitting {
+            Some(fitting) if fitting.from == from => fitting,
+            slot => slot.insert(fitting(from, self.model)?),
+        };
         fitting
             .context
             .run(frame, &mut fitting.scaled)

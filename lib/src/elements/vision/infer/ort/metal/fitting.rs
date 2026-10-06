@@ -99,8 +99,7 @@ impl Fitting {
     /// The kernels, and `capacity` inputs of `model`'s size.
     pub(super) fn new(model: (u32, u32), capacity: usize) -> Result<Self, OrtError> {
         let gpu = MetalGpu::new()?;
-        let [nv12, bgra] = <[Kernel; 2]>::try_from(gpu.kernels(SHADER, &["fit_nv12", "fit_bgra"])?)
-            .unwrap_or_else(|_| unreachable!("two kernels for two names"));
+        let [nv12, bgra] = gpu.kernel_array(SHADER, ["fit_nv12", "fit_bgra"])?;
         let capacity = capacity.max(1);
         let tensor = gpu.shared_buffer(capacity * Self::floats(model) * size_of::<f32>())?;
         Ok(Self {

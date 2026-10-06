@@ -248,7 +248,7 @@ impl Gpus {
                 .cuda
                 .looks
                 .as_mut()
-                .expect("made with the source")
+                .ok_or("no filters on the GPU for this picture")?
                 .follow(tracker, source, MIN_PSR, LOOK_DOUBT)
                 .map_err(|error| error.to_string()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -256,7 +256,7 @@ impl Gpus {
                 .metal
                 .looks
                 .as_mut()
-                .expect("made with the source")
+                .ok_or("no filters on the GPU for this picture")?
                 .follow(tracker, source, MIN_PSR, LOOK_DOUBT)
                 .map_err(|error| error.to_string()),
         }
@@ -276,7 +276,7 @@ impl Gpus {
                 .cuda
                 .looks
                 .as_mut()
-                .expect("made with the source")
+                .ok_or("no filters on the GPU for this picture")?
                 .detected(source, matched, alive)
                 .map_err(|error| error.to_string()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -284,7 +284,7 @@ impl Gpus {
                 .metal
                 .looks
                 .as_mut()
-                .expect("made with the source")
+                .ok_or("no filters on the GPU for this picture")?
                 .detected(source, matched, alive)
                 .map_err(|error| error.to_string()),
         }
@@ -433,10 +433,17 @@ impl Filter for Tracking {
             .metadata()
             .and_then(|metadata| metadata.get::<Detections>())
             .cloned();
-        if found.is_none() && stream.last.is_none() {
-            out.push(buf);
-            return Ok(());
-        }
+        // What this picture carries, or, on one a detector let by, which
+        // detector the expected objects are put on it as; before any
+        // detection there is nothing to expect, and it goes on as it came.
+        let found = match (found, &stream.last) {
+            (Some(found), _) => Ok(found),
+            (None, Some(last)) => Err(last.clone()),
+            (None, None) => {
+                out.push(buf);
+                return Ok(());
+            }
+        };
 
         stream.tracker.advance(steps);
         let gpu_source = if self.options.visual {
@@ -480,36 +487,37 @@ impl Filter for Tracking {
             None => expected,
         };
 
-        let Some(mut found) = found else {
-            let Some(Origin { detector, labels }) = stream.last.clone() else {
-                unreachable!("returned above without one");
-            };
-            let items = expected
-                .into_iter()
-                .filter_map(|expected| {
-                    let [x, y, w, h] = expected.tlwh;
-                    let (left, top) = ((x / width).max(0.0), (y / height).max(0.0));
-                    let (right, bottom) = (((x + w) / width).min(1.0), ((y + h) / height).min(1.0));
-                    (right > left && bottom > top).then(|| Detection {
-                        track_id: Some(expected.id),
-                        ..Detection::new(
-                            expected.class_id,
-                            expected.score,
-                            left as f32,
-                            top as f32,
-                            (right - left) as f32,
-                            (bottom - top) as f32,
-                        )
+        let mut found = match found {
+            Ok(found) => found,
+            Err(Origin { detector, labels }) => {
+                let items = expected
+                    .into_iter()
+                    .filter_map(|expected| {
+                        let [x, y, w, h] = expected.tlwh;
+                        let (left, top) = ((x / width).max(0.0), (y / height).max(0.0));
+                        let (right, bottom) =
+                            (((x + w) / width).min(1.0), ((y + h) / height).min(1.0));
+                        (right > left && bottom > top).then(|| Detection {
+                            track_id: Some(expected.id),
+                            ..Detection::new(
+                                expected.class_id,
+                                expected.score,
+                                left as f32,
+                                top as f32,
+                                (right - left) as f32,
+                                (bottom - top) as f32,
+                            )
+                        })
                     })
-                })
-                .collect();
-            let expected = Detections {
-                predicted: true,
-                ..Detections::new(detector, labels, items)
-            };
-            drop(pixels);
-            out.push(expected.attach_to(buf));
-            return Ok(());
+                    .collect();
+                let expected = Detections {
+                    predicted: true,
+                    ..Detections::new(detector, labels, items)
+                };
+                drop(pixels);
+                out.push(expected.attach_to(buf));
+                return Ok(());
+            }
         };
 
         let seen: Vec<Seen> = found

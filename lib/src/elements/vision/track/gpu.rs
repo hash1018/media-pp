@@ -172,11 +172,19 @@ impl<D: DcfDevice> GpuLooks<D> {
             let [x, y, w, h] = object.tlwh;
             let centre = (x + w / 2.0, y + h / 2.0);
             let (ww, wh) = window_of(size);
-            let (scale, [peak_x, peak_y, _, psr]) = SCALES
-                .iter()
-                .zip(&peaks[n * SCALES.len()..(n + 1) * SCALES.len()])
-                .max_by(|a, b| a.1[2].total_cmp(&b.1[2]))
-                .expect("three scales");
+            // A peak for each scale it was looked at; where the device gave
+            // fewer, the object goes on by its motion.
+            let Some((scale, [peak_x, peak_y, _, psr])) = peaks
+                .get(n * SCALES.len()..(n + 1) * SCALES.len())
+                .and_then(|found| {
+                    SCALES
+                        .iter()
+                        .zip(found)
+                        .max_by(|a, b| a.1[2].total_cmp(&b.1[2]))
+                })
+            else {
+                continue;
+            };
             if *psr < min_psr {
                 continue;
             }

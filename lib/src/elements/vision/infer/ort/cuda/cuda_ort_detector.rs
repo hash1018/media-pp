@@ -573,10 +573,10 @@ impl Detecting {
             // `[batch, 4 + classes, boxes]`.
             [batch, rows, boxes] if batch == pictures && boxes != 6 && rows > 4 => {
                 let room = self.max_batch * boxes * 6;
-                if self.best.as_ref().is_none_or(|best| best.floats() < room) {
-                    self.best = Some(self.driver.buffer(room)?);
-                }
-                let best = self.best.as_ref().expect("made above");
+                let best = match &mut self.best {
+                    Some(best) if best.floats() >= room => best,
+                    slot => slot.insert(self.driver.buffer(room)?),
+                };
                 // SAFETY: `pointer` is the run's output on this device, of
                 // `shape`'s floats, written by a run that has finished —
                 // `synchronize_outputs` — and kept by `outputs` until the

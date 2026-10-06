@@ -313,11 +313,18 @@ impl Overlaying {
         );
         let mut copy = frame.clone();
         for mark in marks {
-            let mask = mark
-                .mask
-                .as_ref()
-                .and_then(|key| self.masks.get(key))
-                .and_then(Option::as_ref);
+            // A mark with a mask is drawn through it or not at all: drawn
+            // without, a label was a solid block of the box's colour.
+            let mask = match &mark.mask {
+                None => None,
+                Some(key) => match self.masks.get(key).and_then(Option::as_ref) {
+                    Some(mask) => Some(mask),
+                    None => {
+                        pp_error!(self, "{key:?} not drawn: its mask is gone from the cache");
+                        continue;
+                    }
+                },
+            };
             // A mask is read row by row from the rectangle's top-left: the
             // rectangle is never wider than it, so its stride is the mask's.
             let mask = mask.map(|mask| (mask.coverage.as_slice(), mask.width as usize));

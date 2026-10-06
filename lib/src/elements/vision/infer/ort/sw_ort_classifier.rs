@@ -134,18 +134,16 @@ impl Classifying {
             frame.color_space(),
             frame.color_range(),
         );
-        if self
-            .converting
-            .as_ref()
-            .is_none_or(|converting| converting.from != from)
-        {
-            self.converting = Some(Converting {
+        // Taken out and put back, so that what is returned borrows only the
+        // slot it is put in.
+        let converting = match self.converting.take() {
+            Some(converting) if converting.from == from => self.converting.insert(converting),
+            _ => self.converting.insert(Converting {
                 from,
                 context: to_rgb24(from, (from.1, from.2))?,
                 rgb: ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, from.1, from.2),
-            });
-        }
-        let converting = self.converting.as_mut().expect("made above");
+            }),
+        };
         converting
             .context
             .run(frame, &mut converting.rgb)

@@ -33,10 +33,7 @@ unsafe impl Send for BestClass {}
 impl BestClass {
     pub(super) fn new() -> Result<Self, OrtError> {
         let gpu = MetalGpu::new()?;
-        let kernel = gpu
-            .kernels(SHADER, &["best_class"])?
-            .pop()
-            .unwrap_or_else(|| unreachable!("one kernel for one name"));
+        let [kernel] = gpu.kernel_array(SHADER, ["best_class"])?;
         Ok(Self {
             gpu,
             kernel,
@@ -52,10 +49,10 @@ impl BestClass {
         floats: usize,
     ) -> Result<Buffer, OrtError> {
         let bytes = floats * size_of::<f32>();
-        if buffer.as_ref().is_none_or(|held| held.length() < bytes) {
-            *buffer = Some(gpu.shared_buffer(bytes)?);
+        match buffer {
+            Some(held) if held.length() >= bytes => Ok(held.clone()),
+            slot => Ok(slot.insert(gpu.shared_buffer(bytes)?).clone()),
         }
-        Ok(buffer.clone().expect("made above"))
     }
 
     /// Each box of `output` — `pictures` outputs of `rows` (four, then a

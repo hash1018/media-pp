@@ -99,6 +99,21 @@ impl MetalGpu {
 
     /// Compiles `source` and each of `kernels` in it into a pipeline, in the
     /// order they are named.
+    /// [`Self::kernels`] for a fixed set of names, one kernel each, as an
+    /// array to take apart.
+    pub(crate) fn kernel_array<const N: usize>(
+        &self,
+        source: &str,
+        names: [&str; N],
+    ) -> Result<[Kernel; N], MetalError> {
+        self.kernels(source, &names)?
+            .try_into()
+            .map_err(|made: Vec<Kernel>| MetalError::Compile {
+                kernel: "(library)".into(),
+                reason: format!("{N} kernels asked for, {} made", made.len()),
+            })
+    }
+
     pub(crate) fn kernels(
         &self,
         source: &str,

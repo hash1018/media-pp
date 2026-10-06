@@ -63,11 +63,9 @@ pub(crate) fn decode(
     letterbox: &Letterbox,
     options: &OrtDetectorOptions,
 ) -> Result<Vec<Detection>, OrtDetectorError> {
-    Ok(
-        decode_batch(output, std::slice::from_ref(letterbox), options)?
-            .pop()
-            .expect("one picture"),
-    )
+    decode_batch(output, std::slice::from_ref(letterbox), options)?
+        .pop()
+        .ok_or_else(|| OrtDetectorError::UnsupportedModel("its output holds no picture".into()))
 }
 
 /// [`decode`] for a batch: the model's output for as many pictures as

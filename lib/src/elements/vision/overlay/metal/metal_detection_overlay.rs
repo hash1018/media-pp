@@ -169,11 +169,10 @@ impl MetalDetectionOverlay {
             .map(|style| load_font(style.font_data.clone(), style.size))
             .transpose()?;
         let gpu = MetalGpu::new()?;
-        let [copy_nv12, copy_bgra, paint_nv12, paint_bgra] = <[Kernel; 4]>::try_from(gpu.kernels(
+        let [copy_nv12, copy_bgra, paint_nv12, paint_bgra] = gpu.kernel_array(
             SHADER,
-            &["copy_nv12", "copy_bgra", "paint_nv12", "paint_bgra"],
-        )?)
-        .unwrap_or_else(|_| unreachable!("four kernels for four names"));
+            ["copy_nv12", "copy_bgra", "paint_nv12", "paint_bgra"],
+        )?;
         let solid = gpu.texture(
             MTLPixelFormat::R8Unorm,
             1,
@@ -359,7 +358,9 @@ impl Overlaying {
             &mut |key| self.mask(key),
         );
         let mut destination = self.frame(layout, width, height)?;
-        let to = PixelBuffer::of_frame(&destination).expect("a frame of this element's own pool");
+        let to = PixelBuffer::of_frame(&destination).ok_or(
+            MetalDetectionOverlayError::MissingPixelBuffer("a frame of this element's own pool"),
+        )?;
 
         // Every texture made before anything is encoded, so a failure leaves
         // no pass half written; each lives until the pass has finished.
@@ -412,11 +413,18 @@ impl Overlaying {
                 [stroke.color.red, stroke.color.green, stroke.color.blue]
                     .map(|value| f32::from(value) / 255.0)
             };
-            let mask = stroke
-                .mask
-                .as_ref()
-                .and_then(|key| self.masks.get(key))
-                .and_then(Option::as_ref);
+            // A stroke with a mask is drawn through it or not at all: drawn
+            // without, a label was a solid block of the box's colour.
+            let mask = match &stroke.mask {
+                None => None,
+                Some(key) => match self.masks.get(key).and_then(Option::as_ref) {
+                    Some(mask) => Some(mask),
+                    None => {
+                        pp_error!(self, "{key:?} not drawn: its mask is gone from the cache");
+                        continue;
+                    }
+                },
+            };
             let bound: Vec<&Texture> = targets
                 .iter()
                 .chain(std::iter::once(mask.unwrap_or(&self.solid)))

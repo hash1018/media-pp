@@ -126,11 +126,19 @@ fn centre_of(tlwh: [f64; 4]) -> (f64, f64) {
 /// through it and its neighbours either way, and its peak-to-sidelobe
 /// ratio.
 fn peak(response: &[f32]) -> ((f32, f32), f32, f32) {
-    let (index, &top) = response
+    // A response is `SIZE` by `SIZE`; anything less is no answer, and a
+    // peak-to-sidelobe ratio of 0 is sure of nothing.
+    let nothing = ((0.0, 0.0), 0.0, 0.0);
+    if response.len() < SIZE * SIZE {
+        return nothing;
+    }
+    let Some((index, &top)) = response
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.total_cmp(b.1))
-        .expect("a response");
+    else {
+        return nothing;
+    };
     let (px, py) = ((index % SIZE) as isize, (index / SIZE) as isize);
     let at = |x: isize, y: isize| {
         response

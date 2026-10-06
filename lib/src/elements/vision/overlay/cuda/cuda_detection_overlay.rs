@@ -366,11 +366,13 @@ impl Overlaying {
                 self.fill(surface, mark.rect, mark.color)?;
                 continue;
             };
-            let mask = self
-                .masks
-                .get(key)
-                .and_then(Option::as_ref)
-                .expect("made while the marks were");
+            // Placed only where its mask was made, and the cache is emptied
+            // only between pictures; were it missing all the same, the mark
+            // is left out rather than the thread panicking.
+            let Some(mask) = self.masks.get(key).and_then(Option::as_ref) else {
+                pp_error!(self, "{key:?} not drawn: its mask is gone from the cache");
+                continue;
+            };
             let area = mark.rect;
             match surface {
                 Surface::Nv12(nv12) => self.driver.blend_mask_nv12(
