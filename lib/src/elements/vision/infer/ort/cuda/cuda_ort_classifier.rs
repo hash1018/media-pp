@@ -38,9 +38,12 @@ use super::runtime::{self, CudaRuntime};
 
 /// The batch TensorRT builds a classifier's engine to be quickest at: a
 /// picture has a few objects to classify at once, seldom the most there is
-/// room for. Every batch from 1 to the most runs on the one engine.
+/// room for. Every batch from 1 to the most runs on the one engine. On an
+/// RTX 3050, MobileNetV2's engine built for 2 ran one to three objects
+/// 2–10% faster than one built for 8, and eight 6% slower; a pipeline
+/// classifying every object on every picture went 1% faster.
 #[cfg(feature = "ort-tensorrt")]
-const TENSORRT_OPT_BATCH: usize = 8;
+const TENSORRT_OPT_BATCH: usize = 2;
 
 /// The most objects classified in one run of a model that takes any
 /// number at once.
