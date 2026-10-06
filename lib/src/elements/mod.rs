@@ -294,11 +294,11 @@ pub use source::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};
 #[cfg(feature = "ort-tensorrt")]
 pub use vision::UseTensorRtPolicy;
 pub use vision::{
-    Analytics, AnalyticsOptions, BoxColors, COCO_CLASS_LABELS, Classification, Crossing, Detection,
-    DetectionOverlayOptions, Detections, LabelStyle, Line, LineCount, ObjectAnalytics,
-    ObjectAnalyticsError, ObjectTracker, OverlayParts, RedactStyle, Redaction,
-    StreamAnalyticsOptions, SwDetectionOverlay, SwDetectionOverlayError, TrackerOptions, Zone,
-    ZoneCount,
+    Analytics, AnalyticsOptions, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassId, ClassRule,
+    Classification, Crossing, Detection, DetectionOverlayOptions, DetectionOverlayOptionsError,
+    Detections, Hiding, LabelStyle, Line, LineCount, ObjectAnalytics, ObjectAnalyticsError,
+    ObjectTracker, OverlayParts, RedactStyle, StreamAnalyticsOptions, SwDetectionOverlay,
+    SwDetectionOverlayError, TrackerOptions, Treatment, Zone, ZoneCount,
 };
 pub use vision::{
     BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,

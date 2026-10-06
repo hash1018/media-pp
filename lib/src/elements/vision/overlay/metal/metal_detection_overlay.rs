@@ -8,7 +8,7 @@ use ffmpeg_next::{self as ffmpeg, ffi};
 use objc2_metal::{MTLPixelFormat, MTLTexture, MTLTextureUsage};
 use thiserror::Error as ThisError;
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{
@@ -29,7 +29,8 @@ use crate::{
 };
 
 use super::super::{
-    Canvas, DetectionOverlayOptions, LABEL_CACHE, MaskKey, Rect, bt709_limited, marks, rasterize,
+    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, LABEL_CACHE, MaskKey, Rect,
+    bt709_limited, marks, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
@@ -68,13 +69,13 @@ pub enum MetalDetectionOverlayError {
     /// Metal refused a kernel, a texture or a pass.
     #[error(transparent)]
     Metal(#[from] MetalError),
-    /// The label size is not a positive number of pixels.
-    #[error("label size {0} is not a positive number of pixels")]
-    LabelSize(f32),
+    /// Options it cannot be made of.
+    #[error(transparent)]
+    Options(#[from] DetectionOverlayOptionsError),
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
-    /// [`DetectionOverlayOptions::redact`] was given: hiding what was found
+    /// A [`Treatment`](super::super::Treatment) hides: hiding what was found
     /// is drawn by `SwDetectionOverlay` and `CudaDetectionOverlay` so far,
     /// not yet on Metal.
     #[error("MetalDetectionOverlay does not hide what was found yet")]
@@ -84,7 +85,7 @@ pub enum MetalDetectionOverlayError {
 impl From<TextFontError> for MetalDetectionOverlayError {
     fn from(error: TextFontError) -> Self {
         match error {
-            TextFontError::Size(size) => Self::LabelSize(size),
+            TextFontError::Size(size) => DetectionOverlayOptionsError::LabelSize(size).into(),
             TextFontError::Font(_) => Self::LabelFont,
         }
     }
@@ -92,7 +93,8 @@ impl From<TextFontError> for MetalDetectionOverlayError {
 
 /// Draws the [`Detections`] each VideoToolbox picture carries onto a copy
 /// of it, on the GPU with Metal — a box around each object, and with
-/// [`DetectionOverlayOptions::labels`] its class and score above it — and
+/// [`BoxStyle::label`](super::super::BoxStyle::label) its class and score
+/// above it — and
 /// hands the copy on, carrying the same `Detections`: what
 /// [`SwDetectionOverlay`](super::super::SwDetectionOverlay) does in system
 /// memory, so that a detector's pictures go on to an encoder, a renderer or
@@ -132,6 +134,9 @@ struct Overlaying {
     /// pieces of zones and lines by where they are; `None` for one with
     /// nothing to draw.
     masks: HashMap<MaskKey, Option<Texture>>,
+    /// Whether it has said that a rule names a class the detections
+    /// carry no names for.
+    warned_names: bool,
     gpu: MetalGpu,
     kernels: Kernels,
     /// What a solid paint binds where a label's mask goes: it is not read,
@@ -158,9 +163,10 @@ impl MetalDetectionOverlay {
     ///
     /// # Errors
     ///
-    /// The label font or size where `options.labels` gives one that cannot
-    /// be drawn with, and Metal's where there is no GPU or a kernel will
-    /// not compile.
+    /// Options it cannot be made of — a label with no font, a class named
+    /// twice — a font that cannot be read, a rule that hides, which it
+    /// cannot yet, and Metal's where there is no GPU or a kernel will not
+    /// compile.
     pub fn new(
         name: impl Into<String>,
         device: &VideoToolboxDevice,
@@ -169,14 +175,16 @@ impl MetalDetectionOverlay {
         let name: Arc<str> = name.into().into();
         // Refused rather than ignored: a picture handed on unhidden where it
         // was asked to be hidden would show what it was meant not to.
-        if options.redact.is_some() {
+        options.check()?;
+        if options.hides_any() {
             return Err(MetalDetectionOverlayError::RedactionUnsupported);
         }
         let pp_log = element_pp_log(ElementType::MetalDetectionOverlay, &name, None);
+        // Read once at any size: each label is rasterized at its own.
         let font = options
-            .labels
+            .font
             .as_ref()
-            .map(|style| load_font(style.font_data.clone(), style.size))
+            .map(|font| load_font(font.clone(), 16.0))
             .transpose()?;
         let gpu = MetalGpu::new()?;
         let [copy_nv12, copy_bgra, paint_nv12, paint_bgra] = gpu.kernel_array(
@@ -193,9 +201,9 @@ impl MetalDetectionOverlay {
         write_texture(&solid, &[255], 1, 1, 1);
         pp_info!(
             pp_log: &pp_log,
-            "opened: NV12 or BGRA, line_width={}, min_score={}, labels={}",
-            options.line_width,
-            options.min_score,
+            "opened: NV12 or BGRA, {} rules, others {:?}, font={}",
+            options.rules.len(),
+            options.others,
             font.is_some()
         );
         Ok(Self(FilterStage::new(Overlaying {
@@ -204,6 +212,7 @@ impl MetalDetectionOverlay {
             options,
             font,
             masks: HashMap::new(),
+            warned_names: false,
             gpu,
             kernels: Kernels {
                 copy_nv12,
@@ -243,11 +252,7 @@ impl Overlaying {
     /// rasterizing and uploading it where it is not cached yet.
     fn mask(&mut self, key: &MaskKey) -> Option<(u32, u32)> {
         if !self.masks.contains_key(key) {
-            let font = self
-                .font
-                .as_ref()
-                .zip(self.options.labels.as_ref().map(|style| style.size));
-            let mask = match rasterize(key, font) {
+            let mask = match rasterize(key, self.font.as_ref()) {
                 Ok(Some(raster)) => self
                     .gpu
                     .texture(
@@ -360,13 +365,13 @@ impl Overlaying {
         if self.masks.len() >= LABEL_CACHE {
             self.masks.clear();
         }
-        let strokes = marks(
-            canvas,
-            self.options.style(),
-            detections,
-            analytics,
-            &mut |key| self.mask(key),
-        );
+        // The options out of `self` while the marks are placed, as placing
+        // them makes masks through `self`; nothing returns in between.
+        let options = std::mem::take(&mut self.options);
+        let strokes = marks(canvas, &options, detections, analytics, &mut |key| {
+            self.mask(key)
+        });
+        self.options = options;
         let mut destination = self.frame(layout, width, height)?;
         let to = PixelBuffer::of_frame(&destination).ok_or(
             MetalDetectionOverlayError::MissingPixelBuffer("a frame of this element's own pool"),
@@ -504,7 +509,17 @@ impl Filter for Overlaying {
         let analytics = metadata
             .as_deref()
             .and_then(|metadata| metadata.get::<Analytics>());
-        if !self.options.style().draws(detections, analytics) {
+        if let Some(detections) = detections
+            && !self.warned_names
+            && self.options.names_unmatched(detections)
+        {
+            pp_warn!(
+                self,
+                "a rule names a class, and the detections carry no class names: it matches nothing"
+            );
+            self.warned_names = true;
+        }
+        if !self.options.draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
             return Ok(());
@@ -523,7 +538,9 @@ impl Filter for Overlaying {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::{BoxColors, LabelStyle, OverlayParts, tests::system_font};
+    use super::super::super::{
+        BoxColors, BoxStyle, LabelStyle, OverlayParts, Treatment, tests::system_font,
+    };
     use super::*;
     use crate::buffer::Metadata;
     use crate::color::Color;
@@ -588,7 +605,10 @@ mod tests {
         };
         let color = Color::new(255, 0, 0);
         let options = DetectionOverlayOptions {
-            colors: BoxColors::One(color),
+            others: Treatment::boxes(BoxStyle {
+                color: BoxColors::One(color),
+                ..BoxStyle::default()
+            }),
             ..DetectionOverlayOptions::default()
         };
         for format in FORMATS {
@@ -710,10 +730,11 @@ mod tests {
         };
         let color = Color::new(255, 196, 0);
         let options = DetectionOverlayOptions {
-            colors: BoxColors::One(color),
-            labels: Some(LabelStyle {
-                size: 12.0,
-                ..LabelStyle::new(font)
+            font: Some(font),
+            others: Treatment::boxes(BoxStyle {
+                color: BoxColors::One(color),
+                label: Some(LabelStyle::new(12.0)),
+                ..BoxStyle::default()
             }),
             ..DetectionOverlayOptions::default()
         };
@@ -778,8 +799,10 @@ mod tests {
             return;
         };
         let options = DetectionOverlayOptions {
-            line_width: 4,
-            parts: OverlayParts::all(),
+            parts: OverlayParts {
+                line_width: 4,
+                ..OverlayParts::all()
+            },
             ..DetectionOverlayOptions::default()
         };
         let analytics: Analytics = super::super::super::tests::watched();

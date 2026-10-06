@@ -48,10 +48,10 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            AppSink, COCO_CLASS_LABELS, CudaCodec, CudaDecoder, CudaDetectionOverlay, CudaDevice,
-            CudaEncoder, CudaEncoderOptions, CudaFrameFormat, CudaOrtDetector,
+            AppSink, BoxStyle, COCO_CLASS_LABELS, CudaCodec, CudaDecoder, CudaDetectionOverlay,
+            CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat, CudaOrtDetector,
             CudaOrtDetectorOptions, DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer,
-            LabelStyle,
+            LabelStyle, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -177,11 +177,12 @@ mod example {
                     "overlay",
                     &device,
                     DetectionOverlayOptions {
-                        line_width: 4,
-                        labels: font.map(|font| LabelStyle {
-                            size: 22.0,
-                            ..LabelStyle::new(font)
+                        others: Treatment::boxes(BoxStyle {
+                            line_width: 4,
+                            label: font.is_some().then(|| LabelStyle::new(22.0)),
+                            ..BoxStyle::default()
                         }),
+                        font,
                         ..DetectionOverlayOptions::default()
                     },
                 )?;

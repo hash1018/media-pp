@@ -34,98 +34,203 @@ pub use sw_detection_overlay::{SwDetectionOverlay, SwDetectionOverlayError};
 
 use std::num::NonZeroU32;
 
+use thiserror::Error as ThisError;
+
 use crate::color::Color;
 use crate::elements::source::{TextMask, TextRasterError, rasterize_coverage};
 use crate::elements::{Analytics, Detection, Detections};
 
-/// How a detection overlay draws, beside the picture and what was found
-/// in it.
-#[derive(Debug, Clone, PartialEq)]
+/// What a detection overlay does with each picture: per class of what was
+/// found, whether its box is drawn and how, whether it is hidden and how,
+/// and from what score — and beside them, the font labels are drawn in and
+/// the zones and lines of an
+/// [`ObjectAnalytics`](crate::elements::ObjectAnalytics).
+///
+/// By default every detection's box is drawn, two pixels thick in its
+/// class's colour, with no label.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DetectionOverlayOptions {
-    /// How thick each box's lines are, in pixels of the picture drawn on.
-    /// Rounded up to even on a picture whose colour is stored per 2x2
-    /// block, NV12 or YUV 4:2:0, so that a line's colour does not bleed
-    /// half a block outside it.
-    pub line_width: u32,
-    /// Detections less confident than this are not drawn.
-    pub min_score: f32,
-    /// What colour each box is.
-    pub colors: BoxColors,
-    /// The labels above the boxes, or `None` for boxes alone.
-    pub labels: Option<LabelStyle>,
-    /// Which of what a picture carries are drawn: by default the boxes
-    /// alone.
+    /// Raw TrueType or OpenType font bytes, which every label is drawn in —
+    /// boxes', zones' and lines' alike — read once for them all. This crate
+    /// bundles no font of its own, as with a compositor's text layers. A
+    /// [`BoxStyle::label`] with no font here is refused.
+    pub font: Option<Vec<u8>>,
+    /// The zones and lines an analytics counted, drawn where asked for.
     pub parts: OverlayParts,
-    /// What is found hidden — mosaicked, blurred or filled — before
-    /// anything is drawn over it, or `None` to hide nothing. To hand on
-    /// the hidden picture alone, set `parts.boxes` to `false`.
-    pub redact: Option<Redaction>,
+    /// What is done with the detections of the classes named here, the
+    /// first rule naming a class being the one it follows. A class named by
+    /// two rules is refused.
+    pub rules: Vec<ClassRule>,
+    /// What is done with the detections of every class no rule names.
+    pub others: Treatment,
 }
 
-impl Default for DetectionOverlayOptions {
+/// What a detection overlay does with one class's detections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassRule {
+    /// The class.
+    pub class: ClassId,
+    /// What is done with its detections.
+    pub treatment: Treatment,
+}
+
+impl ClassRule {
+    /// `treatment` for `class` — a name, `"face"`, or a number, `0`.
+    pub fn new(class: impl Into<ClassId>, treatment: Treatment) -> Self {
+        Self {
+            class: class.into(),
+            treatment,
+        }
+    }
+}
+
+/// A class of a detector's model, by name or by number.
+///
+/// A name is what the model calls the class — the label the
+/// [`Detections`] carry for it — so that a rule follows the class when
+/// the model is changed for one numbering its classes otherwise; it
+/// matches nothing where the model names no classes, which the overlay
+/// warns of once. A number is the class's place in the model's output.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ClassId {
+    /// The class the model calls this.
+    Name(String),
+    /// The class in this place of the model's output.
+    Id(usize),
+}
+
+impl From<&str> for ClassId {
+    fn from(name: &str) -> Self {
+        Self::Name(name.to_owned())
+    }
+}
+
+impl From<String> for ClassId {
+    fn from(name: String) -> Self {
+        Self::Name(name)
+    }
+}
+
+impl From<usize> for ClassId {
+    fn from(id: usize) -> Self {
+        Self::Id(id)
+    }
+}
+
+impl std::fmt::Display for ClassId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Name(name) => write!(f, "{name:?}"),
+            Self::Id(id) => write!(f, "{id}"),
+        }
+    }
+}
+
+/// What a detection overlay does with a detection: hides it, draws its box
+/// over that, both or neither — each only where the detection's score is
+/// at least `min_score`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Treatment {
+    /// How its box and label are drawn, or `None` to draw none.
+    pub draw: Option<BoxStyle>,
+    /// How it is hidden, before any box is drawn over it, or `None` to
+    /// leave it as it is.
+    pub hide: Option<Hiding>,
+    /// Detections less confident than this are left alone. Hiding wants it
+    /// low — a face half seen is still a face — and drawing often higher.
+    pub min_score: f32,
+}
+
+impl Treatment {
+    /// Its box drawn as `style` says, nothing hidden.
+    pub fn boxes(style: BoxStyle) -> Self {
+        Self {
+            draw: Some(style),
+            hide: None,
+            min_score: 0.0,
+        }
+    }
+
+    /// Hidden as `style` says, a tenth's margin, no box drawn.
+    pub fn hidden(style: RedactStyle) -> Self {
+        Self {
+            draw: None,
+            hide: Some(Hiding::new(style)),
+            min_score: 0.0,
+        }
+    }
+
+    /// Nothing done.
+    pub fn none() -> Self {
+        Self {
+            draw: None,
+            hide: None,
+            min_score: 0.0,
+        }
+    }
+}
+
+impl Default for Treatment {
+    /// Its box drawn as [`BoxStyle::default`] says.
+    fn default() -> Self {
+        Self::boxes(BoxStyle::default())
+    }
+}
+
+/// How a box is drawn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoxStyle {
+    /// How thick its lines are, in pixels of the picture drawn on. Rounded
+    /// up to even on a picture whose colour is stored per 2x2 block, NV12
+    /// or YUV 4:2:0, so that a line's colour does not bleed half a block
+    /// outside it.
+    pub line_width: u32,
+    /// What colour it is.
+    pub color: BoxColors,
+    /// The label above it, or `None` for the box alone. Drawn in
+    /// [`DetectionOverlayOptions::font`].
+    pub label: Option<LabelStyle>,
+}
+
+impl Default for BoxStyle {
+    /// Two pixels thick, in its class's colour, with no label.
     fn default() -> Self {
         Self {
             line_width: 2,
-            min_score: 0.0,
-            colors: BoxColors::ByClass,
-            labels: None,
-            parts: OverlayParts::default(),
-            redact: None,
+            color: BoxColors::ByClass,
+            label: None,
         }
     }
 }
 
-/// How an overlay hides what was found — faces, number plates — in each
-/// box, grown by [`Redaction::margin`]: DeepStream's redaction, on a copy
-/// of the picture as everything an overlay draws is.
-///
-/// A mosaic or a blur is made of cells sized by the box, not fixed in
-/// pixels: a face's shorter side is cut into [`RedactStyle::Mosaic`]'s
-/// `cells`, so that a face close to the camera is hidden as well as one far
-/// off — a cell fixed in pixels leaves the near face most of its features.
-/// `min_cell` keeps a small face's cells from shrinking to a pixel or two,
-/// where a mosaic hides nothing.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Redaction {
-    /// How each box is hidden.
+/// How a detection is hidden: the box grown by `margin` and covered as
+/// `style` says, on the copy of the picture the overlay draws on —
+/// DeepStream's redaction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hiding {
+    /// How it is covered.
     pub style: RedactStyle,
-    /// How far each box is grown before it is hidden, each way, as a
-    /// fraction of its own width and height: 0.1 hides a tenth more on
+    /// How far the box is grown before it is covered, each way, as a
+    /// fraction of its own width and height: 0.1 covers a tenth more on
     /// every side, which a box drawn a little tight — or a face moving
     /// between two detections — would otherwise leave showing. 0 or more.
     pub margin: f32,
-    /// Detections less confident than this are not hidden. Separate from
-    /// [`DetectionOverlayOptions::min_score`], as hiding wants to err the
-    /// other way from drawing: by default everything the detector kept.
-    pub min_score: f32,
-    /// The classes hidden, or `None` for every class.
-    pub classes: Option<Vec<usize>>,
 }
 
-impl Redaction {
-    /// `style`, a tenth's margin, every class and every score.
+impl Hiding {
+    /// `style`, with a tenth's margin.
     pub fn new(style: RedactStyle) -> Self {
-        Self {
-            style,
-            margin: 0.1,
-            min_score: 0.0,
-            classes: None,
-        }
-    }
-
-    /// Why these cannot be hidden by, if they cannot.
-    pub(crate) fn check(&self) -> Result<(), &'static str> {
-        if !self.margin.is_finite() || self.margin < 0.0 {
-            return Err("its margin is not a number of 0 or more");
-        }
-        if !self.min_score.is_finite() {
-            return Err("its min_score is not a number");
-        }
-        Ok(())
+        Self { style, margin: 0.1 }
     }
 }
 
-/// How a [`Redaction`] hides a box.
+/// How a [`Hiding`] covers a box.
+///
+/// A mosaic's or a blur's cells are sized by the box, not fixed in pixels:
+/// a face's shorter side is cut into `cells`, so that a face close to the
+/// camera is hidden as well as one far off — a cell fixed in pixels leaves
+/// the near face most of its features. `min_cell` keeps a small face's
+/// cells from shrinking to a pixel or two, where a mosaic hides nothing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RedactStyle {
     /// Cells of one colour each, the mean of the pixels under it: the box's
@@ -172,43 +277,66 @@ impl RedactStyle {
     }
 }
 
-/// Which of what a picture carries an overlay draws. Each label goes with
-/// what it labels, where [`DetectionOverlayOptions::labels`] gives a font.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a detection overlay cannot be made of the options it was given.
+#[derive(Debug, Clone, PartialEq, ThisError)]
+#[non_exhaustive]
+pub enum DetectionOverlayOptionsError {
+    /// A label asked for with no [`DetectionOverlayOptions::font`] to draw
+    /// it in.
+    #[error("a label is asked for with no font to draw it in")]
+    NoFont,
+    /// A label size that is not a positive number of pixels.
+    #[error("label size {0} is not a positive number of pixels")]
+    LabelSize(f32),
+    /// A class two rules name.
+    #[error("class {0} is named by more than one rule")]
+    DuplicateClass(ClassId),
+    /// A hiding margin that is not a number of 0 or more.
+    #[error("hiding margin {0} is not a number of 0 or more")]
+    Margin(f32),
+    /// A minimum score that is not a number.
+    #[error("min_score is not a number")]
+    MinScore,
+}
+
+/// The zones and lines of an
+/// [`ObjectAnalytics`](crate::elements::ObjectAnalytics) an overlay draws,
+/// from the picture's [`Analytics`], each labelled where
+/// [`DetectionOverlayOptions::font`] gives a font.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlayParts {
-    /// Each object's box, and its label — what [`LabelStyle`] says goes in
-    /// it — from the picture's [`Detections`].
-    pub boxes: bool,
-    /// Each zone of an [`ObjectAnalytics`](crate::elements::ObjectAnalytics),
-    /// from the picture's [`Analytics`]: its outline in amber — red while it
-    /// is crowded — `line_width` thick, labelled with its name and how many
-    /// objects are in it, `door 2`.
+    /// Each zone: its outline in amber — red while it is crowded —
+    /// labelled with its name and how many objects are in it, `door 2`.
     pub zones: bool,
-    /// Each line of an [`ObjectAnalytics`](crate::elements::ObjectAnalytics),
-    /// from the picture's [`Analytics`]: drawn across the picture in cyan,
-    /// `line_width` thick, labelled with its name and its crossings forward
-    /// and backward, `gate 12 / 3`.
+    /// Each line: drawn across the picture in cyan, labelled with its name
+    /// and its crossings forward and backward, `gate 12 / 3`.
     pub lines: bool,
+    /// How thick the zones' outlines and the lines are, in pixels, rounded
+    /// up to even as a box's are.
+    pub line_width: u32,
+    /// Their labels' pixel height.
+    pub label_size: f32,
 }
 
 impl Default for OverlayParts {
-    /// The boxes alone: zones and lines are drawn where asked for.
+    /// Neither drawn; two pixels thick and labelled 16 high where they are.
     fn default() -> Self {
         Self {
-            boxes: true,
             zones: false,
             lines: false,
+            line_width: 2,
+            label_size: 16.0,
         }
     }
 }
 
 impl OverlayParts {
-    /// Boxes, zones and lines alike.
+    /// Zones and lines alike.
     pub fn all() -> Self {
         Self {
-            boxes: true,
             zones: true,
             lines: true,
+            ..Self::default()
         }
     }
 }
@@ -229,16 +357,14 @@ pub enum BoxColors {
     ByTrack,
 }
 
-/// How the label above each box is drawn, and what it says — of the class
+/// How the label above a box is drawn, and what it says — of the class
 /// name, the number a tracker gave the object, the score and what
 /// classifiers said of it, each as asked for, `car #7 0.87 | minivan` with
-/// all four — on a band of the box's colour. A box whose label would say
-/// nothing has none.
-#[derive(Debug, Clone, PartialEq)]
+/// all four — on a band of the box's colour, in
+/// [`DetectionOverlayOptions::font`]. A box whose label would say nothing
+/// has none.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LabelStyle {
-    /// Raw TrueType or OpenType font bytes. This crate bundles no font of
-    /// its own, as with a compositor's text layers.
-    pub font_data: Vec<u8>,
     /// The text's pixel height, in the picture drawn on.
     pub size: f32,
     /// Whether the class's name is said — or `class` and its number where
@@ -255,16 +381,119 @@ pub struct LabelStyle {
 }
 
 impl LabelStyle {
-    /// A label in `font_data`, 16 pixels high, saying all it can.
-    pub fn new(font_data: Vec<u8>) -> Self {
+    /// A label `size` pixels high, saying all it can.
+    pub fn new(size: f32) -> Self {
         Self {
-            font_data,
-            size: 16.0,
+            size,
             class: true,
             track_id: true,
             score: true,
             classes: true,
         }
+    }
+}
+
+impl Default for LabelStyle {
+    /// 16 pixels high, saying all it can.
+    fn default() -> Self {
+        Self::new(16.0)
+    }
+}
+
+impl DetectionOverlayOptions {
+    /// Every treatment these give, the rules' and `others`.
+    fn treatments(&self) -> impl Iterator<Item = &Treatment> {
+        self.rules
+            .iter()
+            .map(|rule| &rule.treatment)
+            .chain(std::iter::once(&self.others))
+    }
+
+    /// Why an overlay cannot be made of these, if it cannot.
+    pub(crate) fn check(&self) -> Result<(), DetectionOverlayOptionsError> {
+        let mut named = std::collections::HashSet::new();
+        for rule in &self.rules {
+            if !named.insert(&rule.class) {
+                return Err(DetectionOverlayOptionsError::DuplicateClass(
+                    rule.class.clone(),
+                ));
+            }
+        }
+        let sizes = self
+            .treatments()
+            .filter_map(|treatment| treatment.draw.as_ref()?.label.map(|label| label.size));
+        for size in sizes {
+            if self.font.is_none() {
+                return Err(DetectionOverlayOptionsError::NoFont);
+            }
+            if !size.is_finite() || size <= 0.0 {
+                return Err(DetectionOverlayOptionsError::LabelSize(size));
+            }
+        }
+        let size = self.parts.label_size;
+        if (self.parts.zones || self.parts.lines) && (!size.is_finite() || size <= 0.0) {
+            return Err(DetectionOverlayOptionsError::LabelSize(size));
+        }
+        for treatment in self.treatments() {
+            if !treatment.min_score.is_finite() {
+                return Err(DetectionOverlayOptionsError::MinScore);
+            }
+            if let Some(hiding) = treatment.hide
+                && (!hiding.margin.is_finite() || hiding.margin < 0.0)
+            {
+                return Err(DetectionOverlayOptionsError::Margin(hiding.margin));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any treatment hides.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub(crate) fn hides_any(&self) -> bool {
+        self.treatments().any(|treatment| treatment.hide.is_some())
+    }
+
+    /// Whether any treatment hides by cells — a mosaic or a blur.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn cuts_cells(&self) -> bool {
+        self.treatments().any(|treatment| {
+            treatment.hide.is_some_and(|hiding| {
+                matches!(
+                    hiding.style,
+                    RedactStyle::Mosaic { .. } | RedactStyle::Blur { .. }
+                )
+            })
+        })
+    }
+
+    /// Whether a rule names a class where `detections` carry no names, so
+    /// that it matches nothing: worth a warning, once.
+    pub(crate) fn names_unmatched(&self, detections: &Detections) -> bool {
+        detections.labels.is_empty()
+            && self
+                .rules
+                .iter()
+                .any(|rule| matches!(rule.class, ClassId::Name(_)))
+    }
+
+    /// What is done with `detection`, one of `detections`: the first rule
+    /// naming its class, or `others` — and `None` where its score is below
+    /// that treatment's.
+    pub(crate) fn treatment(
+        &self,
+        detections: &Detections,
+        detection: &Detection,
+    ) -> Option<&Treatment> {
+        let named = detections.label(detection);
+        let treatment = self
+            .rules
+            .iter()
+            .find(|rule| match &rule.class {
+                ClassId::Id(id) => *id == detection.class_id,
+                ClassId::Name(name) => named == Some(name.as_str()),
+            })
+            .map_or(&self.others, |rule| &rule.treatment);
+        (detection.score >= treatment.min_score).then_some(treatment)
     }
 }
 
@@ -490,7 +719,7 @@ pub(crate) fn text_color(background: Color) -> Color {
 pub(crate) fn label_text(
     detections: &Detections,
     detection: &Detection,
-    parts: LabelParts,
+    parts: &LabelStyle,
 ) -> String {
     let mut words = Vec::new();
     if parts.class {
@@ -520,18 +749,6 @@ pub(crate) fn label_text(
         }
     }
     text
-}
-
-/// The detections an overlay draws, most confident last so that it is drawn
-/// over the rest.
-pub(crate) fn drawn(detections: &Detections, min_score: f32) -> Vec<&Detection> {
-    let mut drawn: Vec<&Detection> = detections
-        .items
-        .iter()
-        .filter(|detection| detection.score >= min_score)
-        .collect();
-    drawn.sort_by(|a, b| a.score.total_cmp(&b.score));
-    drawn
 }
 
 /// BT.709 limited-range Y'CbCr for an sRGB colour — what a YUV picture
@@ -572,8 +789,9 @@ const PIECE: f32 = 64.0;
 /// A coverage mask an overlay paints through, and what it is cached by.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum MaskKey {
-    /// A label's text, in the overlay's font.
-    Text(String),
+    /// A label's text, in the overlay's font, `size` — an `f32`'s bits —
+    /// pixels high.
+    Text { text: String, size: u32 },
     /// A piece of a line `width` pixels thick, from `from` to `to` — in
     /// sixteenths of a pixel of the picture — through exactly `rect`, which
     /// the mask is the size of.
@@ -585,16 +803,16 @@ pub(crate) enum MaskKey {
     },
 }
 
-/// What a mask is made of: a label in the overlay's font and size where it
-/// has one — `None` draws no label — and a line's piece from its key
-/// alone.
+/// What a mask is made of: a label in the overlay's font, at the size its
+/// key says, where it has one — `None` draws no label — and a line's
+/// piece from its key alone.
 pub(crate) fn rasterize(
     key: &MaskKey,
-    font: Option<(&ab_glyph::FontArc, f32)>,
+    font: Option<&ab_glyph::FontArc>,
 ) -> Result<Option<TextMask>, TextRasterError> {
     match key {
-        MaskKey::Text(text) => match font {
-            Some((font, size)) => rasterize_coverage(font, size, text),
+        MaskKey::Text { text, size } => match font {
+            Some(font) => rasterize_coverage(font, f32::from_bits(*size), text),
             None => Ok(None),
         },
         &MaskKey::Stroke {
@@ -646,25 +864,6 @@ pub(crate) struct Mark {
     pub(crate) mask: Option<MaskKey>,
 }
 
-/// What an overlay draws with, of its options: all but the font.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Style {
-    line_width: u32,
-    min_score: f32,
-    colors: BoxColors,
-    parts: OverlayParts,
-    label: LabelParts,
-}
-
-/// What a box's label says, of a [`LabelStyle`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct LabelParts {
-    class: bool,
-    track_id: bool,
-    score: bool,
-    classes: bool,
-}
-
 /// One box to hide, in pixels of the picture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Hide {
@@ -679,27 +878,21 @@ pub(crate) enum Hide {
     Fill { rect: Rect, color: Color },
 }
 
-impl Redaction {
-    /// Whether `detection` is one this hides.
-    fn hides(&self, detection: &Detection) -> bool {
-        detection.score >= self.min_score
-            && self
-                .classes
-                .as_ref()
-                .is_none_or(|classes| classes.contains(&detection.class_id))
-    }
-}
-
-/// What `redaction` hides of `detections` on a picture `canvas` describes:
-/// each box grown by the margin, cut to the picture and out to whole
-/// blocks, and for a mosaic or a blur the cells it is cut into.
-pub(crate) fn hides(canvas: Canvas, redaction: &Redaction, detections: &Detections) -> Vec<Hide> {
-    let margin = redaction.margin;
+/// What `options` hide of `detections` on a picture `canvas` describes:
+/// each box its treatment hides grown by the margin, cut to the picture
+/// and out to whole blocks, and for a mosaic or a blur the cells it is cut
+/// into.
+pub(crate) fn hides(
+    canvas: Canvas,
+    options: &DetectionOverlayOptions,
+    detections: &Detections,
+) -> Vec<Hide> {
     detections
         .items
         .iter()
-        .filter(|detection| redaction.hides(detection))
         .filter_map(|detection| {
+            let hiding = options.treatment(detections, detection)?.hide?;
+            let margin = hiding.margin;
             let grown = Detection::new(
                 detection.class_id,
                 detection.score,
@@ -709,7 +902,7 @@ pub(crate) fn hides(canvas: Canvas, redaction: &Redaction, detections: &Detectio
                 detection.height * (1.0 + 2.0 * margin),
             );
             let rect = canvas.place(&grown)?;
-            let (cells, min_cell, smooth) = match redaction.style {
+            let (cells, min_cell, smooth) = match hiding.style {
                 RedactStyle::Fill(color) => return Some(Hide::Fill { rect, color }),
                 RedactStyle::Mosaic { cells, min_cell } => (cells, min_cell, false),
                 RedactStyle::Blur { cells, min_cell } => (cells, min_cell, true),
@@ -743,104 +936,76 @@ impl DetectionOverlayOptions {
         detections: Option<&Detections>,
         analytics: Option<&Analytics>,
     ) -> bool {
-        self.style().draws(detections, analytics)
-            || self.redact.as_ref().is_some_and(|redaction| {
-                detections.is_some_and(|detections| {
-                    detections
-                        .items
-                        .iter()
-                        .any(|detection| redaction.hides(detection))
-                })
+        detections.is_some_and(|detections| {
+            detections.items.iter().any(|detection| {
+                self.treatment(detections, detection)
+                    .is_some_and(|treatment| treatment.draw.is_some() || treatment.hide.is_some())
             })
-    }
-
-    pub(crate) fn style(&self) -> Style {
-        Style {
-            line_width: self.line_width,
-            min_score: self.min_score,
-            colors: self.colors,
-            parts: self.parts,
-            // Without a font no label is drawn, whatever it would say.
-            label: self
-                .labels
-                .as_ref()
-                .map_or_else(LabelParts::default, |style| LabelParts {
-                    class: style.class,
-                    track_id: style.track_id,
-                    score: style.score,
-                    classes: style.classes,
-                }),
-        }
-    }
-}
-
-impl Style {
-    /// Whether a picture carrying `detections` and `analytics` has anything
-    /// to draw: a picture with nothing is handed on as it came.
-    pub(crate) fn draws(
-        &self,
-        detections: Option<&Detections>,
-        analytics: Option<&Analytics>,
-    ) -> bool {
-        (self.parts.boxes
-            && detections.is_some_and(|detections| {
-                detections
-                    .items
-                    .iter()
-                    .any(|detection| detection.score >= self.min_score)
-            }))
-            || analytics.is_some_and(|analytics| {
-                (self.parts.zones && !analytics.zones.is_empty())
-                    || (self.parts.lines && !analytics.lines.is_empty())
-            })
+        }) || analytics.is_some_and(|analytics| {
+            (self.parts.zones && !analytics.zones.is_empty())
+                || (self.parts.lines && !analytics.lines.is_empty())
+        })
     }
 }
 
 /// What to paint for `detections` and `analytics` on a picture `canvas`
-/// describes, in order: the zones and lines, then each box's lines, then
-/// its label's band and text. `mask` makes — or finds — the mask a key
+/// describes, in order: the zones and lines, then each box its treatment
+/// draws — the most confident last, so that it is drawn over the rest —
+/// and its label's band and text. `mask` makes — or finds — the mask a key
 /// names, and says its size, or `None` where it has nothing to draw.
 pub(crate) fn marks(
     canvas: Canvas,
-    style: Style,
+    options: &DetectionOverlayOptions,
     detections: Option<&Detections>,
     analytics: Option<&Analytics>,
     mask: &mut dyn FnMut(&MaskKey) -> Option<(u32, u32)>,
 ) -> Vec<Mark> {
     let mut marks = Vec::new();
+    let parts = options.parts;
     if let Some(analytics) = analytics {
         let pixels = |(x, y): (f32, f32)| (x * canvas.width as f32, y * canvas.height as f32);
-        let zones = analytics.zones.iter().filter(|_| style.parts.zones);
+        let zones = analytics.zones.iter().filter(|_| parts.zones);
         for zone in zones {
             let corners: Vec<(f32, f32)> = zone.corners.iter().copied().map(pixels).collect();
             let color = if zone.crowded { CROWDED } else { ZONE };
             for (index, &from) in corners.iter().enumerate() {
                 let to = corners[(index + 1) % corners.len()];
-                stroke(canvas, style, from, to, color, &mut marks, mask);
+                stroke(canvas, parts.line_width, from, to, color, &mut marks, mask);
             }
             if let Some(anchor) = canvas.bounds(&corners, 0.0) {
                 let text = format!("{} {}", zone.name, zone.objects.len());
-                labelled(canvas, anchor, text, color, &mut marks, mask);
+                let label = (text, parts.label_size);
+                labelled(canvas, anchor, label, color, &mut marks, mask);
             }
         }
-        let lines = analytics.lines.iter().filter(|_| style.parts.lines);
+        let lines = analytics.lines.iter().filter(|_| parts.lines);
         for line in lines {
             let (from, to) = (pixels(line.start), pixels(line.end));
-            stroke(canvas, style, from, to, LINE, &mut marks, mask);
+            stroke(canvas, parts.line_width, from, to, LINE, &mut marks, mask);
             if let Some(anchor) = canvas.bounds(&[from, to], 0.0) {
                 let text = format!("{} {} / {}", line.name, line.forward, line.backward);
-                labelled(canvas, anchor, text, LINE, &mut marks, mask);
+                let label = (text, parts.label_size);
+                labelled(canvas, anchor, label, LINE, &mut marks, mask);
             }
         }
     }
-    let Some(detections) = detections.filter(|_| style.parts.boxes) else {
+    let Some(detections) = detections else {
         return marks;
     };
-    for detection in drawn(detections, style.min_score) {
+    let mut drawn: Vec<(&Detection, &BoxStyle)> = detections
+        .items
+        .iter()
+        .filter_map(|detection| {
+            let style = options.treatment(detections, detection)?.draw.as_ref()?;
+            Some((detection, style))
+        })
+        .collect();
+    drawn.sort_by(|a, b| a.0.score.total_cmp(&b.0.score));
+    for (detection, style) in drawn {
         let Some(placed) = canvas.place(detection) else {
             continue;
         };
-        let color = box_color(style.colors, detection);
+        let color = box_color(style.color, detection);
         marks.extend(
             canvas
                 .edges(placed, style.line_width)
@@ -852,26 +1017,28 @@ pub(crate) fn marks(
                     mask: None,
                 }),
         );
-        let text = label_text(detections, detection, style.label);
-        if !text.is_empty() {
-            labelled(canvas, placed, text, color, &mut marks, mask);
+        if let Some(label) = &style.label {
+            let text = label_text(detections, detection, label);
+            if !text.is_empty() {
+                labelled(canvas, placed, (text, label.size), color, &mut marks, mask);
+            }
         }
     }
     marks
 }
 
-/// A line from `from` to `to`, in pixels, as pieces each painted through
-/// a mask of the rectangle around it.
+/// A line `line_width` thick from `from` to `to`, in pixels, as pieces each
+/// painted through a mask of the rectangle around it.
 fn stroke(
     canvas: Canvas,
-    style: Style,
+    line_width: u32,
     from: (f32, f32),
     to: (f32, f32),
     color: Color,
     marks: &mut Vec<Mark>,
     mask: &mut dyn FnMut(&MaskKey) -> Option<(u32, u32)>,
 ) {
-    let width = canvas.up(style.line_width.max(1));
+    let width = canvas.up(line_width.max(1));
     let length = (to.0 - from.0).hypot(to.1 - from.1);
     let pieces = (length / PIECE).ceil().max(1.0) as usize;
     let at = |t: f32| (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
@@ -910,17 +1077,20 @@ fn stroke(
     }
 }
 
-/// The label `text` for something placed at `anchor`: its band in `color`,
-/// and its text in black or white on it.
+/// The label `text`, `size` pixels high, for something placed at `anchor`:
+/// its band in `color`, and its text in black or white on it.
 fn labelled(
     canvas: Canvas,
     anchor: Rect,
-    text: String,
+    (text, size): (String, f32),
     color: Color,
     marks: &mut Vec<Mark>,
     mask: &mut dyn FnMut(&MaskKey) -> Option<(u32, u32)>,
 ) {
-    let key = MaskKey::Text(text);
+    let key = MaskKey::Text {
+        text,
+        size: size.to_bits(),
+    };
     let Some((width, height)) = mask(&key) else {
         return;
     };
@@ -1120,15 +1290,10 @@ mod tests {
     fn a_label_says_what_it_is_asked_to() {
         let detections =
             Detections::new("test", Arc::from(vec![Arc::<str>::from("person")]), vec![]);
-        let all = LabelParts {
-            class: true,
-            track_id: true,
-            score: true,
-            classes: true,
-        };
-        let without_score = LabelParts {
+        let all = &LabelStyle::default();
+        let without_score = &LabelStyle {
             score: false,
-            ..all
+            ..*all
         };
         let mut found = detection(0.0, 0.0, 0.1, 0.1);
         found.score = 0.876;
@@ -1151,26 +1316,33 @@ mod tests {
             label_text(&detections, &found, without_score),
             "class 7 #12 | minivan"
         );
-        let number_alone = LabelParts {
+        let silent = LabelStyle {
+            class: false,
+            track_id: false,
+            score: false,
+            classes: false,
+            ..LabelStyle::default()
+        };
+        let number_alone = &LabelStyle {
             track_id: true,
-            ..LabelParts::default()
+            ..silent
         };
         assert_eq!(label_text(&detections, &found, number_alone), "#12");
-        let classified_alone = LabelParts {
+        let classified_alone = &LabelStyle {
             classes: true,
-            ..LabelParts::default()
+            ..silent
         };
         assert_eq!(
             label_text(&detections, &found, classified_alone),
             "| minivan"
         );
-        assert_eq!(label_text(&detections, &found, LabelParts::default()), "");
+        assert_eq!(label_text(&detections, &found, &silent), "");
     }
 
-    /// Boxes are drawn by default and zones and lines where asked for, each
-    /// apart; an object whose label says nothing has its box alone.
-    #[test]
-    fn each_part_is_drawn_where_asked_for() {
+    /// What `options` draw of one person and one car on a 400 by 200
+    /// picture, with the zones and lines of [`watched`]: whether anything
+    /// is, the colours painted, and the marks.
+    fn drawn_by(options: &DetectionOverlayOptions) -> (bool, Vec<Color>, Vec<Mark>) {
         let canvas = Canvas {
             width: 400,
             height: 200,
@@ -1178,80 +1350,196 @@ mod tests {
         };
         let detections = Detections::new(
             "test",
-            Arc::from(vec![Arc::<str>::from("person")]),
-            vec![detection(0.1, 0.1, 0.2, 0.2)],
+            Arc::from(vec![Arc::<str>::from("person"), Arc::<str>::from("car")]),
+            vec![
+                detection(0.1, 0.1, 0.2, 0.2),
+                Detection::new(1, 0.4, 0.5, 0.5, 0.2, 0.2),
+            ],
         );
         let analytics = watched();
         let mut measure = |key: &MaskKey| match key {
-            MaskKey::Text(text) => Some((text.len() as u32 * 8, 12)),
+            MaskKey::Text { text, .. } => Some((text.len() as u32 * 8, 12)),
             MaskKey::Stroke { rect, .. } => Some((rect.width, rect.height)),
         };
-        let mut drawn = |parts: OverlayParts, labels: Option<LabelStyle>| {
-            let options = DetectionOverlayOptions {
-                parts,
-                labels,
-                ..DetectionOverlayOptions::default()
-            };
-            let style = options.style();
-            let marks = marks(
-                canvas,
-                style,
-                Some(&detections),
-                Some(&analytics),
-                &mut measure,
-            );
-            let colors: Vec<Color> = marks.iter().map(|mark| mark.color).collect();
-            (
-                style.draws(Some(&detections), Some(&analytics)),
-                colors,
-                marks,
-            )
-        };
-        let boxed = box_color(BoxColors::ByClass, &detections.items[0]);
-        let (draws, colors, _) = drawn(OverlayParts::default(), None);
-        assert!(draws && colors.contains(&boxed));
+        let marks = marks(
+            canvas,
+            options,
+            Some(&detections),
+            Some(&analytics),
+            &mut measure,
+        );
+        let colors = marks.iter().map(|mark| mark.color).collect();
+        (
+            options.draws(Some(&detections), Some(&analytics)),
+            colors,
+            marks,
+        )
+    }
+
+    fn person() -> Detection {
+        detection(0.1, 0.1, 0.2, 0.2)
+    }
+
+    fn car() -> Detection {
+        Detection::new(1, 0.4, 0.5, 0.5, 0.2, 0.2)
+    }
+
+    /// Every box is drawn by default, and zones and lines where asked for,
+    /// each apart; nothing drawn where nothing is asked for.
+    #[test]
+    fn each_part_is_drawn_where_asked_for() {
+        let (person, car) = (
+            box_color(BoxColors::ByClass, &person()),
+            box_color(BoxColors::ByClass, &car()),
+        );
+        let (draws, colors, _) = drawn_by(&DetectionOverlayOptions::default());
+        assert!(draws && colors.contains(&person) && colors.contains(&car));
         assert!(!colors.contains(&ZONE) && !colors.contains(&LINE));
-        let lines_alone = OverlayParts {
-            boxes: false,
-            zones: false,
+
+        let analytics_alone = |parts| DetectionOverlayOptions {
+            parts,
+            others: Treatment::none(),
+            ..DetectionOverlayOptions::default()
+        };
+        let (draws, colors, _) = drawn_by(&analytics_alone(OverlayParts {
             lines: true,
-        };
-        let (draws, colors, _) = drawn(lines_alone, None);
+            ..OverlayParts::default()
+        }));
         assert!(draws && colors.contains(&LINE));
-        assert!(!colors.contains(&ZONE) && !colors.contains(&boxed));
-        let zones_alone = OverlayParts {
-            boxes: false,
+        assert!(!colors.contains(&ZONE) && !colors.contains(&person));
+        let (_, colors, _) = drawn_by(&analytics_alone(OverlayParts {
             zones: true,
-            lines: false,
-        };
-        let (_, colors, _) = drawn(zones_alone, None);
+            ..OverlayParts::default()
+        }));
         assert!(colors.contains(&ZONE) && !colors.contains(&LINE));
-        let nothing = OverlayParts {
-            boxes: false,
-            zones: false,
-            lines: false,
-        };
-        let (draws, colors, _) = drawn(nothing, None);
+        let (draws, colors, _) = drawn_by(&analytics_alone(OverlayParts::default()));
         assert!(!draws && colors.is_empty());
+    }
+
+    /// A rule names a class by name or by number, the first naming it
+    /// being the one it follows; each treatment draws its own way, from its
+    /// own score; a class no rule names follows `others`.
+    #[test]
+    fn each_class_is_drawn_as_its_rule_says() {
+        let (person, car) = (person(), car());
+        let yellow = Color::new(255, 220, 0);
+        let options = DetectionOverlayOptions {
+            rules: vec![
+                ClassRule::new(
+                    "person",
+                    Treatment::boxes(BoxStyle {
+                        color: BoxColors::One(yellow),
+                        line_width: 6,
+                        ..BoxStyle::default()
+                    }),
+                ),
+                ClassRule::new(1, Treatment::none()),
+            ],
+            others: Treatment::none(),
+            ..DetectionOverlayOptions::default()
+        };
+        let (draws, colors, marks) = drawn_by(&options);
+        assert!(draws);
+        assert!(colors.iter().all(|color| *color == yellow), "{colors:?}");
+        assert!(
+            marks.iter().any(|mark| mark.rect.height == 6),
+            "its own line width: {marks:?}"
+        );
+        assert!(!colors.contains(&box_color(BoxColors::ByClass, &car)));
+
+        let sure = DetectionOverlayOptions {
+            others: Treatment {
+                min_score: 0.5,
+                ..Treatment::default()
+            },
+            ..DetectionOverlayOptions::default()
+        };
+        let (_, colors, _) = drawn_by(&sure);
+        assert!(colors.contains(&box_color(BoxColors::ByClass, &person)));
+        assert!(
+            !colors.contains(&box_color(BoxColors::ByClass, &car)),
+            "the car's 0.4 is below its treatment's score"
+        );
 
         let silent = LabelStyle {
             class: false,
             track_id: false,
             score: false,
             classes: false,
-            ..LabelStyle::new(Vec::new())
+            ..LabelStyle::default()
         };
-        let (_, _, marks) = drawn(OverlayParts::default(), Some(silent));
+        let labelled = |label| DetectionOverlayOptions {
+            font: Some(Vec::new()),
+            rules: vec![ClassRule::new(
+                "person",
+                Treatment::boxes(BoxStyle {
+                    label: Some(label),
+                    ..BoxStyle::default()
+                }),
+            )],
+            others: Treatment::none(),
+            ..DetectionOverlayOptions::default()
+        };
+        let (_, _, marks) = drawn_by(&labelled(silent));
         assert!(
             marks.iter().all(|mark| mark.mask.is_none()),
             "a label saying nothing is not drawn: {marks:?}"
         );
-        let (_, _, marks) = drawn(OverlayParts::default(), Some(LabelStyle::new(Vec::new())));
-        assert!(
-            marks
-                .iter()
-                .any(|mark| mark.mask == Some(MaskKey::Text("person 0.90".into())))
+        let (_, _, marks) = drawn_by(&labelled(LabelStyle::new(20.0)));
+        let said = MaskKey::Text {
+            text: "person 0.90".into(),
+            size: 20.0f32.to_bits(),
+        };
+        assert!(marks.iter().any(|mark| mark.mask.as_ref() == Some(&said)));
+    }
+
+    /// Options an overlay cannot be made of are refused: a class two rules
+    /// name, a label with no font or of no size, a margin below 0.
+    #[test]
+    fn options_that_cannot_be_drawn_with_are_refused() {
+        let twice = DetectionOverlayOptions {
+            rules: vec![
+                ClassRule::new("face", Treatment::none()),
+                ClassRule::new("face", Treatment::hidden(RedactStyle::mosaic())),
+            ],
+            ..DetectionOverlayOptions::default()
+        };
+        assert_eq!(
+            twice.check(),
+            Err(DetectionOverlayOptionsError::DuplicateClass("face".into()))
         );
+        let labelled = |font, size| DetectionOverlayOptions {
+            font,
+            others: Treatment::boxes(BoxStyle {
+                label: Some(LabelStyle::new(size)),
+                ..BoxStyle::default()
+            }),
+            ..DetectionOverlayOptions::default()
+        };
+        assert_eq!(
+            labelled(None, 16.0).check(),
+            Err(DetectionOverlayOptionsError::NoFont)
+        );
+        assert_eq!(
+            labelled(Some(Vec::new()), 0.0).check(),
+            Err(DetectionOverlayOptionsError::LabelSize(0.0))
+        );
+        assert_eq!(labelled(Some(Vec::new()), 16.0).check(), Ok(()));
+        let below = DetectionOverlayOptions {
+            others: Treatment {
+                hide: Some(Hiding {
+                    margin: -0.1,
+                    ..Hiding::new(RedactStyle::mosaic())
+                }),
+                ..Treatment::none()
+            },
+            ..DetectionOverlayOptions::default()
+        };
+        assert_eq!(
+            below.check(),
+            Err(DetectionOverlayOptionsError::Margin(-0.1))
+        );
+        assert!(DetectionOverlayOptions::default().check().is_ok());
     }
 
     #[test]
@@ -1311,13 +1599,15 @@ mod tests {
         }
     }
 
-    fn drawing_analytics() -> Style {
+    fn drawing_analytics() -> DetectionOverlayOptions {
         DetectionOverlayOptions {
-            line_width: 4,
-            parts: OverlayParts::all(),
+            parts: OverlayParts {
+                line_width: 4,
+                ..OverlayParts::all()
+            },
+            others: Treatment::none(),
             ..DetectionOverlayOptions::default()
         }
-        .style()
     }
 
     /// A slanting line is painted in pieces, each through a mask of the
@@ -1335,7 +1625,7 @@ mod tests {
         let mut masks = std::collections::HashMap::new();
         let marks = marks(
             canvas,
-            drawing_analytics(),
+            &drawing_analytics(),
             None,
             Some(&analytics),
             &mut |key| {
@@ -1395,13 +1685,13 @@ mod tests {
             block: 2,
         };
         let mut measure = |key: &MaskKey| match key {
-            MaskKey::Text(text) => Some((text.len() as u32 * 8, 12)),
+            MaskKey::Text { text, .. } => Some((text.len() as u32 * 8, 12)),
             MaskKey::Stroke { rect, .. } => Some((rect.width, rect.height)),
         };
         let mut analytics = watched();
         let drawn = marks(
             canvas,
-            drawing_analytics(),
+            &drawing_analytics(),
             None,
             Some(&analytics),
             &mut measure,
@@ -1411,7 +1701,7 @@ mod tests {
         analytics.zones[0].crowded = true;
         let crowded = marks(
             canvas,
-            drawing_analytics(),
+            &drawing_analytics(),
             None,
             Some(&analytics),
             &mut measure,
@@ -1421,14 +1711,17 @@ mod tests {
         let texts: Vec<&MaskKey> = drawn.iter().filter_map(|mark| mark.mask.as_ref()).collect();
         for label in ["door 2", "gate 3 / 1"] {
             assert!(
-                texts.contains(&&MaskKey::Text(label.to_owned())),
+                texts.contains(&&MaskKey::Text {
+                    text: label.to_owned(),
+                    size: 16.0f32.to_bits(),
+                }),
                 "{label}: {texts:?}"
             );
         }
 
-        let not_asked = DetectionOverlayOptions::default().style();
+        let not_asked = DetectionOverlayOptions::default();
         assert!(!not_asked.draws(None, Some(&analytics)));
-        assert!(marks(canvas, not_asked, None, Some(&analytics), &mut measure).is_empty());
+        assert!(marks(canvas, &not_asked, None, Some(&analytics), &mut measure).is_empty());
         assert!(drawing_analytics().draws(None, Some(&analytics)));
         assert!(!drawing_analytics().draws(None, Some(&Analytics::default())));
     }

@@ -42,11 +42,11 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            AppSink, BoxColors, COCO_CLASS_LABELS, CudaCodec, CudaDecoder, CudaDetectionOverlay,
-            CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat, CudaOrtClassifier,
-            CudaOrtDetector, CudaOrtDetectorOptions, Detection, DetectionOverlayOptions,
-            Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle, ObjectTracker,
-            OrtClassifierOptions, OrtDetectorOptions, OverlayParts, TrackerOptions,
+            AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS, CudaCodec, CudaDecoder,
+            CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
+            CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, Detection,
+            DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
+            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, TrackerOptions, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -236,23 +236,21 @@ mod example {
 
         let recording = match out {
             Some(path) => {
-                let overlay = CudaDetectionOverlay::new(
-                    "overlay",
-                    device,
+                let overlay = CudaDetectionOverlay::new("overlay", device, {
+                    let font = FONTS.iter().find_map(|path| std::fs::read(path).ok());
                     DetectionOverlayOptions {
-                        line_width: 4,
-                        min_score: 0.25,
-                        colors: BoxColors::ByTrack,
-                        labels: FONTS.iter().find_map(|path| std::fs::read(path).ok()).map(
-                            |font| LabelStyle {
-                                size: 22.0,
-                                ..LabelStyle::new(font)
-                            },
-                        ),
-                        parts: OverlayParts::default(),
-                        redact: None,
-                    },
-                )?;
+                        others: Treatment {
+                            min_score: 0.25,
+                            ..Treatment::boxes(BoxStyle {
+                                line_width: 4,
+                                color: BoxColors::ByTrack,
+                                label: font.is_some().then(|| LabelStyle::new(22.0)),
+                            })
+                        },
+                        font,
+                        ..DetectionOverlayOptions::default()
+                    }
+                })?;
                 let (width, height) = stream.size().expect("a video stream says its size");
                 let encoder = CudaEncoder::new(
                     "encoder",

@@ -77,11 +77,11 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            Analytics, AnalyticsOptions, AppSink, BoxColors, COCO_CLASS_LABELS,
+            Analytics, AnalyticsOptions, AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS,
             DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
             Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier, MetalOrtDetector,
             MetalOrtDetectorOptions, ObjectAnalytics, ObjectTracker, OrtClassifierOptions,
-            OrtDetectorOptions, OverlayParts, TrackerOptions, VideoToolboxCodec,
+            OrtDetectorOptions, OverlayParts, TrackerOptions, Treatment, VideoToolboxCodec,
             VideoToolboxDecoder, VideoToolboxDevice, VideoToolboxEncoder,
             VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
@@ -379,23 +379,27 @@ mod example {
                     "overlay",
                     &device,
                     DetectionOverlayOptions {
-                        line_width: 4,
-                        min_score: SHOWN,
-                        colors: if track {
-                            BoxColors::ByTrack
-                        } else {
-                            BoxColors::ByClass
+                        others: Treatment {
+                            min_score: SHOWN,
+                            ..Treatment::boxes(BoxStyle {
+                                line_width: 4,
+                                color: if track {
+                                    BoxColors::ByTrack
+                                } else {
+                                    BoxColors::ByClass
+                                },
+                                label: font.is_some().then(|| LabelStyle::new(22.0)),
+                            })
                         },
-                        labels: font.map(|font| LabelStyle {
-                            size: 22.0,
-                            ..LabelStyle::new(font)
-                        }),
                         // The lines counted, and their crossings so far.
                         parts: OverlayParts {
                             lines: count_lines,
+                            line_width: 4,
+                            label_size: 22.0,
                             ..OverlayParts::default()
                         },
-                        redact: None,
+                        font,
+                        ..DetectionOverlayOptions::default()
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");

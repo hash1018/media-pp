@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ffmpeg_next::{self as ffmpeg, format::Pixel};
 use thiserror::Error as ThisError;
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     color::Color,
@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::{
-    Canvas, DetectionOverlayOptions, Hide, LABEL_CACHE, MaskKey, Rect, bt709_limited, cell_edge,
-    hides, marks, rasterize,
+    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
+    Rect, bt709_limited, cell_edge, hides, marks, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, TextMask, load_font};
@@ -46,29 +46,27 @@ pub enum SwDetectionOverlayError {
     /// A picture in a format it does not draw on.
     #[error("SwDetectionOverlay draws on NV12, YUV 4:2:0, RGB24 or BGRA, not {0:?}")]
     UnsupportedFormat(Pixel),
-    /// The label size is not a positive number of pixels.
-    #[error("label size {0} is not a positive number of pixels")]
-    LabelSize(f32),
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
-    /// A [`Redaction`](super::Redaction) that cannot be hidden by.
-    #[error("the redaction cannot be used: {0}")]
-    Redaction(&'static str),
+    /// Options it cannot be made of.
+    #[error(transparent)]
+    Options(#[from] DetectionOverlayOptionsError),
 }
 
 impl From<TextFontError> for SwDetectionOverlayError {
     fn from(error: TextFontError) -> Self {
         match error {
-            TextFontError::Size(size) => Self::LabelSize(size),
+            TextFontError::Size(size) => DetectionOverlayOptionsError::LabelSize(size).into(),
             TextFontError::Font(_) => Self::LabelFont,
         }
     }
 }
 
 /// Draws the [`Detections`] each picture carries onto a copy of it, in
-/// system memory — a box around each object, and with
-/// [`DetectionOverlayOptions::labels`] its class and score above it — and
+/// system memory — each class as its
+/// [`ClassRule`](super::ClassRule) in the options says: its box and label drawn,
+/// or it hidden by a mosaic, a blur or a fill, or both — and
 /// hands the copy on, carrying the same `Detections`.
 ///
 /// It takes NV12, YUV 4:2:0, RGB24 or BGRA pictures of any size, and draws
@@ -90,6 +88,9 @@ struct Overlaying {
     /// zones and lines by where they are; `None` for one with nothing to
     /// draw.
     masks: HashMap<MaskKey, Option<TextMask>>,
+    /// Whether it has said that a rule names a class the detections
+    /// carry no names for.
+    warned_names: bool,
 }
 
 impl SwDetectionOverlay {
@@ -97,29 +98,26 @@ impl SwDetectionOverlay {
     ///
     /// # Errors
     ///
-    /// The label font or size where `options.labels` gives one that cannot
-    /// be drawn with.
+    /// Options it cannot be made of — a label with no font, a class named
+    /// twice — or a font that cannot be read.
     pub fn new(
         name: impl Into<String>,
         options: DetectionOverlayOptions,
     ) -> std::result::Result<Self, SwDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
-        if let Some(redaction) = &options.redact {
-            redaction
-                .check()
-                .map_err(SwDetectionOverlayError::Redaction)?;
-        }
+        options.check()?;
         let pp_log = element_pp_log(ElementType::SwDetectionOverlay, &name, None);
+        // Read once at any size: each label is rasterized at its own.
         let font = options
-            .labels
+            .font
             .as_ref()
-            .map(|style| load_font(style.font_data.clone(), style.size))
+            .map(|font| load_font(font.clone(), 16.0))
             .transpose()?;
         pp_info!(
             pp_log: &pp_log,
-            "opened: line_width={}, min_score={}, labels={}",
-            options.line_width,
-            options.min_score,
+            "opened: {} rules, others {:?}, font={}",
+            options.rules.len(),
+            options.others,
             font.is_some()
         );
         Ok(Self(FilterStage::new(Overlaying {
@@ -128,6 +126,7 @@ impl SwDetectionOverlay {
             options,
             font,
             masks: HashMap::new(),
+            warned_names: false,
         })))
     }
 }
@@ -425,23 +424,25 @@ fn hide_cells(
     }
 }
 
-impl Overlaying {
-    /// The mask `key` names, from the cache where it is there.
-    fn mask(&mut self, key: &MaskKey) -> Option<&TextMask> {
-        if !self.masks.contains_key(key) {
-            let font = self
-                .font
-                .as_ref()
-                .zip(self.options.labels.as_ref().map(|style| style.size));
-            let mask = rasterize(key, font)
-                .inspect_err(|error| pp_error!(self, "{key:?} not drawn: {error:?}"))
-                .ok()
-                .flatten();
-            self.masks.insert(key.clone(), mask);
-        }
-        self.masks.get(key)?.as_ref()
+/// The mask `key` names, from `masks` where it is there, else made in
+/// `font` and kept there.
+fn mask<'a>(
+    masks: &'a mut HashMap<MaskKey, Option<TextMask>>,
+    font: Option<&ab_glyph::FontArc>,
+    pp_log: &PpLog,
+    key: &MaskKey,
+) -> Option<&'a TextMask> {
+    if !masks.contains_key(key) {
+        let made = rasterize(key, font)
+            .inspect_err(|error| pp_error!(pp_log: pp_log, "{key:?} not drawn: {error:?}"))
+            .ok()
+            .flatten();
+        masks.insert(key.clone(), made);
     }
+    masks.get(key)?.as_ref()
+}
 
+impl Overlaying {
     /// A copy of `frame` with `detections` and `analytics` drawn on it.
     fn draw(
         &mut self,
@@ -463,18 +464,15 @@ impl Overlaying {
         if self.masks.len() >= LABEL_CACHE {
             self.masks.clear();
         }
-        let marks = marks(
-            canvas,
-            self.options.style(),
-            detections,
-            analytics,
-            &mut |key| self.mask(key).map(|mask| (mask.width, mask.height)),
-        );
+        let (masks, font, pp_log) = (&mut self.masks, self.font.as_ref(), &self.pp_log);
+        let marks = marks(canvas, &self.options, detections, analytics, &mut |key| {
+            mask(masks, font, pp_log, key).map(|mask| (mask.width, mask.height))
+        });
         let mut copy = frame.clone();
         // What is hidden first, so that a box and its label are drawn over
         // it where they are asked for.
-        if let (Some(redaction), Some(detections)) = (&self.options.redact, detections) {
-            for hide in hides(canvas, redaction, detections) {
+        if let Some(detections) = detections {
+            for hide in hides(canvas, &self.options, detections) {
                 match hide {
                     Hide::Fill { rect, color } => paint(&mut copy, planes, rect, color, None),
                     Hide::Cells {
@@ -551,6 +549,16 @@ impl Filter for Overlaying {
         let analytics = metadata
             .as_deref()
             .and_then(|metadata| metadata.get::<Analytics>());
+        if let Some(detections) = detections
+            && !self.warned_names
+            && self.options.names_unmatched(detections)
+        {
+            pp_warn!(
+                self,
+                "a rule names a class, and the detections carry no class names: it matches nothing"
+            );
+            self.warned_names = true;
+        }
         if !self.options.draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
@@ -574,7 +582,9 @@ mod tests {
 
     use std::num::NonZeroU32;
 
-    use super::super::{Hide, OverlayParts, RedactStyle, Redaction, box_color, hides};
+    use super::super::{
+        BoxStyle, ClassRule, Hide, Hiding, OverlayParts, RedactStyle, Treatment, box_color, hides,
+    };
     use super::*;
     use crate::buffer::Metadata;
     use crate::element::{RawSink, SrcPads};
@@ -655,7 +665,10 @@ mod tests {
     fn every_format_it_takes_is_drawn_on() {
         let color = Color::new(255, 0, 0);
         let options = DetectionOverlayOptions {
-            colors: super::super::BoxColors::One(color),
+            others: Treatment::boxes(BoxStyle {
+                color: super::super::BoxColors::One(color),
+                ..BoxStyle::default()
+            }),
             ..DetectionOverlayOptions::default()
         };
         for format in [Pixel::NV12, Pixel::YUV420P, Pixel::RGB24, Pixel::BGRA] {
@@ -687,7 +700,10 @@ mod tests {
     #[test]
     fn a_picture_with_nothing_to_draw_is_handed_on_as_it_came() {
         let options = DetectionOverlayOptions {
-            min_score: 0.95,
+            others: Treatment {
+                min_score: 0.95,
+                ..Treatment::default()
+            },
             ..DetectionOverlayOptions::default()
         };
         let mut overlay = SwDetectionOverlay::new("overlay", options).unwrap();
@@ -720,7 +736,7 @@ mod tests {
         assert!(error.to_string().contains("YUV444P"), "{error}");
 
         let options = DetectionOverlayOptions {
-            labels: Some(super::super::LabelStyle::new(b"not a font".to_vec())),
+            font: Some(b"not a font".to_vec()),
             ..DetectionOverlayOptions::default()
         };
         assert!(matches!(
@@ -739,10 +755,11 @@ mod tests {
         };
         let color = Color::new(255, 196, 0);
         let options = DetectionOverlayOptions {
-            colors: super::super::BoxColors::One(color),
-            labels: Some(super::super::LabelStyle {
-                size: 12.0,
-                ..super::super::LabelStyle::new(font)
+            font: Some(font),
+            others: Treatment::boxes(BoxStyle {
+                color: super::super::BoxColors::One(color),
+                label: Some(super::super::LabelStyle::new(12.0)),
+                ..BoxStyle::default()
             }),
             ..DetectionOverlayOptions::default()
         };
@@ -783,16 +800,17 @@ mod tests {
             return;
         };
         let options = DetectionOverlayOptions {
-            labels: Some(super::super::LabelStyle {
-                size: 12.0,
-                ..super::super::LabelStyle::new(font)
+            font: Some(font),
+            others: Treatment::boxes(BoxStyle {
+                label: Some(super::super::LabelStyle::new(12.0)),
+                ..BoxStyle::default()
             }),
             ..DetectionOverlayOptions::default()
         };
         let font = options
-            .labels
+            .font
             .as_ref()
-            .map(|style| load_font(style.font_data.clone(), style.size))
+            .map(|font| load_font(font.clone(), 16.0))
             .transpose()
             .unwrap();
         let mut overlaying = Overlaying {
@@ -801,8 +819,12 @@ mod tests {
             options,
             font,
             masks: (1..LABEL_CACHE)
-                .map(|n| (MaskKey::Text(format!("earlier {n}")), None))
+                .map(|n| {
+                    let text = format!("earlier {n}");
+                    (MaskKey::Text { text, size: 0 }, None)
+                })
                 .collect(),
+            warned_names: false,
         };
         let names: Vec<Arc<str>> = ["one", "two", "three"].map(Arc::from).to_vec();
         let items = (0..3)
@@ -816,7 +838,7 @@ mod tests {
         let labels = overlaying
             .masks
             .keys()
-            .filter(|key| matches!(key, MaskKey::Text(text) if !text.starts_with("earlier")))
+            .filter(|key| matches!(key, MaskKey::Text { text, .. } if !text.starts_with("earlier")))
             .count();
         assert_eq!(labels, 3, "every label of the picture is kept");
     }
@@ -934,14 +956,10 @@ mod tests {
     /// Options that hide by `style`, with no margin, and draw nothing.
     fn hiding(style: RedactStyle) -> DetectionOverlayOptions {
         DetectionOverlayOptions {
-            parts: OverlayParts {
-                boxes: false,
-                ..OverlayParts::default()
+            others: Treatment {
+                hide: Some(Hiding { style, margin: 0.0 }),
+                ..Treatment::none()
             },
-            redact: Some(Redaction {
-                margin: 0.0,
-                ..Redaction::new(style)
-            }),
             ..DetectionOverlayOptions::default()
         }
     }
@@ -1040,7 +1058,7 @@ mod tests {
 
     /// The cells follow the box: its shorter side cut into `cells`, but
     /// none smaller than `min_cell`; the margin grows the box first; a
-    /// class or a score not asked for is left as it is.
+    /// class no rule hides, or a score below its rule's, is left as it is.
     #[test]
     fn the_cells_follow_the_box_and_the_margin_grows_it() {
         let canvas = Canvas {
@@ -1049,13 +1067,22 @@ mod tests {
             block: 2,
         };
         let face = |x, y, side| Detection::new(0, 0.9, x, y, side, side);
-        let style = |cells, min_cell| RedactStyle::Mosaic {
-            cells: NonZeroU32::new(cells).unwrap(),
-            min_cell,
+        let style = RedactStyle::Mosaic {
+            cells: NonZeroU32::new(6).unwrap(),
+            min_cell: 8,
         };
-        let cut = |redaction: &Redaction, detection: Detection| {
-            let found = Detections::new("test", Arc::from(vec![]), vec![detection]);
-            hides(canvas, redaction, &found)
+        let faces = |treatment: Treatment| DetectionOverlayOptions {
+            rules: vec![ClassRule::new("face", treatment)],
+            others: Treatment::none(),
+            ..DetectionOverlayOptions::default()
+        };
+        let cut = |options: &DetectionOverlayOptions, detection: Detection| {
+            let found = Detections::new(
+                "test",
+                Arc::from(vec![Arc::<str>::from("face"), Arc::<str>::from("plate")]),
+                vec![detection],
+            );
+            hides(canvas, options, &found)
         };
         let square = |x, side| Rect {
             x,
@@ -1063,10 +1090,10 @@ mod tests {
             width: side,
             height: side,
         };
-        let near = Redaction {
-            margin: 0.0,
-            ..Redaction::new(style(6, 8))
-        };
+        let near = faces(Treatment {
+            hide: Some(Hiding { style, margin: 0.0 }),
+            ..Treatment::none()
+        });
         assert_eq!(
             cut(&near, face(0.1, 0.1, 0.3)),
             vec![Hide::Cells {
@@ -1085,23 +1112,20 @@ mod tests {
             }],
             "a far face: cells of at least eight, about three across"
         );
-        let grown = Redaction::new(style(6, 8));
+        let grown = faces(Treatment::hidden(style));
         let Hide::Cells { rect, .. } = cut(&grown, face(0.5, 0.5, 0.2))[0] else {
             panic!("cells");
         };
         assert_eq!(rect, square(480, 240), "a tenth more each way");
-        let only_plates = Redaction {
-            classes: Some(vec![1]),
-            ..Redaction::new(style(6, 8))
+        let plate = Detection {
+            class_id: 1,
+            ..face(0.5, 0.5, 0.2)
         };
-        assert!(
-            cut(&only_plates, face(0.5, 0.5, 0.2)).is_empty(),
-            "another class"
-        );
-        let sure = Redaction {
+        assert!(cut(&grown, plate).is_empty(), "a class no rule hides");
+        let sure = faces(Treatment {
             min_score: 0.95,
-            ..Redaction::new(style(6, 8))
-        };
+            ..Treatment::hidden(style)
+        });
         assert!(
             cut(&sure, face(0.5, 0.5, 0.2)).is_empty(),
             "below its score"
@@ -1109,18 +1133,23 @@ mod tests {
     }
 
     #[test]
-    fn a_redaction_that_cannot_be_hidden_by_is_refused() {
+    fn options_that_cannot_be_hidden_by_are_refused() {
         let options = |margin| DetectionOverlayOptions {
-            redact: Some(Redaction {
-                margin,
-                ..Redaction::new(RedactStyle::mosaic())
-            }),
+            others: Treatment {
+                hide: Some(Hiding {
+                    style: RedactStyle::mosaic(),
+                    margin,
+                }),
+                ..Treatment::none()
+            },
             ..DetectionOverlayOptions::default()
         };
         for margin in [-0.1, f32::NAN] {
             assert!(matches!(
                 SwDetectionOverlay::new("overlay", options(margin)),
-                Err(SwDetectionOverlayError::Redaction(_))
+                Err(SwDetectionOverlayError::Options(
+                    DetectionOverlayOptionsError::Margin(_)
+                ))
             ));
         }
         assert!(SwDetectionOverlay::new("overlay", options(0.0)).is_ok());

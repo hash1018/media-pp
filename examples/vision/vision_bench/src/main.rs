@@ -45,10 +45,10 @@ use media_pp::{
     buffer::MediaBuffer,
     bus::BusEvent,
     elements::{
-        AppSink, DetectionOverlayOptions, Detections, FileDemuxer, InputScale, LabelStyle,
-        ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, RenderMode, StreamMux,
+        AppSink, BoxStyle, DetectionOverlayOptions, Detections, FileDemuxer, InputScale,
+        LabelStyle, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, RenderMode, StreamMux,
         StreamMuxOptions, SwDecoder, SwDetectionOverlay, SwOrtClassifier, SwOrtDetector,
-        TrackerOptions,
+        TrackerOptions, Treatment,
     },
     ffmpeg::{Rational, codec::Parameters, media},
     pipeline::{ChainBuilder, DetachedBranch, Pipeline},
@@ -512,15 +512,14 @@ fn analysis(
 fn output(branch: ChainBuilder, args: &Args, device: &Device, s: &Stream) -> Result<ChainBuilder> {
     let mut branch = branch;
     if args.overlay {
+        let font = FONTS.iter().find_map(|path| std::fs::read(path).ok());
         let options = DetectionOverlayOptions {
-            line_width: 4,
-            labels: FONTS
-                .iter()
-                .find_map(|path| std::fs::read(path).ok())
-                .map(|font| LabelStyle {
-                    size: 22.0,
-                    ..LabelStyle::new(font)
-                }),
+            others: Treatment::boxes(BoxStyle {
+                line_width: 4,
+                label: font.is_some().then(|| LabelStyle::new(22.0)),
+                ..BoxStyle::default()
+            }),
+            font,
             ..DetectionOverlayOptions::default()
         };
         let name = format!("overlay {}", s.index);

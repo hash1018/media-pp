@@ -65,8 +65,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `CudaDetectionOverlay` and `MetalDetectionOverlay`, which draw those boxes
   and labels onto the picture, and an `ObjectAnalytics`'s zones and lines
   with their counts, each as `OverlayParts` says; and hide what was found —
-  faces, number plates — by a mosaic, a blur or a fill (`Redaction`; not
-  yet on Metal); `WhisperTranscriber`, `FrameCounter`,
+  faces, number plates — by a mosaic, a blur or a fill, each class as its
+  `ClassRule` says (hiding not yet on Metal); `WhisperTranscriber`, `FrameCounter`,
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 

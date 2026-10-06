@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     color::Color,
@@ -32,8 +32,8 @@ use crate::{
 };
 
 use super::super::{
-    Canvas, DetectionOverlayOptions, Hide, LABEL_CACHE, MaskKey, Rect, RedactStyle, hides, marks,
-    rasterize,
+    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
+    Rect, hides, marks, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
@@ -67,29 +67,27 @@ pub enum CudaDetectionOverlayError {
     /// The CUDA driver refused a copy, a fill or a launch.
     #[error(transparent)]
     Driver(#[from] CudaDriverError),
-    /// The label size is not a positive number of pixels.
-    #[error("label size {0} is not a positive number of pixels")]
-    LabelSize(f32),
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
-    /// A [`Redaction`](super::super::Redaction) that cannot be hidden by.
-    #[error("the redaction cannot be used: {0}")]
-    Redaction(&'static str),
+    /// Options it cannot be made of.
+    #[error(transparent)]
+    Options(#[from] DetectionOverlayOptionsError),
 }
 
 impl From<TextFontError> for CudaDetectionOverlayError {
     fn from(error: TextFontError) -> Self {
         match error {
-            TextFontError::Size(size) => Self::LabelSize(size),
+            TextFontError::Size(size) => DetectionOverlayOptionsError::LabelSize(size).into(),
             TextFontError::Font(_) => Self::LabelFont,
         }
     }
 }
 
 /// Draws the [`Detections`] each CUDA picture carries onto a copy of it, on
-/// the GPU — a box around each object, and with
-/// [`DetectionOverlayOptions::labels`] its class and score above it — and
+/// the GPU — each class as its
+/// [`ClassRule`](super::super::ClassRule) in the options says: its box and label drawn,
+/// or it hidden by a mosaic, a blur or a fill, or both — and
 /// hands the copy on, carrying the same `Detections`: what
 /// [`SwDetectionOverlay`](super::super::SwDetectionOverlay) does in system
 /// memory, so that a detector's pictures can go on to an encoder, a
@@ -122,6 +120,9 @@ struct Overlaying {
     /// pieces of zones and lines by where they are; `None` for one with
     /// nothing to draw.
     masks: HashMap<MaskKey, Option<CudaMask>>,
+    /// Whether it has said that a rule names a class the detections
+    /// carry no names for.
+    warned_names: bool,
     /// The kernels a mosaic or a blur is painted with, and the buffer its
     /// cells' means go through, grown as a larger box needs: made with the
     /// element where it hides by cells.
@@ -154,33 +155,29 @@ impl CudaDetectionOverlay {
     ///
     /// # Errors
     ///
-    /// The label font or size where `options.labels` gives one that cannot
-    /// be drawn with, and the driver's where it cannot be opened.
+    /// Options it cannot be made of — a label with no font, a class named
+    /// twice — or a font that cannot be read, and the driver's where it cannot be opened.
     pub fn new(
         name: impl Into<String>,
         device: &CudaDevice,
         options: DetectionOverlayOptions,
     ) -> std::result::Result<Self, CudaDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
-        if let Some(redaction) = &options.redact {
-            redaction
-                .check()
-                .map_err(CudaDetectionOverlayError::Redaction)?;
-        }
+        options.check()?;
         let pp_log = element_pp_log(ElementType::CudaDetectionOverlay, &name, None);
+        // Read once at any size: each label is rasterized at its own.
         let font = options
-            .labels
+            .font
             .as_ref()
-            .map(|style| load_font(style.font_data.clone(), style.size))
+            .map(|font| load_font(font.clone(), 16.0))
             .transpose()?;
         let driver = CudaDriver::retain_primary()?;
         // Made now, where the style needs them, so that a driver that cannot
         // JIT them refuses the element rather than its first picture.
-        let cells = match options.redact.as_ref().map(|redaction| redaction.style) {
-            Some(RedactStyle::Mosaic { .. } | RedactStyle::Blur { .. }) => {
-                Some((driver.redact_kernels()?, driver.cell_means(4 * 64)?))
-            }
-            _ => None,
+        let cells = if options.cuts_cells() {
+            Some((driver.redact_kernels()?, driver.cell_means(4 * 64)?))
+        } else {
+            None
         };
         let hw_device_ctx = device.retain();
         // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
@@ -190,9 +187,9 @@ impl CudaDetectionOverlay {
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
         pp_info!(
             pp_log: &pp_log,
-            "opened: NV12 or BGRA, line_width={}, min_score={}, labels={}",
-            options.line_width,
-            options.min_score,
+            "opened: NV12 or BGRA, {} rules, others {:?}, font={}",
+            options.rules.len(),
+            options.others,
             font.is_some()
         );
         Ok(Self(FilterStage::new(Overlaying {
@@ -201,6 +198,7 @@ impl CudaDetectionOverlay {
             options,
             font,
             masks: HashMap::new(),
+            warned_names: false,
             cells,
             driver,
             hw_device_ctx,
@@ -219,33 +217,34 @@ enum Surface {
     Bgra(BgraSurface),
 }
 
-impl Overlaying {
-    /// The mask `key` names, rasterized and uploaded, from the cache where
-    /// it is there.
-    fn mask(&mut self, key: &MaskKey) -> Option<&CudaMask> {
-        if !self.masks.contains_key(key) {
-            let font = self
-                .font
-                .as_ref()
-                .zip(self.options.labels.as_ref().map(|style| style.size));
-            let mask = match rasterize(key, font) {
-                Ok(Some(raster)) => self
-                    .driver
-                    .upload_mask(&raster.coverage, raster.width, raster.height)
-                    // A mask under two pixels either way has no whole block
-                    // to draw; it is left out, not an error.
-                    .ok(),
-                Ok(None) => None,
-                Err(error) => {
-                    pp_error!(self, "{key:?} not drawn: {error:?}");
-                    None
-                }
-            };
-            self.masks.insert(key.clone(), mask);
-        }
-        self.masks.get(key)?.as_ref()
+/// The mask `key` names, rasterized in `font` and uploaded by `driver`,
+/// from `masks` where it is there.
+fn mask<'a>(
+    masks: &'a mut HashMap<MaskKey, Option<CudaMask>>,
+    font: Option<&ab_glyph::FontArc>,
+    driver: &CudaDriver,
+    pp_log: &PpLog,
+    key: &MaskKey,
+) -> Option<&'a CudaMask> {
+    if !masks.contains_key(key) {
+        let made = match rasterize(key, font) {
+            Ok(Some(raster)) => driver
+                .upload_mask(&raster.coverage, raster.width, raster.height)
+                // A mask under two pixels either way has no whole block
+                // to draw; it is left out, not an error.
+                .ok(),
+            Ok(None) => None,
+            Err(error) => {
+                pp_error!(pp_log: pp_log, "{key:?} not drawn: {error:?}");
+                None
+            }
+        };
+        masks.insert(key.clone(), made);
     }
+    masks.get(key)?.as_ref()
+}
 
+impl Overlaying {
     /// A frame from this element's pool for `format` at `width` x `height`.
     fn frame(
         &mut self,
@@ -436,17 +435,19 @@ impl Overlaying {
         }
         // Placed by each uploaded mask's size, which is the rasterized one
         // cut to whole blocks, so nothing is read past it.
-        let marks = marks(
-            canvas,
-            self.options.style(),
-            detections,
-            analytics,
-            &mut |key| self.mask(key).map(|mask| (mask.width, mask.height)),
+        let (masks, font, driver, pp_log) = (
+            &mut self.masks,
+            self.font.as_ref(),
+            &self.driver,
+            &self.pp_log,
         );
+        let marks = marks(canvas, &self.options, detections, analytics, &mut |key| {
+            mask(masks, font, driver, pp_log, key).map(|mask| (mask.width, mask.height))
+        });
         // What is hidden first, so that a box and its label are drawn over
         // it where they are asked for.
-        if let (Some(redaction), Some(detections)) = (&self.options.redact, detections) {
-            for hide in hides(canvas, redaction, detections) {
+        if let Some(detections) = detections {
+            for hide in hides(canvas, &self.options, detections) {
                 match hide {
                     Hide::Fill { rect, color } => self.fill(surface, rect, color)?,
                     Hide::Cells {
@@ -558,6 +559,16 @@ impl Filter for Overlaying {
         let analytics = metadata
             .as_deref()
             .and_then(|metadata| metadata.get::<Analytics>());
+        if let Some(detections) = detections
+            && !self.warned_names
+            && self.options.names_unmatched(detections)
+        {
+            pp_warn!(
+                self,
+                "a rule names a class, and the detections carry no class names: it matches nothing"
+            );
+            self.warned_names = true;
+        }
         if !self.options.draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
@@ -583,7 +594,9 @@ impl Drop for Overlaying {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::{BoxColors, LabelStyle, tests::system_font};
+    use super::super::super::{
+        BoxColors, BoxStyle, LabelStyle, RedactStyle, Treatment, tests::system_font,
+    };
     use super::*;
     use crate::buffer::Metadata;
     use crate::element::RawSink;
@@ -659,7 +672,10 @@ mod tests {
         };
         let color = Color::new(255, 0, 0);
         let options = DetectionOverlayOptions {
-            colors: BoxColors::One(color),
+            others: Treatment::boxes(BoxStyle {
+                color: BoxColors::One(color),
+                ..BoxStyle::default()
+            }),
             ..DetectionOverlayOptions::default()
         };
         for format in [CudaFrameFormat::Nv12, CudaFrameFormat::Bgra] {
@@ -742,10 +758,11 @@ mod tests {
         };
         let color = Color::new(255, 196, 0);
         let options = DetectionOverlayOptions {
-            colors: BoxColors::One(color),
-            labels: Some(LabelStyle {
-                size: 12.0,
-                ..LabelStyle::new(font)
+            font: Some(font),
+            others: Treatment::boxes(BoxStyle {
+                color: BoxColors::One(color),
+                label: Some(LabelStyle::new(12.0)),
+                ..BoxStyle::default()
             }),
             ..DetectionOverlayOptions::default()
         };
@@ -871,11 +888,7 @@ mod tests {
         ] {
             for style in styles {
                 let options = DetectionOverlayOptions {
-                    parts: super::super::super::OverlayParts {
-                        boxes: false,
-                        ..super::super::super::OverlayParts::default()
-                    },
-                    redact: Some(super::super::super::Redaction::new(style)),
+                    others: Treatment::hidden(style),
                     ..DetectionOverlayOptions::default()
                 };
                 let picture = noise(pixel);

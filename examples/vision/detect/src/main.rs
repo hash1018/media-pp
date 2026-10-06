@@ -29,8 +29,9 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         elements::{
-            AppSink, COCO_CLASS_LABELS, DetectionOverlayOptions, Detections, FileDemuxer,
+            AppSink, BoxStyle, COCO_CLASS_LABELS, DetectionOverlayOptions, Detections, FileDemuxer,
             LabelStyle, OrtDetectorOptions, SwDecoder, SwDetectionOverlay, SwOrtDetector, SwScaler,
+            Treatment,
         },
         pipeline::Pipeline,
     };
@@ -209,16 +210,17 @@ mod example {
                     ..OrtDetectorOptions::default()
                 },
             )?;
-            let overlay = SwDetectionOverlay::new(
-                "overlay",
+            let overlay = SwDetectionOverlay::new("overlay", {
+                let font = FONTS.iter().find_map(|path| std::fs::read(path).ok());
                 DetectionOverlayOptions {
-                    labels: FONTS
-                        .iter()
-                        .find_map(|path| std::fs::read(path).ok())
-                        .map(LabelStyle::new),
+                    others: Treatment::boxes(BoxStyle {
+                        label: font.is_some().then(LabelStyle::default),
+                        ..BoxStyle::default()
+                    }),
+                    font,
                     ..DetectionOverlayOptions::default()
-                },
-            )?;
+                }
+            })?;
             let render_proxy = proxy.clone();
             let sink = AppSink::new("draw", move |buf| {
                 let MediaBuffer::Video(frame) = &buf else {

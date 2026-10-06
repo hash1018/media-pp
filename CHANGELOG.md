@@ -204,19 +204,29 @@ compile error with no explanation.
 
 ### Added
 
-- **The detection overlays hide what was found** —
-  `DetectionOverlayOptions::redact`, DeepStream's redaction. A
-  `Redaction` grows each box by a margin and hides it by a mosaic, a blur
-  or a fill (`RedactStyle`), on the copy the overlay draws on, so that a
-  branch beside it keeps the picture as it was. A mosaic's or a blur's
-  cells are sized by the box — its shorter side cut into `cells`, none
-  smaller than `min_cell` pixels — so that a face close to the camera is
-  hidden as well as one far off; the blur blends those cells' means
-  rather than blurring lightly, which can be partly undone. With
-  `OverlayParts::boxes` off, the hidden picture goes on with nothing
-  drawn. `SwDetectionOverlay` and `CudaDetectionOverlay` hide, writing
-  the same bytes; `MetalDetectionOverlay` refuses a redaction for now,
-  with `MetalDetectionOverlayError::RedactionUnsupported`.
+- **The detection overlays do with each class what its rule says** —
+  draw its box, hide it, both or neither. `DetectionOverlayOptions::rules`
+  holds a `ClassRule` per class, named as the model names it (`"face"`) or
+  by number, and `others` covers the classes no rule names. A rule's
+  `Treatment` gives its `BoxStyle` — line width, colour, label — or none,
+  its `Hiding` or none, and the score below which the detection is left
+  alone, so that faces can be hidden from 0.2 while boxes are drawn from
+  0.5. The font is given once, `DetectionOverlayOptions::font`; a label
+  asked for without one, or a class two rules name, is refused with
+  `DetectionOverlayOptionsError`. A rule naming a class where the model
+  names none is warned of once. By default every box is drawn as before.
+
+  Hiding is DeepStream's redaction: the box grown by a margin and covered
+  by a mosaic, a blur or a fill (`RedactStyle`), on the copy the overlay
+  draws on, so that a branch beside it keeps the picture as it was. A
+  mosaic's or a blur's cells are sized by the box — its shorter side cut
+  into `cells`, none smaller than `min_cell` pixels — so that a face close
+  to the camera is hidden as well as one far off; the blur blends those
+  cells' means rather than blurring lightly, which can be partly undone.
+  `SwDetectionOverlay` and `CudaDetectionOverlay` hide, writing the same
+  bytes; `MetalDetectionOverlay` refuses a rule that hides for now, with
+  `MetalDetectionOverlayError::RedactionUnsupported`.
+
 
 - **`StreamMux`: several streams through one model,** DeepStream's
   `nvstreammux` and `nvstreamdemux` — see docs/stream-mux.md. Inputs come
@@ -423,8 +433,8 @@ compile error with no explanation.
   line's ends, so that what draws them draws what was counted.
 
 - **What a detection overlay draws, chosen.** `DetectionOverlayOptions::parts`
-  (`OverlayParts`) turns each of the boxes, an `ObjectAnalytics`'s zones
-  and its lines on or off — the boxes alone by default. A zone is outlined
+  (`OverlayParts`) turns an `ObjectAnalytics`'s zones and its lines on or
+  off, and sets how thick and how large their labels are. A zone is outlined
   in amber, red while it is crowded, and labelled with how many objects are
   in it; a line is drawn across the picture in cyan, slanting or not, and
   labelled with its crossings each way, `gate 12 / 3`. All three overlays
@@ -511,7 +521,7 @@ compile error with no explanation.
 - **`SwDetectionOverlay` and `CudaDetectionOverlay`: what was found, drawn
   onto the picture.** Each picture carrying `Detections` is handed on as a
   copy with a box around each object — and, given a font
-  (`DetectionOverlayOptions::labels`), its class and score on a band above
+  (`DetectionOverlayOptions::font`), its class and score on a band above
   it — and the same `Detections` still on it. The software one draws on
   NV12, YUV 4:2:0, RGB24 and BGRA pictures; the CUDA one on NV12 and BGRA
   CUDA pictures without them leaving the GPU, so a detector's pictures go
