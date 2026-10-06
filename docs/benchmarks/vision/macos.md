@@ -1,52 +1,45 @@
 # Running the vision benchmarks on macOS
 
-What it takes to measure the same experiments on Apple silicon, so the
-tables can be set beside [the Linux ones](linux-rtx3050.md). The clips,
-the models and `bench.py`'s method are the same — see
-[method.md](method.md); what differs is the backend, which has yet to be
-added to the harness, and the GPU's counters.
+The same experiments on Apple silicon, so the tables can be set beside
+[the Linux ones](linux-rtx3050.md). The clips, the models and `bench.py`'s
+method are the same — see [method.md](method.md); the backend differs, and
+the GPU's counters. The results of one Mac are in
+[macos-m5-air.md](macos-m5-air.md).
 
-## What the harness needs
+## The harness on a Mac
 
-`vision_bench` builds on macOS today with the `cpu` backend alone. A
-`metal` backend goes beside `cuda` and `tensorrt` in
-[`src/main.rs`](../../../examples/vision/vision_bench/src/main.rs), each
-of its `match args.backend` arms taking the macOS element where the CUDA
-one is:
+`vision_bench` builds on macOS with a `metal` backend, its default there,
+beside `cpu`; each stage takes the macOS element where Linux takes the
+CUDA one:
 
 | Stage | Linux (`tensorrt`) | macOS (`metal`) |
 |---|---|---|
 | Decoder | `CudaDecoder` | `VideoToolboxDecoder` |
 | Detector | `CudaOrtDetector` | `MetalOrtDetector`, `max_batch` from `--batch` |
-| Tracker | `ObjectTracker` | `ObjectTracker` — following by look on the GPU with `metal` |
+| Tracker | `ObjectTracker` | `ObjectTracker` — following by look on the GPU with Metal |
 | Classifier | `CudaOrtClassifier` | `MetalOrtClassifier` |
 | Overlay | `CudaDetectionOverlay` | `MetalDetectionOverlay` |
 | Encoder | `CudaEncoder`, H.264 8 Mbit/s | `VideoToolboxEncoder`, the same |
 
-with `media-pp`'s `ort-coreml` feature in a
-`[target.'cfg(target_os = "macos")'.dependencies]` table of its
-`Cargo.toml`. The `RESULT` line stays as it is — `decode=videotoolbox`,
-`backend=metal`, `precision` as Core ML is asked for — so `bench.py` reads
-it unchanged. `metal_multi_detect` and `metal_detect` already build each of
-these stages and are the reference for how.
+Its `RESULT` line reads `decode=videotoolbox`, `backend=metal` and, for
+the precision, the compute units Core ML was allowed, so `bench.py` reads
+it unchanged; on a Mac `bench.py` runs the matrix below in place of the
+Linux one.
 
 Three things in the matrix change meaning:
 
-- **`--fp32` and the engine cache** are TensorRT's. Core ML has its own
-  choice instead: which compute units it may use. A `--compute-units
-  all|gpu|ane|cpu` flag (`MLComputeUnits`) is the comparison that matters
-  on a Mac — the Neural Engine against the GPU — and needs
-  `core_ml_session` in `infer/ort/metal/mod.rs` to take it; it currently
-  leaves the choice to Core ML.
-- **`--track visual` on the CPU.** `metal` follows VideoToolbox pictures by
-  look on the GPU with no feature to turn that off, so E6's CPU row needs a
-  way to ask for the CPU's — an option on `TrackerOptions`, or the pictures
-  downloaded to system memory before the tracker.
-- **E0's ceiling.** `model_only` runs ONNX Runtime's TensorRT and CUDA
-  providers. A `--provider coreml` beside them, the session made as
-  `core_ml_session` makes it and the input a tensor in memory, gives the
-  Mac's ceiling — though Core ML copies its input in on every run, so it is
-  the model's rate plus that copy, which `MetalOrtDetector` pays as well.
+- **`--fp32` and the engine cache** are TensorRT's. Core ML picks its own
+  precision; what it is told is where it may run, `--compute-units
+  all|gpu|ane` — `MetalOrtDetectorOptions::compute_units`, a
+  `CoreMlComputeUnits`. The Neural Engine against the GPU is the
+  comparison that matters on a Mac.
+- **`--track visual` on the CPU.** Metal follows VideoToolbox pictures by
+  look on the GPU with no feature to turn that off, so E6 has no CPU row
+  on a Mac.
+- **E0's ceiling.** `model_only --provider coreml [--compute-units …]`
+  runs the model as `MetalOrtDetector` sets it up, its input a tensor in
+  memory: the model's rate plus the copy Core ML makes of its input on
+  every run, which the detector pays as well.
 
 ## The GPU's counters
 
@@ -72,6 +65,5 @@ The clips are made with `h264_videotoolbox` in place of `h264_nvenc`, as
 
 ## Results
 
-To be filled in from a run, as [linux-rtx3050.md](linux-rtx3050.md) is,
-with the machine described first: the chip and its GPU cores, memory,
-macOS version, ONNX Runtime and FFmpeg versions, and the media-pp commit.
+[macos-m5-air.md](macos-m5-air.md): an M5 MacBook Air, which has no fan —
+every table there is the chip's sustained, throttled rate.

@@ -25,6 +25,11 @@ not go through media-pp.
 --dir holds the clips and models the matrix names: people-432p.mp4,
 people-1080p.mp4, people-2160p.mp4, yolo11n.onnx, yolo11s.onnx,
 yolov10n.onnx and mobilenetv2-12.onnx.
+
+On macOS the same experiments run on the metal backend — VideoToolbox,
+Core ML and Metal — with Core ML's compute units where Linux compares
+providers and precisions, as docs/benchmarks/vision/macos.md describes.
+There is no nvidia-smi there, and the GPU columns stay empty.
 """
 
 import argparse
@@ -53,6 +58,8 @@ ENGINES = os.path.expanduser("~/.cache/media-pp/vision-bench-engines")
 
 CPU = ["--backend", "cpu", "--pictures", "400", "--warmup", "40"]
 TRT = ["--backend", "tensorrt"]
+METAL = ["--backend", "metal"]
+MACOS = sys.platform == "darwin"
 
 
 # E0: the model alone, the ceiling every pipeline below is held against.
@@ -67,11 +74,24 @@ MODEL_ONLY = [
 ]
 
 
+# E0 on a Mac: Core ML, anywhere it chooses, held to the GPU, held to the
+# Neural Engine.
+MODEL_ONLY_MACOS = [
+    (N, ["--provider", "coreml", "--compute-units", "all"], "1,2,4,8"),
+    (N, ["--provider", "coreml", "--compute-units", "gpu"], "1,8"),
+    (N, ["--provider", "coreml", "--compute-units", "ane"], "1,8"),
+    (S, ["--provider", "coreml", "--compute-units", "all"], "1,8"),
+    (S, ["--provider", "coreml", "--compute-units", "ane"], "1"),
+    (V10, ["--provider", "coreml", "--compute-units", "all"], "1"),
+    (V10, ["--provider", "coreml", "--compute-units", "ane"], "1"),
+]
+
+
 def model_only(binary, directory, reps):
     """E0's table: each model, provider and batch, the median of `reps`."""
     seen = {}
     for rep in range(reps):
-        for model, args, batches in MODEL_ONLY:
+        for model, args, batches in (MODEL_ONLY_MACOS if MACOS else MODEL_ONLY):
             out = subprocess.run(
                 [binary, os.path.join(directory, model), *args, "--batch", batches,
                  "--engine-cache-root", ENGINES],
@@ -93,8 +113,82 @@ def model_only(binary, directory, reps):
         print(f"| {model} | {provider} | {precision} | {batch} | {m:.0f} | {batch / m * 1e3:.2f} |")
 
 
+def matrix_macos():
+    """The matrix on a Mac: the metal backend where Linux has TensorRT."""
+    m = []
+
+    def add(exp, label, args):
+        m.append((exp, label, args, False))
+
+    for v in (V432, V1080, V2160):
+        add("E1", f"videotoolbox {v}", [v, *METAL])
+        add("E1", f"sw-decode {v}", [v, *CPU])
+
+    add("E2", "cpu yolo11n", [V1080, "--model", N, *CPU])
+    for units in ("all", "gpu", "ane"):
+        add("E2", f"core ml {units} yolo11n", [V1080, "--model", N, *METAL, "--compute-units", units])
+    add("E2", "cpu yolo11s", [V1080, "--model", S, *CPU])
+    for units in ("all", "ane"):
+        add("E2", f"core ml {units} yolo11s", [V1080, "--model", S, *METAL, "--compute-units", units])
+    for units in ("all", "ane"):
+        add("E2", f"core ml {units} yolov10n", [V1080, "--model", V10, *METAL, "--compute-units", units])
+
+    for v in (V432, V1080, V2160):
+        add("E3", f"core ml {v}", [v, "--model", N, *METAL])
+
+    for n in (1, 2, 4, 8):
+        add("E4", f"{n} streams, a detector each", [V1080, "--model", N, *METAL, "--streams", str(n)])
+        add("E4", f"{n} streams, batched", [V1080, "--model", N, *METAL, "--streams", str(n), "--batch", str(n)])
+    for n in (1, 4, 8):
+        add("E4", f"{n} streams decode only", [V1080, *METAL, "--streams", str(n)])
+
+    for streams, batch in ((1, 0), (4, 4)):
+        for interval in (0, 1, 2, 4):
+            add(
+                "E5",
+                f"{streams} stream(s), interval {interval}",
+                [V1080, "--model", N, *METAL, "--streams", str(streams), "--batch", str(batch),
+                 "--interval", str(interval), "--track", "motion"],
+            )
+
+    # Metal follows VideoToolbox pictures by look on the GPU: there is no
+    # CPU row to set beside it.
+    for interval in (0, 4):
+        base = [V1080, "--model", N, *METAL, "--interval", str(interval)]
+        add("E6", f"interval {interval}, no tracker", base)
+        add("E6", f"interval {interval}, motion", [*base, "--track", "motion"])
+        add("E6", f"interval {interval}, visual on the GPU", [*base, "--track", "visual"])
+
+    for streams, batch in ((1, 0), (4, 4)):
+        base = [V1080, "--model", N, *METAL, "--streams", str(streams), "--batch", str(batch), "--track", "motion"]
+        add("E7", f"{streams} stream(s), detector and tracker", base)
+        add("E7", f"{streams} stream(s), classifier, each object every 30 pictures",
+            [*base, "--classifier", CLS])
+        add("E7", f"{streams} stream(s), classifier, each object every picture",
+            [*base, "--classifier", CLS, "--reclassify", "1"])
+
+    base = [V1080, "--model", N, *METAL]
+    add("E8", "detect", base)
+    add("E8", "detect, overlay", [*base, "--overlay"])
+    add("E8", "detect, overlay, VideoToolbox encode", [*base, "--overlay", "--encode"])
+    add("E8", "decode, VideoToolbox encode", [V1080, *METAL, "--encode"])
+    add("E8", "cpu detect 432p", [V432, "--model", N, *CPU])
+    add("E8", "cpu detect, overlay 432p", [V432, "--model", N, *CPU, "--overlay"])
+
+    for n in (1, 4, 8):
+        add(
+            "E9",
+            f"{n} stream(s) 1080p: interval 2, tracker, classifier, overlay, VideoToolbox encode",
+            [V1080, "--model", N, *METAL, "--streams", str(n), "--batch", str(n) if n > 1 else "0",
+             "--interval", "2", "--track", "motion", "--classifier", CLS, "--overlay", "--encode"],
+        )
+    return m
+
+
 def matrix():
     """(experiment, label, arguments, needs the gpu-dcf build)."""
+    if MACOS:
+        return matrix_macos()
     m = []
 
     def add(exp, label, args, gpu_dcf=False):

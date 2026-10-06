@@ -295,7 +295,10 @@ compile error with no explanation.
   CPU, which is `SwOrtDetector`'s job. On an M5 YOLOv10n
   looks at a 720p picture in about 7 ms through Core ML, against about 19
   ms on the CPU, and loads in under half a second. The `metal_detect`
-  example runs it over a file.
+  example runs it over a file. `MetalOrtDetectorOptions::compute_units`, a
+  `CoreMlComputeUnits`, holds Core ML to the GPU or to the Neural Engine
+  rather than letting it choose; on an M5 the Neural Engine ran YOLO11n at
+  a quarter of the GPU's rate.
 
 - **`Detections`: what a detector found in a picture, as its metadata.**
   `SwOrtDetector` puts one on every picture it hands on — the detector's name,
@@ -358,7 +361,13 @@ compile error with no explanation.
   the same TensorRT, and `bench.py`, which runs a matrix of them in turns
   and compares builds inside one run. `docs/benchmarks/vision` has what
   they measured on an RTX 3050, read against the model alone, and what a
-  Mac needs to measure the same.
+  Mac needs to measure the same. On macOS `vision_bench` has a `metal`
+  backend — VideoToolbox, Core ML on the compute units `--compute-units`
+  allows, Metal — and `model_only` a Core ML provider; the matrix measured
+  on an M5 MacBook Air, at the fanless laptop's sustained rate, is in
+  `macos-m5-air.md`: YOLO11n through Core ML five times the CPU, the
+  Neural Engine a quarter of the GPU, and a detector per stream ahead of
+  one batching them.
 
 - **`MetalOrtClassifier`: what a detector found, named by a second model on
   VideoToolbox pictures** (feature `ort-coreml`). What the other two

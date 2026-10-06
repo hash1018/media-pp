@@ -16,7 +16,8 @@ DeepStream is judged by:
 | [linux-rtx3050.md](linux-rtx3050.md) | The machine, and every experiment's results on it, each read |
 | [windows-rtx3050.md](windows-rtx3050.md) | The same experiments on the same machine under Windows, beside the Linux results: where the operating system costs and where it costs nothing |
 | [findings.md](findings.md) | What measuring turned up: the classifier's cost and its fix, a change that did nothing, engine caching, and the hardware's ceilings |
-| [macos.md](macos.md) | What it takes to run the same experiments on Apple silicon, and where its results go |
+| [macos.md](macos.md) | How the same experiments run on Apple silicon: the `metal` backend and Core ML's compute units |
+| [macos-m5-air.md](macos-m5-air.md) | The results on an M5 MacBook Air — fanless, so its sustained rate — each read |
 
 ## In short
 
@@ -40,6 +41,12 @@ DeepStream itself was not run: installing it needs root or Docker, which
 the machine did not have. The model alone through the same TensorRT
 ([E0](linux-rtx3050.md#e0-the-model-alone)) is the bound it could reach,
 and every table is read against it.
+
+On an M5 MacBook Air, which has no fan, YOLO11n through Core ML at its
+sustained rate: the model alone 295 pictures a second; one 1080p stream
+244; four streams detecting one picture in five, tracked between, 880;
+and everything at once 234 to 272, VideoToolbox's encoder's limit. There a
+detector per stream beats one batching them.
 
 ## Running it
 

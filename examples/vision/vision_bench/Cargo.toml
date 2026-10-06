@@ -27,3 +27,8 @@ media-pp = { path = "../../../lib", features = ["ort-tensorrt"] }
 # model_only runs the model through ONNX Runtime directly: the version
 # media-pp takes, so the same runtime and the same TensorRT provider.
 ort = { version = "2.0.0-rc.13", features = ["cuda", "tensorrt"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["ort-coreml"] }
+# model_only's Core ML provider, set up as the Metal elements set it up.
+ort = { version = "2.0.0-rc.13", features = ["coreml"] }

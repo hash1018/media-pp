@@ -20,15 +20,19 @@
 //! is one core kept busy.
 //!
 //!     cargo run --release -p vision_bench -- video.mp4 --model yolo11n.onnx \
-//!         [--backend cpu|cuda|tensorrt] [--fp32] [--streams N] [--batch B] \
+//!         [--backend cpu|cuda|tensorrt|metal] [--fp32] [--compute-units all|gpu|ane] \
+//!         [--streams N] [--batch B] \
 //!         [--interval N] [--track motion|visual] [--classifier model.onnx] \
 //!         [--reclassify N] [--min-detection-score S] [--overlay] [--encode] \
 //!         [--pictures N] [--warmup N] [--label NAME] [--engine-cache-root DIR]
 //!
 //! Without `--model`, only decoding is measured. `--track visual` follows
 //! CUDA pictures on the GPU when built with `--features gpu-dcf`, and copies
-//! each object down to follow it on the CPU without. The GPU backends are
-//! Linux and Windows; a `metal` backend belongs beside them on macOS.
+//! each object down to follow it on the CPU without. `cuda` and `tensorrt`
+//! are Linux and Windows. `metal` is macOS: VideoToolbox decoding and
+//! encoding, the model through Core ML — on the units `--compute-units`
+//! lets it use, anywhere by default — and the tracker following
+//! VideoToolbox pictures on the GPU.
 
 use std::sync::{
     Arc, Mutex,
@@ -46,18 +50,21 @@ use media_pp::{
         StreamMuxOptions, SwDecoder, SwDetectionOverlay, SwOrtClassifier, SwOrtDetector,
         TrackerOptions,
     },
-    ffmpeg::{codec::Parameters, media},
+    ffmpeg::{Rational, codec::Parameters, media},
     pipeline::{ChainBuilder, DetachedBranch, Pipeline},
 };
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use media_pp::{
-    elements::{
-        CudaCodec, CudaDecoder, CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions,
-        CudaFrameFormat, CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions,
-        UseTensorRtPolicy,
-    },
-    ffmpeg::Rational,
+use media_pp::elements::{
+    CudaCodec, CudaDecoder, CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions,
+    CudaFrameFormat, CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, UseTensorRtPolicy,
+};
+
+#[cfg(target_os = "macos")]
+use media_pp::elements::{
+    CoreMlComputeUnits, MetalDetectionOverlay, MetalOrtClassifier, MetalOrtDetector,
+    MetalOrtDetectorOptions, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice,
+    VideoToolboxEncoder, VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
 };
 
 /// Where the labels' font is looked for; without one, boxes alone.
@@ -80,6 +87,8 @@ enum Backend {
     Cuda,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     TensorRt,
+    #[cfg(target_os = "macos")]
+    Metal,
 }
 
 impl Backend {
@@ -90,7 +99,20 @@ impl Backend {
             Backend::Cuda => "cuda",
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Backend::TensorRt => "tensorrt",
+            #[cfg(target_os = "macos")]
+            Backend::Metal => "metal",
         }
+    }
+}
+
+/// Where Core ML may run the model, as `--compute-units` names it.
+#[cfg(target_os = "macos")]
+fn compute_units(name: &str) -> Option<CoreMlComputeUnits> {
+    match name {
+        "all" => Some(CoreMlComputeUnits::All),
+        "gpu" => Some(CoreMlComputeUnits::CpuAndGpu),
+        "ane" => Some(CoreMlComputeUnits::CpuAndNeuralEngine),
+        _ => None,
     }
 }
 
@@ -106,6 +128,8 @@ struct Args {
     model: Option<String>,
     backend: Backend,
     fp32: bool,
+    /// `--compute-units`, as given: Core ML's, `metal` alone.
+    units: String,
     streams: usize,
     batch: usize,
     interval: u32,
@@ -125,7 +149,8 @@ fn args() -> Args {
     let usage = |why: &str| -> ! {
         eprintln!(
             "{why}\nusage: vision_bench <video> [--model model.onnx] [--backend cpu|cuda|tensorrt] \
-             [--fp32] [--streams N] [--batch B] [--interval N] [--track motion|visual] \
+             [--fp32] [--compute-units all|gpu|ane] [--streams N] [--batch B] [--interval N] \
+             [--track motion|visual] \
              [--classifier model.onnx] [--reclassify N] [--min-detection-score S] \
              [--overlay] [--encode] [--pictures N] [--warmup N] [--label NAME] \
              [--engine-cache-root DIR]"
@@ -139,13 +164,16 @@ fn args() -> Args {
     };
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let mut backend = Backend::TensorRt;
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    let mut backend = Backend::Metal;
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     let mut backend = Backend::Cpu;
     let mut parsed = Args {
         video: String::new(),
         model: None,
         backend,
         fp32: false,
+        units: String::from("all"),
         streams: 1,
         batch: 0,
         interval: 0,
@@ -172,11 +200,18 @@ fn args() -> Args {
                     Some("cuda") => Backend::Cuda,
                     #[cfg(any(target_os = "linux", target_os = "windows"))]
                     Some("tensorrt") => Backend::TensorRt,
+                    #[cfg(target_os = "macos")]
+                    Some("metal") => Backend::Metal,
                     _ => usage("no such backend here"),
                 };
                 parsed.backend = backend;
             }
             "--fp32" => parsed.fp32 = true,
+            "--compute-units" => {
+                parsed.units = args
+                    .next()
+                    .unwrap_or_else(|| usage("--compute-units all|gpu|ane"))
+            }
             "--streams" => parsed.streams = number(args.next()).max(1),
             "--batch" => parsed.batch = number(args.next()),
             "--interval" => parsed.interval = number(args.next()) as u32,
@@ -222,6 +257,10 @@ fn args() -> Args {
     }
     if parsed.backend == Backend::Cpu && (parsed.batch > 0 || parsed.encode) {
         usage("the cpu backend neither batches nor encodes");
+    }
+    #[cfg(target_os = "macos")]
+    if compute_units(&parsed.units).is_none() {
+        usage("--compute-units is all, gpu or ane");
     }
     parsed
 }
@@ -313,7 +352,9 @@ fn cpu_seconds() -> Option<f64> {
 /// The GPU the GPU backends share.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 type Device = Option<CudaDevice>;
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+type Device = Option<VideoToolboxDevice>;
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 type Device = Option<()>;
 
 /// What one stream is, for its decoder and encoder.
@@ -321,7 +362,6 @@ struct Stream {
     index: usize,
     params: Parameters,
     size: (u32, u32),
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
     rate: Rational,
 }
 
@@ -333,6 +373,11 @@ fn decoder(branch: ChainBuilder, args: &Args, device: &Device, s: &Stream) -> Re
         Backend::Cuda | Backend::TensorRt => {
             let device = device.as_ref().expect("a GPU backend has a device");
             branch.pipe(CudaDecoder::new(name, s.params.clone(), device, 16)?)
+        }
+        #[cfg(target_os = "macos")]
+        Backend::Metal => {
+            let device = device.as_ref().expect("a GPU backend has a device");
+            branch.pipe(VideoToolboxDecoder::new(name, s.params.clone(), device)?)
         }
     };
     let _ = device;
@@ -384,6 +429,16 @@ fn detector(
                 },
             )?)
         }
+        #[cfg(target_os = "macos")]
+        Backend::Metal => branch.pipe(MetalOrtDetector::new(
+            name,
+            model,
+            MetalOrtDetectorOptions {
+                detector: options,
+                max_batch: args.batch.max(1),
+                compute_units: compute_units(&args.units).unwrap_or_default(),
+            },
+        )?),
     })
 }
 
@@ -445,6 +500,8 @@ fn analysis(
                 let device = device.as_ref().expect("a GPU backend has a device");
                 branch.pipe(CudaOrtClassifier::new(name, device, model, options)?)
             }
+            #[cfg(target_os = "macos")]
+            Backend::Metal => branch.pipe(MetalOrtClassifier::new(name, model, options)?),
         };
     }
     let _ = device;
@@ -474,6 +531,11 @@ fn output(branch: ChainBuilder, args: &Args, device: &Device, s: &Stream) -> Res
                 let device = device.as_ref().expect("a GPU backend has a device");
                 branch.pipe(CudaDetectionOverlay::new(name, device, options)?)
             }
+            #[cfg(target_os = "macos")]
+            Backend::Metal => {
+                let device = device.as_ref().expect("a GPU backend has a device");
+                branch.pipe(MetalDetectionOverlay::new(name, device, options)?)
+            }
         };
     }
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -495,7 +557,26 @@ fn output(branch: ChainBuilder, args: &Args, device: &Device, s: &Stream) -> Res
         )?;
         branch = branch.queue(format!("drawn {}", s.index), 8).pipe(encoder);
     }
-    let _ = (device, s.size);
+    #[cfg(target_os = "macos")]
+    if args.encode {
+        let device = device.as_ref().expect("a GPU backend has a device");
+        let encoder = VideoToolboxEncoder::new(
+            format!("encoder {}", s.index),
+            device,
+            VideoToolboxEncoderOptions {
+                codec: VideoToolboxCodec::H264,
+                format: VideoToolboxFrameFormat::Nv12,
+                width: s.size.0,
+                height: s.size.1,
+                frame_rate: s.rate,
+                bit_rate: 8_000_000,
+                gop_size: 60,
+                max_b_frames: None,
+            },
+        )?;
+        branch = branch.queue(format!("drawn {}", s.index), 8).pipe(encoder);
+    }
+    let _ = (device, s.size, s.rate);
     Ok(branch)
 }
 
@@ -519,7 +600,12 @@ fn run() -> Result<()> {
         Backend::Cpu => None,
         Backend::Cuda | Backend::TensorRt => Some(CudaDevice::new()?),
     };
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    let device: Device = match args.backend {
+        Backend::Cpu => None,
+        Backend::Metal => Some(VideoToolboxDevice::new()?),
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     let device: Device = None;
 
     let started = Instant::now();
@@ -536,7 +622,6 @@ fn run() -> Result<()> {
             index,
             params: stream.parameters.clone(),
             size: stream.size().expect("a video stream says its size"),
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
             rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
         };
         sources.push((source, stream.index, info));
@@ -649,6 +734,9 @@ fn run() -> Result<()> {
     let track = match args.track {
         Track::Off => "off",
         Track::Motion => "motion",
+        // Metal follows VideoToolbox pictures on the GPU, with no build of
+        // its own to ask for it.
+        Track::Visual if cfg!(target_os = "macos") && args.backend != Backend::Cpu => "visual-gpu",
         Track::Visual if cfg!(feature = "gpu-dcf") && args.backend != Backend::Cpu => "visual-gpu",
         Track::Visual => "visual-cpu",
     };
@@ -666,6 +754,8 @@ fn run() -> Result<()> {
             Backend::Cpu => "sw",
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             _ => "nvdec",
+            #[cfg(target_os = "macos")]
+            Backend::Metal => "videotoolbox",
         },
         if args.model.is_some() {
             args.backend.name()
@@ -681,6 +771,10 @@ fn run() -> Result<()> {
             Backend::Cuda => "fp32",
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Backend::TensorRt => "fp16",
+            // Core ML picks its own precision; what it is told is where
+            // it may run.
+            #[cfg(target_os = "macos")]
+            Backend::Metal => args.units.as_str(),
         },
         args.streams,
         args.batch,

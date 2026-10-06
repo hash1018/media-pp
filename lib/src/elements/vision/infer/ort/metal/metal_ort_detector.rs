@@ -25,8 +25,8 @@ use super::super::{
     model_input,
 };
 use super::best_class::BestClass;
-use super::core_ml_session;
 use super::fitting::{Cut, Fitting, Picture};
+use super::{CoreMlComputeUnits, core_ml_session};
 
 /// How a [`MetalOrtDetector`] runs its model, beside what every detector is
 /// told.
@@ -50,6 +50,11 @@ pub struct MetalOrtDetectorOptions {
     /// YOLOv10n release — is run so, with a warning. The default, 1, is a
     /// detector of one picture at a time.
     pub max_batch: usize,
+    /// Where Core ML may run the model. By default, anywhere, as it
+    /// chooses; the GPU or the Neural Engine alone is the comparison that
+    /// tells which suits a model — on an M5, YOLO11n ran three to four
+    /// times slower held to the Neural Engine than with the GPU.
+    pub compute_units: CoreMlComputeUnits,
 }
 
 impl Default for MetalOrtDetectorOptions {
@@ -57,6 +62,7 @@ impl Default for MetalOrtDetectorOptions {
         Self {
             detector: OrtDetectorOptions::default(),
             max_batch: 1,
+            compute_units: CoreMlComputeUnits::All,
         }
     }
 }
@@ -204,17 +210,18 @@ impl MetalOrtDetector {
             .iter()
             .map(|(symbol, size)| (symbol.as_str(), *size))
             .collect();
-        let session = core_ml_session(model_path, &fixed)?;
+        let session = core_ml_session(model_path, &fixed, options.compute_units)?;
         let model = model_input(&session)?;
         let labels = labels(options.detector.labels.as_deref(), &session);
         let fitting = Fitting::new(model, rows.unwrap_or(max_batch))?;
 
         pp_info!(
             pp_log: &pp_log,
-            "model loaded: path={path}, input={}x{}, batches of up to {max_batch}, {} labels, on Core ML",
+            "model loaded: path={path}, input={}x{}, batches of up to {max_batch}, {} labels, on Core ML ({:?})",
             model.0,
             model.1,
-            labels.len()
+            labels.len(),
+            options.compute_units
         );
         if labels.is_empty() {
             pp_warn!(
@@ -698,9 +705,27 @@ mod tests {
             "picture {n} has something in it"
         );
 
-        let mut gpu = MetalOrtDetector::new("gpu", &model, MetalOrtDetectorOptions::default())
+        // Wherever Core ML is let run it, the same objects: NV12 and BGRA
+        // where it chooses, NV12 held to the GPU and to the Neural Engine.
+        let runs = [
+            (CoreMlComputeUnits::All, ffmpeg::format::Pixel::NV12),
+            (CoreMlComputeUnits::All, ffmpeg::format::Pixel::BGRA),
+            (CoreMlComputeUnits::CpuAndGpu, ffmpeg::format::Pixel::NV12),
+            (
+                CoreMlComputeUnits::CpuAndNeuralEngine,
+                ffmpeg::format::Pixel::NV12,
+            ),
+        ];
+        for (units, format) in runs {
+            let mut gpu = MetalOrtDetector::new(
+                "gpu",
+                &model,
+                MetalOrtDetectorOptions {
+                    compute_units: units,
+                    ..MetalOrtDetectorOptions::default()
+                },
+            )
             .expect("loads on Core ML");
-        for format in [ffmpeg::format::Pixel::NV12, ffmpeg::format::Pixel::BGRA] {
             let actual = found(&mut gpu, upload(&device, nth_picture(&video, n, format)));
             for wanted in expected.items.iter().filter(|found| found.score > 0.5) {
                 let best = actual
@@ -711,7 +736,7 @@ mod tests {
                     .fold(0.0, f32::max);
                 assert!(
                     best > 0.8,
-                    "{format:?}: {wanted:?} found at IoU {best} only"
+                    "{units:?}, {format:?}: {wanted:?} found at IoU {best} only"
                 );
             }
         }

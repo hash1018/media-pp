@@ -34,7 +34,9 @@ pub use cuda::{
     RuntimeShortfall,
 };
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use metal::{MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions};
+pub use metal::{
+    CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
+};
 pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
 #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]

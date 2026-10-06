@@ -6,6 +6,10 @@ mod ort;
 
 #[cfg(feature = "ort-tensorrt")]
 pub use self::ort::UseTensorRtPolicy;
+#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+pub use self::ort::{
+    CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
+};
 #[cfg(feature = "ort-cuda")]
 pub use self::ort::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
@@ -15,5 +19,3 @@ pub use self::ort::{
     InputScale, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtError,
     SwOrtClassifier, SwOrtDetector,
 };
-#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use self::ort::{MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions};

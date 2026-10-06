@@ -15,9 +15,160 @@
 //!         [--engine-cache-root DIR] [--cuda-graph] [--opt N] [--max N] [--int8] \
 //!         [--int8-table FILE]
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn main() {
-    eprintln!("model_only runs ONNX Runtime's TensorRT and CUDA providers: Linux and Windows");
+    eprintln!("model_only runs ONNX Runtime's TensorRT and CUDA providers, or Core ML on macOS");
+}
+
+/// On macOS, the model alone through Core ML, set up as `MetalOrtDetector`
+/// sets it up: an ML Program, the batch the model leaves open fixed at each
+/// batch run and an open height and width at the model's size, on the
+/// compute units asked for. Its input is a tensor in memory, as Core ML's
+/// provider takes it, so this is the model's rate with the copy Core ML
+/// makes of its input on every run — which the detector pays too.
+///
+///     cargo run --release -p vision_bench --bin model_only -- yolo11n.onnx \
+///         [--provider coreml] [--compute-units all|gpu|ane] [--batch 1,2,4,8] [--runs N]
+#[cfg(target_os = "macos")]
+fn main() -> ort::Result<()> {
+    use std::time::Instant;
+
+    use ort::{
+        ep::CoreML,
+        ep::coreml::{ComputeUnits, ModelFormat},
+        inputs,
+        session::Session,
+        value::{Tensor, ValueType},
+    };
+
+    let usage = || -> ! {
+        eprintln!(
+            "usage: model_only <model.onnx> [--provider coreml] [--compute-units all|gpu|ane] \
+             [--batch 1,2,4,8] [--runs N]"
+        );
+        std::process::exit(2);
+    };
+    let (mut model, mut units, mut batches, mut runs) = (None, String::from("all"), vec![1], 300);
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--provider" => {
+                if args.next().as_deref() != Some("coreml") {
+                    usage()
+                }
+            }
+            "--compute-units" => units = args.next().unwrap_or_else(|| usage()),
+            "--batch" => {
+                batches = args
+                    .next()
+                    .unwrap_or_else(|| usage())
+                    .split(',')
+                    .map(|n| n.parse().unwrap_or_else(|_| usage()))
+                    .collect()
+            }
+            "--runs" => {
+                runs = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or_else(|| usage())
+            }
+            // What bench.py hands every arm; Core ML keeps no engines.
+            "--engine-cache-root" => {
+                args.next();
+            }
+            _ if model.is_none() => model = Some(arg),
+            _ => usage(),
+        }
+    }
+    let model = model.unwrap_or_else(|| usage());
+    let compute_units = match units.as_str() {
+        "all" => ComputeUnits::All,
+        "gpu" => ComputeUnits::CPUAndGPU,
+        "ane" => ComputeUnits::CPUAndNeuralEngine,
+        _ => usage(),
+    };
+    let stem = std::path::Path::new(&model)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model")
+        .to_owned();
+
+    // Read on the CPU first: the input's name, sides and open dimensions.
+    let probe = Session::builder()?.commit_from_file(&model)?;
+    let input = &probe.inputs()[0];
+    let name = input.name().to_owned();
+    let ValueType::Tensor {
+        shape,
+        dimension_symbols,
+        ..
+    } = input.dtype()
+    else {
+        panic!("{model}'s input is not a tensor");
+    };
+    let side = |axis: usize| {
+        if shape[axis] > 0 {
+            shape[axis] as usize
+        } else {
+            640
+        }
+    };
+    let (h, w) = (side(2), side(3));
+    let open_batch = shape[0] <= 0;
+    let symbol = |axis: usize| {
+        dimension_symbols
+            .get(axis)
+            .filter(|s| !s.is_empty() && shape[axis] <= 0)
+            .cloned()
+    };
+    let symbols: Vec<(usize, String)> = (0..4)
+        .filter_map(|axis| Some((axis, symbol(axis)?)))
+        .collect();
+    drop(probe);
+
+    for batch in batches {
+        if batch > 1 && !open_batch {
+            eprintln!("{model} takes one picture at a time: batch {batch} skipped");
+            continue;
+        }
+        let mut builder = Session::builder()?;
+        for (axis, symbol) in &symbols {
+            let size = match axis {
+                0 => batch,
+                2 => h,
+                _ => w,
+            };
+            builder = builder.with_dimension_override(symbol, size as i64)?;
+        }
+        let provider = CoreML::default()
+            .with_model_format(ModelFormat::MLProgram)
+            .with_compute_units(compute_units)
+            .build()
+            .error_on_failure();
+        let mut session = builder
+            .with_execution_providers([provider])?
+            .commit_from_file(&model)?;
+        let tensor =
+            Tensor::<f32>::from_array(([batch, 3, h, w], vec![0.5f32; batch * 3 * h * w]))?;
+
+        // The first runs compile the model for these units and settle the
+        // clocks.
+        for _ in 0..30 {
+            session.run(inputs![name.as_str() => tensor.view()])?;
+        }
+        let started = Instant::now();
+        for _ in 0..runs {
+            session.run(inputs![name.as_str() => tensor.view()])?;
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        let per_batch = seconds / runs as f64;
+        println!(
+            "MODEL model={stem} provider=coreml precision={units} profile=1-{batch}-{batch} \
+             batch={batch} runs={runs} ms_per_batch={:.3} fps={:.1}",
+            per_batch * 1e3,
+            batch as f64 / per_batch,
+        );
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]

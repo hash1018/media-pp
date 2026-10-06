@@ -27,8 +27,8 @@ use super::super::classify::{
     Crop, Input, Memory, OrtClassifierOptions, Plan, answer, apply, best, classifier_input,
 };
 use super::super::{OrtError, labels};
-use super::core_ml_session;
 use super::fitting::{Cut, Fitting, Picture};
+use super::{CoreMlComputeUnits, core_ml_session};
 
 /// How many objects a model that takes any number at once is fixed to take
 /// through Core ML, the inputs past those a picture has left as they were.
@@ -130,6 +130,7 @@ impl MetalOrtClassifier {
                 .as_deref()
                 .map(|name| (name, CORE_ML_BATCH as i64))
                 .as_slice(),
+            CoreMlComputeUnits::All,
         )?;
         let input = classifier_input(&session)?;
         let labels = labels(options.labels.as_deref(), &session);

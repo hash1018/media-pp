@@ -10,7 +10,7 @@ are Ultralytics' and the ONNX model zoo's.
 | Piece | What it does |
 |---|---|
 | `vision_bench` | Builds the pipeline its flags describe, plays a file through it as fast as it goes, and prints one `RESULT key=value …` line. |
-| `model_only` | Runs the detector alone through ONNX Runtime on a tensor already on the GPU, its output left there: the ceiling the pipelines are held against. `--cuda-graph` replays it as a CUDA graph; `--int8` runs a Q/DQ model in INT8, `--int8-table` a float one from a calibration table; `--opt`, `--max` build for a range of batches. Linux and Windows. |
+| `model_only` | Runs the detector alone through ONNX Runtime on a tensor already on the GPU, its output left there: the ceiling the pipelines are held against. `--cuda-graph` replays it as a CUDA graph; `--int8` runs a Q/DQ model in INT8, `--int8-table` a float one from a calibration table; `--opt`, `--max` build for a range of batches. Linux and Windows; on macOS `--provider coreml [--compute-units all\|gpu\|ane]`, through Core ML. |
 | `bench.py` | Runs the whole matrix below, each configuration several times, and prints a Markdown table for each experiment. |
 
 `vision_bench`'s pipeline, each bracketed stage there only when asked for:
@@ -30,8 +30,9 @@ a detector of its own.
 | Flag | Meaning |
 |---|---|
 | `--model m.onnx` | The detector; without it, decoding alone is measured. |
-| `--backend cpu\|cuda\|tensorrt` | `cpu`: `SwDecoder`, `SwOrtDetector`, `SwOrtClassifier`, `SwDetectionOverlay`. `cuda`/`tensorrt`: NVDEC, `CudaOrtDetector` on ONNX Runtime's CUDA or TensorRT provider, `CudaOrtClassifier`, `CudaDetectionOverlay`, NVENC. |
+| `--backend cpu\|cuda\|tensorrt\|metal` | `cpu`: `SwDecoder`, `SwOrtDetector`, `SwOrtClassifier`, `SwDetectionOverlay`. `cuda`/`tensorrt`: NVDEC, `CudaOrtDetector` on ONNX Runtime's CUDA or TensorRT provider, `CudaOrtClassifier`, `CudaDetectionOverlay`, NVENC. `metal` (macOS): VideoToolbox, `MetalOrtDetector` and `MetalOrtClassifier` through Core ML, `MetalDetectionOverlay` — see [macos.md](macos.md). |
 | `--fp32` | TensorRT in single precision; half precision otherwise. |
+| `--compute-units all\|gpu\|ane` | `metal`: where Core ML may run the model — anywhere, the GPU, or the Neural Engine, the CPU beside each. |
 | `--streams N`, `--batch B` | N copies of the file; batched B at a time through a `StreamMux`, or `0` for a pipeline each. |
 | `--interval N` | The detector looks at one picture in N+1 (DeepStream's `interval`). |
 | `--track motion\|visual` | `ObjectTracker`: Kalman and matching, or that and correlation filters. `visual` follows on the GPU in a build with `--features gpu-dcf`, on the CPU without. |

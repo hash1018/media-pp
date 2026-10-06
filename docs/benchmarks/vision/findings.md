@@ -270,3 +270,34 @@ model or media-pp. DeepStream drives the same NVDEC and NVENC and would
 meet the same limits. The rows that reach them are E4's eight streams
 (NVDEC 99%), E5's intervals (NVDEC 88–100%) and E8 and E9's encoding
 (NVENC 93–100%).
+
+## Batching on Apple silicon
+
+On the M5 MacBook Air, a `StreamMux` batching streams through one
+`MetalOrtDetector` ran slower than a detector per stream — the opposite of
+the RTX 3050 — and [macos-m5-air.md](macos-m5-air.md#e4-streams) measures
+the same in the matrix (eight streams: 180 batched, 207 a detector each).
+Before the matrix, the batched detector's time was split, 1080p, YOLO11n
+through Core ML, eight streams:
+
+- the detector's thread was busy all the run, and the model took 23 ms a
+  batch of eight against 3.5 ms a picture alone — 17% less a picture;
+- fitting the batch with Metal and reading its output took the rest, one
+  after another with the model, on the one thread;
+- the mux and VideoToolbox decoding alone went at about 5500 pictures a
+  second, so neither held it back.
+
+Running the batch's sessions side by side closed the gap: four Core ML
+sessions inside the one detector, each taking batches of four in turn,
+ran at 322 and 353 pictures a second in two rounds where one session
+batching eight ran at 287 and 309, and eight detectors in separate
+processes at 319 and 368 — the same as the four sessions, round by
+round. It was an experiment and is not in the detector: a session
+each costs the model's memory and its compilation again, a batch's
+pictures would be held a batch longer, and draining and errors would be
+spread across workers. On this hardware, a detector per stream is the
+simpler way to the same rate.
+
+Core ML's choice of where to run is the GPU's rate for these models:
+held to the Neural Engine, YOLO11n ran three to four times slower, alone
+and in the pipeline.

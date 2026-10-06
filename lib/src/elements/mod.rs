@@ -303,6 +303,10 @@ pub use vision::{
     BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,
     StreamMuxInput, StreamMuxOptions, StreamOrigin,
 };
+#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
+pub use vision::{
+    CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
+};
 #[cfg(feature = "cuda")]
 pub use vision::{CudaDetectionOverlay, CudaDetectionOverlayError};
 #[cfg(feature = "ort-cuda")]
@@ -317,5 +321,3 @@ pub use vision::{
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use vision::{MetalDetectionOverlay, MetalDetectionOverlayError};
-#[cfg(all(target_os = "macos", feature = "ort-coreml"))]
-pub use vision::{MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions};
