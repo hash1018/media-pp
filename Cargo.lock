@@ -4461,6 +4461,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vision_bench"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "media-pp",
+ "ort",
+]
+
+[[package]]
 name = "vulkan_window_render"
 version = "0.1.0"
 dependencies = [

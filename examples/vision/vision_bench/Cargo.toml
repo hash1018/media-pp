@@ -1,0 +1,24 @@
+[package]
+name = "vision_bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+default-run = "vision_bench"
+
+[features]
+# ObjectTracker's visual following on the GPU for CUDA pictures. Without it,
+# `--track visual` on a GPU backend copies each object's region down and
+# follows it on the CPU — the two are the comparison.
+gpu-dcf = ["media-pp/cuda-visual-tracking"]
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["ort"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+media-pp = { path = "../../../lib", features = ["ort-tensorrt"] }
+# model_only runs the model through ONNX Runtime directly: the version
+# media-pp takes, so the same runtime and the same TensorRT provider.
+ort = { version = "2.0.0-rc.13", features = ["cuda", "tensorrt"] }
