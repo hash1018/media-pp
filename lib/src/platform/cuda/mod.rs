@@ -7,8 +7,10 @@ pub(crate) mod device;
 pub(crate) mod driver;
 pub(crate) mod format;
 pub(crate) mod frame;
+pub(crate) mod surface;
 
 pub use device::{CudaDevice, CudaDeviceError};
 pub use driver::CudaDriverError;
 pub use format::CudaFrameFormat;
 pub use frame::{CudaFrameError, CudaSurfaces};
+pub use surface::{CudaFramePool, CudaFramePoolError, CudaPlane, CudaSurfaceView};

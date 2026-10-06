@@ -108,7 +108,29 @@ impl CudaDevice {
         Ok(Self { ctx: Arc::new(ctx) })
     }
 
+    /// The ordinal of the GPU this is the primary context of — always the
+    /// default device, 0, as the CUDA driver numbers them.
+    ///
+    /// For an element of your own working on this device's pictures with
+    /// its own CUDA calls: `cuDevicePrimaryCtxRetain` on this device (which
+    /// `cudarc`'s `CudaContext::new(ordinal)` does) gives the very context
+    /// the pictures were made on, so their device pointers are valid there.
+    /// See [`crate::elements::CudaSurfaceView`] for the rest of that
+    /// contract.
+    pub fn ordinal(&self) -> u32 {
+        0
+    }
+
     pub(crate) fn retain(&self) -> Arc<AvBufferRef> {
         self.ctx.clone()
+    }
+
+    /// The `AVHWDeviceContext` frames made on this device name, for
+    /// comparing by address only.
+    pub(crate) fn device_ctx(&self) -> *const ffi::AVHWDeviceContext {
+        // SAFETY: `ctx` owns a live `AVBufferRef` for a CUDA device context,
+        // whose `data` is that `AVHWDeviceContext` by FFmpeg's own
+        // definition; the pointer is only ever compared, never read.
+        unsafe { (*self.ctx.as_ptr()).data as *const ffi::AVHWDeviceContext }
     }
 }

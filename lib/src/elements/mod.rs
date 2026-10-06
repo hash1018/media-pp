@@ -32,7 +32,8 @@ pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
 pub use crate::platform::cuda::{
-    CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameError, CudaFrameFormat, CudaSurfaces,
+    CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameError, CudaFrameFormat, CudaFramePool,
+    CudaFramePoolError, CudaPlane, CudaSurfaceView, CudaSurfaces,
 };
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 pub use crate::platform::linux::v4l2::V4l2CaptureFormat;

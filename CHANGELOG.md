@@ -204,6 +204,18 @@ compile error with no explanation.
 
 ### Added
 
+- **An element of your own can work on CUDA pictures without them
+  leaving the GPU.** `CudaSurfaceView::new(&device, &frame)` asks of a
+  picture what the CUDA elements here ask — CUDA, from this device, NV12,
+  P010 or BGRA — and gives each plane's device pointer, pitch and the bytes
+  and rows that are picture. `CudaFramePool` hands out pictures of one
+  format and size on the device to write into: the elements after yours
+  take them as their own, where one allocated through another FFmpeg device
+  context, even on the same GPU, is refused as `ForeignContext`.
+  `CudaDevice::ordinal` names the GPU whose primary context every picture
+  lives in, for retaining it with your own CUDA calls. `CudaFrameError`
+  gains `NoSurface`, for a CUDA frame with no device pointer behind it.
+
 - **The detection overlays do with each class what its rule says** —
   draw its box, hide it, both or neither. `DetectionOverlayOptions::rules`
   holds a `ClassRule` per class, named as the model names it (`"face"`) or

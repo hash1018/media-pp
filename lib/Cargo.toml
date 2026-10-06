@@ -583,6 +583,9 @@ webrtc = ["dep:str0m"]
 
 [dev-dependencies]
 log = "0.4"
+# `tests/cuda_custom_element.rs` calls the CUDA driver as an application's
+# own element would, opening it as this crate does.
+libloading = "0.8"
 
 # `tests/soak.rs` measures process private bytes, adapter video memory, and
 # the D3D11 debug layer's live-object count. Unlike the library's own

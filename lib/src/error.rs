@@ -78,8 +78,8 @@ use crate::elements::WhisperTranscriberError;
 #[cfg(feature = "cuda")]
 use crate::elements::{
     CudaChromaKeyError, CudaConverterError, CudaDecoderError, CudaDeviceError, CudaDownloadError,
-    CudaDriverError, CudaEncoderError, CudaFrameError, CudaRendererError, CudaScalerError,
-    CudaUploadError, CudaVideoCompositorError, CudaVideoEffectError,
+    CudaDriverError, CudaEncoderError, CudaFrameError, CudaFramePoolError, CudaRendererError,
+    CudaScalerError, CudaUploadError, CudaVideoCompositorError, CudaVideoEffectError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
@@ -440,6 +440,12 @@ pub enum Error {
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaFrameError(#[from] CudaFrameError),
+
+    /// A [`CudaFramePool`](crate::elements::CudaFramePool) could not be
+    /// made or hand out a picture.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaFramePoolError(#[from] CudaFramePoolError),
 
     /// Uploading a frame to CUDA failed.
     #[cfg(feature = "cuda")]

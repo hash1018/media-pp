@@ -73,3 +73,14 @@ Each type's own documentation says what it accepts, owns and how it fails.
 Elements of your own are a `Source`, a `Filter` or a `Sink`; the crate
 documentation's first page says what each is handed, and
 [`custom_element`](../examples/core/custom_element) writes one of each.
+
+One of your own can work on CUDA pictures with CUDA calls of its own and
+sit between the CUDA elements here, the pictures never leaving the GPU:
+`CudaSurfaceView` says where a picture's planes are in device memory, a
+`CudaFramePool` gives pictures to write into that the elements after it take
+as from their own device, and `CudaDevice::ordinal` names the GPU whose
+primary context they all live in. `CudaSurfaceView`'s documentation gives the
+contract — a picture handed to you is ready for the default stream, finish
+yours before handing it on, never write one you were handed — and
+[`cuda_custom_element`](../lib/tests/cuda_custom_element.rs) is one, between
+`CudaUpload` and `CudaDetectionOverlay`.

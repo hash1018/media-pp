@@ -101,6 +101,14 @@ pub enum CudaFrameError {
         /// What the surface holds.
         actual: Pixel,
     },
+
+    /// The frame passed every other question and carries no device pointer
+    /// or pitch for one of its planes.
+    #[error("{element:?} was handed a CUDA frame with no surface behind it")]
+    NoSurface {
+        /// The element that refused it.
+        element: ElementType,
+    },
 }
 
 /// A frame [`validate`] passed: the frames context it came from, and the
