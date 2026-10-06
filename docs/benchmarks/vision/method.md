@@ -147,6 +147,15 @@ the linker and the loader find them — see
 takes one to two hours on an RTX 3050, most of it the warm pass building
 engines the first time.
 
+On Windows the builds are `.exe`s, which `bench.py` looks for, and the
+providers `onnxruntime_providers_{shared,cuda,tensorrt}.dll` go beside
+them. Running needs the NVIDIA DLLs' directories on `PATH` — the
+`bin\x64` of CUDA's and cuDNN's archives and TensorRT's `tensorrt_libs`, as
+for [`cuda_detect`](../../../examples/vision/cuda_detect/README.md) — and
+`PYTHONUTF8=1` where the system's code page is not UTF-8, as a Korean or
+Japanese Windows's is not. A build started without those DLLs on `PATH`
+stops at a system dialog that waits for a click rather than failing.
+
 ## The experiments
 
 | | Compares | Fixed |

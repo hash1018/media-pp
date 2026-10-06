@@ -41,6 +41,9 @@ V432, V1080, V2160 = "people-432p.mp4", "people-1080p.mp4", "people-2160p.mp4"
 N, S, V10 = "yolo11n.onnx", "yolo11s.onnx", "yolov10n.onnx"
 CLS = "mobilenetv2-12.onnx"
 
+# The builds' own names, as Windows gives them.
+EXE = ".exe" if os.name == "nt" else ""
+
 # A CPU detector runs a few dozen pictures a second: a few hundred of them
 # say as much as the whole file.
 # An engine for each model, precision and batch, kept apart: ONNX Runtime
@@ -243,10 +246,10 @@ def main():
     arms = [tuple(arm.split("=", 1)) for arm in a.arm]
 
     def binary(directory, gpu_dcf):
-        return os.path.join(directory, "vision_bench-gpu-dcf" if gpu_dcf else "vision_bench")
+        return os.path.join(directory, ("vision_bench-gpu-dcf" if gpu_dcf else "vision_bench") + EXE)
 
     only = a.only.split(",") if a.only else None
-    model_only_bin = os.path.join(arms[0][1], "model_only")
+    model_only_bin = os.path.join(arms[0][1], "model_only" + EXE)
     if os.path.exists(model_only_bin) and (not only or "E0" in only):
         model_only(model_only_bin, a.dir, a.reps)
     rows = [r for r in matrix() if not only or r[0] in only]
