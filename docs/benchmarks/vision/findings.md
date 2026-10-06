@@ -111,18 +111,25 @@ changed nothing outside the noise: E7's classifier rows were 228 and 228,
 shows why: the wait takes 0.06 ms. The change was not kept, since a
 narrower wait is a risk to correctness that nothing measured pays for.
 
-## Engines for two batches overwrite each other
+## Engines for two batches overwrote each other
 
 ONNX Runtime names a TensorRT engine after the model's graph and the
 precision, not the batch range it was built for. Two `CudaOrtDetector`s
 of one model with different `max_batch` — one stream alone and four
-batched — share a file in the engine cache, and each start finds the
-other's engine and builds its own again, for minutes. `vision_bench`
-gives each model, precision and batch a directory of its own with
-`--engine-cache-root`. `CudaOrtDetectorOptions::engine_cache` lets an
-application do the same, but the default puts every engine in one
-directory, so the default could take the batch range into the path
-itself.
+batched — shared a file in the engine cache, and each start found the
+other's engine and built its own again: a four-stream start after a
+one-stream run took 162 seconds.
+
+The default cache now keeps an engine built for a range of batches in a
+directory of that range's own (`batch-1-4-4`; the classifier's is
+`batch-1-8-32`), and one built for none in the cache itself, where
+engines from before still are. The timing cache stays shared, which made
+the first build of a new range take 6 seconds rather than minutes.
+Starting four batched and one alone in turn, three times, every start
+after the first loaded in 0.3 to 0.4 seconds. A directory an application
+gives in `CudaOrtDetectorOptions::engine_cache` is used as it is, so
+detectors of one model with different batches want one each, as
+`vision_bench --engine-cache-root` gives them.
 
 ## Two builds of one engine differ
 

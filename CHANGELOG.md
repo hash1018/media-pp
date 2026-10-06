@@ -245,7 +245,11 @@ compile error with no explanation.
   Runtime's CUDA provider reads it there — or with `ort-tensorrt` its
   TensorRT provider, with CUDA for what TensorRT cannot run. The engine
   TensorRT builds for a model and GPU — minutes, once — is kept in the
-  user's cache directory (`CudaOrtDetectorOptions::engine_cache`). On an
+  user's cache directory (`CudaOrtDetectorOptions::engine_cache`), an
+  engine built for a range of batches in a directory of that range's own,
+  `batch-1-4-4`: ONNX Runtime names an engine after its model alone, and
+  two detectors of one model with different `max_batch` rebuilt each
+  other's on every start — 162 seconds where loading takes 0.3. On an
   RTX 3050 a 1080p file is decoded by NVDEC and run through YOLOv10n at
   about 540 pictures a second through TensorRT, and about 190 on CUDA
   alone. The `cuda_detect` example runs it over a file.

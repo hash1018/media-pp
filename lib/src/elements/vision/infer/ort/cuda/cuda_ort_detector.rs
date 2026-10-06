@@ -124,7 +124,12 @@ pub struct CudaOrtDetectorOptions {
     /// Where TensorRT keeps the engine it builds for this model and GPU.
     /// Building one takes minutes; the first detector to start builds it
     /// and every later one loads it in under a second. `None` keeps it in
-    /// the user's cache directory, under `media-pp/tensorrt`.
+    /// the user's cache directory, under `media-pp/tensorrt`, in a
+    /// directory of its own for each `max_batch` — `batch-1-4-4` — as ONNX
+    /// Runtime names an engine after its model alone. A directory given
+    /// here is used as it is: two detectors of one model with different
+    /// `max_batch` given the same one rebuild each other's engine on every
+    /// start, and want one each.
     #[cfg(feature = "ort-tensorrt")]
     pub engine_cache: Option<PathBuf>,
 }
@@ -273,10 +278,29 @@ impl CudaOrtDetector {
         let mut providers = Vec::new();
         #[cfg(feature = "ort-tensorrt")]
         let provider = if tensorrt {
-            let cache = options
-                .engine_cache
-                .clone()
-                .unwrap_or_else(super::default_engine_cache);
+            // TensorRT builds an engine for the shapes it is told of, and
+            // builds it again for a batch outside them: told every batch up
+            // to `max_batch`, a short batch costs no rebuild.
+            let batches = if options.max_batch > 1
+                && let Some(input) = batch_input(model_path.as_ref())?
+            {
+                let profile = super::BatchProfile {
+                    min: 1,
+                    opt: options.max_batch,
+                    max: options.max_batch,
+                };
+                Some((input, profile))
+            } else {
+                None
+            };
+            let (cache, timing) = match &options.engine_cache {
+                Some(cache) => (cache.clone(), cache.clone()),
+                None => {
+                    let root = super::default_engine_cache();
+                    let profile = batches.as_ref().map(|(_, profile)| *profile);
+                    (super::engine_directory(&root, profile), root)
+                }
+            };
             if let Err(error) = std::fs::create_dir_all(&cache) {
                 pp_warn!(pp_log: &pp_log, "no engine cache at {}: {error}", cache.display());
             }
@@ -288,19 +312,14 @@ impl CudaOrtDetector {
                 .with_engine_cache(true)
                 .with_engine_cache_path(cache.display())
                 .with_timing_cache(true)
-                .with_timing_cache_path(cache.display());
-            // TensorRT builds an engine for the shapes it is told of, and
-            // builds it again for a batch outside them: told every batch up
-            // to `max_batch`, a short batch costs no rebuild.
-            if options.max_batch > 1
-                && let Some(input) = batch_input(model_path.as_ref())?
-            {
+                .with_timing_cache_path(timing.display());
+            if let Some((input, profile)) = &batches {
                 let (w, h) = (input.width, input.height);
                 let shape = |batch| format!("{}:{batch}x3x{h}x{w}", input.name);
                 provider = provider
-                    .with_profile_min_shapes(shape(1))
-                    .with_profile_opt_shapes(shape(options.max_batch))
-                    .with_profile_max_shapes(shape(options.max_batch));
+                    .with_profile_min_shapes(shape(profile.min))
+                    .with_profile_opt_shapes(shape(profile.opt))
+                    .with_profile_max_shapes(shape(profile.max));
             }
             let provider = provider.build();
             // ONNX Runtime passes over a provider that fails to register and

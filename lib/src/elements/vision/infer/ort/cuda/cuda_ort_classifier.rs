@@ -148,7 +148,13 @@ impl CudaOrtClassifier {
         let mut providers = Vec::new();
         #[cfg(feature = "ort-tensorrt")]
         let provider = if tensorrt {
-            let cache = super::default_engine_cache();
+            let profile = input.batch.is_none().then(|| super::BatchProfile {
+                min: 1,
+                opt: TENSORRT_OPT_BATCH.min(capacity),
+                max: capacity,
+            });
+            let root = super::default_engine_cache();
+            let cache = super::engine_directory(&root, profile);
             if let Err(error) = std::fs::create_dir_all(&cache) {
                 pp_warn!(pp_log: &pp_log, "no engine cache at {}: {error}", cache.display());
             }
@@ -158,14 +164,14 @@ impl CudaOrtClassifier {
                 .with_engine_cache(true)
                 .with_engine_cache_path(cache.display())
                 .with_timing_cache(true)
-                .with_timing_cache_path(cache.display());
-            if input.batch.is_none() {
+                .with_timing_cache_path(root.display());
+            if let Some(profile) = profile {
                 let (width, height) = input.size;
                 let shape = |batch: usize| format!("{input_name}:{batch}x3x{height}x{width}");
                 provider = provider
-                    .with_profile_min_shapes(shape(1))
-                    .with_profile_opt_shapes(shape(TENSORRT_OPT_BATCH.min(capacity)))
-                    .with_profile_max_shapes(shape(capacity));
+                    .with_profile_min_shapes(shape(profile.min))
+                    .with_profile_opt_shapes(shape(profile.opt))
+                    .with_profile_max_shapes(shape(profile.max));
             }
             // Preferred: where TensorRT will not start, ONNX Runtime passes
             // over it to CUDA.
