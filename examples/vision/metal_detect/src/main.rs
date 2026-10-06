@@ -38,6 +38,9 @@
 //! its number, and with `--line` each line drawn across it, labelled with
 //! its crossings each way. The overlay draws on copies, so the branch
 //! printing beside it sees the pictures as they were handed on.
+//! `--hide person=blur` hides a class there instead of boxing it —
+//! `mosaic`, `blur` or `fill`, a mosaic where none is said — and may be
+//! given once for each class.
 //!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26 — of the stock weights: the boxes are named with
@@ -50,7 +53,7 @@
 //!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
 //!         [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
 //!         [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
-//!         [--out boxes.mp4] [--pictures N]
+//!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -76,14 +79,15 @@ mod example {
         Result,
         buffer::MediaBuffer,
         bus::BusEvent,
+        color::Color,
         elements::{
             Analytics, AnalyticsOptions, AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS,
-            DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
-            Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier, MetalOrtDetector,
-            MetalOrtDetectorOptions, ObjectAnalytics, ObjectTracker, OrtClassifierOptions,
-            OrtDetectorOptions, OverlayParts, TrackerOptions, Treatment, VideoToolboxCodec,
-            VideoToolboxDecoder, VideoToolboxDevice, VideoToolboxEncoder,
-            VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
+            ClassRule, DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale,
+            LabelStyle, Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier,
+            MetalOrtDetector, MetalOrtDetectorOptions, ObjectAnalytics, ObjectTracker,
+            OrtClassifierOptions, OrtDetectorOptions, OverlayParts, RedactStyle, TrackerOptions,
+            Treatment, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice,
+            VideoToolboxEncoder, VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -112,7 +116,21 @@ mod example {
         classify: Option<Vec<usize>>,
         lines: Vec<Line>,
         out: Option<String>,
+        hide: Vec<ClassRule>,
         pictures: usize,
+    }
+
+    /// `CLASS[=mosaic|blur|fill]` from `--hide`: that class's detections
+    /// hidden that way — a mosaic where no way is said — and drawn no box.
+    fn hide_rule(spec: &str) -> Option<ClassRule> {
+        let (class, style) = spec.split_once('=').unwrap_or((spec, "mosaic"));
+        let style = match style {
+            "mosaic" => RedactStyle::mosaic(),
+            "blur" => RedactStyle::blur(),
+            "fill" => RedactStyle::Fill(Color::BLACK),
+            _ => return None,
+        };
+        (!class.is_empty()).then(|| ClassRule::new(class, Treatment::hidden(style)))
     }
 
     fn args() -> Args {
@@ -121,7 +139,7 @@ mod example {
                 "usage: metal_detect <model.onnx> <video.mp4> [--track] [--interval N] \
                  [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
                  [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
-                 [--out boxes.mp4] [--pictures N]"
+                 [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]"
             );
             std::process::exit(1);
         };
@@ -129,6 +147,7 @@ mod example {
         let (mut track, mut interval, mut out, mut pictures) = (false, 0, None, usize::MAX);
         let mut confirm = TrackerOptions::default().confirm_after;
         let mut lines = Vec::new();
+        let mut hide = Vec::new();
         let mut visual = false;
         let (mut classifier, mut classifier_labels, mut classify) = (None, None, None);
         let mut args = std::env::args().skip(1);
@@ -185,6 +204,12 @@ mod example {
                     ));
                 }
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
+                "--hide" => hide.push(
+                    args.next()
+                        .as_deref()
+                        .and_then(hide_rule)
+                        .unwrap_or_else(|| usage()),
+                ),
                 "--pictures" => {
                     pictures = args
                         .next()
@@ -195,6 +220,9 @@ mod example {
             }
         }
         let [model, video] = <[String; 2]>::try_from(positional).unwrap_or_else(|_| usage());
+        if out.is_none() && !hide.is_empty() {
+            usage();
+        }
         Args {
             model,
             video,
@@ -207,6 +235,7 @@ mod example {
             classify,
             lines,
             out,
+            hide,
             pictures,
         }
     }
@@ -230,6 +259,7 @@ mod example {
             classify,
             lines,
             out,
+            hide,
             pictures: limit,
         } = args();
         // A second model on what was found, if asked for: an ImageNet
@@ -398,8 +428,8 @@ mod example {
                             label_size: 22.0,
                             ..OverlayParts::default()
                         },
+                        rules: hide,
                         font,
-                        ..DetectionOverlayOptions::default()
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");

@@ -39,6 +39,15 @@ labelled with its crossings each way. The overlay draws on copies, so the
 printing branch beside it is handed the pictures as they were. Labels are
 drawn in Arial, which macOS ships.
 
+`--hide person=blur` hides a class in the recording instead of boxing it:
+`mosaic`, `blur` or `fill` (black), a mosaic where none is said, and once
+for each class to hide, by the name the model gives it. On the people clip,
+YOLO11n records at the same rate hiding people as boxing them, about 235
+pictures a second on an M5 MacBook Air once both are measured in turns.
+Hide with the detector on every picture, as
+[`cuda_track`](../cuda_track/README.md) explains: a picture the tracker
+fills in may miss someone only just come in.
+
 The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
 and YOLO26 — of the stock weights: the boxes are named with COCO's 80 classes,
 whatever the model says, so an export that lost its class names still has
@@ -48,7 +57,7 @@ them. It is built with `ort-coreml`, on an Apple silicon Mac.
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
   [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
   [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
-  [--out boxes.mp4] [--pictures N]
+  [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
 ```
 
 The file's video has to be one VideoToolbox decodes to NV12 — 8-bit H.264 or

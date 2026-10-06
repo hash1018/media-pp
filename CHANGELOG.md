@@ -227,8 +227,8 @@ compile error with no explanation.
   the CPU, `CudaDetectionOverlay` with two kernels of its own, and
   `MetalDetectionOverlay` with their Metal counterparts, which read and
   write the planes as integers and are compiled without fast math. The
-  `cuda_detect` and `cuda_track` examples hide a class with
-  `--hide person=blur`.
+  `cuda_detect`, `cuda_track` and `metal_detect` examples hide a class
+  with `--hide person=blur`.
 
 
 - **`StreamMux`: several streams through one model,** DeepStream's
