@@ -250,6 +250,7 @@ mod example {
                             },
                         ),
                         parts: OverlayParts::default(),
+                        redact: None,
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");

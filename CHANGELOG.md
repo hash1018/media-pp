@@ -204,6 +204,20 @@ compile error with no explanation.
 
 ### Added
 
+- **The detection overlays hide what was found** —
+  `DetectionOverlayOptions::redact`, DeepStream's redaction. A
+  `Redaction` grows each box by a margin and hides it by a mosaic, a blur
+  or a fill (`RedactStyle`), on the copy the overlay draws on, so that a
+  branch beside it keeps the picture as it was. A mosaic's or a blur's
+  cells are sized by the box — its shorter side cut into `cells`, none
+  smaller than `min_cell` pixels — so that a face close to the camera is
+  hidden as well as one far off; the blur blends those cells' means
+  rather than blurring lightly, which can be partly undone. With
+  `OverlayParts::boxes` off, the hidden picture goes on with nothing
+  drawn. `SwDetectionOverlay` and `CudaDetectionOverlay` hide, writing
+  the same bytes; `MetalDetectionOverlay` refuses a redaction for now,
+  with `MetalDetectionOverlayError::RedactionUnsupported`.
+
 - **`StreamMux`: several streams through one model,** DeepStream's
   `nvstreammux` and `nvstreamdemux` — see docs/stream-mux.md. Inputs come
   from other pipelines through `StreamMuxHandle::add_source`; every picture

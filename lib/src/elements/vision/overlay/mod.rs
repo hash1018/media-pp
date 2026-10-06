@@ -3,7 +3,8 @@
 //! box around each object, and with a label above it where a font is given
 //! — and, as [`OverlayParts`] says, the zones and lines an
 //! [`ObjectAnalytics`](crate::elements::ObjectAnalytics) counted from its
-//! [`Analytics`].
+//! [`Analytics`] — or with a [`Redaction`], each box hidden by a mosaic, a
+//! blur or a fill before anything is drawn over it.
 //!
 //! One element per place a picture lives, as the detectors are:
 //! [`SwDetectionOverlay`] draws on pictures in system memory, and
@@ -31,6 +32,8 @@ pub use cuda::{CudaDetectionOverlay, CudaDetectionOverlayError};
 pub use metal::{MetalDetectionOverlay, MetalDetectionOverlayError};
 pub use sw_detection_overlay::{SwDetectionOverlay, SwDetectionOverlayError};
 
+use std::num::NonZeroU32;
+
 use crate::color::Color;
 use crate::elements::source::{TextMask, TextRasterError, rasterize_coverage};
 use crate::elements::{Analytics, Detection, Detections};
@@ -53,6 +56,10 @@ pub struct DetectionOverlayOptions {
     /// Which of what a picture carries are drawn: by default the boxes
     /// alone.
     pub parts: OverlayParts,
+    /// What is found hidden — mosaicked, blurred or filled — before
+    /// anything is drawn over it, or `None` to hide nothing. To hand on
+    /// the hidden picture alone, set `parts.boxes` to `false`.
+    pub redact: Option<Redaction>,
 }
 
 impl Default for DetectionOverlayOptions {
@@ -63,6 +70,104 @@ impl Default for DetectionOverlayOptions {
             colors: BoxColors::ByClass,
             labels: None,
             parts: OverlayParts::default(),
+            redact: None,
+        }
+    }
+}
+
+/// How an overlay hides what was found — faces, number plates — in each
+/// box, grown by [`Redaction::margin`]: DeepStream's redaction, on a copy
+/// of the picture as everything an overlay draws is.
+///
+/// A mosaic or a blur is made of cells sized by the box, not fixed in
+/// pixels: a face's shorter side is cut into [`RedactStyle::Mosaic`]'s
+/// `cells`, so that a face close to the camera is hidden as well as one far
+/// off — a cell fixed in pixels leaves the near face most of its features.
+/// `min_cell` keeps a small face's cells from shrinking to a pixel or two,
+/// where a mosaic hides nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Redaction {
+    /// How each box is hidden.
+    pub style: RedactStyle,
+    /// How far each box is grown before it is hidden, each way, as a
+    /// fraction of its own width and height: 0.1 hides a tenth more on
+    /// every side, which a box drawn a little tight — or a face moving
+    /// between two detections — would otherwise leave showing. 0 or more.
+    pub margin: f32,
+    /// Detections less confident than this are not hidden. Separate from
+    /// [`DetectionOverlayOptions::min_score`], as hiding wants to err the
+    /// other way from drawing: by default everything the detector kept.
+    pub min_score: f32,
+    /// The classes hidden, or `None` for every class.
+    pub classes: Option<Vec<usize>>,
+}
+
+impl Redaction {
+    /// `style`, a tenth's margin, every class and every score.
+    pub fn new(style: RedactStyle) -> Self {
+        Self {
+            style,
+            margin: 0.1,
+            min_score: 0.0,
+            classes: None,
+        }
+    }
+
+    /// Why these cannot be hidden by, if they cannot.
+    pub(crate) fn check(&self) -> Result<(), &'static str> {
+        if !self.margin.is_finite() || self.margin < 0.0 {
+            return Err("its margin is not a number of 0 or more");
+        }
+        if !self.min_score.is_finite() {
+            return Err("its min_score is not a number");
+        }
+        Ok(())
+    }
+}
+
+/// How a [`Redaction`] hides a box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RedactStyle {
+    /// Cells of one colour each, the mean of the pixels under it: the box's
+    /// shorter side cut into `cells`, but no cell smaller than `min_cell`
+    /// pixels, the longer side into as many cells as come out nearest to
+    /// square. Fewer, larger cells hide more.
+    Mosaic {
+        /// Cells across the box's shorter side.
+        cells: NonZeroU32,
+        /// The smallest a cell may be, in pixels.
+        min_cell: u32,
+    },
+    /// The same cells' means, each blended smoothly into its neighbours
+    /// rather than drawn flat: a softer look that hides as much as the
+    /// mosaic of the same cells — which an ordinary blur too light to hide
+    /// a face does not, as it can be partly undone.
+    Blur {
+        /// Cells across the box's shorter side.
+        cells: NonZeroU32,
+        /// The smallest a cell may be, in pixels.
+        min_cell: u32,
+    },
+    /// The box filled with one colour: nothing of what was under it is
+    /// left.
+    Fill(Color),
+}
+
+impl RedactStyle {
+    /// Six cells across a box's shorter side, none smaller than eight
+    /// pixels.
+    pub fn mosaic() -> Self {
+        Self::Mosaic {
+            cells: NonZeroU32::new(6).expect("not zero"),
+            min_cell: 8,
+        }
+    }
+
+    /// [`Self::mosaic`]'s cells, blended.
+    pub fn blur() -> Self {
+        Self::Blur {
+            cells: NonZeroU32::new(6).expect("not zero"),
+            min_cell: 8,
         }
     }
 }
@@ -560,7 +665,95 @@ pub(crate) struct LabelParts {
     classes: bool,
 }
 
+/// One box to hide, in pixels of the picture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Hide {
+    /// `rect` cut into `cells` — across, down — each painted the mean of
+    /// the pixels under it, or with `smooth` blended into its neighbours.
+    Cells {
+        rect: Rect,
+        cells: (u32, u32),
+        smooth: bool,
+    },
+    /// `rect` filled with one colour.
+    Fill { rect: Rect, color: Color },
+}
+
+impl Redaction {
+    /// Whether `detection` is one this hides.
+    fn hides(&self, detection: &Detection) -> bool {
+        detection.score >= self.min_score
+            && self
+                .classes
+                .as_ref()
+                .is_none_or(|classes| classes.contains(&detection.class_id))
+    }
+}
+
+/// What `redaction` hides of `detections` on a picture `canvas` describes:
+/// each box grown by the margin, cut to the picture and out to whole
+/// blocks, and for a mosaic or a blur the cells it is cut into.
+pub(crate) fn hides(canvas: Canvas, redaction: &Redaction, detections: &Detections) -> Vec<Hide> {
+    let margin = redaction.margin;
+    detections
+        .items
+        .iter()
+        .filter(|detection| redaction.hides(detection))
+        .filter_map(|detection| {
+            let grown = Detection::new(
+                detection.class_id,
+                detection.score,
+                detection.x - detection.width * margin,
+                detection.y - detection.height * margin,
+                detection.width * (1.0 + 2.0 * margin),
+                detection.height * (1.0 + 2.0 * margin),
+            );
+            let rect = canvas.place(&grown)?;
+            let (cells, min_cell, smooth) = match redaction.style {
+                RedactStyle::Fill(color) => return Some(Hide::Fill { rect, color }),
+                RedactStyle::Mosaic { cells, min_cell } => (cells, min_cell, false),
+                RedactStyle::Blur { cells, min_cell } => (cells, min_cell, true),
+            };
+            let shorter = rect.width.min(rect.height);
+            let cell = shorter.div_ceil(cells.get()).max(min_cell).max(1);
+            // As many cells along each side as come nearest to `cell`, each
+            // at least one sample of the picture's colour planes.
+            let along =
+                |side: u32| ((side + cell / 2) / cell).clamp(1, (side / canvas.block).max(1));
+            Some(Hide::Cells {
+                rect,
+                cells: (along(rect.width), along(rect.height)),
+                smooth,
+            })
+        })
+        .collect()
+}
+
+/// The `index`th of `cells` stretches a side `length` long is
+/// `[edge(index), edge(index + 1))`: as near equal as whole samples allow.
+pub(crate) fn cell_edge(index: u32, cells: u32, length: u32) -> u32 {
+    (u64::from(index) * u64::from(length) / u64::from(cells)) as u32
+}
+
 impl DetectionOverlayOptions {
+    /// Whether a picture carrying `detections` and `analytics` has anything
+    /// to draw or hide: a picture with nothing is handed on as it came.
+    pub(crate) fn draws(
+        &self,
+        detections: Option<&Detections>,
+        analytics: Option<&Analytics>,
+    ) -> bool {
+        self.style().draws(detections, analytics)
+            || self.redact.as_ref().is_some_and(|redaction| {
+                detections.is_some_and(|detections| {
+                    detections
+                        .items
+                        .iter()
+                        .any(|detection| redaction.hides(detection))
+                })
+            })
+    }
+
     pub(crate) fn style(&self) -> Style {
         Style {
             line_width: self.line_width,

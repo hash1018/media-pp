@@ -32,11 +32,13 @@ mod fit;
 pub(crate) mod interop;
 mod load;
 mod ptx;
+mod redact;
 
 #[cfg(feature = "cuda-visual-tracking")]
 pub(crate) use dcf::{CudaDcf, DcfSource, cufft_version};
 #[cfg(feature = "ort-cuda")]
 pub(crate) use fit::{CudaTensor, Fit, FitKernels};
+pub(crate) use redact::{CellMeans, CellPlane, RedactKernels};
 
 use ptx::{BLEND_PTX, CONVERT_PTX};
 

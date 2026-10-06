@@ -74,6 +74,11 @@ pub enum MetalDetectionOverlayError {
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
+    /// [`DetectionOverlayOptions::redact`] was given: hiding what was found
+    /// is drawn by `SwDetectionOverlay` and `CudaDetectionOverlay` so far,
+    /// not yet on Metal.
+    #[error("MetalDetectionOverlay does not hide what was found yet")]
+    RedactionUnsupported,
 }
 
 impl From<TextFontError> for MetalDetectionOverlayError {
@@ -162,6 +167,11 @@ impl MetalDetectionOverlay {
         options: DetectionOverlayOptions,
     ) -> std::result::Result<Self, MetalDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
+        // Refused rather than ignored: a picture handed on unhidden where it
+        // was asked to be hidden would show what it was meant not to.
+        if options.redact.is_some() {
+            return Err(MetalDetectionOverlayError::RedactionUnsupported);
+        }
         let pp_log = element_pp_log(ElementType::MetalDetectionOverlay, &name, None);
         let font = options
             .labels

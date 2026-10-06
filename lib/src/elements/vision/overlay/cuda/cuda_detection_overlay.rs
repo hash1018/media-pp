@@ -20,7 +20,10 @@ use crate::{
     frame_size::ForSize,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
-        driver::{BgraSurface, CudaDriver, CudaMask, Nv12Region, Nv12Surface},
+        driver::{
+            BgraSurface, CellMeans, CellPlane, CudaDriver, CudaMask, Nv12Region, Nv12Surface,
+            RedactKernels,
+        },
         frame::{self, CudaFrameError, CudaSurfaces, create_hw_frames_ctx},
     },
     platform::ffmpeg::AvBufferRef,
@@ -28,7 +31,10 @@ use crate::{
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use super::super::{Canvas, DetectionOverlayOptions, LABEL_CACHE, MaskKey, Rect, marks, rasterize};
+use super::super::{
+    Canvas, DetectionOverlayOptions, Hide, LABEL_CACHE, MaskKey, Rect, RedactStyle, hides, marks,
+    rasterize,
+};
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
 
@@ -67,6 +73,9 @@ pub enum CudaDetectionOverlayError {
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
+    /// A [`Redaction`](super::super::Redaction) that cannot be hidden by.
+    #[error("the redaction cannot be used: {0}")]
+    Redaction(&'static str),
 }
 
 impl From<TextFontError> for CudaDetectionOverlayError {
@@ -113,6 +122,10 @@ struct Overlaying {
     /// pieces of zones and lines by where they are; `None` for one with
     /// nothing to draw.
     masks: HashMap<MaskKey, Option<CudaMask>>,
+    /// The kernels a mosaic or a blur is painted with, and the buffer its
+    /// cells' means go through, grown as a larger box needs: made with the
+    /// element where it hides by cells.
+    cells: Option<(RedactKernels, CellMeans)>,
     driver: CudaDriver,
     /// This element's own reference to the shared context.
     hw_device_ctx: Arc<AvBufferRef>,
@@ -149,6 +162,11 @@ impl CudaDetectionOverlay {
         options: DetectionOverlayOptions,
     ) -> std::result::Result<Self, CudaDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
+        if let Some(redaction) = &options.redact {
+            redaction
+                .check()
+                .map_err(CudaDetectionOverlayError::Redaction)?;
+        }
         let pp_log = element_pp_log(ElementType::CudaDetectionOverlay, &name, None);
         let font = options
             .labels
@@ -156,6 +174,14 @@ impl CudaDetectionOverlay {
             .map(|style| load_font(style.font_data.clone(), style.size))
             .transpose()?;
         let driver = CudaDriver::retain_primary()?;
+        // Made now, where the style needs them, so that a driver that cannot
+        // JIT them refuses the element rather than its first picture.
+        let cells = match options.redact.as_ref().map(|redaction| redaction.style) {
+            Some(RedactStyle::Mosaic { .. } | RedactStyle::Blur { .. }) => {
+                Some((driver.redact_kernels()?, driver.cell_means(4 * 64)?))
+            }
+            _ => None,
+        };
         let hw_device_ctx = device.retain();
         // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
         // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
@@ -175,6 +201,7 @@ impl CudaDetectionOverlay {
             options,
             font,
             masks: HashMap::new(),
+            cells,
             driver,
             hw_device_ctx,
             device_ctx,
@@ -286,6 +313,61 @@ impl Overlaying {
         }
     }
 
+    /// Paints `rect` of `surface` cell by cell, plane by plane: NV12's
+    /// colour, a sample per 2x2 block, in the same cells at half the size,
+    /// `rect` being on whole blocks.
+    fn hide_cells(
+        &mut self,
+        surface: Surface,
+        rect: Rect,
+        cells: (u32, u32),
+        smooth: bool,
+    ) -> std::result::Result<(), CudaDriverError> {
+        let Some((kernels, means)) = &mut self.cells else {
+            // Made with the element wherever its style cuts cells.
+            return Err(CudaDriverError::KernelRejected(
+                "no hiding kernels for a style that cuts cells".into(),
+            ));
+        };
+        let needed = cells.0 as usize * cells.1 as usize * 4;
+        if means.floats() < needed {
+            *means = self.driver.cell_means(needed)?;
+        }
+        let (x, y) = (u64::from(rect.x), u64::from(rect.y));
+        let planes = match surface {
+            Surface::Nv12(nv12) => vec![
+                CellPlane {
+                    plane: nv12.luma + y * nv12.luma_pitch as u64 + x,
+                    pitch: nv12.luma_pitch,
+                    width: rect.width,
+                    height: rect.height,
+                    channels: 1,
+                    cells,
+                },
+                CellPlane {
+                    plane: nv12.chroma + (y / 2) * nv12.chroma_pitch as u64 + x,
+                    pitch: nv12.chroma_pitch,
+                    width: rect.width / 2,
+                    height: rect.height / 2,
+                    channels: 2,
+                    cells,
+                },
+            ],
+            Surface::Bgra(bgra) => vec![CellPlane {
+                plane: bgra.pixels + y * bgra.pitch as u64 + x * 4,
+                pitch: bgra.pitch,
+                width: rect.width,
+                height: rect.height,
+                channels: 4,
+                cells,
+            }],
+        };
+        for plane in planes {
+            self.driver.hide_cells(kernels, means, plane, smooth)?;
+        }
+        Ok(())
+    }
+
     /// A copy of `source` with `detections` and `analytics` drawn on it.
     fn draw(
         &mut self,
@@ -361,6 +443,20 @@ impl Overlaying {
             analytics,
             &mut |key| self.mask(key).map(|mask| (mask.width, mask.height)),
         );
+        // What is hidden first, so that a box and its label are drawn over
+        // it where they are asked for.
+        if let (Some(redaction), Some(detections)) = (&self.options.redact, detections) {
+            for hide in hides(canvas, redaction, detections) {
+                match hide {
+                    Hide::Fill { rect, color } => self.fill(surface, rect, color)?,
+                    Hide::Cells {
+                        rect,
+                        cells,
+                        smooth,
+                    } => self.hide_cells(surface, rect, cells, smooth)?,
+                }
+            }
+        }
         for mark in marks {
             let Some(key) = &mark.mask else {
                 self.fill(surface, mark.rect, mark.color)?;
@@ -462,7 +558,7 @@ impl Filter for Overlaying {
         let analytics = metadata
             .as_deref()
             .and_then(|metadata| metadata.get::<Analytics>());
-        if !self.options.style().draws(detections, analytics) {
+        if !self.options.draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
             return Ok(());
@@ -702,6 +798,133 @@ mod tests {
                 written > 10,
                 "{format:?}: the text is drawn ({written} dark pixels)"
             );
+        }
+    }
+
+    /// A `pixel` picture of noise, 96 by 48, the same every time.
+    fn noise(pixel: ffmpeg::format::Pixel) -> ffmpeg::frame::Video {
+        let mut frame = ffmpeg::frame::Video::new(pixel, 96, 48);
+        for plane in 0..frame.planes() {
+            for (index, byte) in frame.data_mut(plane).iter_mut().enumerate() {
+                let mut v = (index as u32).wrapping_mul(2_654_435_761) ^ (plane as u32 * 977);
+                v ^= v >> 15;
+                *byte = (v.wrapping_mul(2_246_822_519) >> 24) as u8;
+            }
+        }
+        frame.set_pts(Some(7));
+        frame
+    }
+
+    /// The bytes a picture shows, plane by plane, row by row, without the
+    /// padding at the end of each row.
+    fn shown(frame: &ffmpeg::frame::Video) -> Vec<Vec<u8>> {
+        let (width, height) = (frame.width() as usize, frame.height() as usize);
+        let rows: Vec<(usize, usize)> = match frame.format() {
+            ffmpeg::format::Pixel::NV12 => vec![(height, width), (height / 2, width)],
+            _ => vec![(height, width * 4)],
+        };
+        rows.into_iter()
+            .enumerate()
+            .map(|(plane, (rows, bytes))| {
+                let stride = frame.stride(plane);
+                (0..rows)
+                    .flat_map(|row| frame.data(plane)[row * stride..][..bytes].to_vec())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The point of the kernels: a mosaic and a blur on the GPU write the
+    /// same bytes as the CPU's overlay on the same picture, NV12 and BGRA
+    /// alike — one face, grown by the margin, cut into cells of uneven
+    /// width, its colour at half the size.
+    #[test]
+    fn a_box_is_hidden_on_the_gpu_as_on_the_cpu() {
+        let Some((device, _serial)) = try_cuda_device() else {
+            return;
+        };
+        let faces = || {
+            Detections::new(
+                "test",
+                Arc::from(vec![Arc::<str>::from("face")]),
+                vec![
+                    Detection::new(0, 0.9, 0.1, 0.2, 0.37, 0.55),
+                    Detection::new(0, 0.8, 0.62, 0.05, 0.2, 0.3),
+                ],
+            )
+        };
+        let styles = [
+            RedactStyle::mosaic(),
+            RedactStyle::blur(),
+            RedactStyle::Mosaic {
+                cells: std::num::NonZeroU32::new(5).unwrap(),
+                min_cell: 2,
+            },
+            RedactStyle::Blur {
+                cells: std::num::NonZeroU32::new(5).unwrap(),
+                min_cell: 2,
+            },
+        ];
+        for (format, pixel) in [
+            (CudaFrameFormat::Nv12, ffmpeg::format::Pixel::NV12),
+            (CudaFrameFormat::Bgra, ffmpeg::format::Pixel::BGRA),
+        ] {
+            for style in styles {
+                let options = DetectionOverlayOptions {
+                    parts: super::super::super::OverlayParts {
+                        boxes: false,
+                        ..super::super::super::OverlayParts::default()
+                    },
+                    redact: Some(super::super::super::Redaction::new(style)),
+                    ..DetectionOverlayOptions::default()
+                };
+                let picture = noise(pixel);
+
+                let mut cpu = crate::elements::SwDetectionOverlay::new("cpu", options.clone())
+                    .expect("opens");
+                let on_cpu = capture(&mut cpu);
+                cpu.consume(
+                    MediaBuffer::video(picture.clone())
+                        .with_metadata(Metadata::new().with(faces())),
+                )
+                .expect("hidden on the CPU");
+                let MediaBuffer::Video(expected) = on_cpu.lock().unwrap().remove(0) else {
+                    panic!("a picture");
+                };
+
+                let mut upload = CudaUpload::new("upload", &device, format);
+                let uploaded = capture(&mut upload);
+                upload
+                    .consume(MediaBuffer::video(picture.clone()))
+                    .expect("uploads");
+                let input = uploaded
+                    .lock()
+                    .unwrap()
+                    .remove(0)
+                    .with_metadata(Metadata::new().with(faces()));
+                let mut gpu = CudaDetectionOverlay::new("gpu", &device, options).expect("opens");
+                let on_gpu = capture(&mut gpu);
+                gpu.consume(input).expect("hidden on the GPU");
+                let actual = download(&device, format, on_gpu.lock().unwrap().remove(0));
+
+                let (expected, actual) = (shown(&expected), shown(&actual));
+                assert_ne!(
+                    expected,
+                    shown(&picture),
+                    "{format:?} {style:?}: something hidden"
+                );
+                for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                    let differ = expected
+                        .iter()
+                        .zip(actual)
+                        .filter(|(expected, actual)| expected != actual)
+                        .count();
+                    assert_eq!(
+                        differ, 0,
+                        "{format:?} {style:?}, plane {plane}: {differ} bytes differ"
+                    );
+                }
+            }
         }
     }
 }

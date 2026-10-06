@@ -3781,6 +3781,322 @@ LEARN_DONE:
 }
 "#;
 
+/// What [`crate::elements::CudaDetectionOverlay`] runs to hide a box: the
+/// box, on one plane of a picture — `width` by `height` samples of
+/// `channels` bytes each, from `plane`, rows `pitch` apart — cut into
+/// `cells_x` by `cells_y` cells as near equal as whole samples allow, cell
+/// `c` of `n` along a side `length` long spanning `[c * length / n,
+/// (c + 1) * length / n)`.
+///
+/// - `cell_means`: a thread a cell, summing each channel of its samples row
+///   by row into `means` — `cells_y` rows of `cells_x` cells of `channels`
+///   floats — each sum times the reciprocal of the count.
+/// - `cell_paint`: a thread a sample, writing over it its cell's mean, or
+///   with `smooth` the means of the four cells around it blended by where
+///   it sits between their centres. The cell that holds sample `x` is
+///   `((x + 1) * n - 1) / length`, and the sample sits at
+///   `(x + 0.5) * n / length - 0.5` measured in cells.
+///
+/// Every multiply, add and division is rounded as written (`.rn`), and
+/// each byte rounded to nearest even (`cvt.rni`), so that the CPU's
+/// overlay, computing the same in `f32` in the same order, writes the same
+/// bytes.
+///
+/// Kept apart from [`BLEND_PTX`] and loaded by an overlay that hides,
+/// alone: every other CUDA element would otherwise pay for its JIT.
+pub(super) const REDACT_PTX: &str = r#"
+.version 6.0
+.target sm_50
+.address_size 64
+
+.visible .entry cell_means(
+    .param .u64 plane,
+    .param .u32 pitch,
+    .param .u32 width,
+    .param .u32 height,
+    .param .u32 channels,
+    .param .u32 cells_x,
+    .param .u32 cells_y,
+    .param .u64 means
+)
+{
+    .reg .pred  %p<8>;
+    .reg .b16   %rs<2>;
+    .reg .b32   %r<32>;
+    .reg .f32   %f<8>;
+    .reg .b64   %rd<12>;
+
+    ld.param.u64    %rd1, [plane];
+    ld.param.u32    %r1, [pitch];
+    ld.param.u32    %r2, [width];
+    ld.param.u32    %r3, [height];
+    ld.param.u32    %r4, [channels];
+    ld.param.u32    %r5, [cells_x];
+    ld.param.u32    %r6, [cells_y];
+    ld.param.u64    %rd2, [means];
+
+    // The cell: a 16 by 16 block read as 256 threads in a row.
+    mov.u32         %r7, %ctaid.x;
+    mov.u32         %r8, %tid.y;
+    mov.u32         %r9, %tid.x;
+    shl.b32         %r7, %r7, 8;
+    shl.b32         %r8, %r8, 4;
+    add.s32         %r10, %r7, %r8;
+    add.s32         %r10, %r10, %r9;
+    mul.lo.u32      %r11, %r5, %r6;
+    setp.ge.u32     %p1, %r10, %r11;
+    @%p1 bra        MEANS_DONE;
+
+    rem.u32         %r12, %r10, %r5;
+    div.u32         %r13, %r10, %r5;
+    mul.lo.u32      %r14, %r12, %r2;
+    div.u32         %r14, %r14, %r5;
+    add.u32         %r15, %r12, 1;
+    mul.lo.u32      %r15, %r15, %r2;
+    div.u32         %r15, %r15, %r5;
+    mul.lo.u32      %r16, %r13, %r3;
+    div.u32         %r16, %r16, %r6;
+    add.u32         %r17, %r13, 1;
+    mul.lo.u32      %r17, %r17, %r3;
+    div.u32         %r17, %r17, %r6;
+
+    mov.f32         %f1, 0f00000000;
+    mov.f32         %f2, 0f00000000;
+    mov.f32         %f3, 0f00000000;
+    mov.f32         %f4, 0f00000000;
+    setp.gt.u32     %p2, %r4, 1;
+    setp.gt.u32     %p3, %r4, 2;
+    setp.gt.u32     %p4, %r4, 3;
+
+    mov.u32         %r18, %r16;
+MEANS_ROW:
+    setp.ge.u32     %p5, %r18, %r17;
+    @%p5 bra        MEANS_SUMMED;
+    mul.wide.u32    %rd3, %r18, %r1;
+    add.s64         %rd4, %rd1, %rd3;
+    mov.u32         %r19, %r14;
+MEANS_SAMPLE:
+    setp.ge.u32     %p6, %r19, %r15;
+    @%p6 bra        MEANS_NEXT_ROW;
+    mul.lo.u32      %r20, %r19, %r4;
+    cvt.u64.u32     %rd5, %r20;
+    add.s64         %rd6, %rd4, %rd5;
+    ld.global.u8    %rs1, [%rd6];
+    cvt.u32.u16     %r21, %rs1;
+    cvt.rn.f32.u32  %f5, %r21;
+    add.rn.f32      %f1, %f1, %f5;
+    @!%p2 bra       MEANS_STEP;
+    ld.global.u8    %rs1, [%rd6+1];
+    cvt.u32.u16     %r21, %rs1;
+    cvt.rn.f32.u32  %f5, %r21;
+    add.rn.f32      %f2, %f2, %f5;
+    @!%p3 bra       MEANS_STEP;
+    ld.global.u8    %rs1, [%rd6+2];
+    cvt.u32.u16     %r21, %rs1;
+    cvt.rn.f32.u32  %f5, %r21;
+    add.rn.f32      %f3, %f3, %f5;
+    @!%p4 bra       MEANS_STEP;
+    ld.global.u8    %rs1, [%rd6+3];
+    cvt.u32.u16     %r21, %rs1;
+    cvt.rn.f32.u32  %f5, %r21;
+    add.rn.f32      %f4, %f4, %f5;
+MEANS_STEP:
+    add.u32         %r19, %r19, 1;
+    bra             MEANS_SAMPLE;
+MEANS_NEXT_ROW:
+    add.u32         %r18, %r18, 1;
+    bra             MEANS_ROW;
+
+MEANS_SUMMED:
+    sub.u32         %r22, %r15, %r14;
+    sub.u32         %r23, %r17, %r16;
+    mul.lo.u32      %r22, %r22, %r23;
+    cvt.rn.f32.u32  %f6, %r22;
+    rcp.rn.f32      %f6, %f6;
+    mul.lo.u32      %r24, %r10, %r4;
+    mul.wide.u32    %rd7, %r24, 4;
+    add.s64         %rd8, %rd2, %rd7;
+    mul.rn.f32      %f1, %f1, %f6;
+    st.global.f32   [%rd8], %f1;
+    @!%p2 bra       MEANS_DONE;
+    mul.rn.f32      %f2, %f2, %f6;
+    st.global.f32   [%rd8+4], %f2;
+    @!%p3 bra       MEANS_DONE;
+    mul.rn.f32      %f3, %f3, %f6;
+    st.global.f32   [%rd8+8], %f3;
+    @!%p4 bra       MEANS_DONE;
+    mul.rn.f32      %f4, %f4, %f6;
+    st.global.f32   [%rd8+12], %f4;
+
+MEANS_DONE:
+    ret;
+}
+
+.visible .entry cell_paint(
+    .param .u64 plane,
+    .param .u32 pitch,
+    .param .u32 width,
+    .param .u32 height,
+    .param .u32 channels,
+    .param .u32 cells_x,
+    .param .u32 cells_y,
+    .param .u64 means,
+    .param .u32 smooth
+)
+{
+    .reg .pred  %p<8>;
+    .reg .b16   %rs<2>;
+    .reg .b32   %r<40>;
+    .reg .f32   %f<32>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u64    %rd1, [plane];
+    ld.param.u32    %r1, [pitch];
+    ld.param.u32    %r2, [width];
+    ld.param.u32    %r3, [height];
+    ld.param.u32    %r4, [channels];
+    ld.param.u32    %r5, [cells_x];
+    ld.param.u32    %r6, [cells_y];
+    ld.param.u64    %rd2, [means];
+    ld.param.u32    %r7, [smooth];
+
+    mov.u32         %r8, %ctaid.x;
+    mov.u32         %r9, %ntid.x;
+    mov.u32         %r11, %tid.x;
+    mad.lo.s32      %r10, %r8, %r9, %r11;
+    mov.u32         %r8, %ctaid.y;
+    mov.u32         %r9, %ntid.y;
+    mov.u32         %r11, %tid.y;
+    mad.lo.s32      %r13, %r8, %r9, %r11;
+    setp.ge.u32     %p1, %r10, %r2;
+    @%p1 bra        PAINT_DONE;
+    setp.ge.u32     %p1, %r13, %r3;
+    @%p1 bra        PAINT_DONE;
+
+    // The sample: y * pitch + x * channels bytes into the plane.
+    mul.wide.u32    %rd3, %r13, %r1;
+    mul.lo.u32      %r14, %r10, %r4;
+    cvt.u64.u32     %rd4, %r14;
+    add.s64         %rd3, %rd3, %rd4;
+    add.s64         %rd5, %rd1, %rd3;
+
+    setp.ne.u32     %p2, %r7, 0;
+    @%p2 bra        PAINT_SMOOTH;
+
+    add.u32         %r15, %r10, 1;
+    mul.lo.u32      %r15, %r15, %r5;
+    sub.u32         %r15, %r15, 1;
+    div.u32         %r15, %r15, %r2;
+    add.u32         %r16, %r13, 1;
+    mul.lo.u32      %r16, %r16, %r6;
+    sub.u32         %r16, %r16, 1;
+    div.u32         %r16, %r16, %r3;
+    mad.lo.u32      %r17, %r16, %r5, %r15;
+    mul.lo.u32      %r17, %r17, %r4;
+    mul.wide.u32    %rd6, %r17, 4;
+    add.s64         %rd7, %rd2, %rd6;
+    mov.u32         %r18, 0;
+PAINT_FLAT:
+    setp.ge.u32     %p3, %r18, %r4;
+    @%p3 bra        PAINT_DONE;
+    mul.wide.u32    %rd8, %r18, 4;
+    add.s64         %rd9, %rd7, %rd8;
+    ld.global.f32   %f1, [%rd9];
+    cvt.rni.u16.f32 %rs1, %f1;
+    cvt.u64.u32     %rd10, %r18;
+    add.s64         %rd11, %rd5, %rd10;
+    st.global.u8    [%rd11], %rs1;
+    add.u32         %r18, %r18, 1;
+    bra             PAINT_FLAT;
+
+PAINT_SMOOTH:
+    // Where the sample sits among the cells' centres, across: c0 and c1
+    // the cells either side, t how far it is from c0's centre to c1's.
+    cvt.rn.f32.u32  %f2, %r10;
+    add.rn.f32      %f2, %f2, 0f3F000000;
+    cvt.rn.f32.u32  %f3, %r5;
+    mul.rn.f32      %f2, %f2, %f3;
+    cvt.rn.f32.u32  %f4, %r2;
+    div.rn.f32      %f2, %f2, %f4;
+    sub.rn.f32      %f2, %f2, 0f3F000000;
+    sub.u32         %r20, %r5, 1;
+    cvt.rn.f32.u32  %f5, %r20;
+    max.f32         %f2, %f2, 0f00000000;
+    min.f32         %f2, %f2, %f5;
+    cvt.rmi.u32.f32 %r21, %f2;
+    cvt.rn.f32.u32  %f6, %r21;
+    sub.rn.f32      %f7, %f2, %f6;
+    add.u32         %r22, %r21, 1;
+    min.u32         %r22, %r22, %r20;
+
+    // And down: r0, r1 and s.
+    cvt.rn.f32.u32  %f8, %r13;
+    add.rn.f32      %f8, %f8, 0f3F000000;
+    cvt.rn.f32.u32  %f9, %r6;
+    mul.rn.f32      %f8, %f8, %f9;
+    cvt.rn.f32.u32  %f10, %r3;
+    div.rn.f32      %f8, %f8, %f10;
+    sub.rn.f32      %f8, %f8, 0f3F000000;
+    sub.u32         %r23, %r6, 1;
+    cvt.rn.f32.u32  %f11, %r23;
+    max.f32         %f8, %f8, 0f00000000;
+    min.f32         %f8, %f8, %f11;
+    cvt.rmi.u32.f32 %r24, %f8;
+    cvt.rn.f32.u32  %f12, %r24;
+    sub.rn.f32      %f13, %f8, %f12;
+    add.u32         %r25, %r24, 1;
+    min.u32         %r25, %r25, %r23;
+
+    // The four cells' first floats: (r0, c0), (r0, c1), (r1, c0), (r1, c1).
+    mad.lo.u32      %r26, %r24, %r5, %r21;
+    mul.lo.u32      %r26, %r26, %r4;
+    mad.lo.u32      %r27, %r24, %r5, %r22;
+    mul.lo.u32      %r27, %r27, %r4;
+    mad.lo.u32      %r28, %r25, %r5, %r21;
+    mul.lo.u32      %r28, %r28, %r4;
+    mad.lo.u32      %r29, %r25, %r5, %r22;
+    mul.lo.u32      %r29, %r29, %r4;
+    mov.u32         %r18, 0;
+PAINT_BLEND:
+    setp.ge.u32     %p3, %r18, %r4;
+    @%p3 bra        PAINT_DONE;
+    add.u32         %r30, %r26, %r18;
+    mul.wide.u32    %rd8, %r30, 4;
+    add.s64         %rd9, %rd2, %rd8;
+    ld.global.f32   %f20, [%rd9];
+    add.u32         %r30, %r27, %r18;
+    mul.wide.u32    %rd8, %r30, 4;
+    add.s64         %rd9, %rd2, %rd8;
+    ld.global.f32   %f21, [%rd9];
+    add.u32         %r30, %r28, %r18;
+    mul.wide.u32    %rd8, %r30, 4;
+    add.s64         %rd9, %rd2, %rd8;
+    ld.global.f32   %f22, [%rd9];
+    add.u32         %r30, %r29, %r18;
+    mul.wide.u32    %rd8, %r30, 4;
+    add.s64         %rd9, %rd2, %rd8;
+    ld.global.f32   %f23, [%rd9];
+    sub.rn.f32      %f24, %f21, %f20;
+    mul.rn.f32      %f24, %f24, %f7;
+    add.rn.f32      %f24, %f20, %f24;
+    sub.rn.f32      %f25, %f23, %f22;
+    mul.rn.f32      %f25, %f25, %f7;
+    add.rn.f32      %f25, %f22, %f25;
+    sub.rn.f32      %f26, %f25, %f24;
+    mul.rn.f32      %f26, %f26, %f13;
+    add.rn.f32      %f26, %f24, %f26;
+    cvt.rni.u16.f32 %rs1, %f26;
+    cvt.u64.u32     %rd10, %r18;
+    add.s64         %rd11, %rd5, %rd10;
+    st.global.u8    [%rd11], %rs1;
+    add.u32         %r18, %r18, 1;
+    bra             PAINT_BLEND;
+
+PAINT_DONE:
+    ret;
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     /// ptxas refuses a module with a character past ASCII anywhere in it —
@@ -3793,6 +4109,7 @@ mod tests {
         let mut modules = vec![
             ("CONVERT_PTX", super::CONVERT_PTX),
             ("BLEND_PTX", super::BLEND_PTX),
+            ("REDACT_PTX", super::REDACT_PTX),
         ];
         #[cfg(feature = "ort-cuda")]
         modules.push(("FIT_PTX", super::FIT_PTX));

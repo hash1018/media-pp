@@ -395,6 +395,7 @@ mod example {
                             lines: count_lines,
                             ..OverlayParts::default()
                         },
+                        redact: None,
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");

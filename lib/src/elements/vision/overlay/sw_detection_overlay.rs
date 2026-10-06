@@ -22,7 +22,8 @@ use crate::{
 };
 
 use super::{
-    Canvas, DetectionOverlayOptions, LABEL_CACHE, MaskKey, Rect, bt709_limited, marks, rasterize,
+    Canvas, DetectionOverlayOptions, Hide, LABEL_CACHE, MaskKey, Rect, bt709_limited, cell_edge,
+    hides, marks, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, TextMask, load_font};
@@ -51,6 +52,9 @@ pub enum SwDetectionOverlayError {
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
+    /// A [`Redaction`](super::Redaction) that cannot be hidden by.
+    #[error("the redaction cannot be used: {0}")]
+    Redaction(&'static str),
 }
 
 impl From<TextFontError> for SwDetectionOverlayError {
@@ -100,6 +104,11 @@ impl SwDetectionOverlay {
         options: DetectionOverlayOptions,
     ) -> std::result::Result<Self, SwDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
+        if let Some(redaction) = &options.redact {
+            redaction
+                .check()
+                .map_err(SwDetectionOverlayError::Redaction)?;
+        }
         let pp_log = element_pp_log(ElementType::SwDetectionOverlay, &name, None);
         let font = options
             .labels
@@ -266,6 +275,156 @@ fn paint(
     }
 }
 
+/// Paints each cell of a plane its mean — or with `smooth` its mean blended
+/// into its neighbours' — as the CUDA overlay's `cell_means` and
+/// `cell_paint` do, in the same `f32` operations in the same order, so
+/// that the two write the same bytes: `size` samples of `channels` bytes
+/// each from byte `offset` of `data`, rows `stride` apart, cut into
+/// `cells` across and down.
+fn hide_plane(
+    data: &mut [u8],
+    stride: usize,
+    offset: usize,
+    size: (u32, u32),
+    channels: usize,
+    cells: (u32, u32),
+    smooth: bool,
+) {
+    let ((width, height), (across, down)) = (size, cells);
+    let at = |x: u32, y: u32| offset + y as usize * stride + x as usize * channels;
+    let mut means = vec![0.0f32; across as usize * down as usize * channels];
+    for cy in 0..down {
+        let (y0, y1) = (cell_edge(cy, down, height), cell_edge(cy + 1, down, height));
+        for cx in 0..across {
+            let (x0, x1) = (
+                cell_edge(cx, across, width),
+                cell_edge(cx + 1, across, width),
+            );
+            let mut sums = [0.0f32; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let sample = &data[at(x, y)..][..channels];
+                    for (sum, &byte) in sums.iter_mut().zip(sample) {
+                        *sum += f32::from(byte);
+                    }
+                }
+            }
+            let reciprocal = 1.0f32 / ((x1 - x0) * (y1 - y0)) as f32;
+            let first = (cy * across + cx) as usize * channels;
+            for (mean, sum) in means[first..first + channels].iter_mut().zip(sums) {
+                *mean = sum * reciprocal;
+            }
+        }
+    }
+    // Where a sample sits among the cells' centres along a side: the cells
+    // either side and how far it is from the first's centre to the second's.
+    let between = |sample: u32, cells: u32, length: u32| {
+        let last = (cells - 1) as f32;
+        let at = ((sample as f32 + 0.5) * cells as f32 / length as f32 - 0.5)
+            .max(0.0)
+            .min(last);
+        let first = at.floor() as u32;
+        (first, (first + 1).min(cells - 1), at - first as f32)
+    };
+    let byte = |value: f32| value.round_ties_even() as u8;
+    for y in 0..height {
+        for x in 0..width {
+            let sample = at(x, y);
+            if smooth {
+                let (c0, c1, t) = between(x, across, width);
+                let (r0, r1, s) = between(y, down, height);
+                let mean = |row: u32, column: u32, channel: usize| {
+                    means[(row * across + column) as usize * channels + channel]
+                };
+                for channel in 0..channels {
+                    let (m00, m01) = (mean(r0, c0, channel), mean(r0, c1, channel));
+                    let (m10, m11) = (mean(r1, c0, channel), mean(r1, c1, channel));
+                    let top = m00 + (m01 - m00) * t;
+                    let bottom = m10 + (m11 - m10) * t;
+                    data[sample + channel] = byte(top + (bottom - top) * s);
+                }
+            } else {
+                let cx = ((x + 1) * across - 1) / width;
+                let cy = ((y + 1) * down - 1) / height;
+                let first = (cy * across + cx) as usize * channels;
+                for channel in 0..channels {
+                    data[sample + channel] = byte(means[first + channel]);
+                }
+            }
+        }
+    }
+}
+
+/// Hides `rect` of `frame` by its cells, plane by plane: a picture whose
+/// colour is stored per 2x2 block has its colour cut into the same cells
+/// at half the size, `rect` being on whole blocks.
+fn hide_cells(
+    frame: &mut ffmpeg::frame::Video,
+    planes: Planes,
+    rect: Rect,
+    cells: (u32, u32),
+    smooth: bool,
+) {
+    let (x, y) = (rect.x as usize, rect.y as usize);
+    let size = (rect.width, rect.height);
+    let half = (rect.width / 2, rect.height / 2);
+    match planes {
+        Planes::Packed { bytes, .. } => {
+            let stride = frame.stride(0);
+            let offset = y * stride + x * bytes;
+            hide_plane(
+                frame.data_mut(0),
+                stride,
+                offset,
+                size,
+                bytes,
+                cells,
+                smooth,
+            );
+        }
+        Planes::Nv12 => {
+            let stride = frame.stride(0);
+            hide_plane(
+                frame.data_mut(0),
+                stride,
+                y * stride + x,
+                size,
+                1,
+                cells,
+                smooth,
+            );
+            let stride = frame.stride(1);
+            let offset = (y / 2) * stride + x;
+            hide_plane(frame.data_mut(1), stride, offset, half, 2, cells, smooth);
+        }
+        Planes::Yuv420p => {
+            let stride = frame.stride(0);
+            hide_plane(
+                frame.data_mut(0),
+                stride,
+                y * stride + x,
+                size,
+                1,
+                cells,
+                smooth,
+            );
+            for plane in [1, 2] {
+                let stride = frame.stride(plane);
+                let offset = (y / 2) * stride + x / 2;
+                hide_plane(
+                    frame.data_mut(plane),
+                    stride,
+                    offset,
+                    half,
+                    1,
+                    cells,
+                    smooth,
+                );
+            }
+        }
+    }
+}
+
 impl Overlaying {
     /// The mask `key` names, from the cache where it is there.
     fn mask(&mut self, key: &MaskKey) -> Option<&TextMask> {
@@ -312,6 +471,20 @@ impl Overlaying {
             &mut |key| self.mask(key).map(|mask| (mask.width, mask.height)),
         );
         let mut copy = frame.clone();
+        // What is hidden first, so that a box and its label are drawn over
+        // it where they are asked for.
+        if let (Some(redaction), Some(detections)) = (&self.options.redact, detections) {
+            for hide in hides(canvas, redaction, detections) {
+                match hide {
+                    Hide::Fill { rect, color } => paint(&mut copy, planes, rect, color, None),
+                    Hide::Cells {
+                        rect,
+                        cells,
+                        smooth,
+                    } => hide_cells(&mut copy, planes, rect, cells, smooth),
+                }
+            }
+        }
         for mark in marks {
             // A mark with a mask is drawn through it or not at all: drawn
             // without, a label was a solid block of the box's colour.
@@ -378,7 +551,7 @@ impl Filter for Overlaying {
         let analytics = metadata
             .as_deref()
             .and_then(|metadata| metadata.get::<Analytics>());
-        if !self.options.style().draws(detections, analytics) {
+        if !self.options.draws(detections, analytics) {
             // Nothing to draw: the same picture, not a copy of it.
             out.push(buf);
             return Ok(());
@@ -399,7 +572,9 @@ impl Filter for Overlaying {
 mod tests {
     use std::sync::Mutex;
 
-    use super::super::{OverlayParts, box_color};
+    use std::num::NonZeroU32;
+
+    use super::super::{Hide, OverlayParts, RedactStyle, Redaction, box_color, hides};
     use super::*;
     use crate::buffer::Metadata;
     use crate::element::{RawSink, SrcPads};
@@ -715,5 +890,239 @@ mod tests {
             id,
             "not asked: as it came"
         );
+    }
+
+    /// The first byte of the sample at (`x`, `y`): luma, or a packed
+    /// picture's first colour.
+    fn sample(buf: &MediaBuffer, x: usize, y: usize) -> u8 {
+        let MediaBuffer::Video(frame) = buf else {
+            panic!("expected a picture");
+        };
+        let bytes = if frame.format() == Pixel::RGB24 { 3 } else { 1 };
+        frame.data(0)[y * frame.stride(0) + x * bytes]
+    }
+
+    /// A picture whose every third column, from the second, is white and
+    /// the rest black, 48 by 24, the box from (12, 6) to (36, 18) on it.
+    fn stripes(format: Pixel) -> MediaBuffer {
+        let mut frame = ffmpeg::frame::Video::new(format, 48, 24);
+        let white = |x: usize| if x % 3 == 1 { 255 } else { 0 };
+        let stride = frame.stride(0);
+        let bytes = if format == Pixel::RGB24 { 3 } else { 1 };
+        for y in 0..24 {
+            for x in 0..48 {
+                for byte in 0..bytes {
+                    frame.data_mut(0)[y * stride + x * bytes + byte] = white(x);
+                }
+            }
+        }
+        for plane in 1..frame.planes() {
+            frame.data_mut(plane).fill(128);
+        }
+        carrying(frame, face())
+    }
+
+    /// One face of class 0, from (12, 6) to (36, 18) of a 48 by 24 picture.
+    fn face() -> Detections {
+        Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("face")]),
+            vec![Detection::new(0, 0.9, 0.25, 0.25, 0.5, 0.5)],
+        )
+    }
+
+    /// Options that hide by `style`, with no margin, and draw nothing.
+    fn hiding(style: RedactStyle) -> DetectionOverlayOptions {
+        DetectionOverlayOptions {
+            parts: OverlayParts {
+                boxes: false,
+                ..OverlayParts::default()
+            },
+            redact: Some(Redaction {
+                margin: 0.0,
+                ..Redaction::new(style)
+            }),
+            ..DetectionOverlayOptions::default()
+        }
+    }
+
+    /// What an overlay hiding by `style` makes of `input`.
+    fn hidden(style: RedactStyle, input: &MediaBuffer) -> MediaBuffer {
+        let mut overlay = SwDetectionOverlay::new("overlay", hiding(style)).unwrap();
+        let kept = capture(&mut overlay);
+        overlay.consume(input.clone()).expect("hidden");
+        kept.lock().unwrap().remove(0)
+    }
+
+    /// A mosaic paints every cell the mean of what was under it: the box,
+    /// 24 by 12, cut into two cells down its shorter side and four across,
+    /// six columns each — two white of every six — reads a third white all
+    /// over, whatever the stripes were; outside it, and on the picture
+    /// handed in, the stripes are as they were.
+    #[test]
+    fn a_mosaic_paints_each_cell_its_mean_on_a_copy() {
+        let style = RedactStyle::Mosaic {
+            cells: NonZeroU32::new(2).unwrap(),
+            min_cell: 1,
+        };
+        for format in [Pixel::RGB24, Pixel::NV12] {
+            let input = stripes(format);
+            let output = hidden(style, &input);
+            for y in 6..18 {
+                for x in 12..36 {
+                    assert_eq!(sample(&output, x, y), 85, "{format:?} at ({x}, {y})");
+                }
+            }
+            assert_eq!(sample(&output, 10, 10), 255, "{format:?}: outside the box");
+            assert_eq!(sample(&output, 13, 3), 255, "{format:?}: above it");
+            assert_eq!(
+                sample(&input, 13, 10),
+                255,
+                "{format:?}: the picture handed in"
+            );
+        }
+    }
+
+    /// A blur paints the same cells' means blended into each other: on a
+    /// box whose left half is black and right half white, the mosaic jumps
+    /// from one to the other at the cells' edge, and the blur passes
+    /// through greys between the two cells' centres.
+    #[test]
+    fn a_blur_blends_the_cells_where_a_mosaic_steps() {
+        let mut frame = ffmpeg::frame::Video::new(Pixel::RGB24, 48, 24);
+        let stride = frame.stride(0);
+        for y in 0..24 {
+            for x in 0..48 {
+                let value = if x < 24 { 0 } else { 255 };
+                frame.data_mut(0)[y * stride + x * 3..][..3].fill(value);
+            }
+        }
+        let input = carrying(frame, face());
+        let row = |style| {
+            let output = hidden(style, &input);
+            (12..36)
+                .map(|x| sample(&output, x, 12))
+                .collect::<Vec<u8>>()
+        };
+        let cells = NonZeroU32::new(1).unwrap();
+        let mosaic = row(RedactStyle::Mosaic {
+            cells,
+            min_cell: 12,
+        });
+        let blur = row(RedactStyle::Blur {
+            cells,
+            min_cell: 12,
+        });
+        assert_eq!(mosaic, [[0u8; 12], [255u8; 12]].concat(), "two cells, flat");
+        assert!(
+            blur.windows(2).all(|pair| pair[0] <= pair[1]),
+            "rising: {blur:?}"
+        );
+        let greys = blur.iter().filter(|&&v| v != 0 && v != 255).count();
+        assert!(greys >= 10, "blended between the centres: {blur:?}");
+        assert_eq!(
+            (blur[0], blur[23]),
+            (0, 255),
+            "each cell's own mean at its centre and beyond"
+        );
+    }
+
+    /// A fill leaves nothing of what was under the box.
+    #[test]
+    fn a_fill_covers_the_box() {
+        let output = hidden(RedactStyle::Fill(Color::BLACK), &stripes(Pixel::RGB24));
+        for y in 6..18 {
+            for x in 12..36 {
+                assert_eq!(sample(&output, x, y), 0, "at ({x}, {y})");
+            }
+        }
+    }
+
+    /// The cells follow the box: its shorter side cut into `cells`, but
+    /// none smaller than `min_cell`; the margin grows the box first; a
+    /// class or a score not asked for is left as it is.
+    #[test]
+    fn the_cells_follow_the_box_and_the_margin_grows_it() {
+        let canvas = Canvas {
+            width: 1000,
+            height: 1000,
+            block: 2,
+        };
+        let face = |x, y, side| Detection::new(0, 0.9, x, y, side, side);
+        let style = |cells, min_cell| RedactStyle::Mosaic {
+            cells: NonZeroU32::new(cells).unwrap(),
+            min_cell,
+        };
+        let cut = |redaction: &Redaction, detection: Detection| {
+            let found = Detections::new("test", Arc::from(vec![]), vec![detection]);
+            hides(canvas, redaction, &found)
+        };
+        let square = |x, side| Rect {
+            x,
+            y: x,
+            width: side,
+            height: side,
+        };
+        let near = Redaction {
+            margin: 0.0,
+            ..Redaction::new(style(6, 8))
+        };
+        assert_eq!(
+            cut(&near, face(0.1, 0.1, 0.3)),
+            vec![Hide::Cells {
+                rect: square(100, 300),
+                cells: (6, 6),
+                smooth: false,
+            }],
+            "a near face: six cells of fifty"
+        );
+        assert_eq!(
+            cut(&near, face(0.1, 0.1, 0.02)),
+            vec![Hide::Cells {
+                rect: square(100, 20),
+                cells: (3, 3),
+                smooth: false,
+            }],
+            "a far face: cells of at least eight, about three across"
+        );
+        let grown = Redaction::new(style(6, 8));
+        let Hide::Cells { rect, .. } = cut(&grown, face(0.5, 0.5, 0.2))[0] else {
+            panic!("cells");
+        };
+        assert_eq!(rect, square(480, 240), "a tenth more each way");
+        let only_plates = Redaction {
+            classes: Some(vec![1]),
+            ..Redaction::new(style(6, 8))
+        };
+        assert!(
+            cut(&only_plates, face(0.5, 0.5, 0.2)).is_empty(),
+            "another class"
+        );
+        let sure = Redaction {
+            min_score: 0.95,
+            ..Redaction::new(style(6, 8))
+        };
+        assert!(
+            cut(&sure, face(0.5, 0.5, 0.2)).is_empty(),
+            "below its score"
+        );
+    }
+
+    #[test]
+    fn a_redaction_that_cannot_be_hidden_by_is_refused() {
+        let options = |margin| DetectionOverlayOptions {
+            redact: Some(Redaction {
+                margin,
+                ..Redaction::new(RedactStyle::mosaic())
+            }),
+            ..DetectionOverlayOptions::default()
+        };
+        for margin in [-0.1, f32::NAN] {
+            assert!(matches!(
+                SwDetectionOverlay::new("overlay", options(margin)),
+                Err(SwDetectionOverlayError::Redaction(_))
+            ));
+        }
+        assert!(SwDetectionOverlay::new("overlay", options(0.0)).is_ok());
     }
 }

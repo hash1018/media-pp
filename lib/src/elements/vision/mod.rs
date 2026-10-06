@@ -44,8 +44,8 @@ pub use meta::{
     ZoneCount,
 };
 pub use overlay::{
-    BoxColors, DetectionOverlayOptions, LabelStyle, OverlayParts, SwDetectionOverlay,
-    SwDetectionOverlayError,
+    BoxColors, DetectionOverlayOptions, LabelStyle, OverlayParts, RedactStyle, Redaction,
+    SwDetectionOverlay, SwDetectionOverlayError,
 };
 #[cfg(feature = "cuda")]
 pub use overlay::{CudaDetectionOverlay, CudaDetectionOverlayError};
