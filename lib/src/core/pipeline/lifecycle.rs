@@ -143,7 +143,15 @@ impl Pipeline {
                     // `RawSource::run`'s docs) — a returned `Err` here
                     // means something genuinely ended this source, e.g.
                     // a `Seek` that failed outright.
-                    let outcome = if let Err(error) = source.run(&control_rx, &bus) {
+                    // A panic in the source, or in what its chain runs on
+                    // this thread before the first queue, is told and ended
+                    // as a returned error is, rather than unwinding the
+                    // thread with nothing posted.
+                    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        source.run(&control_rx, &bus)
+                    }))
+                    .unwrap_or_else(|payload| Err(crate::error::Error::panicked(payload.as_ref())));
+                    let outcome = if let Err(error) = ran {
                         bus.post(
                             source.pp_log(),
                             BusEvent::Error {

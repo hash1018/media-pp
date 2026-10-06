@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace};
+use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_trace};
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use thiserror::Error as ThisError;
 
@@ -381,16 +381,38 @@ impl Queue {
         let handle = spawn(
             thread_name.clone(),
             Box::new(move || {
-                worker_loop(
-                    worker_inbox,
-                    control_rx,
-                    downstream,
-                    worker_bus,
-                    worker_name,
-                    worker_pp_log,
-                    worker_stop,
-                    worker_counters,
-                )
+                // A panic downstream ends this thread, and the elements it
+                // fed with it; it is told on the bus as the failure of the
+                // element this queue feeds, as a returned error would be.
+                // Left to unwind on its own, it ended the thread with
+                // nothing posted, and a caller waiting for `Finished`
+                // waited for good.
+                let fed = (downstream.element_type(), downstream.name());
+                let (panic_bus, panic_log) = (worker_bus.clone(), worker_pp_log.clone());
+                let worked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker_loop(
+                        worker_inbox,
+                        control_rx,
+                        downstream,
+                        worker_bus,
+                        worker_name,
+                        worker_pp_log,
+                        worker_stop,
+                        worker_counters,
+                    )
+                }));
+                if let Err(payload) = worked {
+                    let error = crate::error::Error::panicked(payload.as_ref());
+                    pp_error!(pp_log: &panic_log, "worker: {error}");
+                    panic_bus.post(
+                        &panic_log,
+                        BusEvent::Error {
+                            element_type: fed.0,
+                            name: fed.1,
+                            error,
+                        },
+                    );
+                }
             }),
         )
         .map_err(|source| QueueError::ThreadSpawn(ThreadSpawnError::new(thread_name, source)))?;

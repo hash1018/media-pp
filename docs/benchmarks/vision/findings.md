@@ -210,10 +210,13 @@ drew the lost labels as solid blocks. All three now empty the cache only
 between pictures; a test fills it to one short of full and draws three
 new labels, and fails with the old eviction.
 
-That the panic stopped the run without a word is a second defect, left
-open: an element's thread that panics leaves its pipeline without a
-`Finished` or an `Error` on the bus, so whatever waits for either waits
-for good. A panic should reach the bus as the element's error.
+That the panic stopped the run without a word was a second defect: an
+element's thread that panicked left its pipeline without a `Finished` or
+an `Error` on the bus, so whatever waited for either waited for good. A
+queue's worker and the source's thread now catch a panic and post it as
+`Error::Panicked`, the failure of the element the queue fed or of the
+source, once; tests make an element panic behind a queue and on the
+source's thread, and fail without it.
 
 ## Two builds of one engine differ
 

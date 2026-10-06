@@ -1013,6 +1013,16 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A panic on a pipeline's thread is told on the bus.** A queue's worker
+  that panicked — an element behind it, or something it called — ended
+  its thread with nothing posted, and so did the source's thread: the
+  branch went quiet, no `Finished` ever came, and a caller waiting for it
+  waited for good. Both now catch it and post `BusEvent::Error` with the
+  new `Error::Panicked`, naming the thread and what the panic said — as
+  the element a queue feeds, or as the source — and the source's thread
+  stops its branch as it does on a returned error. A detection overlay
+  that panicked took a benchmark run three hours to notice.
+
 - **`Player::position` after a step is where the picture is.** With sound,
   the sound renderer sets the clock from the sample it has reached, and
   after a step that was up to a buffer away from the picture shown — 550 ms

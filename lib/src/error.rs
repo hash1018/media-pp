@@ -214,6 +214,20 @@ pub enum Error {
     #[error(transparent)]
     ThreadSpawnError(#[from] ThreadSpawnError),
 
+    /// Code on one of a pipeline's threads panicked: a defect, in an
+    /// element or in what it calls. The thread is gone and what it fed
+    /// receives nothing more; this is how the pipeline's owner hears of it,
+    /// as it hears of any other element's failure, rather than waiting for
+    /// a `Finished` that will not come.
+    #[error("panicked on thread `{thread}`: {message}")]
+    Panicked {
+        /// The thread's name: `pipeline:source`, or `queue:` and the
+        /// queue's.
+        thread: String,
+        /// What the panic said.
+        message: String,
+    },
+
     /// FFmpeg could not allocate a D3D11 frame buffer wrapper.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
@@ -900,6 +914,23 @@ pub struct Traced {
 }
 
 impl Error {
+    /// A panic on the current thread, `payload` being what
+    /// [`std::panic::catch_unwind`] caught.
+    pub(crate) fn panicked(payload: &(dyn std::any::Any + Send)) -> Self {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| String::from("a panic with no message"));
+        Self::Panicked {
+            thread: std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_owned(),
+            message,
+        }
+    }
+
     /// Attaches `element_type`/`name` as this error's origin, unless it
     /// already has one.
     ///

@@ -845,3 +845,118 @@ where
         (self.answer)("Stop")
     }
 }
+
+/// A sink that panics on its third buffer: a defect in an element.
+struct PanickingSink {
+    pp_log: PpLog,
+    seen: usize,
+}
+
+impl Element for PanickingSink {
+    fn name(&self) -> Arc<str> {
+        "panicking".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl RawSink for PanickingSink {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        self.seen += 1;
+        assert!(self.seen < 3, "the third buffer");
+        Ok(())
+    }
+}
+
+/// Runs a burst into a sink that panics, behind a queue or on the source's
+/// own thread, and says what the bus told within a few seconds: the
+/// panics it reported, and how many errors in all.
+fn a_panic_is_told(queued: bool) -> (Vec<(Arc<str>, String)>, usize) {
+    let (pipeline, ()) = Pipeline::new(
+        "panic",
+        BurstSource {
+            pp_log: element_pp_log(ElementType::Other, "burst", None),
+            pad: SrcPad::new("burst_src"),
+            ready: Arc::new(AtomicBool::new(false)),
+            buffers: 200,
+        },
+        |source, ctx| {
+            let sink = PanickingSink {
+                pp_log: element_pp_log(ElementType::Other, "panicking", None),
+                seen: 0,
+            };
+            let branch = if queued {
+                ctx.branch().queue("before", 4).to(sink)?
+            } else {
+                ctx.branch().to(sink)?
+            };
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        },
+    )
+    .unwrap();
+    pipeline.run().unwrap();
+    let (mut panics, mut errors) = (Vec::new(), 0);
+    let until = Instant::now() + Duration::from_secs(3);
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        let Ok(event) = pipeline.bus().recv_timeout(left) else {
+            break;
+        };
+        if let BusEvent::Error { name, error, .. } = event {
+            errors += 1;
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            while let Some(error) = cause {
+                if let Some(crate::error::Error::Panicked { thread, message }) =
+                    error.downcast_ref::<crate::error::Error>()
+                {
+                    panics.push((name.clone(), format!("{thread}: {message}")));
+                    break;
+                }
+                cause = error.source();
+            }
+        }
+    }
+    pipeline.stop();
+    (panics, errors)
+}
+
+/// A panic behind a queue reaches the bus as the failure of the element
+/// the queue fed, once, rather than ending the queue's thread with
+/// nothing said — which left a caller waiting for `Finished` for good.
+#[test]
+fn a_panic_behind_a_queue_is_told_on_the_bus() {
+    let (panics, errors) = a_panic_is_told(true);
+    assert_eq!(panics.len(), 1, "{panics:?}");
+    assert_eq!(&*panics[0].0, "panicking");
+    assert!(
+        panics[0].1.starts_with("queue:before: ") && panics[0].1.contains("the third buffer"),
+        "{panics:?}"
+    );
+    assert!(
+        errors < 5,
+        "{errors} errors: the rest of the burst is not one each"
+    );
+}
+
+/// A panic on the source's own thread is told as the source's failure, as
+/// an error it returned would be.
+#[test]
+fn a_panic_on_the_source_thread_is_told_on_the_bus() {
+    let (panics, errors) = a_panic_is_told(false);
+    assert_eq!(panics.len(), 1, "{panics:?}");
+    assert!(
+        panics[0].1.starts_with("pipeline:source: ") && panics[0].1.contains("the third buffer"),
+        "{panics:?}"
+    );
+    assert!(errors < 5, "{errors} errors");
+}
