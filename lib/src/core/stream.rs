@@ -29,8 +29,9 @@
 //! its reaction, so they go on ahead of the event, as what an element
 //! drains goes on ahead of an `Eos`.
 //!
-//! Events are never dropped for room and never waited for: a queue takes
-//! one past its capacity.
+//! Events are never dropped for room. A queue takes one past its capacity
+//! rather than wait — all but an `Eos`, which waits for room as a buffer
+//! does, however long that takes.
 //!
 //! A branch joined to a stream already under way — one attached to a `Tee`,
 //! a line a bin or a rack fills anew — is handed the stream's last segment
