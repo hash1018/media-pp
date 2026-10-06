@@ -12,10 +12,11 @@ the GPU's utilisation is not measured.
 
 | | |
 |---|---|
-| Model | MacBook Air (Mac17,3) — **no fan** |
-| Chip | Apple M5: 10 CPU cores (4 performance, 6 efficiency), 10 GPU cores, Neural Engine |
+| Model | MacBook Air 13-inch (Mac17,3), the base M5 configured with more memory — **no fan** |
+| Chip | Apple M5, the base chip: 10 CPU cores (4 performance — "Super" in macOS's own listing — and 6 efficiency), 10 GPU cores, the Neural Engine |
 | Memory | 24 GB, shared by the CPU, the GPU and the Neural Engine |
-| OS | macOS 26.5 |
+| Power | On its adapter for every timed run; on battery for E0 and the first minutes of the warm pass, the adapter connected before 19:00 of a run from 18:51 to 20:46. Low Power Mode off. |
+| OS | macOS 26.5, in ordinary use: its own background work — photo analysis among it — ran when it chose |
 | ONNX Runtime | `ort` 2.0.0-rc.13's prebuilt build with Core ML, the same release as on Linux |
 | FFmpeg | 8.0.1 (Homebrew) |
 | Rust | 1.98.1, release profile |

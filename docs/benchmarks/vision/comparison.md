@@ -13,7 +13,7 @@ TensorRT.
 
 | | Linux | Windows | macOS |
 |---|---|---|---|
-| Machine | i5-12400F, 32 GB, RTX 3050 8 GB (115 W) | the same machine | M5 MacBook Air, 24 GB, no fan |
+| Machine | i5-12400F, 32 GB, RTX 3050 8 GB (115 W) | the same machine | MacBook Air 13-inch, base M5 (10-core CPU, 10-core GPU), 24 GB, no fan |
 | Model runs on | TensorRT fp16 | TensorRT fp16 | Core ML, on the GPU as it chooses |
 | Decode, encode | NVDEC, NVENC | NVDEC, NVENC | VideoToolbox |
 | Driver model | — | WDDM | — |
