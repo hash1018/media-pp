@@ -97,9 +97,12 @@ pub use crate::platform::macos::metal::MetalError;
 pub use crate::platform::macos::screencapturekit::{
     ScreenCaptureKitDisplay, ScreenCaptureKitWindow,
 };
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use crate::platform::macos::surface::{MetalSurfaceError, MetalSurfaceView};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use crate::platform::macos::videotoolbox::{
-    VideoToolboxDevice, VideoToolboxDeviceError, VideoToolboxFrameFormat,
+    VideoToolboxDevice, VideoToolboxDeviceError, VideoToolboxFrameFormat, VideoToolboxFramePool,
+    VideoToolboxFramePoolError,
 };
 #[cfg(feature = "webrtc")]
 pub use driver::{

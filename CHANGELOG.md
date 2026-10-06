@@ -216,6 +216,16 @@ compile error with no explanation.
   lives in, for retaining it with your own CUDA calls. `CudaFrameError`
   gains `NoSurface`, for a CUDA frame with no device pointer behind it.
 
+- **And on VideoToolbox pictures with Metal of its own.**
+  `MetalSurfaceView::new(&mtl_device, &frame)` asks of a picture what the
+  Metal elements here ask — VideoToolbox, NV12 or BGRA, on a pixel buffer
+  at least its size — and gives its planes as `MetalFramePlanes`, textures
+  made over the pixel buffer's `IOSurface` on whichever Metal device you
+  draw with, to read, write or render to. `VideoToolboxFramePool` hands out
+  VideoToolbox pictures of one format and size to write into, which the
+  elements after yours take as from their own upload. `MetalSurfaceError`
+  and `VideoToolboxFramePoolError` say why either fails.
+
 - **The detection overlays do with each class what its rule says** —
   draw its box, hide it, both or neither. `DetectionOverlayOptions::rules`
   holds a `ClassRule` per class, named as the model names it (`"face"`) or

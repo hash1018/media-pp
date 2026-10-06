@@ -14,7 +14,10 @@ use std::sync::Arc;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
-use crate::platform::ffmpeg::AvBufferRef;
+use crate::{
+    platform::ffmpeg::AvBufferRef,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+};
 
 /// Why a [`VideoToolboxDevice`] could not be opened.
 #[derive(Debug, ThisError)]
@@ -179,6 +182,142 @@ pub(crate) unsafe fn create_frames_ctx(
             });
         }
         Ok(buf)
+    }
+}
+
+/// Errors from making or drawing from a [`VideoToolboxFramePool`].
+#[derive(Debug, ThisError)]
+pub enum VideoToolboxFramePoolError {
+    /// FFmpeg could not allocate the frames context.
+    #[error("failed to allocate the VideoToolbox frames context")]
+    Alloc,
+
+    /// FFmpeg would not make a frames context of this size.
+    #[error(
+        "failed to initialize the VideoToolbox frames context (code {code}) for {width}x{height}"
+    )]
+    Init {
+        /// FFmpeg's error code.
+        code: i32,
+        /// The width asked for.
+        width: u32,
+        /// The height asked for.
+        height: u32,
+    },
+
+    /// The pool could not hand out a pixel buffer.
+    #[error("failed to take a frame from the VideoToolbox pool (code {0})")]
+    Get(i32),
+}
+
+impl From<VideoToolboxFramesContextError> for VideoToolboxFramePoolError {
+    fn from(error: VideoToolboxFramesContextError) -> Self {
+        match error {
+            VideoToolboxFramesContextError::Alloc => Self::Alloc,
+            VideoToolboxFramesContextError::Init {
+                code,
+                width,
+                height,
+                ..
+            } => Self::Init {
+                code,
+                width,
+                height,
+            },
+        }
+    }
+}
+
+/// VideoToolbox pictures of one format and size, for an element of your own
+/// to write into and hand on — the macOS counterpart of `CudaFramePool`.
+///
+/// A picture from here is what the VideoToolbox and Metal elements of this
+/// crate take from their own upload or decoder: a frame in FFmpeg's
+/// VideoToolbox format, carrying the frames context that says what it
+/// holds, its pixel buffer from Core Video's own pool and backed by an
+/// `IOSurface`, so Metal makes textures over it without a copy
+/// (`MetalSurfaceView`, with the `metal` feature). Each pixel buffer goes
+/// back to the pool when the last reference to the picture downstream is
+/// dropped, and the pool grows as many are held at once.
+///
+/// A picture comes out with undefined pixels and no timing: copy what it is
+/// made from — `av_frame_copy_props` from the picture handed in — before
+/// pushing it. Make a pool again for another size; each one keeps the
+/// device alive.
+pub struct VideoToolboxFramePool {
+    format: VideoToolboxFrameFormat,
+    width: u32,
+    height: u32,
+    frames_ctx: AvBufferRef,
+    /// Reuses only the CPU-side `AVFrame` wrapper; each pixel buffer comes
+    /// from `frames_ctx`.
+    wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
+}
+
+impl VideoToolboxFramePool {
+    /// A pool of `format` pictures, `width` by `height`, on `device`.
+    ///
+    /// # Errors
+    ///
+    /// [`VideoToolboxFramePoolError`] where FFmpeg cannot make a frames
+    /// context of this size.
+    pub fn new(
+        device: &VideoToolboxDevice,
+        format: VideoToolboxFrameFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, VideoToolboxFramePoolError> {
+        // SAFETY: `create_frames_ctx`'s contract is a live device context,
+        // which the device's own reference is; the frames context takes a
+        // reference of its own to it.
+        let frames_ctx =
+            unsafe { create_frames_ctx(&device.retain(), format.pixel(), width, height) }?;
+        Ok(Self {
+            format,
+            width,
+            height,
+            frames_ctx,
+            wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+        })
+    }
+
+    /// A picture to write into.
+    ///
+    /// # Errors
+    ///
+    /// [`VideoToolboxFramePoolError::Get`] where Core Video has no pixel
+    /// buffer to give.
+    pub fn get(
+        &self,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, VideoToolboxFramePoolError> {
+        let mut frame = self.wrappers.get();
+        // SAFETY: `frame` is the pooled wrapper's own `AVFrame`;
+        // unreferencing it first hands any previous pixel buffer back to its
+        // pool. The frames context is this pool's own, held for its life.
+        unsafe {
+            let frame = frame.as_mut_ptr();
+            ffi::av_frame_unref(frame);
+            let code = ffi::av_hwframe_get_buffer(self.frames_ctx.as_ptr(), frame, 0);
+            if code < 0 {
+                return Err(VideoToolboxFramePoolError::Get(code));
+            }
+        }
+        Ok(frame)
+    }
+
+    /// The format its pictures are in.
+    pub fn format(&self) -> VideoToolboxFrameFormat {
+        self.format
+    }
+
+    /// Its pictures' width.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Its pictures' height.
+    pub fn height(&self) -> u32 {
+        self.height
     }
 }
 

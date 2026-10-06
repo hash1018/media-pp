@@ -32,6 +32,10 @@ pub(crate) mod pixel_buffer;
 /// there are, and whether this program may record them.
 #[cfg(feature = "screencapturekit-capture")]
 pub(crate) mod screencapturekit;
+/// VideoToolbox pictures as Metal textures, for an element of an
+/// application's own.
+#[cfg(feature = "metal")]
+pub(crate) mod surface;
 /// VideoToolbox through FFmpeg: the context its decoders, encoders and
 /// frames are on.
 #[cfg(feature = "videotoolbox")]

@@ -350,6 +350,12 @@ pub enum Error {
     #[error(transparent)]
     VideoToolboxDeviceError(#[from] crate::elements::VideoToolboxDeviceError),
 
+    /// A [`VideoToolboxFramePool`](crate::elements::VideoToolboxFramePool)
+    /// could not be made or hand out a picture.
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    #[error(transparent)]
+    VideoToolboxFramePoolError(#[from] crate::elements::VideoToolboxFramePoolError),
+
     /// Decoding through VideoToolbox failed.
     #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
     #[error(transparent)]
@@ -409,6 +415,11 @@ pub enum Error {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[error(transparent)]
     MetalWindowRendererError(#[from] crate::elements::MetalWindowRendererError),
+
+    /// A frame had no [`MetalSurfaceView`](crate::elements::MetalSurfaceView).
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalSurfaceError(#[from] crate::elements::MetalSurfaceError),
 
     /// Handing a frame to an application's Metal drawing failed.
     #[cfg(all(target_os = "macos", feature = "metal"))]

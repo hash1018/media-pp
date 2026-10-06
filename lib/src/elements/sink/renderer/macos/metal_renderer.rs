@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ffmpeg_next::format::Pixel;
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLDevice, MTLPixelFormat, MTLTexture, MTLTextureUsage};
+use objc2_metal::{MTLDevice, MTLTexture, MTLTextureUsage};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -13,9 +13,8 @@ use crate::{
     elements::SubmitError,
     error::Result,
     platform::macos::{
-        metal::{MetalError, plane_on},
-        pixel_buffer::PixelBuffer,
-        videotoolbox::{NotVideoToolbox, sw_format_of},
+        metal::MetalError,
+        surface::{MetalSurfaceError, textures},
     },
     pool::UnboundObjectPoolRef,
     pp_log::{PpLog, pp_error, pp_info},
@@ -222,50 +221,30 @@ impl Submitting {
         &self,
         frame: &Arc<UnboundObjectPoolRef<ffmpeg_next::frame::Video>>,
     ) -> std::result::Result<MetalFrame, MetalRendererError> {
-        let layout = match sw_format_of(frame) {
-            Ok(layout @ (Pixel::NV12 | Pixel::BGRA)) => layout,
-            Ok(other) | Err(NotVideoToolbox::Format(other)) => {
-                return Err(MetalRendererError::UnsupportedFormat(other));
-            }
-            Err(NotVideoToolbox::NoFramesContext) => {
-                return Err(MetalRendererError::NoFramesContext);
-            }
-        };
-        let buffer = PixelBuffer::of_frame(frame)
-            .ok_or(MetalRendererError::UnsupportedFormat(frame.format()))?;
+        let (_, planes, color) = textures(&self.device, frame, MTLTextureUsage::ShaderRead)
+            .map_err(|error| match error {
+                MetalSurfaceError::NotVideoToolbox(format)
+                | MetalSurfaceError::UnsupportedLayout(format) => {
+                    MetalRendererError::UnsupportedFormat(format)
+                }
+                MetalSurfaceError::NoPixelBuffer => {
+                    MetalRendererError::UnsupportedFormat(Pixel::VIDEOTOOLBOX)
+                }
+                MetalSurfaceError::NoFramesContext => MetalRendererError::NoFramesContext,
+                MetalSurfaceError::SmallerBuffer {
+                    width,
+                    height,
+                    buffer_width,
+                    buffer_height,
+                } => MetalRendererError::SmallerBuffer {
+                    width,
+                    height,
+                    buffer_width,
+                    buffer_height,
+                },
+                MetalSurfaceError::Metal(error) => MetalRendererError::Metal(error),
+            })?;
         let (width, height) = (frame.width(), frame.height());
-        let (buffer_width, buffer_height) = buffer.size();
-        if buffer_width < width || buffer_height < height {
-            return Err(MetalRendererError::SmallerBuffer {
-                width,
-                height,
-                buffer_width,
-                buffer_height,
-            });
-        }
-        let read = MTLTextureUsage::ShaderRead;
-        let (planes, color) = match layout {
-            Pixel::BGRA => (
-                MetalFramePlanes::Bgra(plane_on(
-                    &self.device,
-                    &buffer,
-                    0,
-                    MTLPixelFormat::BGRA8Unorm,
-                    read,
-                )?),
-                ColorDescription {
-                    space: ffmpeg_next::color::Space::RGB,
-                    ..ColorDescription::of(frame)
-                },
-            ),
-            _ => (
-                MetalFramePlanes::Nv12 {
-                    luma: plane_on(&self.device, &buffer, 0, MTLPixelFormat::R8Unorm, read)?,
-                    chroma: plane_on(&self.device, &buffer, 1, MTLPixelFormat::RG8Unorm, read)?,
-                },
-                ColorDescription::of(frame),
-            ),
-        };
         Ok(MetalFrame {
             planes,
             width,
@@ -323,7 +302,7 @@ impl Sink for Submitting {
 mod tests {
     use std::sync::Mutex;
 
-    use objc2_metal::MTLCreateSystemDefaultDevice;
+    use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
 
     use super::*;
     use crate::{

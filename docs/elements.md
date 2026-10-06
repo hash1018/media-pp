@@ -84,3 +84,12 @@ contract — a picture handed to you is ready for the default stream, finish
 yours before handing it on, never write one you were handed — and
 [`cuda_custom_element`](../lib/tests/cuda_custom_element.rs) is one, between
 `CudaUpload` and `CudaDetectionOverlay`.
+
+On macOS the same is done with Metal: `MetalSurfaceView` makes a VideoToolbox
+picture's planes into textures over its pixel buffer, on any Metal device
+since a pixel buffer belongs to none, and a `VideoToolboxFramePool` gives
+pictures to write into. Every element here that writes a picture waits for
+the GPU before handing it on; do the same before handing on yours, and never
+write one you were handed.
+[`metal_custom_element`](../lib/tests/metal_custom_element.rs) is one, between
+`VideoToolboxUpload` and `MetalDetectionOverlay`.
