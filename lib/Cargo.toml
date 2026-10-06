@@ -530,8 +530,8 @@ wasapi-renderer = [
     "windows/Win32_UI_Shell_PropertiesSystem",
 ]
 ort = ["dep:ort", "dep:ndarray"]
-# Detection on CUDA pictures, on ONNX Runtime's CUDA provider:
-# `CudaOrtDetector`. ONNX Runtime's build for it is fetched as `ort` fetches
+# Detection and classification on CUDA pictures, on ONNX Runtime's CUDA
+# provider: `CudaOrtDetector` and `CudaOrtClassifier`. ONNX Runtime's build for it is fetched as `ort` fetches
 # the CPU one, and CUDA 13's runtime, cuBLAS and cuRAND, and cuDNN 9 are
 # linked into the program — see `build.rs`: building needs them where the
 # linker finds them, and the program does not start without them.

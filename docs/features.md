@@ -28,8 +28,8 @@ unprefixed type works the same on every platform.
 | `coreaudio-capture` | System, per-application and microphone audio capture; the first two need macOS 14.2 | macOS |
 | `coreaudio-renderer` | Audio playback | macOS |
 | `ort` | ONNX Runtime object detection on the CPU, `SwOrtDetector`; `Detections` and the detection overlays need no feature | All |
-| `ort-cuda` | Object detection on CUDA pictures, `CudaOrtDetector`, on ONNX Runtime's CUDA provider; links CUDA and cuDNN; enables `ort` and `cuda` | Linux, Windows |
-| `ort-tensorrt` | `CudaOrtDetector` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
+| `ort-cuda` | Object detection and classification on CUDA pictures, `CudaOrtDetector` and `CudaOrtClassifier`, on ONNX Runtime's CUDA provider; links CUDA and cuDNN; enables `ort` and `cuda` | Linux, Windows |
+| `ort-tensorrt` | `CudaOrtDetector` and `CudaOrtClassifier` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
 | `cuda-visual-tracking` | `ObjectTracker`'s following by look on the GPU for CUDA pictures; links cuFFT; enables `cuda` | Linux, Windows |
 | `ort-coreml` | Object detection and classification on VideoToolbox pictures, `MetalOrtDetector` and `MetalOrtClassifier`, through ONNX Runtime's Core ML provider; enables `ort` and `metal` | macOS (Apple silicon) |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |

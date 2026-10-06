@@ -276,7 +276,7 @@ impl CudaOrtDetector {
             let cache = options
                 .engine_cache
                 .clone()
-                .unwrap_or_else(default_engine_cache);
+                .unwrap_or_else(super::default_engine_cache);
             if let Err(error) = std::fs::create_dir_all(&cache) {
                 pp_warn!(pp_log: &pp_log, "no engine cache at {}: {error}", cache.display());
             }
@@ -448,18 +448,6 @@ fn batch_input(model: &Path) -> std::result::Result<Option<BatchInput>, OrtDetec
         width,
         height,
     }))
-}
-
-/// `$XDG_CACHE_HOME/media-pp/tensorrt`, or the platform's own cache
-/// directory, or the temporary one where there is neither.
-#[cfg(feature = "ort-tensorrt")]
-fn default_engine_cache() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("media-pp").join("tensorrt")
 }
 
 impl Detecting {

@@ -325,8 +325,14 @@ compile error with no explanation.
   or ImageNet's normalisation. Raw scores are put through a softmax, and
   probabilities taken as they are. The CUDA one cuts the boxes with the
   detector's fitting kernels, pointed at each box, into one batch tensor in
-  device memory, normalised there by a kernel of its own, and runs on
-  ONNX Runtime's CUDA provider. On the same boxes of a 1080p picture,
+  device memory, normalised there by a kernel of its own, and runs through
+  TensorRT in half precision with `ort-tensorrt` — its engine built once
+  for every batch from 1 to 32, as many as a picture has objects — and on
+  ONNX Runtime's CUDA provider where TensorRT cannot run. On CUDA's
+  provider beside a TensorRT detector, its many small kernels queued
+  behind the detector's: one 1080p stream with a classifier ran at 228
+  pictures a second where it ran at 545 without, and runs at 514 through
+  TensorRT. On the same boxes of a 1080p picture,
   MobileNetV2 on the GPU names five of six as it does on the CPU — two
   electric guitars among them. The overlay labels an object with what was
   said of it, `car #5 0.48 | minivan`, and `cuda_track --classifier` runs
