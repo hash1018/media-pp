@@ -27,6 +27,14 @@ pub struct OrtClassifierOptions {
     /// The fewest pixels an object's box may have across or down to be
     /// classified: a smaller one is too little picture to tell by.
     pub min_size: u32,
+    /// The lowest detection score an object is classified at. A detector
+    /// before a tracker is told to keep unsure boxes, for the tracker to
+    /// match a partly hidden object with, and the tracker hands on those it
+    /// numbered nothing for as they came; without this each of them was
+    /// classified again on every picture, as an object with no number is.
+    /// An answer already given a followed object is kept whatever its box
+    /// scores now.
+    pub min_detection_score: f32,
     /// The lowest score an answer is kept at; below it, an object is left
     /// unclassified, and tried again on the next picture it is detected on.
     pub min_score: f32,
@@ -40,7 +48,8 @@ pub struct OrtClassifierOptions {
 }
 
 impl Default for OrtClassifierOptions {
-    /// The model's own labels, every class, boxes of 16 pixels or more,
+    /// The model's own labels, every class, boxes of 16 pixels or more
+    /// detected at 0.25 or more — Ultralytics' own confidence threshold —
     /// answers at 0.5 or more, inputs from 0 to 1, and an answer kept for a
     /// second at 30 frames a second.
     fn default() -> Self {
@@ -48,6 +57,7 @@ impl Default for OrtClassifierOptions {
             labels: None,
             classes: None,
             min_size: 16,
+            min_detection_score: 0.25,
             min_score: 0.5,
             input: InputScale::Unit,
             reclassify: 30,
@@ -225,10 +235,11 @@ impl Answers {
             if detections.predicted {
                 continue;
             }
-            if options
-                .classes
-                .as_ref()
-                .is_some_and(|classes| !classes.contains(&item.class_id))
+            if item.score < options.min_detection_score
+                || options
+                    .classes
+                    .as_ref()
+                    .is_some_and(|classes| !classes.contains(&item.class_id))
             {
                 continue;
             }
@@ -441,5 +452,44 @@ mod tests {
         let (index, (left, top, width, height)) = plan.classify[0];
         assert_eq!(index, 1);
         assert_eq!((left, top, width, height), (64, 36, 128, 144));
+    }
+
+    /// The unsure boxes a tracker is handed and hands on unnumbered are not
+    /// classified; a followed object keeps its answer when its box is unsure
+    /// on one picture.
+    #[test]
+    fn unsure_detections_are_not_classified_and_answers_are_kept() {
+        let options = OrtClassifierOptions {
+            reclassify: 0,
+            ..OrtClassifierOptions::default()
+        };
+        let unsure = |id: Option<u64>| Detection {
+            score: 0.15,
+            ..tracked(id, 0)
+        };
+        let mut memory = Memory::default();
+        let plan = memory.plan(
+            &on(None),
+            &found(vec![unsure(None), tracked(Some(1), 0)], false),
+            &options,
+            (640, 360),
+        );
+        let classified: Vec<usize> = plan.classify.iter().map(|(index, _)| *index).collect();
+        assert_eq!(classified, [1], "the unsure, unnumbered box is left");
+        apply(
+            &mut found(vec![unsure(None), tracked(Some(1), 0)], false),
+            &mut memory,
+            plan,
+            vec![(1, Some(red()))],
+        );
+
+        let plan = memory.plan(
+            &on(None),
+            &found(vec![unsure(Some(1))], false),
+            &options,
+            (640, 360),
+        );
+        assert!(plan.classify.is_empty());
+        assert_eq!(plan.remembered.len(), 1, "its answer is kept");
     }
 }
