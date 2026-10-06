@@ -10,7 +10,7 @@ are Ultralytics' and the ONNX model zoo's.
 | Piece | What it does |
 |---|---|
 | `vision_bench` | Builds the pipeline its flags describe, plays a file through it as fast as it goes, and prints one `RESULT key=value …` line. |
-| `model_only` | Runs the detector alone through ONNX Runtime on a tensor already on the GPU, its output left there: the ceiling the pipelines are held against. `--cuda-graph` replays it as a CUDA graph. Linux and Windows. |
+| `model_only` | Runs the detector alone through ONNX Runtime on a tensor already on the GPU, its output left there: the ceiling the pipelines are held against. `--cuda-graph` replays it as a CUDA graph; `--int8` runs a Q/DQ model in INT8, `--int8-table` a float one from a calibration table; `--opt`, `--max` build for a range of batches. Linux and Windows. |
 | `bench.py` | Runs the whole matrix below, each configuration several times, and prints a Markdown table for each experiment. |
 
 `vision_bench`'s pipeline, each bracketed stage there only when asked for:

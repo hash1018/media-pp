@@ -12,7 +12,8 @@
 //!
 //!     cargo run --release -p vision_bench --bin model_only -- yolo11n.onnx \
 //!         [--provider tensorrt|cuda] [--fp32] [--batch 1,2,4,8] [--runs N] \
-//!         [--engine-cache-root DIR] [--cuda-graph] [--opt N] [--max N]
+//!         [--engine-cache-root DIR] [--cuda-graph] [--opt N] [--max N] [--int8] \
+//!         [--int8-table FILE]
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
@@ -34,7 +35,7 @@ fn main() -> ort::Result<()> {
     let usage = || -> ! {
         eprintln!(
             "usage: model_only <model.onnx> [--provider tensorrt|cuda] [--fp32] \
-             [--batch 1,2,4,8] [--runs N] [--engine-cache-root DIR] [--cuda-graph] [--opt N] [--max N]"
+             [--batch 1,2,4,8] [--runs N] [--engine-cache-root DIR] [--cuda-graph] [--opt N] [--max N] [--int8] [--int8-table FILE]"
         );
         std::process::exit(2);
     };
@@ -45,6 +46,11 @@ fn main() -> ort::Result<()> {
     // batch alone, as a classifier's engine is built.
     let (mut opt, mut max): (Option<usize>, Option<usize>) = (None, None);
     let (mut tensorrt, mut fp16, mut batches, mut runs) = (true, true, vec![1], 500);
+    // A model quantized to INT8 Q/DQ is run in INT8 where TensorRT is let.
+    let mut int8 = false;
+    // TensorRT's own INT8 for a float model: a calibration table ONNX
+    // Runtime's calibrator wrote, from which it picks INT8 or FP16 per layer.
+    let mut int8_table: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -56,6 +62,11 @@ fn main() -> ort::Result<()> {
                 }
             }
             "--fp32" => fp16 = false,
+            "--int8" => int8 = true,
+            "--int8-table" => {
+                int8 = true;
+                int8_table = Some(args.next().unwrap_or_else(|| usage()));
+            }
             "--cuda-graph" => cuda_graph = true,
             "--opt" => {
                 opt = Some(
@@ -136,7 +147,11 @@ fn main() -> ort::Result<()> {
             let cache = match &engine_root {
                 Some(root) => root.join(format!(
                     "{stem}-{}-{}",
-                    if fp16 { "fp16" } else { "fp32" },
+                    match (int8, fp16) {
+                        (true, _) => "int8",
+                        (false, true) => "fp16",
+                        (false, false) => "fp32",
+                    },
                     match (opt, max) {
                         (None, None) => format!("b{batch}"),
                         (opt, max) => format!(
@@ -155,6 +170,7 @@ fn main() -> ort::Result<()> {
             let mut provider = TensorRT::default()
                 .with_device_id(0)
                 .with_fp16(fp16)
+                .with_int8(int8)
                 .with_engine_cache(true)
                 .with_engine_cache_path(cache.display())
                 .with_timing_cache(true)
@@ -167,6 +183,11 @@ fn main() -> ort::Result<()> {
                     .with_profile_min_shapes(shape(1))
                     .with_profile_opt_shapes(shape(opt))
                     .with_profile_max_shapes(shape(max));
+            }
+            if let Some(table) = &int8_table {
+                provider = provider
+                    .with_int8_calibration_table_name(table)
+                    .with_int8_use_native_calibration_table(false);
             }
             providers.push(provider.build().error_on_failure());
         }
@@ -210,7 +231,11 @@ fn main() -> ort::Result<()> {
              runs={runs} ms_per_batch={:.3} fps={:.1}",
             if tensorrt { "tensorrt" } else { "cuda" },
             if tensorrt && cuda_graph { "+graph" } else { "" },
-            if tensorrt && fp16 { "fp16" } else { "fp32" },
+            match (tensorrt, int8, fp16) {
+                (true, true, _) => "int8",
+                (true, false, true) => "fp16",
+                _ => "fp32",
+            },
             opt.unwrap_or(batch),
             max.unwrap_or(batch).max(batch),
             per_batch * 1e3,

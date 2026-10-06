@@ -196,6 +196,40 @@ where it is, a graph replays stale pictures, so the detector does not use
 one. `vision_bench` reports `found`, the objects found over the whole run,
 which is what told the two apart.
 
+## INT8 pays only where the model is heavy
+
+TensorRT runs INT8 at up to twice FP16's arithmetic on this GPU's tensor
+cores. Measured on the model alone (`model_only`), two runs each, the
+models quantized with ONNX Runtime's `quantize_static` — Q/DQ nodes,
+weights per channel, both symmetric, calibrated by min and max over 64
+pictures of the people clip, the DFL that makes box edges left in float:
+
+| Model | Quantized | Batch 1 | Batch 8 |
+|---|---|---:|---:|
+| YOLO11n | FP16 | 670 | 921 |
+| YOLO11n | INT8, Conv only | 474 (−29%) | 918 (0%) |
+| YOLO11n, static | INT8, every op | 458 (−32%) | — |
+| YOLO11s | FP16 | 401 | 522 |
+| YOLO11s | INT8, Conv only | 364 (−9%) | 609 (+17%) |
+
+A small model one picture at a time is bound by launching kernels and
+moving between INT8 and FP16 at each quantized layer, not by arithmetic,
+and INT8 adds conversions to it. Only a heavier model, eight pictures at
+a time, keeps the tensor cores busy enough for INT8 to pay — 17% for
+YOLO11s. Whether its answers hold up was not measured: `CudaOrtDetector`
+has no way to ask for INT8 yet.
+
+TensorRT's own calibration — a float model and a table of each tensor's
+range, from which TensorRT picks INT8 or FP16 layer by layer, usually
+the faster way — failed to build: ONNX Runtime's calibrator writes ranges
+for the model's tensors, TensorRT's network has tensors of its own, and
+the provider refuses an engine with any range missing (`failed to set
+INT8 dynamic range`), on the dynamic model and the static alike.
+
+Calibrating by percentile over 199 pictures ran the quantizer out of 32
+GB of memory: it keeps every activation's histogram. Min and max over 64
+needed under 10.
+
 ## A full label cache stopped the pipeline
 
 Measuring the above, the 1-stream E9 run never ended: three hours on, the
