@@ -41,7 +41,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     produce::source_stage,
-    schedule::PeriodicSchedule,
+    schedule::LiveSchedule,
 };
 
 /// How long the source's thread waits at most before looking at what the
@@ -342,9 +342,7 @@ struct Capturing {
     output: Output,
     /// When each frame is due, on the clock a pause does not move — made as
     /// the first is asked for.
-    schedule: Option<PeriodicSchedule>,
-    /// Whether a tick's work was done since the schedule last moved.
-    ticked: bool,
+    schedule: LiveSchedule,
     frame_rate: Arc<FrameRate>,
     /// The emitted `pts`: ticks since the first.
     frame_index: i64,
@@ -549,8 +547,7 @@ impl ScreenCaptureKitSource {
                 running: false,
                 latest,
                 output,
-                schedule: None,
-                ticked: false,
+                schedule: LiveSchedule::default(),
                 frame_rate: FrameRate::new(rate),
                 frame_index: 0,
                 wrapper_pool: UnboundObjectPool::new(
@@ -759,20 +756,8 @@ impl Source for Capturing {
     /// the clock a pause does not move, so playing on after one is not a
     /// burst of the ticks it would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        let now = wait.now();
-        let interval = self.frame_rate.interval();
-        let schedule = self
-            .schedule
-            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
-        if std::mem::take(&mut self.ticked) {
-            schedule.advance_after_tick(now);
-        }
-        let rate_changed = schedule.interval() != interval;
-        if rate_changed {
-            schedule.set_interval(interval, now);
-        }
-        let due = now + schedule.remaining(now);
-        if rate_changed {
+        let tick = self.schedule.next(self.frame_rate.interval(), wait.now());
+        if tick.rate_changed {
             pp_info!(self, "frame rate is now {}", self.frame_rate.get());
         }
 
@@ -788,10 +773,10 @@ impl Source for Capturing {
             return Err(ScreenCaptureKitSourceError::SourceGone(reason).into());
         }
 
-        if !wait.until(due.min(now + POLL_GRANULARITY)) || wait.now() < due {
+        if !tick.come(wait, POLL_GRANULARITY) {
             return Ok(Produced::Nothing);
         }
-        self.ticked = true;
+        self.schedule.made();
         Ok(self.emit_frame()?.map_or(Produced::Nothing, |frame| {
             Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into()))
         }))

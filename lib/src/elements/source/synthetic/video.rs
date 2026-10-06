@@ -9,7 +9,7 @@ use crate::{
     element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
     pool::UnboundObjectPool,
     produce::source_stage,
-    schedule::PeriodicSchedule,
+    schedule::LiveSchedule,
 };
 
 /// Construction-time options for [`TestVideoSource::new`].
@@ -103,10 +103,7 @@ struct Generating {
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// When each frame is due, on the clock a pause does not move — made
     /// as the first is asked for.
-    schedule: Option<PeriodicSchedule>,
-    /// Whether a frame went on since the schedule last moved: it moves on
-    /// once that frame has been handed on, as the next is asked for.
-    ticked: bool,
+    schedule: LiveSchedule,
 }
 
 impl TestVideoSource {
@@ -142,8 +139,7 @@ impl TestVideoSource {
             frame_index: 0,
             frame_interval,
             pool,
-            schedule: None,
-            ticked: false,
+            schedule: LiveSchedule::default(),
         }))
     }
 
@@ -234,24 +230,12 @@ impl Source for Generating {
     /// pause does not move, so playing on after one is not a burst of the
     /// frames it would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> crate::error::Result<Produced> {
-        let now = wait.now();
-        let schedule = self
-            .schedule
-            .get_or_insert_with(|| PeriodicSchedule::new(self.frame_interval, now));
-        // Moved on only now that the last frame's own work (generate and
-        // push, which a slow downstream can stretch arbitrarily) is done —
-        // `advance_after_tick`'s resync check needs `now` to reflect that,
-        // or one abnormally slow tick's own catch-up frame slips through
-        // uncapped before the next is asked for.
-        if std::mem::take(&mut self.ticked) {
-            schedule.advance_after_tick(now);
-        }
-        let due = now + schedule.remaining(now);
-        if !wait.until(due) {
+        let tick = self.schedule.next(self.frame_interval, wait.now());
+        if !tick.come(wait, Duration::MAX) {
             return Ok(Produced::Nothing);
         }
         let frame = self.generate_frame();
-        self.ticked = true;
+        self.schedule.made();
         Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into())))
     }
 }

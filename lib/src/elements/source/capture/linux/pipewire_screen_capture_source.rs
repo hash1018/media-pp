@@ -38,7 +38,7 @@ use crate::{
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     produce::source_stage,
-    schedule::PeriodicSchedule,
+    schedule::LiveSchedule,
 };
 
 /// How long [`PipeWireScreenCaptureSource::open`] waits for the PipeWire stream to
@@ -525,10 +525,7 @@ struct Capturing {
     contract: OutputContract,
     /// When each frame is due, on the clock a pause does not move — made as
     /// the first is asked for.
-    schedule: Option<PeriodicSchedule>,
-    /// Whether a tick's work was done since the schedule last moved: it
-    /// moves on once that work is done, as the next is asked for.
-    ticked: bool,
+    schedule: LiveSchedule,
     width: u32,
     height: u32,
     /// The configured output rate: the unit `pts` counts in, what
@@ -783,8 +780,7 @@ impl PipeWireScreenCaptureSource {
                 // ones, and which of the two is settled here — so a
                 // downstream filter can be checked against it.
                 contract: OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, memory)),
-                schedule: None,
-                ticked: false,
+                schedule: LiveSchedule::default(),
                 name: name.into(),
                 pp_log,
                 width,
@@ -1195,26 +1191,11 @@ impl Source for Capturing {
     /// kept on the clock a pause does not move, so playing on after one is
     /// not a burst of the ticks it would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        let now = wait.now();
-        // Followed here rather than at construction, so a rate set through
-        // `frame_rate()` while this is running is kept from the next tick.
-        let interval = self.frame_rate.interval();
-        let schedule = self
-            .schedule
-            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
-        // Moved on only once the last tick's own work (copy and push, which
-        // a slow downstream can stretch arbitrarily) is done — see
-        // `TestVideoSource`'s identical correction for why the placement
-        // matters.
-        if std::mem::take(&mut self.ticked) {
-            schedule.advance_after_tick(now);
-        }
-        let rate_changed = schedule.interval() != interval;
-        if rate_changed {
-            schedule.set_interval(interval, now);
-        }
-        let due = now + schedule.remaining(now);
-        if rate_changed {
+        // The rate is followed here rather than at construction, so one set
+        // through `frame_rate()` while this is running is kept from the next
+        // tick.
+        let tick = self.schedule.next(self.frame_rate.interval(), wait.now());
+        if tick.rate_changed {
             pp_info!(self, "frame rate is now {}", self.frame_rate.get());
         }
 
@@ -1243,12 +1224,10 @@ impl Source for Capturing {
         // Nothing to poll: the PipeWire thread fills `latest` on its own.
         // Waited for in `POLL_GRANULARITY` slices, so what that thread
         // reports is looked at even at a low `frame_rate`.
-        if !wait.until(due.min(now + POLL_GRANULARITY)) || wait.now() < due {
+        if !tick.come(wait, POLL_GRANULARITY) {
             return Ok(Produced::Nothing);
         }
-        // The schedule moves on even for a tick with nothing to emit, or
-        // the next would be due at once.
-        self.ticked = true;
+        self.schedule.made();
         Ok(self.emit_frame().map_or(Produced::Nothing, |frame| {
             Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into()))
         }))
@@ -2680,8 +2659,7 @@ mod tests {
                 MediaKind::VideoFrame,
                 MemoryDomain::System,
             )),
-            schedule: None,
-            ticked: false,
+            schedule: LiveSchedule::default(),
             width,
             height,
             frame_rate: FrameRate::new(ffmpeg::Rational::new(30, 1)),

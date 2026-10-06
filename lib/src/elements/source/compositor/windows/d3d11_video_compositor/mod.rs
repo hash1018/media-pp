@@ -67,7 +67,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     produce::source_stage,
-    schedule::PeriodicSchedule,
+    schedule::LiveSchedule,
     stats::TickCounters,
     stream::StreamEvent,
 };
@@ -925,10 +925,7 @@ struct Compositing {
     bus: Bus,
     /// When each live tick is due, on the clock a pause does not move —
     /// made as the first is asked for.
-    schedule: Option<PeriodicSchedule>,
-    /// Whether a frame went on since the schedule last moved: it moves on
-    /// once that frame has been handed on, as the next is asked for.
-    ticked: bool,
+    schedule: LiveSchedule,
 }
 
 // SAFETY: every field is either a `windows-rs` COM interface wrapper
@@ -1025,8 +1022,7 @@ impl D3d11VideoCompositor {
                 output_views: HashMap::new(),
                 ticks: None,
                 bus: Bus::new().0,
-                schedule: None,
-                ticked: false,
+                schedule: LiveSchedule::default(),
             })),
             D3d11VideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
@@ -1487,37 +1483,24 @@ impl Compositing {
     /// This tick's frame, once it is due at its own rate — see
     /// [`RenderMode::Live`] and the software compositor's own.
     fn produce_live(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        let now = wait.now();
-        // Followed here rather than at construction, so a rate set while
-        // this is running is kept from the next tick on.
-        let interval = self.shared.frame_rate.interval();
-        let schedule = self
+        // The rate is followed here rather than at construction, so one set
+        // while this is running is kept from the next tick on. A push a slow
+        // downstream holds is part of its tick, and the deadlines it overran
+        // are ticks missed.
+        let tick = self
             .schedule
-            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
-        // Moved on only once the last frame has been handed on: a push a
-        // slow downstream holds is part of its tick, and the deadlines it
-        // overran are ticks missed.
-        let missed = if std::mem::take(&mut self.ticked) {
-            schedule.advance_after_tick(now)
-        } else {
-            0
-        };
-        let rate_changed = schedule.interval() != interval;
-        if rate_changed {
-            schedule.set_interval(interval, now);
-        }
-        let due = now + schedule.remaining(now);
+            .next(self.shared.frame_rate.interval(), wait.now());
         if let Some(ticks) = &self.ticks {
-            ticks.missed(missed);
+            ticks.missed(tick.missed);
         }
-        if rate_changed {
+        if tick.rate_changed {
             pp_info!(self, "frame rate is now {}", self.frame_rate());
         }
-        if !wait.until(due.min(now + RATE_POLL_INTERVAL)) || wait.now() < due {
+        if !tick.come(wait, RATE_POLL_INTERVAL) {
             return Ok(Produced::Nothing);
         }
         let frame = self.make_frame()?;
-        self.ticked = true;
+        self.schedule.made();
         Ok(Produced::Buffer(frame))
     }
 }

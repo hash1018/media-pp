@@ -42,7 +42,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     produce::source_stage,
-    schedule::PeriodicSchedule,
+    schedule::LiveSchedule,
 };
 
 /// How long a capture waits for its next tick at a time before it looks at
@@ -547,11 +547,7 @@ struct Capturing {
     captured_since_picture: bool,
     /// When each tick is due, on the clock a pause does not move — made as
     /// the first is asked for.
-    schedule: Option<PeriodicSchedule>,
-    /// Whether a tick's work was done since the schedule last moved: it
-    /// moves on once that work — its frame handed on, where it had one — is
-    /// done, as the next is asked for.
-    ticked: bool,
+    schedule: LiveSchedule,
 }
 
 // SAFETY: every D3D11/DXGI handle here is a `windows-rs` COM interface
@@ -872,8 +868,7 @@ impl DxgiCaptureSource {
                 metadata: Vec::new(),
                 direct,
                 captured_since_picture: false,
-                schedule: None,
-                ticked: false,
+                schedule: LiveSchedule::default(),
             })),
             VideoFormat {
                 width,
@@ -1769,42 +1764,26 @@ impl Source for Capturing {
     /// not move, so playing on after one is not a burst of the ticks it
     /// would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        let now = wait.now();
-        // Followed here rather than at construction, so a rate set through
-        // `frame_rate()` while this is running is kept from the next tick.
-        let interval = self.frame_rate.interval();
-        let schedule = self
-            .schedule
-            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
-        // Moved on only once the last tick's own work (emit and push, which
-        // a slow downstream or GPU readback can stretch arbitrarily) is done
-        // — see `TestVideoSource`'s identical correction for why the
-        // placement matters.
-        if std::mem::take(&mut self.ticked) {
-            schedule.advance_after_tick(now);
-        }
-        let rate_changed = schedule.interval() != interval;
-        if rate_changed {
-            schedule.set_interval(interval, now);
-        }
-        let due = now + schedule.remaining(now);
-        if rate_changed {
+        // The rate is followed here rather than at construction, so one set
+        // through `frame_rate()` while this is running is kept from the next
+        // tick.
+        let tick = self.schedule.next(self.frame_rate.interval(), wait.now());
+        if tick.rate_changed {
             pp_info!(self, "frame rate is now {}", self.frame_rate.get());
         }
         // The wait for the next tick happens here, holding nothing, rather
         // than inside `AcquireNextFrame` — see `ACQUIRE_TIMEOUT_MS` on why
         // that call is never given time to wait in.
-        if !wait.until(due.min(now + POLL_GRANULARITY)) || wait.now() < due {
+        if !tick.come(wait, POLL_GRANULARITY) {
             return Ok(Produced::Nothing);
         }
         if let Err(error) = self.poll_capture(ACQUIRE_TIMEOUT_MS) {
             pp_error!(self, "capture failed: {error}");
             return Err(error.into());
         }
-        self.ticked = true;
+        self.schedule.made();
         if !self.all_captured() {
-            // Nothing real captured yet — nothing to emit; the schedule
-            // still moves on, or the next tick would be due at once.
+            // Nothing real captured yet — nothing to emit.
             return Ok(Produced::Nothing);
         }
         match self.emit_frame() {

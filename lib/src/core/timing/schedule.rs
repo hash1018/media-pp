@@ -100,6 +100,88 @@ impl PeriodicSchedule {
     }
 }
 
+/// A live source's schedule as its `produce` follows it: begun as the first
+/// tick is asked for, kept at whatever rate each is asked with, and moved
+/// on past a tick only once [`Self::made`] says that tick's work is done.
+///
+/// The placement is the point. A tick's work — making a frame and pushing
+/// it, which a slow downstream can stretch arbitrarily — has to be behind
+/// the `now` that [`PeriodicSchedule::advance_after_tick`] judges a resync
+/// by; moved on before it, one abnormally slow tick's catch-up frame slips
+/// through uncapped before the next is asked for.
+#[derive(Debug, Default)]
+pub(crate) struct LiveSchedule {
+    schedule: Option<PeriodicSchedule>,
+    /// Whether a tick's work was done since the schedule last moved.
+    made: bool,
+}
+
+/// Where a live source's next tick stands — see [`LiveSchedule::next`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Tick {
+    now: Instant,
+    /// When it is due, on the clock it was asked on.
+    pub(crate) due: Instant,
+    /// How many ticks the last one's work overran, and were dropped.
+    pub(crate) missed: u64,
+    /// Whether it was asked for at a rate other than the last one's, which
+    /// the schedule is anchored afresh to.
+    pub(crate) rate_changed: bool,
+}
+
+impl LiveSchedule {
+    /// The next tick at `now`, `interval` after the last — on the clock a
+    /// pause does not move, [`crate::element::Wait::now`], so playing on
+    /// after one is not a burst of the ticks it would have owed.
+    pub(crate) fn next(&mut self, interval: Duration, now: Instant) -> Tick {
+        let schedule = self
+            .schedule
+            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
+        let missed = if std::mem::take(&mut self.made) {
+            schedule.advance_after_tick(now)
+        } else {
+            0
+        };
+        let rate_changed = schedule.interval() != interval;
+        if rate_changed {
+            schedule.set_interval(interval, now);
+        }
+        Tick {
+            now,
+            due: now + schedule.remaining(now),
+            missed,
+            rate_changed,
+        }
+    }
+
+    /// The tick [`Self::next`] answered was made — or passed with nothing
+    /// to emit, which moves the schedule on all the same, or the next would
+    /// be due at once.
+    pub(crate) fn made(&mut self) {
+        self.made = true;
+    }
+}
+
+impl Tick {
+    /// Where a wait for this tick, `slice` at a time, stops this time: the
+    /// tick, or `slice` from when it was asked for if that comes first.
+    pub(crate) fn until(&self, slice: Duration) -> Instant {
+        self.now
+            .checked_add(slice)
+            .map_or(self.due, |end| end.min(self.due))
+    }
+
+    /// Waits for the tick, `slice` at a time, so what a source looks at
+    /// between waits — a rate set meanwhile, a capture thread's report — is
+    /// looked at even at a low rate. `true` once it has come; `false` where
+    /// a slice ended first or the pipeline had something for the thread —
+    /// answer [`Produced::Nothing`](crate::element::Produced::Nothing)
+    /// then, and be asked again.
+    pub(crate) fn come(&self, wait: &mut crate::element::Wait<'_>, slice: Duration) -> bool {
+        wait.until(self.until(slice)) && wait.now() >= self.due
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +292,52 @@ mod tests {
         let now = start + Duration::from_millis(500);
         schedule.set_interval(Duration::from_millis(200), now);
         assert_eq!(schedule.remaining(now), Duration::from_millis(200));
+    }
+
+    /// Asked again before the tick was made — a wait let go — the schedule
+    /// stays where it was; once made, it moves on by one interval.
+    #[test]
+    fn a_live_schedule_moves_on_only_past_a_tick_made() {
+        let start = Instant::now();
+        let mut live = LiveSchedule::default();
+        let first = live.next(INTERVAL, start);
+        assert_eq!(first.due, start, "the first tick is due at once");
+        let again = live.next(INTERVAL, start + INTERVAL / 2);
+        assert_eq!(again.due, start + INTERVAL / 2, "still the first, overdue");
+        live.made();
+        let second = live.next(INTERVAL, start + INTERVAL / 2);
+        assert_eq!(second.due, start + INTERVAL);
+        assert_eq!(second.missed, 0);
+        assert!(!second.rate_changed);
+    }
+
+    /// A tick whose work overran says how many it cost, and one asked for
+    /// at another rate is anchored afresh.
+    #[test]
+    fn a_live_schedule_counts_overruns_and_follows_its_rate() {
+        let start = Instant::now();
+        let mut live = LiveSchedule::default();
+        live.next(INTERVAL, start);
+        live.made();
+        let late = live.next(INTERVAL, start + INTERVAL * 3 + INTERVAL / 2);
+        assert_eq!(late.missed, 3);
+        let now = start + INTERVAL * 4;
+        let faster = live.next(INTERVAL / 2, now);
+        assert!(faster.rate_changed);
+        assert_eq!(faster.due, now + INTERVAL / 2);
+    }
+
+    /// A wait slice ends at the tick or `slice` on, whichever is first, and
+    /// one too long to add to an instant ends at the tick.
+    #[test]
+    fn a_tick_is_waited_for_a_slice_at_a_time() {
+        let start = Instant::now();
+        let mut live = LiveSchedule::default();
+        live.next(INTERVAL, start);
+        live.made();
+        let tick = live.next(INTERVAL, start);
+        assert_eq!(tick.until(INTERVAL / 4), start + INTERVAL / 4);
+        assert_eq!(tick.until(INTERVAL * 2), start + INTERVAL);
+        assert_eq!(tick.until(Duration::MAX), start + INTERVAL);
     }
 }

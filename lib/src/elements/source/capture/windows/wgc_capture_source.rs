@@ -74,7 +74,7 @@ use crate::{
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_error, pp_info, pp_warn},
     produce::{Received, source_stage},
-    schedule::PeriodicSchedule,
+    schedule::LiveSchedule,
 };
 
 const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
@@ -254,11 +254,7 @@ struct Capturing {
     latest: Option<Captured>,
     /// When each tick is due, on the clock a pause does not move — made as
     /// the first is asked for.
-    schedule: Option<PeriodicSchedule>,
-    /// Whether a tick's work was done since the schedule last moved: it
-    /// moves on once that work — its frame handed on, where it had one — is
-    /// done, as the next is asked for.
-    ticked: bool,
+    schedule: LiveSchedule,
 }
 
 /// A picture copied out of WGC's frame pool, and its visible size.
@@ -388,8 +384,7 @@ impl WgcCaptureSource {
             frame_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
             session: None,
             latest: None,
-            schedule: None,
-            ticked: false,
+            schedule: LiveSchedule::default(),
         }))
     }
 
@@ -629,22 +624,11 @@ impl Source for Capturing {
     /// move, so playing on after one is not a burst of the ticks it would
     /// have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        let now = wait.now();
-        // Followed here rather than at construction, so a rate set through
-        // `frame_rate()` while this is running is kept from the next tick.
-        let interval = self.frame_rate.interval();
-        let schedule = self
-            .schedule
-            .get_or_insert_with(|| PeriodicSchedule::new(interval, now));
-        if std::mem::take(&mut self.ticked) {
-            schedule.advance_after_tick(now);
-        }
-        let rate_changed = schedule.interval() != interval;
-        if rate_changed {
-            schedule.set_interval(interval, now);
-        }
-        let due = now + schedule.remaining(now);
-        if rate_changed {
+        // The rate is followed here rather than at construction, so one set
+        // through `frame_rate()` while this is running is kept from the next
+        // tick.
+        let tick = self.schedule.next(self.frame_rate.interval(), wait.now());
+        if tick.rate_changed {
             pp_info!(self, "frame rate is now {}", self.frame_rate.get());
         }
 
@@ -656,7 +640,7 @@ impl Source for Capturing {
             return Err(WgcCaptureSourceError::TargetGone.into());
         }
         // A slice at a time, so a rate set while it waits is kept from then.
-        match wait.recv_until(&runtime.frame_rx, due.min(now + POLL_GRANULARITY)) {
+        match wait.recv_until(&runtime.frame_rx, tick.until(POLL_GRANULARITY)) {
             Some(Received::Got(())) => {
                 // `Closed` shares this bounded wake-up channel with
                 // `FrameArrived`. Do not touch the frame pool after the
@@ -680,10 +664,10 @@ impl Source for Capturing {
         if runtime.target_gone() {
             return Err(WgcCaptureSourceError::TargetGone.into());
         }
-        if wait.now() < due {
+        if wait.now() < tick.due {
             return Ok(Produced::Nothing);
         }
-        self.ticked = true;
+        self.schedule.made();
         let Some((latest, (width, height))) = self.latest.clone() else {
             return Ok(Produced::Nothing);
         };
