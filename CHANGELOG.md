@@ -340,6 +340,16 @@ compile error with no explanation.
   `OrtDetectorError` is `OrtError`, the old name kept as an alias, since
   the classifiers' errors are the same.
 
+- **`vision_bench`, and the vision benchmarks it measured.** An example
+  that builds the pipeline its flags describe — CPU, CUDA or TensorRT,
+  streams batched or not, an interval, a tracker, a classifier, drawing
+  and encoding — plays a file through it as fast as it goes and prints one
+  line a script can collect, beside `model_only`, the model alone through
+  the same TensorRT, and `bench.py`, which runs a matrix of them in turns
+  and compares builds inside one run. `docs/benchmarks/vision` has what
+  they measured on an RTX 3050, read against the model alone, and what a
+  Mac needs to measure the same.
+
 - **`MetalOrtClassifier`: what a detector found, named by a second model on
   VideoToolbox pictures** (feature `ort-coreml`). What the other two
   classifiers do, with each object's box cut from the picture and

@@ -17,7 +17,7 @@ so. Each has a README with its pipeline drawn out.
 | [`cuda`](../examples/cuda) | Headless CUDA recording, and GPU text compositing |
 | [`render`](../examples/render/README.md) | `Player`, playback on every renderer, seeking, screen preview and recording, GPU scaling, keying, hardware encoding — with an index of its own |
 | [`rtsp`](../examples/rtsp) | Publishing to an RTSP server such as MediaMTX, seeking what is published, and receiving from one — this crate does not serve RTSP itself |
-| [`vision`](../examples/vision) | Scaling, and ONNX object detection with its boxes drawn — on the CPU; on CUDA pictures through TensorRT and on macOS through Core ML and Metal, several files batched through one detector, with objects tracked between detections |
+| [`vision`](../examples/vision) | Scaling, and ONNX object detection with its boxes drawn — on the CPU; on CUDA pictures through TensorRT and on macOS through Core ML and Metal, several files batched through one detector, with objects tracked between detections; `vision_bench`, the harness the [vision benchmarks](benchmarks/vision/) are measured with |
 | [`webrtc`](../examples/webrtc) | Loopback, a two-way video call, and recording received tracks |
 
 Some to start with:

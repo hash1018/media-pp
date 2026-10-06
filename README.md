@@ -64,6 +64,7 @@ Setting up FFmpeg and each platform's SDKs is in
 | [Features](docs/features.md) | Every feature flag, its platform, and what it needs to build |
 | [Examples](docs/examples.md) | The example crates and how to run them |
 | [Building](docs/building/) | Setting up Windows, Linux and macOS to build and test |
+| [Vision benchmarks](docs/benchmarks/vision/) | How fast detection, tracking and classification run, against what the GPU can do |
 | [Stream events](docs/stream-events.md) | Design record of how segments, flushes and the end of a stream travel |
 | [`CHANGELOG.md`] | What changed between versions, and what to write instead |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Testing, the control conformance matrix, soak tests |
