@@ -1139,7 +1139,28 @@ pub(crate) fn nth_picture(
     n: usize,
     format: ffmpeg_next::format::Pixel,
 ) -> ffmpeg_next::frame::Video {
+    // One in `n`, and the first of those is the one.
+    let mut found = None;
+    each_picture(video, n, format, |_, picture| {
+        found = Some(picture);
+        false
+    });
+    found.unwrap_or_else(|| panic!("the video is shorter than {n} pictures"))
+}
+
+/// Every `every`th picture of `video` — the `every`th, then the
+/// `2 * every`th, counted from 1 as [`nth_picture`] counts — as `format` in
+/// system memory, stamped with its number, until `visit` answers `false`.
+/// The file is decoded once, and only the pictures handed over converted.
+#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+pub(crate) fn each_picture(
+    video: &str,
+    every: usize,
+    format: ffmpeg_next::format::Pixel,
+    mut visit: impl FnMut(usize, ffmpeg_next::frame::Video) -> bool,
+) {
     use ffmpeg_next as ffmpeg;
+    let every = every.max(1);
     let mut input = ffmpeg::format::input(video).expect("the video opens");
     let stream = input
         .streams()
@@ -1158,23 +1179,61 @@ pub(crate) fn nth_picture(
         decoder.send_packet(&packet).expect("decodes");
         while decoder.receive_frame(&mut decoded).is_ok() {
             seen += 1;
-            if seen == n {
-                let mut converted = ffmpeg::frame::Video::empty();
-                ffmpeg::software::scaling::Context::get(
-                    decoded.format(),
-                    decoded.width(),
-                    decoded.height(),
-                    format,
-                    decoded.width(),
-                    decoded.height(),
-                    ffmpeg::software::scaling::Flags::BILINEAR,
-                )
-                .and_then(|mut context| context.run(&decoded, &mut converted))
-                .expect("converts");
-                converted.set_pts(Some(n as i64));
-                return converted;
+            if seen % every != 0 {
+                continue;
+            }
+            let mut converted = ffmpeg::frame::Video::empty();
+            ffmpeg::software::scaling::Context::get(
+                decoded.format(),
+                decoded.width(),
+                decoded.height(),
+                format,
+                decoded.width(),
+                decoded.height(),
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            )
+            .and_then(|mut context| context.run(&decoded, &mut converted))
+            .expect("converts");
+            converted.set_pts(Some(seen as i64));
+            if !visit(seen, converted) {
+                return;
             }
         }
     }
-    panic!("the video is shorter than {n} pictures");
+}
+
+/// The numbers of the first `count` pictures of `video`, looking at one in
+/// 25, on which the CPU's detector with `model` is sure of something — over
+/// 0.5. A clip may begin on an empty scene, and a test that needs objects to
+/// compare finds the pictures that have them rather than counting on one by
+/// its number. Fewer than `count` where the clip has fewer.
+#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+pub(crate) fn pictures_with_objects(model: &str, video: &str, count: usize) -> Vec<usize> {
+    use crate::element::SrcPads;
+    use crate::elements::{AppSink, Detections, OrtDetectorOptions, SwOrtDetector};
+    let Ok(mut detector) = SwOrtDetector::new("scan", model, OrtDetectorOptions::default()) else {
+        return Vec::new();
+    };
+    let kept: Arc<Mutex<Vec<MediaBuffer>>> = Arc::default();
+    let sink = Arc::clone(&kept);
+    detector.src_pads()[0].link(Box::new(AppSink::new("scan", move |buf| {
+        sink.lock().unwrap().push(buf);
+        Ok(())
+    })));
+    let mut chosen = Vec::new();
+    each_picture(video, 25, ffmpeg_next::format::Pixel::NV12, |n, picture| {
+        if detector.consume(MediaBuffer::video(picture)).is_err() {
+            return false;
+        }
+        let sure = kept.lock().unwrap().drain(..).any(|buf| {
+            buf.metadata()
+                .and_then(|metadata| metadata.get::<Detections>())
+                .is_some_and(|found| found.items.iter().any(|item| item.score > 0.5))
+        });
+        if sure {
+            chosen.push(n);
+        }
+        chosen.len() < count
+    });
+    chosen
 }

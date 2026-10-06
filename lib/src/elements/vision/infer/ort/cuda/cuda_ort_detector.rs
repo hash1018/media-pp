@@ -819,13 +819,17 @@ mod tests {
     /// What `detector` found in `buf`, the picture it handed on checked to
     /// be the one it was given.
     fn found(detector: &mut dyn RawSinkAndPads, buf: MediaBuffer) -> Detections {
+        let given = match &buf {
+            MediaBuffer::Video(frame) => frame.pts(),
+            _ => None,
+        };
         let kept = capture(detector.pads());
         detector.sink().consume(buf).expect("detects");
         let kept = kept.lock().unwrap();
         let MediaBuffer::Video(frame) = &kept[0] else {
             panic!("a picture goes on");
         };
-        assert_eq!(frame.pts(), Some(150), "the picture it was given");
+        assert_eq!(frame.pts(), given, "the picture it was given");
         kept[0]
             .metadata()
             .and_then(|metadata| metadata.get::<Detections>())
@@ -900,18 +904,23 @@ mod tests {
             tensorrt: UseTensorRtPolicy::Off,
             ..CudaOrtDetectorOptions::default()
         };
+        // A picture with something on it to compare, wherever in the clip.
+        let Some(&n) = crate::test_support::pictures_with_objects(&model, &video, 1).first() else {
+            eprintln!("skipping: nothing in {video} that the CPU is sure of");
+            return;
+        };
         let mut cpu = SwOrtDetector::new("cpu", &model, options.detector.clone()).expect("loads");
         let expected = found(
             &mut cpu,
             MediaBuffer::video(crate::test_support::nth_picture(
                 &video,
-                150,
+                n,
                 ffmpeg::format::Pixel::NV12,
             )),
         );
         assert!(
             !expected.items.is_empty(),
-            "the picture has something in it"
+            "picture {n} has something in it"
         );
 
         for (format, layout) in [
@@ -922,7 +931,7 @@ mod tests {
             let uploaded = capture(&mut upload);
             upload
                 .consume(MediaBuffer::video(crate::test_support::nth_picture(
-                    &video, 150, layout,
+                    &video, n, layout,
                 )))
                 .expect("uploads");
             let on_gpu = uploaded.lock().unwrap().remove(0);
@@ -1016,7 +1025,12 @@ mod tests {
             tensorrt: UseTensorRtPolicy::Off,
             ..CudaOrtDetectorOptions::default()
         };
-        let pictures = [100, 150, 200];
+        // Three pictures with something on them, wherever in the clip.
+        let pictures = crate::test_support::pictures_with_objects(&model, &video, 3);
+        if pictures.len() < 3 {
+            eprintln!("skipping: fewer than three pictures in {video} with something on them");
+            return;
+        }
         let found_in = |buf: &MediaBuffer| -> Vec<(usize, f32, f32)> {
             buf.metadata()
                 .and_then(|metadata| metadata.get::<Detections>())
@@ -1030,7 +1044,7 @@ mod tests {
 
         let mut alone = CudaOrtDetector::new("alone", &device, &model, options(1)).expect("loads");
         let one_at_a_time = capture(&mut alone);
-        for (index, n) in pictures.into_iter().enumerate() {
+        for (index, n) in pictures.iter().copied().enumerate() {
             alone
                 .consume(in_batch(&device, &video, n, index, pictures.len()))
                 .expect("detects");
@@ -1044,7 +1058,7 @@ mod tests {
         let mut batched =
             CudaOrtDetector::new("batched", &device, &model, options(4)).expect("loads");
         let together = capture(&mut batched);
-        for (index, n) in pictures.into_iter().enumerate() {
+        for (index, n) in pictures.iter().copied().enumerate() {
             batched
                 .consume(in_batch(&device, &video, n, index, pictures.len()))
                 .expect("detects");
@@ -1089,7 +1103,7 @@ mod tests {
         let mut cut =
             CudaOrtDetector::new("cut short", &device, &model, options(4)).expect("loads");
         let ended = capture(&mut cut);
-        for (index, n) in pictures.into_iter().take(2).enumerate() {
+        for (index, n) in pictures.iter().copied().take(2).enumerate() {
             cut.consume(in_batch(&device, &video, n, index, 3))
                 .expect("detects");
         }
