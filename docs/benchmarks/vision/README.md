@@ -26,11 +26,11 @@ On an RTX 3050 with YOLO11n through TensorRT in half precision:
 
 | Pictures a second, 1080p | Linux | Windows |
 |---|---:|---:|
-| The model alone, one picture at a time | 673 | 509 |
-| One stream: decode, detect | 544 | 407 |
-| One stream, detecting one picture in two, tracked between | 768 — NVDEC's limit | 628 |
-| Eight streams batched through one detector | 705 — 82% of what NVDEC decodes | 714 |
-| One to eight streams: interval 2, tracker, classifier, overlay, NVENC | 441–443 — NVENC's limit (448) | 418–436 |
+| The model alone, one picture at a time | 673 | 498 |
+| One stream: decode, detect | 544 | 403 |
+| One stream, detecting one picture in two, tracked between | 768 — NVDEC's limit | 625 |
+| Eight streams batched through one detector | 705 — 82% of what NVDEC decodes | 712 |
+| One to eight streams: interval 2, tracker, classifier, overlay, NVENC | 441–443 — NVENC's limit (448) | 417–440 |
 
 The model sets the pace of one stream; the GPU's decoder and encoder set
 the pace of several, as they would for DeepStream on the same GPU. Under
