@@ -12,6 +12,15 @@ Queue -> CudaEncoder -> FileMuxer`. The overlay draws on copies, so the
 printing branch beside it is handed the pictures as they were. Labels are
 drawn where DejaVu Sans is found.
 
+`--hide person=blur` hides a class in the recording instead of boxing it:
+`mosaic`, `blur` or `fill` (black), a mosaic where none is said, and once
+for each class to hide, by the name the model gives it. On the people clip
+below, YOLO11n records at about 420 pictures a second boxing everything, 395
+hiding people under a mosaic or a blur, and 420 filling them. What is hidden
+is what the detector finds: someone walking in under a hat, seen from
+above, was found as a chair or a toilet, or not at all, for the half second
+before their shoulders showed.
+
 The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
 and YOLO26. The first run builds a TensorRT engine for the model and this GPU,
 which takes minutes; later runs load it from `~/.cache/media-pp/tensorrt`
@@ -25,7 +34,7 @@ linker finds them, and running where the loader does — here both through
 ```sh
 LD_LIBRARY_PATH=/path/to/cuda13-cudnn9-tensorrt10/lib \
   cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-    [--out boxes.mp4] [--pictures N]
+    [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
 ```
 
 On Windows building needs none of them, and running needs the directories

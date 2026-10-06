@@ -5,7 +5,10 @@
 //!
 //! `--out tracked.mp4` records it: `-> CudaDetectionOverlay -> Queue ->
 //! CudaEncoder -> FileMuxer`, each object in a colour of its own and
-//! labelled with its number.
+//! labelled with its number. `--hide person=blur` hides a class there
+//! instead — `mosaic`, `blur` or `fill`, a mosaic where none is said —
+//! following each object from picture to picture as the tracker does, and
+//! may be given once for each class.
 //!
 //! `--eval 1,2,4,9` measures how good the filled-in pictures are. It runs
 //! the file once with the detector on every picture, which is the
@@ -15,7 +18,8 @@
 //! detected boxes still, which is what filling in without a motion model
 //! would give.
 //!
-//!     cargo run --release -p cuda_track -- model.onnx video.mp4 [--interval N] [--out tracked.mp4]
+//!     cargo run --release -p cuda_track -- model.onnx video.mp4 [--interval N] \
+//!         [--out tracked.mp4 [--hide CLASS[=mosaic|blur|fill]]...]
 //!     cargo run --release -p cuda_track -- model.onnx video.mp4 --eval 1,2,4,9
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -41,12 +45,14 @@ mod example {
         Result,
         buffer::MediaBuffer,
         bus::BusEvent,
+        color::Color,
         elements::{
-            AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS, CudaCodec, CudaDecoder,
+            AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, Detection,
             DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
-            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, TrackerOptions, Treatment,
+            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, RedactStyle, TrackerOptions,
+            Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -74,7 +80,21 @@ mod example {
         classifier_labels: Option<String>,
         classify: Option<Vec<usize>>,
         out: Option<String>,
+        hide: Vec<ClassRule>,
         eval: Option<Vec<u32>>,
+    }
+
+    /// `CLASS[=mosaic|blur|fill]` from `--hide`: that class's detections
+    /// hidden that way — a mosaic where no way is said — and drawn no box.
+    fn hide_rule(spec: &str) -> Option<ClassRule> {
+        let (class, style) = spec.split_once('=').unwrap_or((spec, "mosaic"));
+        let style = match style {
+            "mosaic" => RedactStyle::mosaic(),
+            "blur" => RedactStyle::blur(),
+            "fill" => RedactStyle::Fill(Color::BLACK),
+            _ => return None,
+        };
+        (!class.is_empty()).then(|| ClassRule::new(class, Treatment::hidden(style)))
     }
 
     fn args() -> Args {
@@ -82,7 +102,7 @@ mod example {
             eprintln!(
                 "usage: cuda_track <model.onnx> <video.mp4> [--interval N] [--confirm N] [--visual]\n\
                  \x20        [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]]\n\
-                 \x20        [--out tracked.mp4]\n\
+                 \x20        [--out tracked.mp4 [--hide CLASS[=mosaic|blur|fill]]...]\n\
                  \x20      cuda_track <model.onnx> <video.mp4> --eval 1,2,4,9 [--confirm N] [--visual]"
             );
             std::process::exit(1);
@@ -91,6 +111,7 @@ mod example {
         let (mut interval, mut out, mut eval) = (0, None, None);
         let mut confirm = TrackerOptions::default().confirm_after;
         let mut visual = false;
+        let mut hide = Vec::new();
         let (mut classifier, mut classifier_labels, mut classify) = (None, None, None);
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -122,6 +143,12 @@ mod example {
                     )
                 }
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
+                "--hide" => hide.push(
+                    args.next()
+                        .as_deref()
+                        .and_then(hide_rule)
+                        .unwrap_or_else(|| usage()),
+                ),
                 "--eval" => {
                     eval = Some(
                         args.next()
@@ -135,6 +162,9 @@ mod example {
             }
         }
         let [model, video] = <[String; 2]>::try_from(positional).unwrap_or_else(|_| usage());
+        if out.is_none() && !hide.is_empty() {
+            usage();
+        }
         Args {
             model,
             video,
@@ -145,6 +175,7 @@ mod example {
             classifier_labels,
             classify,
             out,
+            hide,
             eval,
         }
     }
@@ -247,6 +278,7 @@ mod example {
                                 label: font.is_some().then(|| LabelStyle::new(22.0)),
                             })
                         },
+                        rules: args.hide.clone(),
                         font,
                         ..DetectionOverlayOptions::default()
                     }

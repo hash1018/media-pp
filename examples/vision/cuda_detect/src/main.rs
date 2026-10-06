@@ -8,7 +8,9 @@
 //! each picture and records it, still on the GPU:
 //! `Tee -> CudaDetectionOverlay -> Queue -> CudaEncoder -> FileMuxer`. The
 //! overlay draws on copies, so the branch printing beside it sees the
-//! pictures as the detector handed them on.
+//! pictures as the detector handed them on. `--hide person=blur` hides a
+//! class there instead of boxing it — `mosaic`, `blur` or `fill`, a mosaic
+//! where none is said — and may be given once for each class.
 //!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26. The first run builds a TensorRT engine for the model
@@ -20,7 +22,7 @@
 //! `PATH`.
 //!
 //!     cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--out boxes.mp4] [--pictures N]
+//!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
@@ -47,11 +49,12 @@ mod example {
         Result,
         buffer::MediaBuffer,
         bus::BusEvent,
+        color::Color,
         elements::{
-            AppSink, BoxStyle, COCO_CLASS_LABELS, CudaCodec, CudaDecoder, CudaDetectionOverlay,
-            CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat, CudaOrtDetector,
-            CudaOrtDetectorOptions, DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer,
-            LabelStyle, Treatment,
+            AppSink, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
+            CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
+            CudaOrtDetector, CudaOrtDetectorOptions, DetectionOverlayOptions, Detections,
+            FileDemuxer, FileMuxer, LabelStyle, RedactStyle, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -69,22 +72,44 @@ mod example {
         model: String,
         video: String,
         out: Option<String>,
+        hide: Vec<ClassRule>,
         pictures: usize,
+    }
+
+    /// `CLASS[=mosaic|blur|fill]` from `--hide`: that class's detections
+    /// hidden that way — a mosaic where no way is said — and drawn no box.
+    fn hide_rule(spec: &str) -> Option<ClassRule> {
+        let (class, style) = spec.split_once('=').unwrap_or((spec, "mosaic"));
+        let style = match style {
+            "mosaic" => RedactStyle::mosaic(),
+            "blur" => RedactStyle::blur(),
+            "fill" => RedactStyle::Fill(Color::BLACK),
+            _ => return None,
+        };
+        (!class.is_empty()).then(|| ClassRule::new(class, Treatment::hidden(style)))
     }
 
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
-                "usage: cuda_detect <model.onnx> <video.mp4> [--out boxes.mp4] [--pictures N]"
+                "usage: cuda_detect <model.onnx> <video.mp4> \
+                 [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]"
             );
             std::process::exit(1);
         };
         let mut positional = Vec::new();
         let (mut out, mut pictures) = (None, usize::MAX);
+        let mut hide = Vec::new();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
+                "--hide" => hide.push(
+                    args.next()
+                        .as_deref()
+                        .and_then(hide_rule)
+                        .unwrap_or_else(|| usage()),
+                ),
                 "--pictures" => {
                     pictures = args
                         .next()
@@ -95,10 +120,14 @@ mod example {
             }
         }
         let [model, video] = <[String; 2]>::try_from(positional).unwrap_or_else(|_| usage());
+        if out.is_none() && !hide.is_empty() {
+            usage();
+        }
         Args {
             model,
             video,
             out,
+            hide,
             pictures,
         }
     }
@@ -114,6 +143,7 @@ mod example {
             model,
             video,
             out,
+            hide,
             pictures: limit,
         } = args();
 
@@ -182,6 +212,7 @@ mod example {
                             label: font.is_some().then(|| LabelStyle::new(22.0)),
                             ..BoxStyle::default()
                         }),
+                        rules: hide,
                         font,
                         ..DetectionOverlayOptions::default()
                     },

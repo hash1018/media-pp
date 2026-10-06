@@ -14,6 +14,15 @@ by how it looks as well as by its motion (`TrackerOptions::visual`), on the
 GPU: the example is built with `cuda-visual-tracking`, which links cuFFT 12
 beside the libraries `ort-tensorrt` links.
 
+`--hide person=blur` hides a class in the recording instead, as
+[`cuda_detect`](../cuda_detect/README.md)'s does. Hide with the detector on
+every picture, `--interval 0`: a box the tracker filled in is where it
+expects the object, and an object only just come into the picture has no
+motion to expect it by yet. On the people clip, at `--interval 2`, someone
+walking in was left uncovered on a picture the detector let by, the picture
+after it had found them, with `--confirm 1` or without; at `--interval 0`
+they were hidden from the first picture the detector found them on.
+
 `--classifier imagenet.onnx` puts a `CudaOrtClassifier` after the tracker —
 DeepStream's secondary inference — so that each object is also named by a
 second model, once per object it follows, and labelled with it:
