@@ -1403,10 +1403,12 @@ fn an_offline_render_shows_what_each_input_says_at_each_output_time() {
         Ok(())
     })
     .unwrap();
-    render.run().unwrap();
     // Each feed's pusher is dropped as the closure returns, which ends it.
+    // Both are added before the render runs: one added after the other
+    // has ended would find the render already over.
     let _red = feed("red", 0, red);
     let _blue = feed("blue", 1, blue);
+    render.run().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut finished = false;
