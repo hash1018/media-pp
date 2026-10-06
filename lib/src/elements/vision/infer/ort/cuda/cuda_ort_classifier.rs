@@ -455,7 +455,10 @@ mod tests {
     }
 
     /// The top answer for each object `classifier` was handed `buf` with.
-    fn answers<T: RawSink + SrcPads>(classifier: &mut T, buf: MediaBuffer) -> Vec<Option<usize>> {
+    fn answers<T: RawSink + SrcPads>(
+        classifier: &mut T,
+        buf: MediaBuffer,
+    ) -> Vec<Option<(usize, f32)>> {
         let kept = capture(classifier);
         classifier.consume(buf).expect("classifies");
         let kept = kept.lock().unwrap();
@@ -465,14 +468,22 @@ mod tests {
             .expect("carries Detections")
             .items
             .iter()
-            .map(|item| item.classes.first().map(|class| class.class_id))
+            .map(|item| {
+                item.classes
+                    .first()
+                    .map(|class| (class.class_id, class.score))
+            })
             .collect()
     }
 
     /// On the GPU it says what the CPU says of the same objects, from NV12
-    /// and from BGRA: the same model on the same boxes, cut by a kernel
-    /// rather than on the CPU. The cuts differ — nearest samples against
-    /// bilinear — so most, not all, must agree.
+    /// and from BGRA: the same model on the same boxes of the same picture,
+    /// each input pixel the mean of those it covers on both. Where the CPU
+    /// is sure of a box, the GPU names the same class at much the same
+    /// score; where it is not, a thousand classes share the score and the
+    /// answer turns on the last digit, so those are not compared. On NV12
+    /// the scores differ by up to about 0.1: swscale interpolates the
+    /// chroma the GPU takes as it is.
     #[test]
     fn it_says_on_the_gpu_what_the_cpu_says() {
         let (Ok(model), Ok(video)) = (
@@ -503,30 +514,47 @@ mod tests {
             })
             .collect();
         let found = Detections::new("detector", Arc::from([]), items);
-        let expected = answers(
-            &mut cpu,
-            found.clone().attach_to(MediaBuffer::video(nth_picture(
-                &video,
-                150,
-                ffmpeg::format::Pixel::RGB24,
-            ))),
-        );
-        assert!(expected.iter().all(Option::is_some), "{expected:?}");
+        // An answer this sure is the model's, not the last digit's.
+        const SURE: f32 = 0.3;
 
+        // The CPU is handed the very picture the GPU is, so both read its
+        // colours alike: an RGB24 one converted here would be swscale's
+        // BT.601 where the GPU reads an untagged HD picture as BT.709.
         for (format, layout) in [
             (CudaFrameFormat::Nv12, ffmpeg::format::Pixel::NV12),
             (CudaFrameFormat::Bgra, ffmpeg::format::Pixel::BGRA),
         ] {
+            let picture = nth_picture(&video, 150, layout);
+            let expected = answers(
+                &mut cpu,
+                found.clone().attach_to(MediaBuffer::video(picture.clone())),
+            );
+            assert!(expected.iter().all(Option::is_some), "{expected:?}");
             let mut upload = CudaUpload::new("upload", &device, format);
             let uploaded = capture(&mut upload);
             upload
-                .consume(MediaBuffer::video(nth_picture(&video, 150, layout)))
+                .consume(MediaBuffer::video(picture))
                 .expect("uploads");
             let on_gpu = uploaded.lock().unwrap().remove(0);
             let actual = answers(&mut gpu, found.clone().attach_to(on_gpu));
-            let agree = expected.iter().zip(&actual).filter(|(a, b)| a == b).count();
             eprintln!("{format:?}: cpu {expected:?}, gpu {actual:?}");
-            assert!(agree >= 4, "{format:?}: {agree} of 6 agree");
+            let sure: Vec<_> = expected
+                .iter()
+                .zip(&actual)
+                .filter_map(|(cpu, gpu)| Some(((*cpu).filter(|(_, score)| *score >= SURE)?, *gpu)))
+                .collect();
+            assert!(!sure.is_empty(), "{format:?}: the CPU is sure of no box");
+            for ((class, score), gpu) in sure {
+                let (gpu_class, gpu_score) = gpu.expect("the GPU answers too");
+                assert_eq!(
+                    gpu_class, class,
+                    "{format:?}: the CPU said {class} at {score}"
+                );
+                assert!(
+                    (gpu_score - score).abs() <= 0.15,
+                    "{format:?}: class {class} at {gpu_score} on the GPU, {score} on the CPU"
+                );
+            }
         }
     }
 }

@@ -58,27 +58,43 @@ the GPU is busy again (50% → 89%). Every E9 row now meets NVENC's limit
 media-pp, is the last limit left. The classifier's first start builds its
 engine, about 50 seconds for MobileNetV2; later starts load it.
 
-**What it answers.** On the people clip, picture 150, six boxes across it:
-TensorRT fp16 and CUDA fp32 give the same class for five of the six. Both
-agree with the CPU's `SwOrtClassifier` on only three — see
-[the next finding](#the-gpu-and-the-cpu-classify-differently).
+**What it answers.** Half precision does not change what it says: on the
+same boxes TensorRT fp16 gives CUDA fp32's class wherever the model is
+sure, and on a BGRA picture the CPU's scores to within 0.02. Measuring
+this turned up a difference between the GPU and the CPU that predates
+TensorRT — [the next finding](#the-gpu-and-the-cpu-classified-differently).
 
-## The GPU and the CPU classify differently
+## The GPU and the CPU classified differently
 
-`it_says_on_the_gpu_what_the_cpu_says` asks that the GPU and the CPU give
-the same class for at least four of six boxes. With MobileNetV2 it passes
-on `sample.mp4`, where every box is the same thing, and fails on the
-people clip, three of six, **on CUDA's provider as much as on TensorRT** —
-so it predates the change above.
+`it_says_on_the_gpu_what_the_cpu_says` asked that the GPU and the CPU give
+the same class for at least four of six boxes. With MobileNetV2 it passed
+on `sample.mp4`, where every box is the same thing, and failed on the
+people clip, three of six, on CUDA's provider as much as on TensorRT. Two
+things differed, and neither was the model.
 
-The two cut the boxes differently. The GPU cuts on whole 2×2 blocks of an
-NV12 picture and shrinks each input pixel from the mean of the pixels it
-covers. The CPU scales the RGB picture with swscale. On a soft picture —
-this clip is 432p made 1080p — an ImageNet model is unsure of every box,
-and unsure answers flip on small differences in the input. The test's
-threshold was set on a picture where the answers were sure. Whether the
-GPU's cut should match the CPU's more closely, or the test should use a
-picture where the answers are sure, is open.
+- **How a box was shrunk.** The GPU makes each input pixel the mean of the
+  source pixels it covers, as `5038cd66` made the detectors' fitting. The
+  CPU's `SwOrtClassifier` took a bilinear sample at each input pixel's
+  centre, which reads four of the dozen pixels a person's box gives each
+  one: the same defect the GPU's fitting had before that commit. It now
+  takes the mean over the same span the kernels do.
+- **What the test handed each.** The CPU was given an RGB24 picture the
+  test converted with swscale's default, BT.601; the GPU the NV12 one,
+  which it reads as BT.709, as an untagged HD picture is. The test now
+  hands both the very same picture.
+
+With both, on a BGRA picture the GPU's scores are the CPU's to within
+0.003 on CUDA's provider and 0.02 through TensorRT fp16. On NV12 they
+differ by up to about 0.1: swscale interpolates the chroma the GPU takes
+as it is, and the GPU averages Y'CbCr where the CPU averages RGB. Closing
+that would take the CUDA and Metal kernels interpolating chroma too.
+
+The answers that still differ are those the model is not sure of: on the
+people clip, two boxes whose best class scores 0.06 and 0.15 out of a
+thousand, where the answer turns on the last digit. The test now compares
+the boxes the CPU is sure of (0.3 or more), asks the GPU for the same
+class within 0.15 of the score, and asks that there be at least one. It
+passes on both clips, on CUDA and through TensorRT.
 
 ## Waiting on the whole context
 

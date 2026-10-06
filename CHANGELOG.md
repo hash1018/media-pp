@@ -332,11 +332,14 @@ compile error with no explanation.
   provider beside a TensorRT detector, its many small kernels queued
   behind the detector's: one 1080p stream with a classifier ran at 228
   pictures a second where it ran at 545 without, and runs at 514 through
-  TensorRT. On the same boxes of a 1080p picture,
-  MobileNetV2 on the GPU names five of six as it does on the CPU — two
-  electric guitars among them. The overlay labels an object with what was
-  said of it, `car #5 0.48 | minivan`, and `cuda_track --classifier` runs
-  the whole of detection, tracking, classification and drawing on the GPU.
+  TensorRT. Both cut each input pixel as the mean of the picture's pixels
+  it covers, the CPU as the kernels do; where the CPU is sure of a box,
+  MobileNetV2 on the GPU names the same class, its score within 0.02 of
+  the CPU's on a BGRA picture and about 0.1 on NV12, whose chroma
+  swscale interpolates and the kernels do not. The overlay labels an
+  object with what was said of it, `car #5 0.48 | minivan`, and
+  `cuda_track --classifier` runs the whole of detection, tracking,
+  classification and drawing on the GPU.
   `OrtDetectorError` is `OrtError`, the old name kept as an alias, since
   the classifiers' errors are the same.
 

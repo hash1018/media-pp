@@ -194,8 +194,15 @@ impl Classifying {
     }
 }
 
-/// `crop` of the RGB24 picture `rgb`, stretched bilinearly to `size` and
-/// scaled per channel, into input `slot` of `tensor`.
+/// `crop` of the RGB24 picture `rgb`, stretched to `size` and scaled per
+/// channel, into input `slot` of `tensor`.
+///
+/// Each input pixel is the mean of the source pixels it covers — from
+/// `d * source / size` to `(d + 1) * source / size` rounded up, at least
+/// one — as the CUDA and Metal kernels fit a box: a bilinear sample at its
+/// centre read four pixels of the dozen a person's box gives each input
+/// pixel, so the same box reached the model as another picture on the CPU
+/// than on the GPU, and an unsure model named it otherwise.
 fn cut(
     rgb: &ffmpeg::frame::Video,
     (left, top, width, height): Crop,
@@ -207,29 +214,29 @@ fn cut(
 ) {
     let stride = rgb.stride(0);
     let data = rgb.data(0);
-    let sample = |x: f32, y: f32, channel: usize| {
-        let fx = (x - 0.5).clamp(0.0, (width - 1) as f32);
-        let fy = (y - 0.5).clamp(0.0, (height - 1) as f32);
-        let (x0, y0) = (fx as usize, fy as usize);
-        let (x1, y1) = (
-            (x0 + 1).min(width as usize - 1),
-            (y0 + 1).min(height as usize - 1),
-        );
-        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-        let at = |x: usize, y: usize| {
-            f32::from(data[(top as usize + y) * stride + (left as usize + x) * 3 + channel])
-        };
-        let upper = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
-        let lower = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
-        upper + (lower - upper) * ty
+    let covered = |d: u32, source: u32, scaled: u32| {
+        let first = u64::from(d) * u64::from(source) / u64::from(scaled);
+        let last = (u64::from(d + 1) * u64::from(source)).div_ceil(u64::from(scaled));
+        let last = last.min(u64::from(source)).max(first + 1);
+        (first as usize, last as usize)
     };
-    let (sx, sy) = (width as f32 / size.0 as f32, height as f32 / size.1 as f32);
-    for y in 0..size.1 as usize {
-        for x in 0..size.0 as usize {
-            let (u, v) = ((x as f32 + 0.5) * sx, (y as f32 + 0.5) * sy);
+    for y in 0..size.1 {
+        let (y0, y1) = covered(y, height, size.1);
+        for x in 0..size.0 {
+            let (x0, x1) = covered(x, width, size.0);
+            let mut sum = [0u32; 3];
+            for row in y0..y1 {
+                let at = (top as usize + row) * stride + (left as usize + x0) * 3;
+                for pixel in data[at..at + (x1 - x0) * 3].as_chunks::<3>().0 {
+                    for channel in 0..3 {
+                        sum[channel] += u32::from(pixel[channel]);
+                    }
+                }
+            }
+            let count = ((x1 - x0) * (y1 - y0)) as f32;
             for channel in 0..3 {
-                tensor[[slot, channel, y, x]] =
-                    sample(u, v, channel) / 255.0 * scale[channel] + bias[channel];
+                tensor[[slot, channel, y as usize, x as usize]] =
+                    sum[channel] as f32 / count / 255.0 * scale[channel] + bias[channel];
             }
         }
     }
