@@ -234,9 +234,6 @@ impl Overlaying {
     /// rasterizing and uploading it where it is not cached yet.
     fn mask(&mut self, key: &MaskKey) -> Option<(u32, u32)> {
         if !self.masks.contains_key(key) {
-            if self.masks.len() >= LABEL_CACHE {
-                self.masks.clear();
-            }
             let font = self
                 .font
                 .as_ref()
@@ -347,6 +344,13 @@ impl Overlaying {
             height,
             block: if nv12 { 2 } else { 1 },
         };
+        // The cache is emptied between pictures, never while one's marks are
+        // placed: every mask made for this picture is read after all of
+        // them are, and one emptied away in between was drawn as a solid
+        // block, or on CUDA panicked the element's thread.
+        if self.masks.len() >= LABEL_CACHE {
+            self.masks.clear();
+        }
         let strokes = marks(
             canvas,
             self.options.style(),

@@ -270,9 +270,6 @@ impl Overlaying {
     /// The mask `key` names, from the cache where it is there.
     fn mask(&mut self, key: &MaskKey) -> Option<&TextMask> {
         if !self.masks.contains_key(key) {
-            if self.masks.len() >= LABEL_CACHE {
-                self.masks.clear();
-            }
             let font = self
                 .font
                 .as_ref()
@@ -300,6 +297,13 @@ impl Overlaying {
             height: frame.height(),
             block: planes.block(),
         };
+        // The cache is emptied between pictures, never while one's marks are
+        // placed: every mask made for this picture is read after all of
+        // them are, and one emptied away in between was drawn as a solid
+        // block, or on CUDA panicked the element's thread.
+        if self.masks.len() >= LABEL_CACHE {
+            self.masks.clear();
+        }
         let marks = marks(
             canvas,
             self.options.style(),
@@ -585,6 +589,54 @@ mod tests {
             .filter(|&(x, y)| green(x, y) < 100)
             .count();
         assert!(written > 10, "the text is drawn ({written} dark pixels)");
+    }
+
+    /// A picture's labels are all still there when it is drawn, the cache
+    /// filling up on the way: it was emptied mid-picture, and the masks
+    /// made before were drawn as solid blocks.
+    #[test]
+    fn a_full_cache_keeps_every_mask_of_the_picture_being_drawn() {
+        let Some(font) = super::super::tests::system_font() else {
+            eprintln!("skipping: no system font");
+            return;
+        };
+        let options = DetectionOverlayOptions {
+            labels: Some(super::super::LabelStyle {
+                size: 12.0,
+                ..super::super::LabelStyle::new(font)
+            }),
+            ..DetectionOverlayOptions::default()
+        };
+        let font = options
+            .labels
+            .as_ref()
+            .map(|style| load_font(style.font_data.clone(), style.size))
+            .transpose()
+            .unwrap();
+        let mut overlaying = Overlaying {
+            name: Arc::from("overlay"),
+            pp_log: element_pp_log(ElementType::SwDetectionOverlay, "overlay", None),
+            options,
+            font,
+            masks: (1..LABEL_CACHE)
+                .map(|n| (MaskKey::Text(format!("earlier {n}")), None))
+                .collect(),
+        };
+        let names: Vec<Arc<str>> = ["one", "two", "three"].map(Arc::from).to_vec();
+        let items = (0..3)
+            .map(|class| Detection::new(class, 0.9, 0.1 + class as f32 * 0.3, 0.5, 0.2, 0.4))
+            .collect();
+        let detections = Detections::new("test", Arc::from(names), items);
+        let frame = ffmpeg::frame::Video::new(Pixel::RGB24, 320, 120);
+        overlaying
+            .draw(&frame, Some(&detections), None)
+            .expect("drawn");
+        let labels = overlaying
+            .masks
+            .keys()
+            .filter(|key| matches!(key, MaskKey::Text(text) if !text.starts_with("earlier")))
+            .count();
+        assert_eq!(labels, 3, "every label of the picture is kept");
     }
 
     #[test]
