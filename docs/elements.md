@@ -18,7 +18,7 @@ Each type's own documentation says what it accepts, owns and how it fails.
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` | `VideoToolboxUpload`, `VideoToolboxDownload` |
 | Detect | `SwOrtDetector` | | | `CudaOrtDetector` | | `MetalOrtDetector` |
 | Classify what was found | `SwOrtClassifier` | | | `CudaOrtClassifier` | | `MetalOrtClassifier` |
-| Draw or hide detections | `SwDetectionOverlay` | | | `CudaDetectionOverlay` | | `MetalDetectionOverlay` (draw only) |
+| Draw or hide detections | `SwDetectionOverlay` | | | `CudaDetectionOverlay` | | `MetalDetectionOverlay` |
 | Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | `MetalWindowRenderer`, `MetalRenderer` |
 
 - `VideoDecodeBin` and `VideoEncodeBin` pick among these for a stream: the
@@ -66,7 +66,7 @@ Each type's own documentation says what it accepts, owns and how it fails.
   and labels onto the picture, and an `ObjectAnalytics`'s zones and lines
   with their counts, each as `OverlayParts` says; and hide what was found —
   faces, number plates — by a mosaic, a blur or a fill, each class as its
-  `ClassRule` says (hiding not yet on Metal); `WhisperTranscriber`, `FrameCounter`,
+  `ClassRule` says; `WhisperTranscriber`, `FrameCounter`,
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 

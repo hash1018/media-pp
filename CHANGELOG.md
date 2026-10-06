@@ -223,9 +223,10 @@ compile error with no explanation.
   into `cells`, none smaller than `min_cell` pixels — so that a face close
   to the camera is hidden as well as one far off; the blur blends those
   cells' means rather than blurring lightly, which can be partly undone.
-  `SwDetectionOverlay` and `CudaDetectionOverlay` hide, writing the same
-  bytes; `MetalDetectionOverlay` refuses a rule that hides for now, with
-  `MetalDetectionOverlayError::RedactionUnsupported`.
+  All three overlays hide and write the same bytes: `SwDetectionOverlay` on
+  the CPU, `CudaDetectionOverlay` with two kernels of its own, and
+  `MetalDetectionOverlay` with their Metal counterparts, which read and
+  write the planes as integers and are compiled without fast math.
 
 
 - **`StreamMux`: several streams through one model,** DeepStream's

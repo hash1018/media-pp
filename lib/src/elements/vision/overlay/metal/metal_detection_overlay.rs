@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ffmpeg_next::{self as ffmpeg, ffi};
-use objc2_metal::{MTLPixelFormat, MTLTexture, MTLTextureUsage};
+use objc2_metal::{MTLBuffer, MTLPixelFormat, MTLTexture, MTLTextureUsage};
 use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
@@ -20,7 +20,7 @@ use crate::{
     frame_size::ForSize,
     platform::ffmpeg::AvBufferRef,
     platform::macos::{
-        metal::{Kernel, MetalError, MetalGpu, Texture, write_texture},
+        metal::{Buffer, Kernel, MetalError, MetalGpu, Texture, write_texture},
         pixel_buffer::PixelBuffer,
         videotoolbox::{NotVideoToolbox, create_frames_ctx, sw_format_of},
     },
@@ -29,13 +29,14 @@ use crate::{
 };
 
 use super::super::{
-    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, LABEL_CACHE, MaskKey, Rect,
-    bt709_limited, marks, rasterize,
+    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
+    Rect, bt709_limited, hides, marks, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
 
 const SHADER: &str = include_str!("../../../../shaders/metal/overlay.metal");
+const REDACT: &str = include_str!("../../../../shaders/metal/redact.metal");
 
 /// Errors specific to `MetalDetectionOverlay`. Converts into the crate-wide
 /// `Error` via `?`.
@@ -75,11 +76,6 @@ pub enum MetalDetectionOverlayError {
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
-    /// A [`Treatment`](super::super::Treatment) hides: hiding what was found
-    /// is drawn by `SwDetectionOverlay` and `CudaDetectionOverlay` so far,
-    /// not yet on Metal.
-    #[error("MetalDetectionOverlay does not hide what was found yet")]
-    RedactionUnsupported,
 }
 
 impl From<TextFontError> for MetalDetectionOverlayError {
@@ -112,6 +108,12 @@ impl From<TextFontError> for MetalDetectionOverlayError {
 /// blended on the GPU, as the Metal compositor's text layers are. An NV12
 /// picture is painted in BT.709 limited-range colour, as the other
 /// overlays paint it.
+///
+/// What a rule hides is hidden before any box is drawn: a fill painted as
+/// a band is, and a mosaic's or a blur's cells by two kernels — one for
+/// each cell's mean, one painting each sample — that read and write the
+/// planes as integers and are compiled without fast math, so that they
+/// write the very bytes `SwDetectionOverlay` writes.
 pub struct MetalDetectionOverlay(FilterStage<Overlaying>);
 
 filter_stage!(MetalDetectionOverlay);
@@ -139,6 +141,12 @@ struct Overlaying {
     warned_names: bool,
     gpu: MetalGpu,
     kernels: Kernels,
+    /// `cell_means` and `cell_paint`, where a rule hides by a mosaic or a
+    /// blur.
+    cells: Option<[Kernel; 2]>,
+    /// The cells' means, a `float4` each, grown to the most a picture has
+    /// wanted.
+    means: Option<Buffer>,
     /// What a solid paint binds where a label's mask goes: it is not read,
     /// but a kernel's every texture is bound.
     solid: Texture,
@@ -164,8 +172,8 @@ impl MetalDetectionOverlay {
     /// # Errors
     ///
     /// Options it cannot be made of — a label with no font, a class named
-    /// twice — a font that cannot be read, a rule that hides, which it
-    /// cannot yet, and Metal's where there is no GPU or a kernel will not
+    /// twice — a font that cannot be read, and Metal's where there is no
+    /// GPU or a kernel will not
     /// compile.
     pub fn new(
         name: impl Into<String>,
@@ -173,12 +181,7 @@ impl MetalDetectionOverlay {
         options: DetectionOverlayOptions,
     ) -> std::result::Result<Self, MetalDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
-        // Refused rather than ignored: a picture handed on unhidden where it
-        // was asked to be hidden would show what it was meant not to.
         options.check()?;
-        if options.hides_any() {
-            return Err(MetalDetectionOverlayError::RedactionUnsupported);
-        }
         let pp_log = element_pp_log(ElementType::MetalDetectionOverlay, &name, None);
         // Read once at any size: each label is rasterized at its own.
         let font = options
@@ -199,6 +202,13 @@ impl MetalDetectionOverlay {
             true,
         )?;
         write_texture(&solid, &[255], 1, 1, 1);
+        // Compiled where a rule may cut cells, without fast math so that
+        // they are the CPU's bytes.
+        let cells = if options.hides_any() {
+            Some(gpu.precise_kernel_array(REDACT, ["cell_means", "cell_paint"])?)
+        } else {
+            None
+        };
         pp_info!(
             pp_log: &pp_log,
             "opened: NV12 or BGRA, {} rules, others {:?}, font={}",
@@ -220,12 +230,42 @@ impl MetalDetectionOverlay {
                 paint_nv12,
                 paint_bgra,
             },
+            cells,
+            means: None,
             solid,
             hw_device_ctx: device.retain(),
             nv12_frames: ForSize::new(),
             bgra_frames: ForSize::new(),
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         })))
+    }
+}
+
+/// The parameters of one plane's cells, as the redaction shader's `Cells`.
+fn cells(origin: (u32, u32), size: (u32, u32), cells: (u32, u32), smooth: bool) -> Vec<u8> {
+    [
+        origin.0,
+        origin.1,
+        size.0,
+        size.1,
+        cells.0,
+        cells.1,
+        u32::from(smooth),
+        0,
+    ]
+    .iter()
+    .flat_map(|word| word.to_ne_bytes())
+    .collect()
+}
+
+/// A colour as the paint kernels take it: Y', Cb, Cr in BT.709's limited
+/// range on NV12, R, G, B on BGRA, each 0 to 1.
+fn colour_of(color: crate::color::Color, nv12: bool) -> [f32; 3] {
+    if nv12 {
+        let (y, cb, cr) = bt709_limited(color);
+        [y, cb, cr].map(|value| f32::from(value) / 255.0)
+    } else {
+        [color.red, color.green, color.blue].map(|value| f32::from(value) / 255.0)
     }
 }
 
@@ -371,6 +411,11 @@ impl Overlaying {
         let strokes = marks(canvas, &options, detections, analytics, &mut |key| {
             self.mask(key)
         });
+        // What is hidden, in the order the CPU hides it: before every mark,
+        // so that a box and its label are drawn over it where asked for.
+        let hidden = detections
+            .map(|detections| hides(canvas, &options, detections))
+            .unwrap_or_default();
         self.options = options;
         let mut destination = self.frame(layout, width, height)?;
         let to = PixelBuffer::of_frame(&destination).ok_or(
@@ -400,6 +445,36 @@ impl Overlaying {
                 vec![self.gpu.plane(&from, 0, MTLPixelFormat::BGRA8Unorm, read)?],
             )
         };
+        // The copy's planes as integers, for the cells to be read and
+        // written byte for byte, and room for every cell's mean: a picture
+        // with nothing to cut makes neither.
+        let planes_of = |cells: (u32, u32)| (cells.0 * cells.1) as usize * targets.len();
+        let wanted: usize = hidden
+            .iter()
+            .map(|hide| match hide {
+                Hide::Cells { cells, .. } => planes_of(*cells),
+                Hide::Fill { .. } => 0,
+            })
+            .sum();
+        let integers = if wanted == 0 {
+            Vec::new()
+        } else if nv12 {
+            vec![
+                self.gpu.plane(&to, 0, MTLPixelFormat::R8Uint, both)?,
+                self.gpu.plane(&to, 1, MTLPixelFormat::RG8Uint, both)?,
+            ]
+        } else {
+            vec![self.gpu.plane(&to, 0, MTLPixelFormat::RGBA8Uint, both)?]
+        };
+        let bytes = wanted * 4 * size_of::<f32>();
+        if wanted > 0
+            && self
+                .means
+                .as_ref()
+                .is_none_or(|means| means.length() < bytes)
+        {
+            self.means = Some(self.gpu.shared_buffer(bytes)?);
+        }
         let (copy, paint_kernel) = if nv12 {
             (&self.kernels.copy_nv12, &self.kernels.paint_nv12)
         } else {
@@ -420,14 +495,64 @@ impl Overlaying {
             Some(&paint(whole, [0.0; 3], false)),
             (width, height),
         );
+        let solid: Vec<&Texture> = targets.iter().chain([&self.solid]).collect();
+        let mut at = 0;
+        for hide in &hidden {
+            match *hide {
+                Hide::Fill { rect, color } => pass.dispatch(
+                    paint_kernel,
+                    &solid,
+                    Some(&paint(rect, colour_of(color, nv12), false)),
+                    (rect.width, rect.height),
+                ),
+                Hide::Cells {
+                    rect,
+                    cells: count,
+                    smooth,
+                } => {
+                    let (Some([means_kernel, cells_kernel]), Some(means)) =
+                        (&self.cells, &self.means)
+                    else {
+                        // Made with the options and above for this picture:
+                        // a picture is not handed on unhidden.
+                        return Err(MetalDetectionOverlayError::Metal(MetalError::Unavailable(
+                            "the hiding kernels",
+                        )));
+                    };
+                    // NV12's colour is cut into the same cells at half the
+                    // size, the rectangle being on whole blocks.
+                    let whole = ((rect.x, rect.y), (rect.width, rect.height));
+                    let half = ((rect.x / 2, rect.y / 2), (rect.width / 2, rect.height / 2));
+                    for (plane, (origin, size)) in integers.iter().zip([whole, half]) {
+                        let parameters = cells(origin, size, count, smooth);
+                        let n = (count.0 * count.1) as usize;
+                        pass.dispatch_groups(
+                            means_kernel,
+                            &[plane],
+                            &[(means, at)],
+                            Some(&parameters),
+                            (n.div_ceil(64), 1, 1),
+                            (64, 1, 1),
+                        );
+                        pass.dispatch_groups(
+                            cells_kernel,
+                            &[plane],
+                            &[(means, at)],
+                            Some(&parameters),
+                            (
+                                (size.0 as usize).div_ceil(8),
+                                (size.1 as usize).div_ceil(8),
+                                1,
+                            ),
+                            (8, 8, 1),
+                        );
+                        at += n * 4 * size_of::<f32>();
+                    }
+                }
+            }
+        }
         for stroke in &strokes {
-            let colour = if nv12 {
-                let (y, cb, cr) = bt709_limited(stroke.color);
-                [y, cb, cr].map(|value| f32::from(value) / 255.0)
-            } else {
-                [stroke.color.red, stroke.color.green, stroke.color.blue]
-                    .map(|value| f32::from(value) / 255.0)
-            };
+            let colour = colour_of(stroke.color, nv12);
             // A stroke with a mask is drawn through it or not at all: drawn
             // without, a label was a solid block of the box's colour.
             let mask = match &stroke.mask {
@@ -848,6 +973,140 @@ mod tests {
                 "{format:?}: something drawn ({changed} bytes)"
             );
             assert_eq!(differ, 0, "{format:?}: bytes more than 1 apart");
+        }
+    }
+
+    /// A `pixel` picture 96 by 48 in which no byte is its neighbour's, so a
+    /// cell that read the wrong samples would show it.
+    fn noise(pixel: ffmpeg::format::Pixel) -> ffmpeg::frame::Video {
+        let mut frame = ffmpeg::frame::Video::new(pixel, 96, 48);
+        for plane in 0..frame.planes() {
+            for (index, byte) in frame.data_mut(plane).iter_mut().enumerate() {
+                let mut v = (index as u32).wrapping_mul(2_654_435_761) ^ (plane as u32 * 977);
+                v ^= v >> 15;
+                *byte = (v.wrapping_mul(2_246_822_519) >> 24) as u8;
+            }
+        }
+        frame.set_pts(Some(7));
+        frame
+    }
+
+    /// The bytes a picture shows, plane by plane, row by row, without the
+    /// padding at the end of each row.
+    fn shown(frame: &ffmpeg::frame::Video) -> Vec<Vec<u8>> {
+        let (width, height) = (frame.width() as usize, frame.height() as usize);
+        let rows: Vec<(usize, usize)> = match frame.format() {
+            ffmpeg::format::Pixel::NV12 => vec![(height, width), (height / 2, width)],
+            _ => vec![(height, width * 4)],
+        };
+        rows.into_iter()
+            .enumerate()
+            .map(|(plane, (rows, bytes))| {
+                let stride = frame.stride(plane);
+                (0..rows)
+                    .flat_map(|row| frame.data(plane)[row * stride..][..bytes].to_vec())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A mosaic, a blur and a fill on the GPU write the same bytes as the
+    /// CPU's overlay on the same picture, NV12 and BGRA alike — two faces,
+    /// grown by the margin, cut into cells of uneven width, the colour at
+    /// half the size — and a box drawn over a hidden face is drawn over it.
+    #[test]
+    fn a_box_is_hidden_on_the_gpu_as_on_the_cpu() {
+        use super::super::super::{Hiding, RedactStyle, Treatment};
+        use crate::elements::{Detection, SwDetectionOverlay};
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let faces = || {
+            Detections::new(
+                "test",
+                Arc::from(vec![Arc::<str>::from("face")]),
+                vec![
+                    Detection::new(0, 0.9, 0.1, 0.2, 0.37, 0.55),
+                    Detection::new(0, 0.8, 0.62, 0.05, 0.2, 0.3),
+                ],
+            )
+        };
+        let few = std::num::NonZeroU32::new(5).unwrap();
+        let styles = [
+            RedactStyle::mosaic(),
+            RedactStyle::blur(),
+            RedactStyle::Mosaic {
+                cells: few,
+                min_cell: 2,
+            },
+            RedactStyle::Blur {
+                cells: few,
+                min_cell: 2,
+            },
+            RedactStyle::Fill(Color::new(10, 200, 30)),
+        ];
+        for format in FORMATS {
+            for style in styles {
+                for drawn in [false, true] {
+                    let treatment = Treatment {
+                        hide: Some(Hiding::new(style)),
+                        ..if drawn {
+                            Treatment::default()
+                        } else {
+                            Treatment::hidden(style)
+                        }
+                    };
+                    let options = DetectionOverlayOptions {
+                        others: treatment,
+                        ..DetectionOverlayOptions::default()
+                    };
+                    let picture = noise(format);
+                    let mut cpu = SwDetectionOverlay::new("cpu", options.clone()).expect("opens");
+                    let on_cpu = capture(&mut cpu);
+                    cpu.consume(
+                        MediaBuffer::video(picture.clone())
+                            .with_metadata(Metadata::new().with(faces())),
+                    )
+                    .expect("hidden on the CPU");
+                    let MediaBuffer::Video(expected) = on_cpu.lock().unwrap().remove(0) else {
+                        panic!("a picture");
+                    };
+
+                    let mut upload = VideoToolboxUpload::new("upload", &device);
+                    let uploaded = capture(&mut upload);
+                    upload
+                        .consume(MediaBuffer::video(picture.clone()))
+                        .expect("uploads");
+                    let input = uploaded
+                        .lock()
+                        .unwrap()
+                        .remove(0)
+                        .with_metadata(Metadata::new().with(faces()));
+                    let mut gpu =
+                        MetalDetectionOverlay::new("gpu", &device, options).expect("opens");
+                    let on_gpu = capture(&mut gpu);
+                    gpu.consume(input).expect("hidden on the GPU");
+                    let actual = download(on_gpu.lock().unwrap().remove(0));
+
+                    let (expected, actual) = (shown(&expected), shown(&actual));
+                    assert_ne!(
+                        expected,
+                        shown(&picture),
+                        "{format:?} {style:?}: something hidden"
+                    );
+                    for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                        let differ = expected
+                            .iter()
+                            .zip(actual)
+                            .filter(|(expected, actual)| expected != actual)
+                            .count();
+                        assert_eq!(
+                            differ, 0,
+                            "{format:?} {style:?}, boxes drawn {drawn}, plane {plane}: {differ} bytes differ"
+                        );
+                    }
+                }
+            }
         }
     }
 }

@@ -16,9 +16,10 @@ use objc2_foundation::NSString;
 use objc2_io_surface::IOSurfaceRef;
 use objc2_metal::{
     MTLBarrierScope, MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandBufferStatus,
-    MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLOrigin, MTLPixelFormat, MTLRegion,
-    MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions, MTLComputeCommandEncoder,
+    MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLOrigin,
+    MTLPixelFormat, MTLRegion, MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor,
+    MTLTextureUsage,
 };
 use thiserror::Error as ThisError;
 
@@ -97,8 +98,6 @@ impl MetalGpu {
         Ok(Self { device, queue })
     }
 
-    /// Compiles `source` and each of `kernels` in it into a pipeline, in the
-    /// order they are named.
     /// [`Self::kernels`] for a fixed set of names, one kernel each, as an
     /// array to take apart.
     pub(crate) fn kernel_array<const N: usize>(
@@ -106,22 +105,53 @@ impl MetalGpu {
         source: &str,
         names: [&str; N],
     ) -> Result<[Kernel; N], MetalError> {
-        self.kernels(source, &names)?
-            .try_into()
+        Self::array(self.kernels(source, &names)?)
+    }
+
+    /// [`Self::kernel_array`] compiled without fast math: every
+    /// floating-point operation rounded as written, as the CPU rounds it,
+    /// for kernels whose output is to be the CPU's byte for byte. Fast math
+    /// is Metal's default, and lets the compiler fuse and reorder.
+    pub(crate) fn precise_kernel_array<const N: usize>(
+        &self,
+        source: &str,
+        names: [&str; N],
+    ) -> Result<[Kernel; N], MetalError> {
+        let options = MTLCompileOptions::new();
+        // `mathMode`, which replaces it, is macOS 15 and later; this is
+        // every version, and turns the same optimisations off.
+        #[allow(deprecated)]
+        options.setFastMathEnabled(false);
+        Self::array(self.compile(source, &names, Some(&options))?)
+    }
+
+    fn array<const N: usize>(made: Vec<Kernel>) -> Result<[Kernel; N], MetalError> {
+        made.try_into()
             .map_err(|made: Vec<Kernel>| MetalError::Compile {
                 kernel: "(library)".into(),
                 reason: format!("{N} kernels asked for, {} made", made.len()),
             })
     }
 
+    /// Compiles `source` and each of `kernels` in it into a pipeline, in the
+    /// order they are named.
     pub(crate) fn kernels(
         &self,
         source: &str,
         kernels: &[&str],
     ) -> Result<Vec<Kernel>, MetalError> {
+        self.compile(source, kernels, None)
+    }
+
+    fn compile(
+        &self,
+        source: &str,
+        kernels: &[&str],
+        options: Option<&MTLCompileOptions>,
+    ) -> Result<Vec<Kernel>, MetalError> {
         let library = self
             .device
-            .newLibraryWithSource_options_error(&NSString::from_str(source), None)
+            .newLibraryWithSource_options_error(&NSString::from_str(source), options)
             .map_err(|error| MetalError::Compile {
                 kernel: "(library)".into(),
                 reason: error.localizedDescription().to_string(),
