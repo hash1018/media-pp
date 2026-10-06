@@ -324,8 +324,11 @@ compile error with no explanation.
   its answer kept on every picture it is followed through, those a detector
   let by too, until `OrtClassifierOptions::reclassify` pictures have passed
   — DeepStream's asynchronous mode; `classes` limits it to some of the
-  detector's classes, `min_size` to boxes big enough, `min_score` to
-  answers sure enough, and `InputScale` says whether the model wants 0 to 1
+  detector's classes, `min_size` to boxes big enough,
+  `min_detection_score` (0.25) to boxes the detector was sure enough of —
+  the unsure ones a tracker is handed and hands on unnumbered were
+  otherwise classified again on every picture — `min_score` to answers
+  sure enough, and `InputScale` says whether the model wants 0 to 1
   or ImageNet's normalisation. Raw scores are put through a softmax, and
   probabilities taken as they are. The CUDA one cuts the boxes with the
   detector's fitting kernels, pointed at each box, into one batch tensor in

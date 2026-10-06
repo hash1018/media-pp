@@ -22,8 +22,8 @@
 //!     cargo run --release -p vision_bench -- video.mp4 --model yolo11n.onnx \
 //!         [--backend cpu|cuda|tensorrt] [--fp32] [--streams N] [--batch B] \
 //!         [--interval N] [--track motion|visual] [--classifier model.onnx] \
-//!         [--reclassify N] [--overlay] [--encode] [--pictures N] [--warmup N] [--label NAME] \
-//!         [--engine-cache-root DIR]
+//!         [--reclassify N] [--min-detection-score S] [--overlay] [--encode] \
+//!         [--pictures N] [--warmup N] [--label NAME] [--engine-cache-root DIR]
 //!
 //! Without `--model`, only decoding is measured. `--track visual` follows
 //! CUDA pictures on the GPU when built with `--features gpu-dcf`, and copies
@@ -112,6 +112,7 @@ struct Args {
     track: Track,
     classifier: Option<String>,
     reclassify: u32,
+    min_detection_score: f32,
     overlay: bool,
     encode: bool,
     pictures: usize,
@@ -125,8 +126,9 @@ fn args() -> Args {
         eprintln!(
             "{why}\nusage: vision_bench <video> [--model model.onnx] [--backend cpu|cuda|tensorrt] \
              [--fp32] [--streams N] [--batch B] [--interval N] [--track motion|visual] \
-             [--classifier model.onnx] [--reclassify N] [--overlay] [--encode] [--pictures N] [--warmup N] \
-             [--label NAME] [--engine-cache-root DIR]"
+             [--classifier model.onnx] [--reclassify N] [--min-detection-score S] \
+             [--overlay] [--encode] [--pictures N] [--warmup N] [--label NAME] \
+             [--engine-cache-root DIR]"
         );
         std::process::exit(2);
     };
@@ -150,6 +152,7 @@ fn args() -> Args {
         track: Track::Off,
         classifier: None,
         reclassify: OrtClassifierOptions::default().reclassify,
+        min_detection_score: OrtClassifierOptions::default().min_detection_score,
         overlay: false,
         encode: false,
         pictures: usize::MAX,
@@ -186,6 +189,12 @@ fn args() -> Args {
             }
             "--classifier" => parsed.classifier = args.next(),
             "--reclassify" => parsed.reclassify = number(args.next()) as u32,
+            "--min-detection-score" => {
+                parsed.min_detection_score = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or_else(|| usage("a score was expected"))
+            }
             "--overlay" => parsed.overlay = true,
             "--encode" => parsed.encode = true,
             "--pictures" => parsed.pictures = number(args.next()),
@@ -392,6 +401,7 @@ fn analysis(
             input: InputScale::ImageNet,
             min_score: 0.0,
             reclassify: args.reclassify,
+            min_detection_score: args.min_detection_score,
             ..OrtClassifierOptions::default()
         };
         let name = format!("classifier {index}");
@@ -616,7 +626,8 @@ fn run() -> Result<()> {
     println!(
         "RESULT label={} decode={} backend={} precision={} model={model} video={video} \
          streams={} batch={} interval={} track={track} classify={} overlay={} encode={} \
-         pictures={counted} seconds={seconds:.3} fps={:.1} cpu={} objects={:.2} ready={:.1}",
+         pictures={counted} seconds={seconds:.3} fps={:.1} cpu={} objects={:.2} found={} \
+         ready={:.1}",
         args.label,
         match args.backend {
             Backend::Cpu => "sw",
@@ -649,6 +660,7 @@ fn run() -> Result<()> {
         counted as f64 / seconds,
         cpu.map_or_else(|| String::from("-"), |c| format!("{c:.2}")),
         meter.objects.load(Ordering::Relaxed) as f64 / n.max(1) as f64,
+        meter.objects.load(Ordering::Relaxed),
         ready.as_secs_f64(),
     );
     Ok(())

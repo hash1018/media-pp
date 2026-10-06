@@ -12,7 +12,7 @@
 //!
 //!     cargo run --release -p vision_bench --bin model_only -- yolo11n.onnx \
 //!         [--provider tensorrt|cuda] [--fp32] [--batch 1,2,4,8] [--runs N] \
-//!         [--engine-cache-root DIR]
+//!         [--engine-cache-root DIR] [--cuda-graph] [--opt N] [--max N]
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
@@ -34,12 +34,16 @@ fn main() -> ort::Result<()> {
     let usage = || -> ! {
         eprintln!(
             "usage: model_only <model.onnx> [--provider tensorrt|cuda] [--fp32] \
-             [--batch 1,2,4,8] [--runs N] [--engine-cache-root DIR]"
+             [--batch 1,2,4,8] [--runs N] [--engine-cache-root DIR] [--cuda-graph] [--opt N] [--max N]"
         );
         std::process::exit(2);
     };
     let mut model = None;
     let mut engine_root: Option<PathBuf> = None;
+    let mut cuda_graph = false;
+    // A profile of its own — 1 to `max`, fastest at `opt` — rather than the
+    // batch alone, as a classifier's engine is built.
+    let (mut opt, mut max): (Option<usize>, Option<usize>) = (None, None);
     let (mut tensorrt, mut fp16, mut batches, mut runs) = (true, true, vec![1], 500);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -52,6 +56,21 @@ fn main() -> ort::Result<()> {
                 }
             }
             "--fp32" => fp16 = false,
+            "--cuda-graph" => cuda_graph = true,
+            "--opt" => {
+                opt = Some(
+                    args.next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                )
+            }
+            "--max" => {
+                max = Some(
+                    args.next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                )
+            }
             "--batch" => {
                 batches = args
                     .next()
@@ -116,8 +135,16 @@ fn main() -> ort::Result<()> {
             // vision_bench names them.
             let cache = match &engine_root {
                 Some(root) => root.join(format!(
-                    "{stem}-{}-b{batch}",
-                    if fp16 { "fp16" } else { "fp32" }
+                    "{stem}-{}-{}",
+                    if fp16 { "fp16" } else { "fp32" },
+                    match (opt, max) {
+                        (None, None) => format!("b{batch}"),
+                        (opt, max) => format!(
+                            "batch-1-{}-{}",
+                            opt.unwrap_or(batch),
+                            max.unwrap_or(batch).max(batch)
+                        ),
+                    }
                 )),
                 None => cache.clone(),
             };
@@ -131,13 +158,15 @@ fn main() -> ort::Result<()> {
                 .with_engine_cache(true)
                 .with_engine_cache_path(cache.display())
                 .with_timing_cache(true)
-                .with_timing_cache_path(cache.display());
-            if batch > 1 {
+                .with_timing_cache_path(cache.display())
+                .with_cuda_graph(cuda_graph);
+            let (opt, max) = (opt.unwrap_or(batch), max.unwrap_or(batch).max(batch));
+            if max > 1 {
                 let shape = |b: usize| format!("{name}:{b}x3x{h}x{w}");
                 provider = provider
                     .with_profile_min_shapes(shape(1))
-                    .with_profile_opt_shapes(shape(batch))
-                    .with_profile_max_shapes(shape(batch));
+                    .with_profile_opt_shapes(shape(opt))
+                    .with_profile_max_shapes(shape(max));
             }
             providers.push(provider.build().error_on_failure());
         }
@@ -177,10 +206,13 @@ fn main() -> ort::Result<()> {
         let seconds = started.elapsed().as_secs_f64();
         let per_batch = seconds / runs as f64;
         println!(
-            "MODEL model={stem} provider={} precision={} batch={batch} runs={runs} \
-             ms_per_batch={:.3} fps={:.1}",
+            "MODEL model={stem} provider={}{} precision={} profile=1-{}-{} batch={batch} \
+             runs={runs} ms_per_batch={:.3} fps={:.1}",
             if tensorrt { "tensorrt" } else { "cuda" },
+            if tensorrt && cuda_graph { "+graph" } else { "" },
             if tensorrt && fp16 { "fp16" } else { "fp32" },
+            opt.unwrap_or(batch),
+            max.unwrap_or(batch).max(batch),
             per_batch * 1e3,
             batch as f64 / per_batch,
         );

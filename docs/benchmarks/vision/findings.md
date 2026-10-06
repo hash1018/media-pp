@@ -58,6 +58,42 @@ the GPU is busy again (50% → 89%). Every E9 row now meets NVENC's limit
 media-pp, is the last limit left. The classifier's first start builds its
 engine, about 50 seconds for MobileNetV2; later starts load it.
 
+**Unsure boxes.** A detector before a tracker keeps boxes down to 0.1,
+for the tracker to match a partly hidden object with, and the tracker
+hands on those it numbered nothing for. A classifier classified each of
+them again on every picture, as an object with no number is. It now
+leaves boxes under `OrtClassifierOptions::min_detection_score`, 0.25 by
+default, and keeps an answer it gave a followed object whatever its box
+scores later. Classifying every detection against those at 0.25 or more,
+in turns, three runs each:
+
+| Configuration | Every detection | 0.25 or more | Change |
+|---|---:|---:|---:|
+| 1 stream, every 30 pictures | 512 | 524 | +2% |
+| 4 streams batched, every 30 pictures | 625 | 647 | +3% |
+| 1 stream, every picture | 470 | 470 | 0% |
+| E9, 1, 4 and 8 streams | 441–442 | 441–442 | 0%, NVENC's limit |
+
+**The batch its engine is fastest at.** A TensorRT engine built for a
+range of batches is quickest at the one it was told to optimise for. The
+classifier's engine was built for 8, but a picture has one to three
+objects to classify. MobileNetV2 alone, milliseconds a run (`model_only
+--opt N --max 32`, the median of two runs):
+
+| Built for | 1 | 2 | 3 | 4 | 8 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.308 | 0.490 | 0.657 | 0.816 | 1.496 |
+| 2 | 0.325 | 0.454 | 0.610 | 0.776 | 1.422 |
+| 4 | 0.350 | 0.478 | 0.609 | 0.741 | 1.405 |
+| 8 | 0.361 | 0.490 | 0.622 | 0.758 | 1.341 |
+| 16 | 0.399 | 0.528 | 0.657 | 0.792 | 1.373 |
+| 32 | 0.402 | 0.532 | 0.666 | 0.800 | 1.381 |
+
+It is now built for 2. In the pipeline, classifying every object on every
+picture, that is 1% (one stream, 470 → 476) and 0.6% (four batched,
+568 → 571) — small, as a run is a few hundredths of a millisecond shorter,
+but in every run.
+
 **What it answers.** Half precision does not change what it says: on the
 same boxes TensorRT fp16 gives CUDA fp32's class wherever the model is
 sure, and on a BGRA picture the CPU's scores to within 0.02. Measuring
@@ -122,7 +158,7 @@ one-stream run took 162 seconds.
 
 The default cache now keeps an engine built for a range of batches in a
 directory of that range's own (`batch-1-4-4`; the classifier's is
-`batch-1-8-32`), and one built for none in the cache itself, where
+`batch-1-2-32`), and one built for none in the cache itself, where
 engines from before still are. The timing cache stays shared, which made
 the first build of a new range take 6 seconds rather than minutes.
 Starting four batched and one alone in turn, three times, every start
@@ -130,6 +166,54 @@ after the first loaded in 0.3 to 0.4 seconds. A directory an application
 gives in `CudaOrtDetectorOptions::engine_cache` is used as it is, so
 detectors of one model with different batches want one each, as
 `vision_bench --engine-cache-root` gives them.
+
+## CUDA graphs: faster, and wrong
+
+TensorRT's provider can capture a run as a CUDA graph and replay it,
+launching the model whole rather than kernel by kernel. On the model alone
+(`model_only --cuda-graph`) it is a real gain where batches are small:
+
+| Model | Batch | Without | With | Change |
+|---|---:|---:|---:|---:|
+| YOLO11n | 1 | 669 | 776 | +16% |
+| YOLO11n | 8 | 922 | 950 | +3% |
+| MobileNetV2 | 1 | 3277 | 4029 | +23% |
+| MobileNetV2 | 4 | 5370 | 5890 | +10% |
+
+A graph replays the addresses it was captured with, so `CudaOrtDetector`
+was made to keep one `IoBinding` for each number of pictures, captured
+under its own `gpu_graph_id`. Comparing every picture's detections with
+and without, over the 2982 pictures of the 1080p clip, 625 differed —
+every other picture or so — and 2208 objects were found against 2222.
+
+ONNX Runtime copies an input into memory of its own when it is bound,
+here even when the tensor is in its own CUDA allocator's memory: a binding
+kept from run to run saw only the first picture, and found nothing at
+all, with or without the graph. Bound again on every run, as the detector
+always has, the copy goes to one of two buffers in turn, and the graph
+reads the one it was captured with. Until a model's input can be bound
+where it is, a graph replays stale pictures, so the detector does not use
+one. `vision_bench` reports `found`, the objects found over the whole run,
+which is what told the two apart.
+
+## A full label cache stopped the pipeline
+
+Measuring the above, the 1-stream E9 run never ended: three hours on, the
+GPU idle. Run under gdb, the CUDA overlay's thread had panicked at
+`expect("made while the marks were")`. Since the overlays place every
+mark of a picture before drawing any, a label made early in a picture
+could be emptied out of the cache by one made later, once the cache
+reached its 256 masks — and with a classifier, whose labels carry a score
+that changes from picture to picture, it reached them in a minute. The CPU
+and Metal overlays read the cache the same way without the `expect`, and
+drew the lost labels as solid blocks. All three now empty the cache only
+between pictures; a test fills it to one short of full and draws three
+new labels, and fails with the old eviction.
+
+That the panic stopped the run without a word is a second defect, left
+open: an element's thread that panics leaves its pipeline without a
+`Finished` or an `Error` on the bus, so whatever waits for either waits
+for good. A panic should reach the bus as the element's error.
 
 ## Two builds of one engine differ
 

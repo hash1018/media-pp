@@ -10,7 +10,7 @@ are Ultralytics' and the ONNX model zoo's.
 | Piece | What it does |
 |---|---|
 | `vision_bench` | Builds the pipeline its flags describe, plays a file through it as fast as it goes, and prints one `RESULT key=value …` line. |
-| `model_only` | Runs the detector alone through ONNX Runtime on a tensor already on the GPU, its output left there: the ceiling the pipelines are held against. Linux and Windows. |
+| `model_only` | Runs the detector alone through ONNX Runtime on a tensor already on the GPU, its output left there: the ceiling the pipelines are held against. `--cuda-graph` replays it as a CUDA graph. Linux and Windows. |
 | `bench.py` | Runs the whole matrix below, each configuration several times, and prints a Markdown table for each experiment. |
 
 `vision_bench`'s pipeline, each bracketed stage there only when asked for:
@@ -47,6 +47,7 @@ What a `RESULT` line says:
 | `fps` | Pictures a second through the sinks, all streams together, after the warm-up. |
 | `cpu` | The process's CPU time over the same span, in cores: 1.00 is one core kept busy. |
 | `objects` | Objects on each picture that reached the sink, on average. |
+| `found` | Objects over the whole run: two builds that should find the same find exactly the same number. |
 | `ready` | Seconds to build the pipeline, a TensorRT engine's loading included. |
 
 `bench.py` adds the GPU's utilisation, NVDEC's, NVENC's and the GPU memory
