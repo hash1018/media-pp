@@ -116,7 +116,9 @@ impl BestClass {
 mod tests {
     use ndarray::Array3;
 
-    use super::super::super::{Letterbox, OrtDetectorOptions, decode_batch, decode_best};
+    use super::super::super::{
+        Letterbox, ModelOutput, OrtDetectorOptions, decode_batch, decode_best, yolo::Yolo,
+    };
     use super::*;
 
     /// What the kernel writes, read, is what the whole output reads to on
@@ -179,7 +181,13 @@ mod tests {
             Letterbox::new((480, 640), (640, 640)),
         ];
         let options = OrtDetectorOptions::default();
-        let whole = decode_batch(output.view().into_dyn(), &letterboxes, &options).unwrap();
+        let shape = [pictures, rows, boxes];
+        let outputs = [ModelOutput {
+            name: "output0",
+            shape: &shape,
+            data: floats,
+        }];
+        let whole = decode_batch(&Yolo, &outputs, &letterboxes, (640, 640), &options).unwrap();
         assert!(whole.iter().all(|found| !found.is_empty()));
         assert_eq!(decode_best(&best, boxes, &letterboxes, &options), whole);
     }
