@@ -74,8 +74,11 @@ static bool covered(constant Fit &fit, uint2 id, thread uint2 &lo, thread uint2 
 
 // Where shown pixel (x, y) of the rectangle is in the picture as stored.
 static uint2 stored(constant Fit &fit, uint x, uint y) {
+    // Metal's `dot` is of floats only; these are whole numbers.
     int3 at = int3(int(x), int(y), 1);
-    return fit.origin + uint2(uint(dot(fit.x_of.xyz, at)), uint(dot(fit.y_of.xyz, at)));
+    int3 xs = fit.x_of.xyz * at;
+    int3 ys = fit.y_of.xyz * at;
+    return fit.origin + uint2(uint(xs.x + xs.y + xs.z), uint(ys.x + ys.y + ys.z));
 }
 
 static void store(device float *tensor, constant Fit &fit, uint2 id, float3 rgb) {

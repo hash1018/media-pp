@@ -491,4 +491,84 @@ pub(super) mod tests {
             );
         }
     }
+
+    /// A picture stored turned is fitted the way it is shown: whichever of
+    /// the eight ways it is stored, the model is handed what the upright
+    /// picture gives it — as the CUDA kernels are held to.
+    #[test]
+    fn a_turned_picture_is_fitted_the_way_it_is_shown() {
+        use crate::orientation::Rotation;
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let model = (16, 16);
+        let mut fitting = Fitting::new(model, 1).expect("the kernels compile");
+        // Wider than tall, shrunk by three and by two, no two pixels alike.
+        let size = (48u32, 32u32);
+        let shown = |x: u32, y: u32| ((x * 5 + y * 11) % 251) as u8;
+        let mut fitted = |orientation: Orientation, bgra: bool| {
+            let stored = orientation.display_size(size.0, size.1);
+            let [xx, xy, x0, yx, yy, y0] = orientation.sampling(stored.0, stored.1);
+            let format = if bgra {
+                ffmpeg::format::Pixel::BGRA
+            } else {
+                ffmpeg::format::Pixel::NV12
+            };
+            let mut frame = ffmpeg::frame::Video::new(format, stored.0, stored.1);
+            if !bgra {
+                frame.data_mut(1).fill(128);
+            }
+            let stride = frame.stride(0);
+            for y in 0..size.1 as i32 {
+                for x in 0..size.0 as i32 {
+                    let (sx, sy) = (
+                        (xx * x + xy * y + x0) as usize,
+                        (yx * x + yy * y + y0) as usize,
+                    );
+                    let value = shown(x as u32, y as u32);
+                    if bgra {
+                        frame.data_mut(0)[sy * stride + sx * 4..][..4]
+                            .copy_from_slice(&[value, value, value, 255]);
+                    } else {
+                        frame.data_mut(0)[sy * stride + sx] = value;
+                    }
+                }
+            }
+            let MediaBuffer::Video(frame) = upload(&device, frame) else {
+                panic!("a picture is uploaded");
+            };
+            let picture = Picture::of(&frame).expect("readable");
+            let cut = Cut {
+                crop: (0, 0, stored.0, stored.1),
+                orientation,
+                offset: (0, 0),
+                scaled: model,
+                slot: 0,
+            };
+            fitting
+                .fit(&picture, &[cut], ([1.0; 3], [0.0; 3]))
+                .expect("fits");
+            fitting.input(1).to_vec()
+        };
+        for bgra in [false, true] {
+            let upright = fitted(Orientation::UPRIGHT, bgra);
+            for rotation in [
+                Rotation::None,
+                Rotation::Clockwise90,
+                Rotation::Half,
+                Rotation::Clockwise270,
+            ] {
+                for mirrored in [false, true] {
+                    let orientation = Orientation { rotation, mirrored };
+                    let turned = fitted(orientation, bgra);
+                    for (index, (turned, upright)) in turned.iter().zip(&upright).enumerate() {
+                        assert!(
+                            (turned - upright).abs() < 1e-6,
+                            "bgra={bgra}, {orientation:?}: float {index} is {turned}, not {upright}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

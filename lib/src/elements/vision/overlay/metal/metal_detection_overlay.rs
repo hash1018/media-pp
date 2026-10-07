@@ -1119,4 +1119,70 @@ mod tests {
             }
         }
     }
+
+    /// A picture stored turned is drawn on as it is shown, on the GPU as on
+    /// the CPU: boxes and labels drawn on it and turned back are the bytes
+    /// drawn on the picture stored the right way up, for each of the eight
+    /// ways it can be turned.
+    #[test]
+    fn a_turned_picture_is_drawn_on_as_it_is_shown() {
+        use super::super::super::tests::{every_orientation, turn};
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let Some(font) = system_font() else {
+            eprintln!("skipping: no system font to draw labels in");
+            return;
+        };
+        let options = DetectionOverlayOptions {
+            font: Some(font),
+            others: Treatment::boxes(BoxStyle {
+                label: Some(LabelStyle::new(14.0)),
+                ..BoxStyle::default()
+            }),
+            ..DetectionOverlayOptions::default()
+        };
+        let found = Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("thing")]),
+            vec![
+                Detection::new(0, 0.9, 0.25, 0.5, 0.5, 0.375),
+                Detection::new(0, 0.6, 0.625, 0.0, 0.25, 0.25),
+            ],
+        );
+        for format in FORMATS {
+            let draw = |picture: ffmpeg::frame::Video, found: Detections| {
+                let mut upload = VideoToolboxUpload::new("upload", &device);
+                let uploaded = capture(&mut upload);
+                upload
+                    .consume(MediaBuffer::video(picture))
+                    .expect("uploads");
+                let input = uploaded
+                    .lock()
+                    .unwrap()
+                    .remove(0)
+                    .with_metadata(Metadata::new().with(found));
+                let mut gpu =
+                    MetalDetectionOverlay::new("gpu", &device, options.clone()).expect("opens");
+                let on_gpu = capture(&mut gpu);
+                gpu.consume(input).expect("drawn");
+                download(on_gpu.lock().unwrap().remove(0))
+            };
+            let upright = noise(format);
+            let expected = shown(&draw(upright.clone(), found.clone()));
+            for orientation in every_orientation() {
+                let mut stored = found.clone();
+                for item in &mut stored.items {
+                    [item.x, item.y, item.width, item.height] =
+                        orientation.from_display([item.x, item.y, item.width, item.height]);
+                }
+                let drawn = draw(turn(&upright, orientation, false), stored);
+                assert_eq!(
+                    shown(&turn(&drawn, orientation, true)),
+                    expected,
+                    "{format:?} {orientation:?}"
+                );
+            }
+        }
+    }
 }
