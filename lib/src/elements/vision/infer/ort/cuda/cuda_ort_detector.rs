@@ -2,7 +2,6 @@
 //! with what was found in it, without the picture leaving the GPU.
 
 #[cfg(feature = "ort-tensorrt")]
-use crate::orientation::Orientations;
 use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
 
@@ -43,6 +42,7 @@ use super::super::{
     model_input,
 };
 use super::runtime::{self, CudaRuntime};
+use crate::orientation::Orientations;
 
 /// Whether a [`CudaOrtDetector`] runs its model through TensorRT, with
 /// the `ort-tensorrt` feature.
