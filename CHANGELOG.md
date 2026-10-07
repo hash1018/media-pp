@@ -247,7 +247,14 @@ compile error with no explanation.
   against 362 without; `cuda_detect --tiles`. On an M5 through Core ML,
   YOLO11n ran 42 pictures a second with tiles and `max_batch` 7, 34 with
   `max_batch` 1, against 210 without, and the tiles find through Core ML
-  where they find on the CPU; `metal_detect --tiles`.
+  where they find on the CPU; `metal_detect --tiles`. `Tiles::choose`, a
+  `TileChooser` of the application's own, picks the tiles each picture is
+  looked in from what it carries in — an earlier detector's
+  `Detections` — through a `TiledPicture`; the whole picture is always
+  looked at. Looking for faces only in the tiles a small person's head lies
+  in missed the same faces as all six tiles on the eleven videos, at five
+  runs of RetinaFace a picture instead of seven, three where a few people
+  are.
 
 - **Embedders: what a detector found, made into vectors.** `SwOrtEmbedder`
   and `CudaOrtEmbedder` run an embedding model on each object and put its

@@ -13,6 +13,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{OrtDetectorOptions, OrtError, retinaface, retinaface::RetinaFace, yolo::Yolo};
+use crate::buffer::Metadata;
 use crate::elements::Detection;
 use crate::orientation::Orientation;
 
@@ -406,7 +407,10 @@ impl Letterbox {
 /// is found both in the whole picture and in a tile, the whole picture's box
 /// is kept, with the more confident score: a tile can cut a large face in
 /// two.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Each tile is looked in on every picture, unless [`Tiles::choose`] says
+/// otherwise picture by picture.
+#[derive(Debug, Clone)]
 pub struct Tiles {
     /// Tiles across a picture shown wider than tall; down one shown taller,
     /// so that a portrait picture is cut the same way turned.
@@ -417,18 +421,77 @@ pub struct Tiles {
     /// from 0 to less than 1: a face on the line between two is whole in one
     /// of them where it is no wider than this.
     pub overlap: f32,
+    /// Which tiles each picture is looked in — from what it carries in, the
+    /// boxes an earlier detector found on it, say — or `None` for every one.
+    /// The whole picture is always looked at.
+    pub choose: Option<Arc<dyn TileChooser>>,
 }
 
 impl Default for Tiles {
     /// Three across and two down, a quarter overlapping — the arrangement
-    /// measured above.
+    /// measured above — every one looked in.
     fn default() -> Self {
         Self {
             across: 3,
             down: 2,
             overlap: 0.25,
+            choose: None,
         }
     }
+}
+
+impl PartialEq for Tiles {
+    /// The same arrangement, choosing by the same chooser — the same one,
+    /// not one alike.
+    fn eq(&self, other: &Self) -> bool {
+        self.across == other.across
+            && self.down == other.down
+            && self.overlap == other.overlap
+            && match (&self.choose, &other.choose) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+/// What picks the tiles a detector looks in, picture by picture —
+/// [`Tiles::choose`]. A tile can be passed over where nothing it could find
+/// is there: in front of a face detector, where a person detector found no
+/// small person, a tile holds no face the whole picture misses, and running
+/// the model on it is time spent for nothing.
+///
+/// One chooser is shared by every detector it is given to, and called from
+/// each one's own thread, once for each tile of each picture looked at.
+///
+/// On eleven public videos with 20 to 80 people a picture, looking with a
+/// RetinaFace ResNet50 only in the tiles where a person detector's box put a
+/// small head missed exactly the faces all six tiles missed, at five runs of
+/// the model a picture instead of seven; where a few people were, three.
+pub trait TileChooser: fmt::Debug + Send + Sync {
+    /// Whether to look in `tile` of `picture` — left, top, width and height
+    /// as fractions of the picture as stored, as a [`Detection`]'s box is.
+    fn look_in(&self, picture: &TiledPicture<'_>, tile: [f32; 4]) -> bool;
+}
+
+/// A picture about to be looked at in tiles, as a [`TileChooser`] is told
+/// of it.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct TiledPicture<'a> {
+    /// What the picture carries in, as earlier elements left it: what an
+    /// earlier detector found is its `Detections`, and an element of the
+    /// application's own may have put anything beside it.
+    pub metadata: Option<&'a Metadata>,
+    /// Its size as stored, in pixels.
+    pub size: (u32, u32),
+    /// Which way up it is shown: on a picture stored on its side, a box's
+    /// top is not where a person's head is.
+    pub orientation: Orientation,
+    /// How many pixels of the model's input one of the picture's comes to
+    /// where the picture is looked at whole: what decides whether a thing is
+    /// too small to be found without a tile.
+    pub whole_scale: f32,
 }
 
 impl Tiles {
@@ -436,7 +499,7 @@ impl Tiles {
     /// overlap that leaves each tile something of its own.
     pub(crate) fn check(&self) -> Result<(), OrtError> {
         if self.across == 0 || self.down == 0 || !(0.0..0.9).contains(&self.overlap) {
-            return Err(OrtError::InvalidTiles(*self));
+            return Err(OrtError::InvalidTiles(self.clone()));
         }
         Ok(())
     }
@@ -489,23 +552,49 @@ impl Tiles {
     }
 }
 
-/// Every way a detector looks at a picture stored `frame` in size: the
-/// whole of it first, then each of `tiles`.
+/// Every way a detector looks at a picture stored `frame` in size, carrying
+/// `metadata` in: the whole of it first, then each of `tiles` their chooser
+/// picks.
 pub(crate) fn looks(
     frame: (u32, u32),
     model: (u32, u32),
     orientation: Orientation,
     tiles: Option<&Tiles>,
+    metadata: Option<&Metadata>,
 ) -> Vec<Letterbox> {
-    let mut found = vec![Letterbox::shown(frame, model, orientation)];
-    if let Some(tiles) = tiles {
-        found.extend(
-            tiles
-                .rectangles(frame, orientation)
-                .into_iter()
-                .map(|crop| Letterbox::cropped(frame, crop, model, orientation)),
-        );
-    }
+    let whole = Letterbox::shown(frame, model, orientation);
+    let Some(tiles) = tiles else {
+        return vec![whole];
+    };
+    let shown = orientation.display_size(frame.0, frame.1);
+    let picture = TiledPicture {
+        metadata,
+        size: frame,
+        orientation,
+        whole_scale: whole.scaled.0 as f32 / shown.0.max(1) as f32,
+    };
+    let (width, height) = (frame.0.max(1) as f32, frame.1.max(1) as f32);
+    let chosen = |&(x, y, w, h): &(u32, u32, u32, u32)| {
+        tiles.choose.as_ref().is_none_or(|choose| {
+            choose.look_in(
+                &picture,
+                [
+                    x as f32 / width,
+                    y as f32 / height,
+                    w as f32 / width,
+                    h as f32 / height,
+                ],
+            )
+        })
+    };
+    let mut found = vec![whole];
+    found.extend(
+        tiles
+            .rectangles(frame, orientation)
+            .into_iter()
+            .filter(chosen)
+            .map(|crop| Letterbox::cropped(frame, crop, model, orientation)),
+    );
     found
 }
 
@@ -713,11 +802,18 @@ mod tests {
         // three across and two down as stored.
         let turned = tiles.rectangles((1920, 1080), Orientation::rotated(Rotation::Clockwise90));
         assert_eq!(turned, wide);
-        assert!(Tiles { across: 0, ..tiles }.check().is_err());
+        assert!(
+            Tiles {
+                across: 0,
+                ..tiles.clone()
+            }
+            .check()
+            .is_err()
+        );
         assert!(
             Tiles {
                 overlap: 0.95,
-                ..tiles
+                ..tiles.clone()
             }
             .check()
             .is_err()
@@ -755,7 +851,7 @@ mod tests {
             "the bottom-right corner: {found:?}"
         );
         assert_eq!(
-            looks((1920, 1080), (640, 640), Orientation::UPRIGHT, None).len(),
+            looks((1920, 1080), (640, 640), Orientation::UPRIGHT, None, None).len(),
             1
         );
         let all = looks(
@@ -763,9 +859,73 @@ mod tests {
             (640, 640),
             Orientation::UPRIGHT,
             Some(&Tiles::default()),
+            None,
         );
         assert_eq!(all.len(), 7);
         assert_eq!(all[0].crop, (0, 0, 1920, 1080), "the whole picture first");
+    }
+
+    /// Looks in the tiles that hold the centre of a box the picture carries
+    /// in.
+    #[derive(Debug)]
+    struct WhereFound;
+
+    impl TileChooser for WhereFound {
+        fn look_in(&self, picture: &TiledPicture<'_>, [x, y, w, h]: [f32; 4]) -> bool {
+            assert!((picture.whole_scale - 640.0 / 1920.0).abs() < 1e-6);
+            picture
+                .metadata
+                .and_then(|metadata| metadata.get::<crate::elements::Detections>())
+                .is_some_and(|found| {
+                    found.items.iter().any(|item| {
+                        let (cx, cy) = (item.x + item.width / 2.0, item.y + item.height / 2.0);
+                        (x..x + w).contains(&cx) && (y..y + h).contains(&cy)
+                    })
+                })
+        }
+    }
+
+    /// A chooser is asked of each tile, from what the picture carries, and
+    /// only the tiles it picks are looked in — the whole picture always.
+    #[test]
+    fn a_chooser_picks_the_tiles_from_what_the_picture_carries() {
+        let tiles = Tiles {
+            choose: Some(Arc::new(WhereFound)),
+            ..Tiles::default()
+        };
+        let looked = |metadata: Option<&Metadata>| {
+            looks(
+                (1920, 1080),
+                (640, 640),
+                Orientation::UPRIGHT,
+                Some(&tiles),
+                metadata,
+            )
+        };
+        assert_eq!(looked(None).len(), 1, "nothing carried, the whole alone");
+        // Top left, and bottom right: one tile each, as 3 by 2 tiles of a
+        // quarter's overlap meet nowhere near either.
+        let found = crate::elements::Detections::new(
+            "people",
+            Arc::from([]),
+            vec![
+                Detection::new(0, 0.9, 0.02, 0.02, 0.04, 0.04),
+                Detection::new(0, 0.9, 0.94, 0.94, 0.04, 0.04),
+            ],
+        );
+        let metadata = Metadata::default().with(found);
+        let all = looked(Some(&metadata));
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].crop, (0, 0, 1920, 1080), "the whole picture first");
+        assert_eq!((all[1].crop.0, all[1].crop.1), (0, 0));
+        assert_eq!(all[2].crop.0 + all[2].crop.2, 1920);
+        assert_eq!(all[2].crop.1 + all[2].crop.3, 1080);
+        assert_ne!(
+            tiles,
+            Tiles::default(),
+            "a chooser is part of what tiles are"
+        );
+        assert_eq!(tiles, tiles.clone());
     }
 
     /// A face found whole and in a tile keeps the whole picture's box and

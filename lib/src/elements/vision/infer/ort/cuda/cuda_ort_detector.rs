@@ -17,7 +17,7 @@ use ort::{
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, Metadata},
     bus::BusEvent,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     element::{Context, Element, ElementType, element_pp_log},
@@ -508,6 +508,7 @@ impl Detecting {
     fn looks(
         &mut self,
         frame: &ffmpeg::frame::Video,
+        metadata: Option<&Metadata>,
     ) -> std::result::Result<Vec<Letterbox>, OrtDetectorError> {
         let surface = frame::validate(
             frame,
@@ -524,6 +525,7 @@ impl Detecting {
             self.model,
             orientation,
             self.options.tiles.as_ref(),
+            metadata,
         ))
     }
 
@@ -855,7 +857,7 @@ impl Filter for Detecting {
         let last = slot.is_none_or(|slot| slot.is_last());
 
         let looks = if self.interval.look(&buf) {
-            match self.looks(frame) {
+            match self.looks(frame, buf.metadata()) {
                 Ok(looks) => looks,
                 // This picture alone failed. Where nothing else is to go on
                 // from this call, the failure is this call's; where the
@@ -1196,6 +1198,110 @@ mod tests {
                 .fold(0.0, f32::max);
             assert!(best > 0.4, "{wanted:?} found at IoU {best} only");
         }
+    }
+
+    /// Asks of each tile whether the picture carries a `Mark`, and passes
+    /// over every one.
+    #[derive(Debug, Default)]
+    struct PassOver {
+        asked: std::sync::atomic::AtomicUsize,
+        marked: std::sync::atomic::AtomicUsize,
+    }
+
+    struct Mark;
+
+    impl crate::elements::TileChooser for PassOver {
+        fn look_in(&self, picture: &crate::elements::TiledPicture<'_>, _tile: [f32; 4]) -> bool {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.asked.fetch_add(1, Relaxed);
+            if picture.metadata.is_some_and(|m| m.get::<Mark>().is_some()) {
+                self.marked.fetch_add(1, Relaxed);
+            }
+            false
+        }
+    }
+
+    /// A tile chooser is asked of each tile with what the picture carries
+    /// in, on the CPU and on the GPU alike, and a picture whose tiles are
+    /// all passed over is looked at whole alone. Needs a model and a video,
+    /// as above.
+    #[test]
+    fn a_tile_chooser_hears_what_the_picture_carries_on_the_cpu_and_the_gpu() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Ok(device) = CudaDevice::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        if let CudaRuntime::Unavailable { cuda } = CudaOrtDetector::runtime() {
+            eprintln!("skipping: the CUDA runtime cannot be used ({cuda})");
+            return;
+        }
+        let Some(&n) = crate::test_support::pictures_with_objects(&model, &video, 1).first() else {
+            eprintln!("skipping: nothing in {video} that the CPU is sure of");
+            return;
+        };
+        let chooser = Arc::new(PassOver::default());
+        let tiled = OrtDetectorOptions {
+            tiles: Some(crate::elements::Tiles {
+                choose: Some(chooser.clone()),
+                ..crate::elements::Tiles::default()
+            }),
+            ..OrtDetectorOptions::default()
+        };
+        let picture = || {
+            MediaBuffer::video(crate::test_support::nth_picture(
+                &video,
+                n,
+                ffmpeg::format::Pixel::NV12,
+            ))
+            .with_metadata(Metadata::default().with(Mark))
+        };
+        let mut whole =
+            SwOrtDetector::new("whole", &model, OrtDetectorOptions::default()).expect("loads");
+        let mut cpu = SwOrtDetector::new("cpu", &model, tiled.clone()).expect("loads");
+        let alone = found(&mut whole, picture());
+        let passed_over = found(&mut cpu, picture());
+        assert_eq!(
+            (chooser.asked.load(Relaxed), chooser.marked.load(Relaxed)),
+            (6, 6)
+        );
+        assert_eq!(passed_over.items, alone.items, "the whole picture alone");
+
+        #[cfg_attr(
+            not(feature = "ort-tensorrt"),
+            allow(unused_mut, clippy::needless_update)
+        )]
+        let mut options = CudaOrtDetectorOptions {
+            detector: tiled,
+            max_batch: 7,
+            ..CudaOrtDetectorOptions::default()
+        };
+        #[cfg(feature = "ort-tensorrt")]
+        {
+            options.tensorrt = UseTensorRtPolicy::Off;
+        }
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+        let uploaded = capture(&mut upload);
+        upload.consume(picture()).expect("uploads");
+        let buf = uploaded.lock().unwrap().remove(0);
+        let mut gpu = CudaOrtDetector::new("gpu", &device, &model, options).expect("loads on CUDA");
+        let on_gpu = found(&mut gpu, buf);
+        assert_eq!(
+            (chooser.asked.load(Relaxed), chooser.marked.load(Relaxed)),
+            (12, 12)
+        );
+        assert_eq!(
+            on_gpu.items.len(),
+            alone.items.len(),
+            "the whole picture alone"
+        );
     }
 
     /// A RetinaFace model on the GPU finds the faces the CPU finds, in the

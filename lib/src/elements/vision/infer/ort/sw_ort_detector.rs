@@ -9,7 +9,7 @@ use ort::{inputs, session::Session, value::TensorRef};
 use crate::ffmpeg;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, Metadata},
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     element::{Element, ElementType, element_pp_log},
     elements::filter::scaler::{is_rgb, matrix},
@@ -224,14 +224,20 @@ impl Detecting {
         Ok(letterbox)
     }
 
-    /// Looks at `frame` — whole, then in each tile — and says what it found.
-    fn detect(&mut self, frame: &ffmpeg::frame::Video) -> Result<Detections> {
+    /// Looks at `frame`, carrying `metadata` in — whole, then in each tile
+    /// chosen — and says what it found.
+    fn detect(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+        metadata: Option<&Metadata>,
+    ) -> Result<Detections> {
         let orientation = self.orientations.of(frame, &self.pp_log);
         let looks = looks(
             (frame.width(), frame.height()),
             self.model,
             orientation,
             self.options.tiles.as_ref(),
+            metadata,
         );
         let mut found = Vec::with_capacity(looks.len());
         for look in &looks {
@@ -487,7 +493,7 @@ impl Filter for Detecting {
             out.push(buf);
             return Ok(());
         }
-        let detections = self.detect(frame)?;
+        let detections = self.detect(frame, buf.metadata())?;
         out.push(detections.attach_to(buf));
         Ok(())
     }

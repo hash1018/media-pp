@@ -45,8 +45,8 @@ pub use metal::{
     MetalOrtEmbedder,
 };
 pub use model::{
-    ChannelOrder, DetectorDecoder, DetectorModel, ModelBox, ModelInput, ModelOutput, Tiles,
-    non_max_suppression,
+    ChannelOrder, DetectorDecoder, DetectorModel, ModelBox, ModelInput, ModelOutput, TileChooser,
+    TiledPicture, Tiles, non_max_suppression,
 };
 use model::{Letterbox, decode_batch, looks, merge_looks};
 pub use sw_ort_classifier::SwOrtClassifier;

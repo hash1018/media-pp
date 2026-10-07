@@ -10,7 +10,7 @@ use ort::{inputs, session::Session, value::TensorRef, value::ValueType};
 use crate::ffmpeg;
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, Metadata},
     bus::BusEvent,
     contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
     element::{Context, Element, ElementType, element_pp_log},
@@ -314,6 +314,7 @@ impl Detecting {
     fn look(
         &mut self,
         frame: &ffmpeg::frame::Video,
+        metadata: Option<&Metadata>,
     ) -> std::result::Result<(Picture, Vec<Letterbox>), OrtError> {
         let picture = self.fitting.picture(frame)?;
         let orientation = self.orientations.of(frame, &self.pp_log);
@@ -322,6 +323,7 @@ impl Detecting {
             self.fitting.model,
             orientation,
             self.options.tiles.as_ref(),
+            metadata,
         );
         Ok((picture, looks))
     }
@@ -513,7 +515,7 @@ impl Filter for Detecting {
         let last = slot.is_none_or(|slot| slot.is_last());
 
         let look = if self.interval.look(&buf) {
-            match self.look(frame) {
+            match self.look(frame, buf.metadata()) {
                 Ok(look) => Some(look),
                 // This picture alone failed. Where nothing else is to go on
                 // from this call, the failure is this call's; where the
