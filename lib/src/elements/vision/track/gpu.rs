@@ -167,6 +167,7 @@ impl<D: DcfDevice> GpuLooks<D> {
             if d > half { d - SIZE as f32 } else { d }
         };
         let mut corrected = Vec::new();
+        let mut looked = Vec::new();
         for (n, (index, size)) in followed.into_iter().enumerate() {
             let object = &expected[index];
             let [x, y, w, h] = object.tlwh;
@@ -185,6 +186,7 @@ impl<D: DcfDevice> GpuLooks<D> {
             else {
                 continue;
             };
+            looked.push((index, *psr));
             if *psr < min_psr {
                 continue;
             }
@@ -210,6 +212,9 @@ impl<D: DcfDevice> GpuLooks<D> {
         self.device.finish()?;
         for (index, _, tlwh) in corrected {
             expected[index].tlwh = tlwh;
+        }
+        for (index, psr) in looked {
+            expected[index].look = Some(psr);
         }
         Ok(expected)
     }

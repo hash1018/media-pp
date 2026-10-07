@@ -351,6 +351,7 @@ fn follow_by_look(
         let Some(found) = filter.find(luma, (x + w / 2.0, y + h / 2.0)) else {
             continue;
         };
+        object.look = Some(found.psr);
         if found.psr < MIN_PSR {
             continue;
         }
@@ -506,6 +507,7 @@ impl Filter for Tracking {
                             (((x + w) / width).min(1.0), ((y + h) / height).min(1.0));
                         (right > left && bottom > top).then(|| Detection {
                             track_id: Some(expected.id),
+                            look: expected.look,
                             ..Detection::new(
                                 expected.class_id,
                                 expected.score,
@@ -829,6 +831,70 @@ mod tests {
         );
     }
 
+    /// How sure following by look was on each of eleven pictures of a block
+    /// detected on the first two, there for five more, then gone — each
+    /// picture put where `place` puts it.
+    fn looks_on(
+        visual: bool,
+        place: &dyn Fn(ffmpeg::frame::Video) -> MediaBuffer,
+    ) -> Vec<Option<f32>> {
+        let mut tracker = ObjectTracker::new(
+            "tracker",
+            TrackerOptions {
+                visual,
+                ..TrackerOptions::default()
+            },
+        );
+        let kept = capture(&mut tracker);
+        for n in 0..=10u32 {
+            let block = if n <= 6 {
+                [20 + 2 * n, 30, 24, 32]
+            } else {
+                [300, 30, 24, 32]
+            };
+            tracker
+                .consume(scene(i64::from(n) * 100, block, n < 2, place))
+                .expect("tracked");
+        }
+        let kept = kept.lock().unwrap();
+        (0..=10usize)
+            .map(|n| {
+                detections(&kept[n])
+                    .and_then(|found| found.items.first().map(|item| item.look))
+                    .flatten()
+            })
+            .collect()
+    }
+
+    /// What [`looks_on`] gives where the look worked: nothing said on the
+    /// pictures detected, sure while the block is there, unsure once gone.
+    fn assert_looks(looks: &[Option<f32>]) {
+        assert_eq!(looks[..2], [None, None], "detected: no look");
+        assert!(
+            looks[2..=6].iter().all(|l| l.is_some_and(|l| l > MIN_PSR)),
+            "{looks:?}"
+        );
+        assert!(
+            looks[8..].iter().all(|l| l.is_some_and(|l| l < MIN_PSR)),
+            "{looks:?}"
+        );
+    }
+
+    /// A block followed by look says how sure the look was; following by
+    /// motion alone says nothing.
+    #[test]
+    fn following_by_look_says_how_sure_it_was() {
+        let by_look = looks_on(true, &MediaBuffer::video);
+        eprintln!("looks: {by_look:?}");
+        assert_looks(&by_look);
+        assert!(
+            looks_on(false, &MediaBuffer::video)
+                .iter()
+                .all(Option::is_none),
+            "by motion alone"
+        );
+    }
+
     /// The same turn, on VideoToolbox pictures: the look is read where the
     /// pictures are, and holds the block as it does in system memory.
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -860,7 +926,7 @@ mod tests {
     /// The same turn on NV12 CUDA pictures: the look is read where they
     /// are — copied down region by region, or with `cuda-visual-tracking`
     /// followed on the GPU — and holds the block as the CPU's does, to
-    /// within a pixel or two.
+    /// within a pixel or two, saying how sure it was as the CPU's does.
     #[cfg(feature = "cuda")]
     #[test]
     fn following_by_look_reads_cuda_pictures() {
@@ -886,6 +952,9 @@ mod tests {
             upload.consume(MediaBuffer::video(nv12)).expect("uploaded");
             uploaded.lock().unwrap().remove(0)
         };
+        let looks = looks_on(true, &upload);
+        eprintln!("looks on CUDA: {looks:?}");
+        assert_looks(&looks);
         let on_cuda = worst_miss_on(true, &upload);
         let in_memory = worst_miss(true);
         eprintln!("worst miss by look: on CUDA {on_cuda}, in system memory {in_memory}");

@@ -66,7 +66,9 @@ Each type's own documentation says what it accepts, owns and how it fails.
   each object found a vector — a face straightened by its five points, or
   a whole box — that lies near another's where the two look alike;
   `ObjectTracker`, which numbers each
-  object across pictures and fills in the pictures a detector let by;
+  object across pictures and fills in the pictures a detector let by —
+  following by look, saying on each box how sure the look was
+  (`Detection::look`);
   `ObjectAnalytics`, which counts the objects in zones of the picture and
   across lines; `SwCutDetector`, `CudaCutDetector` and `MetalCutDetector`,
   which mark the first picture of each shot of an edited video with a

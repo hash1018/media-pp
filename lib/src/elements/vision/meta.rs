@@ -62,6 +62,17 @@ pub struct Detection {
     /// same thing across a video. One per embedder that looked at it, in the
     /// order they ran.
     pub embeddings: Vec<Embedding>,
+    /// On a picture no detector looked at, how sure an
+    /// [`ObjectTracker`](crate::elements::ObjectTracker) following by look
+    /// ([`TrackerOptions::visual`](crate::elements::TrackerOptions::visual))
+    /// was of where it found the object: its correlation filter's
+    /// peak-to-sidelobe ratio. Over about 7 the box is where the look found
+    /// the object; under it the tracker did not believe the look, and the
+    /// box is where the object's motion would have taken it — the object
+    /// may be lost. `None` on an object detected, and on one the tracker
+    /// did not look for: following by motion alone, or a picture it could
+    /// not read.
+    pub look: Option<f32>,
 }
 
 /// What an embedding model made of an object: a vector of unit length, so
@@ -153,6 +164,7 @@ impl Detection {
             classes: Vec::new(),
             landmarks: Vec::new(),
             embeddings: Vec::new(),
+            look: None,
         }
     }
 }

@@ -24,6 +24,9 @@ pub(super) struct Seen {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Expected {
     pub(super) id: u64,
+    /// How sure following by look was of where it put the object — the
+    /// filter's peak-to-sidelobe ratio — where it looked.
+    pub(super) look: Option<f32>,
     pub(super) class_id: usize,
     pub(super) score: f32,
     pub(super) tlwh: [f64; 4],
@@ -343,6 +346,7 @@ impl ByteTrack {
             .filter_map(|track| {
                 Some(Expected {
                     id: track.id?,
+                    look: None,
                     class_id: track.class_id,
                     score: track.score,
                     tlwh: track.tlwh(),

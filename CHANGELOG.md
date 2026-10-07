@@ -256,6 +256,16 @@ compile error with no explanation.
   runs of RetinaFace a picture instead of seven, three where a few people
   are.
 
+- **A box followed by look says how sure the look was.** On a picture no
+  detector looked at, `ObjectTracker` with `visual` puts each object where
+  its correlation filter finds it; `Detection::look` now carries that
+  filter's peak-to-sidelobe ratio — over about 7 the box is where the look
+  found the object, under it where its motion would have taken it — on the
+  CPU, CUDA and Metal alike, `None` on objects detected. A block followed
+  scored 19 to 26 while there and under 4 once gone. What follows one
+  object forward can end where its look is lost rather than after a fixed
+  time.
+
 - **Embedders: what a detector found, made into vectors.** `SwOrtEmbedder`
   and `CudaOrtEmbedder` run an embedding model on each object and put its
   vector, of length 1, in the object's `Detection::embeddings` — vectors
