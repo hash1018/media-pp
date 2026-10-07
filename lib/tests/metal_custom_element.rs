@@ -244,6 +244,8 @@ impl Mark {
         drop(to);
         // SAFETY: two live, distinct frames.
         unsafe { ffi::av_frame_copy_props(marked.as_mut_ptr(), picture.as_ptr()) };
+        // Its pixel buffer says the same colour: an encoder reads it there.
+        self.pool.as_ref().expect("made above").describe(&marked)?;
         let found = Detections::new(
             self.name.clone(),
             Arc::from([Arc::from("thing")]),

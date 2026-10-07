@@ -8,17 +8,20 @@ use objc2_metal::{MTLBuffer, MTLPixelFormat, MTLTextureUsage};
 use crate::ffmpeg;
 use crate::{
     color::ColorDescription,
+    elements::{VideoToolboxDevice, VideoToolboxFrameFormat, VideoToolboxFramePool},
     platform::macos::{
         metal::{Buffer, Kernel, MetalGpu, Texture},
         pixel_buffer::PixelBuffer,
         videotoolbox::{NotVideoToolbox, sw_format_of},
     },
+    pool::UnboundObjectPoolRef,
 };
 
 use super::super::{ChannelOrder, ModelInput, OrtError};
 use crate::orientation::Orientation;
 
 const SHADER: &str = include_str!("../../../../../shaders/metal/fit.metal");
+const TONE_MAP: &str = include_str!("../../../../../shaders/metal/tone_map.metal");
 
 /// A VideoToolbox picture a [`Fitting`] can read: NV12 or BGRA, its pixel
 /// buffer held, no smaller than the picture says it is.
@@ -80,6 +83,114 @@ pub(super) struct Cut {
     pub(super) slot: usize,
 }
 
+/// What brings an HDR picture to SDR for a model: the kernel, and the BGRA
+/// pictures it writes into, of one size at a time.
+struct SdrCopy {
+    kernel: Kernel,
+    /// Its own context: a pixel buffer belongs to none, so the pictures it
+    /// makes are read on whichever the rest of the pipeline shares.
+    device: VideoToolboxDevice,
+    pool: Option<VideoToolboxFramePool>,
+}
+
+impl SdrCopy {
+    fn new(gpu: &MetalGpu) -> Result<Self, OrtError> {
+        let [kernel] = gpu.kernel_array(TONE_MAP, ["hdr_to_bgra"])?;
+        let device = VideoToolboxDevice::new()
+            .map_err(|error| OrtError::UnsupportedModel(format!("no VideoToolbox: {error}")))?;
+        Ok(Self {
+            kernel,
+            device,
+            pool: None,
+        })
+    }
+
+    /// `frame`, a P010 picture, brought to SDR BGRA as `tone_map` says, in
+    /// a picture of its own pool, written and waited for.
+    fn of(
+        &mut self,
+        gpu: &MetalGpu,
+        frame: &ffmpeg::frame::Video,
+        tone_map: &crate::tone_map::ToneMap,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, OrtError> {
+        let size = (frame.width(), frame.height());
+        if self.pool.as_ref().map(|pool| (pool.width(), pool.height())) != Some(size) {
+            self.pool = Some(
+                VideoToolboxFramePool::new(
+                    &self.device,
+                    VideoToolboxFrameFormat::Bgra,
+                    size.0,
+                    size.1,
+                )
+                .map_err(|error| OrtError::UnsupportedModel(format!("no SDR copy: {error}")))?,
+            );
+        }
+        let copy = self
+            .pool
+            .as_ref()
+            .expect("made above")
+            .get()
+            .map_err(|error| OrtError::UnsupportedModel(format!("no SDR copy: {error}")))?;
+        let from = PixelBuffer::of_frame(frame).ok_or(OrtError::MissingPixelBuffer("pixels"))?;
+        let to = PixelBuffer::of_frame(&copy).ok_or(OrtError::MissingPixelBuffer("pixels"))?;
+        let surface = from.size();
+        if size.0 > surface.0 || size.1 > surface.1 {
+            return Err(OrtError::PictureOutsideSurface {
+                picture: size,
+                surface,
+            });
+        }
+        let read = MTLTextureUsage::ShaderRead;
+        let textures = [
+            gpu.plane(&from, 0, MTLPixelFormat::R16Unorm, read)?,
+            gpu.plane(&from, 1, MTLPixelFormat::RG16Unorm, read)?,
+            gpu.plane(
+                &to,
+                0,
+                MTLPixelFormat::BGRA8Unorm,
+                MTLTextureUsage::ShaderWrite,
+            )?,
+        ];
+        // As the shader's `ToneMap`: three rows, the transfer and the EETF's
+        // three numbers, three rows of the gamut, then the size.
+        let mut bytes: Vec<u8> = tone_map
+            .rows
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        bytes.extend(tone_map.transfer.to_ne_bytes());
+        for value in [tone_map.source_peak_pq, tone_map.target_peak, tone_map.knee] {
+            bytes.extend(value.to_ne_bytes());
+        }
+        bytes.extend(
+            tone_map
+                .gamut
+                .iter()
+                .flatten()
+                .flat_map(|value| value.to_ne_bytes()),
+        );
+        for word in [size.0, size.1, 0, 0] {
+            bytes.extend(word.to_ne_bytes());
+        }
+        let bound: Vec<&Texture> = textures.iter().collect();
+        let mut pass = gpu.pass()?;
+        pass.dispatch(&self.kernel, &bound, Some(&bytes), size);
+        pass.finish()?;
+        let mut copy = copy;
+        // What it now holds: SDR, as the copy's colour says.
+        // SAFETY: two live, distinct frames.
+        unsafe { ffmpeg::ffi::av_frame_copy_props(copy.as_mut_ptr(), frame.as_ptr()) };
+        crate::color::ColorDescription {
+            space: ffmpeg::color::Space::RGB,
+            range: ffmpeg::color::Range::JPEG,
+            ..crate::color::ColorDescription::BT709_LIMITED
+        }
+        .describe(&mut copy);
+        Ok(copy)
+    }
+}
+
 /// The kernels, and `capacity` inputs of a model's size in shared memory —
 /// apart from any session, so a test can check them without a model.
 pub(super) struct Fitting {
@@ -90,6 +201,9 @@ pub(super) struct Fitting {
     bgra: Kernel,
     warp_nv12: Kernel,
     warp_bgra: Kernel,
+    /// Where an HDR picture is brought to SDR for the model: made with the
+    /// first such picture.
+    sdr: Option<SdrCopy>,
     /// The inputs, each three planes of `f32`, which the kernels write and
     /// a session reads.
     tensor: Buffer,
@@ -117,8 +231,33 @@ impl Fitting {
             bgra,
             warp_nv12,
             warp_bgra,
+            sdr: None,
             tensor,
         })
+    }
+
+    /// `frame` as a picture to fit: as it is, or — an HDR P010 picture,
+    /// HLG or PQ — an SDR BGRA copy of it, brought down by
+    /// `core/tone_map.rs`'s definition, as the CUDA detectors look at HDR;
+    /// a model was trained on SDR pictures. What is found goes on `frame`
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// [`OrtError::UnsupportedPicture`] for a P010 picture tagged neither
+    /// HLG nor PQ, which has no tone map, and what [`Picture::of`] refuses.
+    pub(super) fn picture(&mut self, frame: &ffmpeg::frame::Video) -> Result<Picture, OrtError> {
+        if sw_format_of(frame) != Ok(ffmpeg::format::Pixel::P010LE) {
+            return Picture::of(frame);
+        }
+        let tone_map = crate::tone_map::ToneMap::of_frame(frame)
+            .ok_or(OrtError::UnsupportedPicture(ffmpeg::format::Pixel::P010LE))?;
+        let sdr = match &mut self.sdr {
+            Some(sdr) => sdr,
+            empty => empty.insert(SdrCopy::new(&self.gpu)?),
+        };
+        let copy = sdr.of(&self.gpu, frame, &tone_map)?;
+        Picture::of(&copy)
     }
 
     /// How many `f32`s one input holds.
@@ -778,6 +917,102 @@ pub(super) mod tests {
                     "{format:?} plane {channel}: {got}"
                 );
             }
+        }
+    }
+
+    /// An HDR picture, HLG or PQ, is looked at through an SDR copy that is
+    /// `core/tone_map.rs`'s definition, pixel for pixel to within the
+    /// rounding of a GPU's powers; a P010 picture tagged neither is refused,
+    /// having no tone map.
+    #[test]
+    fn an_hdr_picture_is_looked_at_in_sdr() {
+        use crate::tone_map::ToneMap;
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let mut fitting = Fitting::new((16, 16), 1).expect("the kernels compile");
+        let (width, height) = (64usize, 32usize);
+        // Ten-bit luma across the range, two chroma pairs off grey.
+        let luma = |x: usize, y: usize| (64 + (x * 13 + y * 7) % 877) as u16;
+        let chroma = |x: usize, y: usize| -> (u16, u16) {
+            match (x + y) % 3 {
+                0 => (512, 512),
+                1 => (400, 620),
+                _ => (600, 450),
+            }
+        };
+        for transfer in [
+            ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+            ffmpeg::color::TransferCharacteristic::SMPTE2084,
+            ffmpeg::color::TransferCharacteristic::BT709,
+        ] {
+            let mut frame = ffmpeg::frame::Video::new(
+                ffmpeg::format::Pixel::P010LE,
+                width as u32,
+                height as u32,
+            );
+            let (stride, cstride) = (frame.stride(0), frame.stride(1));
+            for y in 0..height {
+                for x in 0..width {
+                    frame.data_mut(0)[y * stride + x * 2..][..2]
+                        .copy_from_slice(&(luma(x, y) << 6).to_le_bytes());
+                }
+            }
+            for y in 0..height / 2 {
+                for x in 0..width / 2 {
+                    let (cb, cr) = chroma(x, y);
+                    let at = y * cstride + x * 4;
+                    frame.data_mut(1)[at..at + 2].copy_from_slice(&(cb << 6).to_le_bytes());
+                    frame.data_mut(1)[at + 2..at + 4].copy_from_slice(&(cr << 6).to_le_bytes());
+                }
+            }
+            crate::color::ColorDescription {
+                space: ffmpeg::color::Space::BT2020NCL,
+                range: ffmpeg::color::Range::MPEG,
+                primaries: ffmpeg::color::Primaries::BT2020,
+                transfer,
+            }
+            .describe(&mut frame);
+            let MediaBuffer::Video(uploaded) = upload(&device, frame.clone()) else {
+                panic!("a picture is uploaded");
+            };
+            let Some(map) = ToneMap::of_frame(&frame) else {
+                assert!(
+                    matches!(
+                        fitting.picture(&uploaded),
+                        Err(OrtError::UnsupportedPicture(ffmpeg::format::Pixel::P010LE))
+                    ),
+                    "SDR P010 has no tone map"
+                );
+                continue;
+            };
+            let picture = fitting.picture(&uploaded).expect("an SDR copy");
+            assert!(!picture.nv12, "the copy is BGRA");
+            let sdr = SdrCopy::new(&fitting.gpu)
+                .expect("the kernel compiles")
+                .of(&fitting.gpu, &uploaded, &map)
+                .expect("an SDR copy");
+            let mut download = crate::elements::VideoToolboxDownload::new("download");
+            let downloaded = capture(&mut download);
+            download
+                .consume(MediaBuffer::Video(Arc::new(sdr).into()))
+                .expect("downloads");
+            let MediaBuffer::Video(copy) = downloaded.lock().unwrap().remove(0) else {
+                panic!("a picture");
+            };
+            let mut worst = 0;
+            for y in 0..height {
+                for x in 0..width {
+                    let (cb, cr) = chroma(x / 2, y / 2);
+                    let unit = |code: u16| f32::from(code << 6) / 65535.0;
+                    let want = map.apply(unit(luma(x, y)), unit(cb), unit(cr));
+                    let got = &copy.data(0)[y * copy.stride(0) + x * 4..][..4];
+                    for (got, want) in [got[2], got[1], got[0]].iter().zip(want) {
+                        worst = worst.max(got.abs_diff(want));
+                    }
+                }
+            }
+            assert!(worst <= 2, "{transfer:?}: off by {worst} of 255");
         }
     }
 }

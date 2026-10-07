@@ -24,7 +24,7 @@ use super::super::classify::{
     Crop, Input, Memory, OrtClassifierOptions, Plan, answer, apply, best,
 };
 use super::super::{OrtError, labels};
-use super::fitting::{Cut, Fitting, Picture};
+use super::fitting::{Cut, Fitting};
 use super::{CORE_ML_BATCH, object_model_session};
 
 /// Classifies the objects a detector found on each VideoToolbox picture
@@ -41,7 +41,7 @@ use super::{CORE_ML_BATCH, object_model_session};
 /// lets a followed object be classified once and its answer kept, as
 /// [`OrtClassifierOptions::reclassify`] says. It takes NV12 or BGRA
 /// VideoToolbox pictures from any device, since a pixel buffer belongs to
-/// none. The model is an image classifier with one input, `[batch, 3,
+/// none, and HDR P010 through an SDR copy, as the detector does. The model is an image classifier with one input, `[batch, 3,
 /// height, width]`, and one output of a score per class, probabilities or
 /// raw.
 ///
@@ -123,7 +123,7 @@ impl Classifying {
         frame: &ffmpeg::frame::Video,
         crops: &[Crop],
     ) -> std::result::Result<Vec<Option<(usize, f32)>>, OrtError> {
-        let picture = Picture::of(frame)?;
+        let picture = self.fitting.picture(frame)?;
         let orientation = self.orientations.of(frame, &self.pp_log);
         let (width, height) = self.input.size;
         let affine = self.options.input.affine();
@@ -184,11 +184,11 @@ impl Element for Classifying {
 }
 
 impl Filter for Classifying {
-    /// Decoded NV12 or BGRA video in VideoToolbox pixel buffers.
+    /// Decoded NV12, BGRA or HDR P010 video in VideoToolbox pixel buffers.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
-                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
+                .with_layouts(PixelLayoutSet::GPU_SCALABLE),
         )
     }
 

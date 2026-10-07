@@ -46,7 +46,8 @@ impl VideoToolboxCodec {
 pub struct VideoToolboxEncoderOptions {
     /// The bitstream to encode.
     pub codec: VideoToolboxCodec,
-    /// What the frames it is handed hold. BGRA is converted to YUV by
+    /// What the frames it is handed hold: P010 as HEVC Main 10, which
+    /// H.264 refuses. BGRA is converted to YUV by
     /// VideoToolbox itself, on the media engine, always with BT.709's
     /// matrix at limited range — which is what the stream then says it
     /// holds; see [`VideoToolboxEncoder::with_color`].
@@ -105,6 +106,10 @@ pub enum VideoToolboxEncoderError {
         got: ffmpeg::format::Pixel,
     },
 
+    /// P010 for H.264, which has no ten bits: HEVC encodes it, as Main 10.
+    #[error("VideoToolboxEncoder encodes P010 as HEVC Main 10 only, not H.264")]
+    TenBitsNeedHevc,
+
     /// [`VideoToolboxEncoder::with_color`] was asked to describe BGRA
     /// input, whose YUV VideoToolbox makes itself — always BT.709 at limited
     /// range, whatever the stream says.
@@ -147,7 +152,7 @@ pub enum VideoToolboxEncoderError {
     HwFramesRef,
 }
 
-/// Encodes NV12 or BGRA VideoToolbox frames into `Packet`s with the Mac's
+/// Encodes NV12, P010 or BGRA VideoToolbox frames into `Packet`s with the Mac's
 /// hardware encoder, through FFmpeg's VideoToolbox encoders — the macOS counterpart
 /// of `CudaEncoder` and `VideoToolboxEncoder`, and a `RawFilter` as they are.
 ///
@@ -223,9 +228,16 @@ impl VideoToolboxEncoder {
     /// written into its headers, where every player finds it; nothing is
     /// converted.
     ///
-    /// NV12 only: BGRA is converted by VideoToolbox with BT.709 at limited
-    /// range whatever the stream is told, so [`Self::new`] says that of it
-    /// and this refuses it with [`VideoToolboxEncoderError::ColorOfBgra`].
+    /// NV12 and P010 only: BGRA is converted by VideoToolbox with BT.709 at
+    /// limited range whatever the stream is told, so [`Self::new`] says that
+    /// of it and this refuses it with
+    /// [`VideoToolboxEncoderError::ColorOfBgra`].
+    ///
+    /// An HDR stream — HLG or PQ in P010 — takes pictures whose pixel
+    /// buffers say the same of themselves, as a
+    /// [`VideoToolboxDecoder`](crate::elements::VideoToolboxDecoder)'s and an
+    /// upload of a frame so tagged do: VideoToolbox fails a picture that
+    /// says nothing of its colour under an HLG stream.
     pub fn with_color(
         name: impl Into<String>,
         device: &VideoToolboxDevice,
@@ -248,7 +260,10 @@ impl VideoToolboxEncoder {
         // limited range, and goes on doing so whatever matrix or range the
         // session is told — only the headers follow what it is told.
         let color = match (options.format, color) {
-            (VideoToolboxFrameFormat::Nv12, color) => color,
+            (VideoToolboxFrameFormat::P010, _) if options.codec == VideoToolboxCodec::H264 => {
+                return Err(VideoToolboxEncoderError::TenBitsNeedHevc);
+            }
+            (VideoToolboxFrameFormat::Nv12 | VideoToolboxFrameFormat::P010, color) => color,
             (VideoToolboxFrameFormat::Bgra, None) => Some(ColorDescription::BT709_LIMITED),
             (VideoToolboxFrameFormat::Bgra, Some(_)) => {
                 return Err(VideoToolboxEncoderError::ColorOfBgra);
@@ -299,6 +314,11 @@ impl VideoToolboxEncoder {
             unsafe {
                 let ptr = video.as_mut_ptr();
                 (*ptr).hw_frames_ctx = codec_frames_ctx.into_raw();
+                // Ten bits are HEVC Main 10, which the encoder does not pick
+                // for itself from the frames it is told of.
+                if options.format == VideoToolboxFrameFormat::P010 {
+                    (*ptr).profile = ffmpeg::ffi::AV_PROFILE_HEVC_MAIN_10;
+                }
                 if let Some(color) = color {
                     color.tell(ptr);
                 }
@@ -786,5 +806,179 @@ mod tests {
             Ok(encoder) => assert_eq!(encoder.parameters().id(), ffmpeg::codec::Id::HEVC),
             Err(error) => eprintln!("skipping: H.265 not here: {error}"),
         }
+    }
+
+    /// P010 encodes as HEVC Main 10, its colour as the stream is told —
+    /// HLG in BT.2020 — and decodes back to ten bits of what was sent; H.264
+    /// is refused it before an encoder opens.
+    #[test]
+    fn p010_encodes_as_hevc_main_10() {
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        let ten_bits = VideoToolboxEncoderOptions {
+            format: VideoToolboxFrameFormat::P010,
+            ..options(VideoToolboxCodec::H264, width, height)
+        };
+        assert!(matches!(
+            VideoToolboxEncoder::new("encoder", &device, ten_bits),
+            Err(VideoToolboxEncoderError::TenBitsNeedHevc)
+        ));
+        let hlg = ColorDescription {
+            space: ffmpeg::color::Space::BT2020NCL,
+            range: ffmpeg::color::Range::MPEG,
+            primaries: ffmpeg::color::Primaries::BT2020,
+            transfer: ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+        };
+        let mut encoder = match VideoToolboxEncoder::with_color(
+            "encoder",
+            &device,
+            VideoToolboxEncoderOptions {
+                codec: VideoToolboxCodec::H265,
+                ..ten_bits
+            },
+            hlg,
+        ) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: no HEVC Main 10 encoder here ({error})");
+                return;
+            }
+        };
+        // A ramp of ten-bit luma, in each sample's top ten bits.
+        let level = |x: usize, index: i64| (64 + (x as i64 * 3 + index * 8) % 800) as u16;
+        let picture = |index: i64| {
+            let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::P010LE, width, height);
+            let stride = frame.stride(0);
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let at = y * stride + x * 2;
+                    frame.data_mut(0)[at..at + 2]
+                        .copy_from_slice(&(level(x, index) << 6).to_le_bytes());
+                }
+            }
+            for pair in frame.data_mut(1).as_chunks_mut::<2>().0 {
+                pair.copy_from_slice(&(512u16 << 6).to_le_bytes());
+            }
+            frame.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+            // Uploaded, its pixel buffer says so, as a decoder's does.
+            hlg.describe(&mut frame);
+            frame
+        };
+        let packets = capture(&mut encoder);
+        let mut upload = VideoToolboxUpload::new("upload", &device);
+        let uploaded = capture(&mut upload);
+        let frames = 10;
+        for index in 0..frames {
+            upload.consume(MediaBuffer::video(picture(index))).unwrap();
+            let frame = uploaded.lock().unwrap().remove(0);
+            encoder.consume(frame).expect("encode");
+        }
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos");
+
+        let parameters = encoder.parameters();
+        // SAFETY: a live parameters struct this test owns.
+        let (profile, transfer, primaries) = unsafe {
+            let raw = parameters.as_ptr();
+            ((*raw).profile, (*raw).color_trc, (*raw).color_primaries)
+        };
+        assert_eq!(parameters.id(), ffmpeg::codec::Id::HEVC);
+        assert_eq!(profile, 2, "HEVC Main 10");
+        assert_eq!(
+            transfer,
+            ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_ARIB_STD_B67
+        );
+        assert_eq!(primaries, ffmpeg::ffi::AVColorPrimaries::AVCOL_PRI_BT2020);
+        let packets = std::mem::take(&mut *packets.lock().unwrap());
+        let decoded = decode(parameters, &packets);
+        assert_eq!(decoded.len(), frames as usize, "every frame came back");
+        let last = decoded.last().unwrap();
+        assert_eq!(last.format(), ffmpeg::format::Pixel::YUV420P10LE);
+        let mean = (0..height as usize)
+            .flat_map(|y| (0..width as usize).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let at = y * last.stride(0) + x * 2;
+                let got = u16::from_le_bytes([last.data(0)[at], last.data(0)[at + 1]]);
+                f64::from(got.abs_diff(level(x, frames - 1)))
+            })
+            .sum::<f64>()
+            / f64::from(width * height);
+        assert!(
+            mean < 8.0,
+            "the last picture decodes to its ten bits: {mean} of 1023 off"
+        );
+    }
+
+    /// A picture an element made in a pool of its own says its colour in
+    /// its frame's fields alone, which an HLG encoder fails; described, its
+    /// pixel buffer says so too and it encodes. A picture of another pool's
+    /// is not described.
+    #[test]
+    fn a_pool_picture_described_encodes_under_hlg() {
+        use crate::elements::{VideoToolboxFramePool, VideoToolboxFramePoolError};
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        let hlg = ColorDescription {
+            space: ffmpeg::color::Space::BT2020NCL,
+            range: ffmpeg::color::Range::MPEG,
+            primaries: ffmpeg::color::Primaries::BT2020,
+            transfer: ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+        };
+        let options = VideoToolboxEncoderOptions {
+            format: VideoToolboxFrameFormat::P010,
+            ..options(VideoToolboxCodec::H265, width, height)
+        };
+        let pool =
+            VideoToolboxFramePool::new(&device, VideoToolboxFrameFormat::P010, width, height)
+                .expect("pool");
+        let picture = |index: i64, described: bool| {
+            let mut picture = pool.get().expect("a picture");
+            picture.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut picture, ffmpeg::Rational::new(1, 30));
+            hlg.describe(&mut picture);
+            if described {
+                pool.describe(&picture).expect("described");
+            }
+            MediaBuffer::Video(Arc::new(picture).into())
+        };
+        let encoder =
+            |name: &str| match VideoToolboxEncoder::with_color(name, &device, options, hlg) {
+                Ok(encoder) => Some(encoder),
+                Err(error) => {
+                    eprintln!("skipping: no HEVC Main 10 encoder here ({error})");
+                    None
+                }
+            };
+        let Some(mut bare) = encoder("bare") else {
+            return;
+        };
+        assert!(
+            bare.consume(picture(0, false)).is_err(),
+            "a pixel buffer that says nothing is refused under HLG"
+        );
+        let Some(mut said) = encoder("said") else {
+            return;
+        };
+        let packets = capture(&mut said);
+        for index in 0..5 {
+            said.consume(picture(index, true)).expect("encodes");
+        }
+        crate::stream::deliver(&mut said, &crate::stream::StreamEvent::Eos).expect("eos");
+        assert!(!packets.lock().unwrap().is_empty(), "packets came out");
+
+        let other =
+            VideoToolboxFramePool::new(&device, VideoToolboxFrameFormat::P010, width, height)
+                .expect("pool");
+        let foreign = other.get().expect("a picture");
+        assert!(matches!(
+            pool.describe(&foreign),
+            Err(VideoToolboxFramePoolError::ForeignPicture)
+        ));
     }
 }

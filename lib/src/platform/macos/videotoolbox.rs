@@ -101,14 +101,20 @@ pub enum VideoToolboxFrameFormat {
     /// 8-bit BGRA, with alpha: what `VideoToolboxUpload` makes of a BGRA
     /// frame, and what `ScreenCaptureKitSource` captures.
     Bgra,
+    /// P010: what `VideoToolboxDecoder` decodes 10-bit video to — an
+    /// iPhone's HDR — and what the HEVC encoder takes as Main 10. The
+    /// elements that draw and convert do not make it.
+    P010,
 }
 
 impl VideoToolboxFrameFormat {
     /// The layout as FFmpeg names it, where a frame holding it is `Some`.
+    #[cfg(feature = "metal")]
     pub(crate) fn of(format: ffmpeg::format::Pixel) -> Option<Self> {
         match format {
             ffmpeg::format::Pixel::NV12 => Some(Self::Nv12),
             ffmpeg::format::Pixel::BGRA => Some(Self::Bgra),
+            ffmpeg::format::Pixel::P010LE => Some(Self::P010),
             _ => None,
         }
     }
@@ -118,6 +124,7 @@ impl VideoToolboxFrameFormat {
         match self {
             Self::Nv12 => ffmpeg::format::Pixel::NV12,
             Self::Bgra => ffmpeg::format::Pixel::BGRA,
+            Self::P010 => ffmpeg::format::Pixel::P010LE,
         }
     }
 
@@ -125,6 +132,7 @@ impl VideoToolboxFrameFormat {
         match self {
             Self::Nv12 => crate::contract::PixelLayoutSet::NV12,
             Self::Bgra => crate::contract::PixelLayoutSet::BGRA,
+            Self::P010 => crate::contract::PixelLayoutSet::P010,
         }
     }
 }
@@ -208,6 +216,15 @@ pub enum VideoToolboxFramePoolError {
     /// The pool could not hand out a pixel buffer.
     #[error("failed to take a frame from the VideoToolbox pool (code {0})")]
     Get(i32),
+
+    /// [`VideoToolboxFramePool::describe`] was handed a picture this pool
+    /// did not make: one handed in, which is never written.
+    #[error("a picture from somewhere other than this VideoToolbox pool is not described")]
+    ForeignPicture,
+
+    /// FFmpeg could not set a pixel buffer's colour.
+    #[error("failed to describe the pixel buffer's colour (code {0})")]
+    Describe(i32),
 }
 
 impl From<VideoToolboxFramesContextError> for VideoToolboxFramePoolError {
@@ -242,8 +259,10 @@ impl From<VideoToolboxFramesContextError> for VideoToolboxFramePoolError {
 ///
 /// A picture comes out with undefined pixels and no timing: copy what it is
 /// made from — `av_frame_copy_props` from the picture handed in — before
-/// pushing it. Make a pool again for another size; each one keeps the
-/// device alive.
+/// pushing it, and then [`Self::describe`] it, so that its pixel buffer says
+/// what colour it is as well: VideoToolbox reads it there, and its encoder
+/// fails an HDR picture whose buffer says nothing. Make a pool again for
+/// another size; each one keeps the device alive.
 pub struct VideoToolboxFramePool {
     format: VideoToolboxFrameFormat,
     width: u32,
@@ -305,6 +324,36 @@ impl VideoToolboxFramePool {
         Ok(frame)
     }
 
+    /// Makes the pixel buffer of `picture`, one of this pool's, say of its
+    /// colour what `picture`'s fields say — its matrix, primaries, transfer
+    /// and range, as `av_frame_copy_props` or
+    /// [`ColorDescription::describe`](crate::color::ColorDescription::describe)
+    /// left them — as FFmpeg's own upload does, a field left unspecified
+    /// leaving that attachment unset. VideoToolbox reads a picture's colour
+    /// from its pixel buffer, not the frame: an encoder told the stream is
+    /// HLG fails a picture whose buffer says nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`VideoToolboxFramePoolError::ForeignPicture`] for a picture of
+    /// another pool's — a picture handed to an element is never written —
+    /// and [`VideoToolboxFramePoolError::Describe`] where FFmpeg fails.
+    pub fn describe(
+        &self,
+        picture: &ffmpeg::frame::Video,
+    ) -> Result<(), VideoToolboxFramePoolError> {
+        // SAFETY: a live frame's frames-context reference is read and
+        // compared by address only.
+        let ours = unsafe {
+            let frames = (*picture.as_ptr()).hw_frames_ctx;
+            !frames.is_null() && (*frames).data == (*self.frames_ctx.as_ptr()).data
+        };
+        if !ours {
+            return Err(VideoToolboxFramePoolError::ForeignPicture);
+        }
+        describe_pixel_buffer(picture).map_err(VideoToolboxFramePoolError::Describe)
+    }
+
     /// The format its pictures are in.
     pub fn format(&self) -> VideoToolboxFrameFormat {
         self.format
@@ -319,6 +368,41 @@ impl VideoToolboxFramePool {
     pub fn height(&self) -> u32 {
         self.height
     }
+}
+
+unsafe extern "C" {
+    /// FFmpeg's own (`libavutil/hwcontext_videotoolbox.h`), which its
+    /// upload calls: sets a pixel buffer's colour attachments from an
+    /// `AVFrame`'s fields.
+    fn av_vt_pixbuf_set_attachments(
+        log_ctx: *mut std::ffi::c_void,
+        pixbuf: *mut std::ffi::c_void,
+        src: *const ffi::AVFrame,
+    ) -> std::ffi::c_int;
+}
+
+/// Makes the pixel buffer of `frame` — a VideoToolbox frame an element made
+/// itself, from a pool of its own — say of its colour what `frame`'s fields
+/// say, as FFmpeg's upload does. VideoToolbox reads a picture's colour from
+/// its pixel buffer, not the frame: an encoder told the stream is HLG fails
+/// a picture whose buffer says nothing. A frame with no pixel buffer is
+/// left as it is; FFmpeg's code where it fails.
+pub(crate) fn describe_pixel_buffer(frame: &ffmpeg::frame::Video) -> Result<(), i32> {
+    if frame.format() != ffmpeg::format::Pixel::VIDEOTOOLBOX {
+        return Ok(());
+    }
+    // SAFETY: a live VideoToolbox frame keeps its pixel buffer in `data[3]`;
+    // FFmpeg reads the frame's colour fields and sets that buffer's
+    // attachments, which no one reads while the element that made it still
+    // holds it alone.
+    let code = unsafe {
+        let buffer = (*frame.as_ptr()).data[3];
+        if buffer.is_null() {
+            return Ok(());
+        }
+        av_vt_pixbuf_set_attachments(std::ptr::null_mut(), buffer.cast(), frame.as_ptr())
+    };
+    if code < 0 { Err(code) } else { Ok(()) }
 }
 
 /// Why a frame is not one a VideoToolbox element can read.

@@ -77,7 +77,9 @@ impl Default for MetalOrtDetectorOptions {
 ///
 /// It takes NV12 or BGRA VideoToolbox pictures of any size — a decoder's, a
 /// camera's, a screen's — from any device, since a pixel buffer belongs to
-/// none; the boxes it finds are fractions of each picture, as
+/// none, and HDR P010, HLG or PQ, which it looks at through an SDR copy as
+/// `CudaOrtDetector` does: a model was trained on SDR pictures, and what it
+/// finds goes on the ten-bit picture itself. The boxes it finds are fractions of each picture, as
 /// [`Detection`](crate::elements::Detection) describes. The models it reads
 /// are those [`OrtDetectorOptions`] describes. The pictures of a
 /// [`StreamMux`](crate::elements::StreamMux)'s batch are run together, as
@@ -314,7 +316,7 @@ impl Detecting {
         &mut self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<(Picture, Letterbox), OrtError> {
-        let picture = Picture::of(frame)?;
+        let picture = self.fitting.picture(frame)?;
         let orientation = self.orientations.of(frame, &self.pp_log);
         let letterbox = Letterbox::shown(picture.size, self.fitting.model, orientation);
         Ok((picture, letterbox))
@@ -463,11 +465,11 @@ impl Element for Detecting {
 }
 
 impl Filter for Detecting {
-    /// Decoded NV12 or BGRA video in VideoToolbox pixel buffers.
+    /// Decoded NV12, BGRA or HDR P010 video in VideoToolbox pixel buffers.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
-                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
+                .with_layouts(PixelLayoutSet::GPU_SCALABLE),
         )
     }
 

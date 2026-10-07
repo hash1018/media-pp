@@ -144,7 +144,8 @@ impl EncodeInput {
         #[cfg(any(
             feature = "cuda",
             feature = "vulkan",
-            all(target_os = "windows", feature = "d3d11")
+            all(target_os = "windows", feature = "d3d11"),
+            all(target_os = "macos", feature = "videotoolbox")
         ))]
         use ffmpeg::format::Pixel;
 
@@ -173,7 +174,11 @@ impl EncodeInput {
             #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
             DecodeTarget::VideoToolbox { device } => Some(Self::VideoToolbox {
                 device: device.clone(),
-                format: VideoToolboxFrameFormat::of(format?)?,
+                format: match format? {
+                    Pixel::NV12 => VideoToolboxFrameFormat::Nv12,
+                    Pixel::BGRA => VideoToolboxFrameFormat::Bgra,
+                    _ => return None,
+                },
             }),
             #[cfg(feature = "vulkan")]
             DecodeTarget::Vulkan { device, .. } => Some(Self::Vulkan {

@@ -30,6 +30,10 @@ struct Cells {
     // x: 1 to blend each cell into its neighbours, 0 for a mosaic; y: 1 to
     // paint only the ellipse inside the rectangle.
     uint2 smooth;
+    // x: how far up a value sits in its sample — 6 for P010's ten bits at
+    // the top of sixteen, read as `r16Uint` and `rg16Uint`, the six below
+    // written naught; 0 for bytes.
+    uint2 shift;
 };
 
 // The `index`th of `cells` stretches a side `length` long starts here.
@@ -54,7 +58,7 @@ kernel void cell_means(texture2d<uint, access::read> plane [[texture(0)]],
     float4 sum = float4(0.0);
     for (uint y = y0; y < y1; y++) {
         for (uint x = x0; x < x1; x++) {
-            sum += float4(plane.read(c.origin + uint2(x, y)));
+            sum += float4(plane.read(c.origin + uint2(x, y)) >> c.shift.x);
         }
     }
     float reciprocal = precise::divide(1.0f, float((x1 - x0) * (y1 - y0)));
@@ -111,5 +115,5 @@ kernel void cell_paint(texture2d<uint, access::read_write> plane [[texture(0)]],
         uint cy = ((id.y + 1) * c.cells.y - 1) / c.size.y;
         value = means[cy * across + cx];
     }
-    plane.write(uint4(rint(value)), c.origin + id);
+    plane.write(uint4(rint(value)) << c.shift.x, c.origin + id);
 }

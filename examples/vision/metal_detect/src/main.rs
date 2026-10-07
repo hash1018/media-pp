@@ -47,16 +47,17 @@
 //! labelled the right way up, and recorded saying it is turned, as the
 //! file does.
 //!
+//! A 10-bit file — an iPhone's HDR — is decoded to P010, looked at through
+//! an SDR copy, and recorded as it came: HEVC Main 10 in its own colours.
+//! Nothing is drawn on it; `--hide` still hides in its ten bits.
+//!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26 — of the stock weights: the boxes are named with
 //! COCO's 80 classes, whatever the model says. Or with `--retinaface` it
 //! is a RetinaFace export, whose faces are labelled `face` and carry five
 //! points each: `--retinaface --out faces.mp4 --hide face=mosaic,ellipse`
-//! hides every face. Built with `ort-coreml`, on
-//! an Apple silicon Mac. The file's video has to be one VideoToolbox decodes
-//! to NV12 — 8-bit H.264 or HEVC, say: a 10-bit one is refused as the
-//! pipeline is wired, the decoder's P010 being a layout the detector does
-//! not take. `--pictures` stops it after about that many.
+//! hides every face. Built with `ort-coreml`, on an Apple silicon Mac.
+//! `--pictures` stops it after about that many.
 //!
 //!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
 //!         [--retinaface] [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
@@ -88,6 +89,7 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         color::Color,
+        contract::PixelLayoutSet,
         elements::{
             Analytics, AnalyticsOptions, AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS,
             ClassRule, DetectionOverlayOptions, Detections, DetectorModel, FileDemuxer, FileMuxer,
@@ -365,6 +367,12 @@ mod example {
         // A phone's portrait recording is stored on its side and says so;
         // what is recorded says so too, so it is shown the same way up.
         let orientation = stream.orientation()?;
+        // A 10-bit file — an iPhone's HDR — is decoded to P010 and recorded
+        // as it came, HEVC Main 10 in its own colours; nothing is drawn on
+        // it, only hidden.
+        let ten_bit = stream
+            .pixel_format()
+            .is_some_and(|format| PixelLayoutSet::decoded_from(format) == PixelLayoutSet::P010);
         let seen = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&seen);
         let followed: Arc<Mutex<HashSet<u64>>> = Arc::default();
@@ -448,25 +456,33 @@ mod example {
                 if font.is_none() {
                     println!("no font found: boxes without labels");
                 }
+                let others = if ten_bit {
+                    println!(
+                        "a 10-bit file: recorded in 10 bits, hiding what --hide says, boxing nothing"
+                    );
+                    Treatment::none()
+                } else {
+                    Treatment {
+                        min_score: SHOWN,
+                        ..Treatment::boxes(BoxStyle {
+                            line_width: 4,
+                            color: if track {
+                                BoxColors::ByTrack
+                            } else {
+                                BoxColors::ByClass
+                            },
+                            label: font.is_some().then(|| LabelStyle::new(22.0)),
+                        })
+                    }
+                };
                 let overlay = MetalDetectionOverlay::new(
                     "overlay",
                     &device,
                     DetectionOverlayOptions {
-                        others: Treatment {
-                            min_score: SHOWN,
-                            ..Treatment::boxes(BoxStyle {
-                                line_width: 4,
-                                color: if track {
-                                    BoxColors::ByTrack
-                                } else {
-                                    BoxColors::ByClass
-                                },
-                                label: font.is_some().then(|| LabelStyle::new(22.0)),
-                            })
-                        },
+                        others,
                         // The lines counted, and their crossings so far.
                         parts: OverlayParts {
-                            lines: count_lines,
+                            lines: count_lines && !ten_bit,
                             line_width: 4,
                             label_size: 22.0,
                             ..OverlayParts::default()
@@ -476,20 +492,32 @@ mod example {
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");
-                let encoder = VideoToolboxEncoder::new(
-                    "encoder",
-                    &device,
-                    VideoToolboxEncoderOptions {
-                        codec: VideoToolboxCodec::H264,
-                        format: VideoToolboxFrameFormat::Nv12,
-                        width,
-                        height,
-                        frame_rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
-                        bit_rate: 8_000_000,
-                        gop_size: 60,
-                        max_b_frames: None,
+                let options = VideoToolboxEncoderOptions {
+                    codec: if ten_bit {
+                        VideoToolboxCodec::H265
+                    } else {
+                        VideoToolboxCodec::H264
                     },
-                )?;
+                    format: if ten_bit {
+                        VideoToolboxFrameFormat::P010
+                    } else {
+                        VideoToolboxFrameFormat::Nv12
+                    },
+                    width,
+                    height,
+                    frame_rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
+                    bit_rate: 8_000_000,
+                    gop_size: 60,
+                    max_b_frames: None,
+                };
+                // The file's own colours said in the stream: a 10-bit one's
+                // BT.2020 and HLG or PQ above all.
+                let encoder = match stream.color() {
+                    Some(color) => {
+                        VideoToolboxEncoder::with_color("encoder", &device, options, color)?
+                    }
+                    None => VideoToolboxEncoder::new("encoder", &device, options)?,
+                };
                 let mut muxer = FileMuxer::create(path)?;
                 let track = muxer.add_stream(
                     "video",

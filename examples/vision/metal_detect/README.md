@@ -68,10 +68,10 @@ cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
   [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
 ```
 
-The file's video has to be one VideoToolbox decodes to NV12 — 8-bit H.264 or
-HEVC, say: a 10-bit one is refused as the pipeline is wired, the decoder's
-P010 being a layout the detector does not take. `--pictures` stops it after
-about that many.
+A 10-bit file — an iPhone's HDR — is decoded to P010, looked at through an
+SDR copy, and recorded as it came: HEVC Main 10, BT.2020 and HLG or PQ,
+`hvc1`. Nothing is drawn on it; `--hide` still hides in its ten bits.
+`--pictures` stops it after about that many.
 
 On an M5, YOLOv10n over a 720p H.264 file runs at about 220 pictures a
 second, decoding included, and at 150 to 200 when it is also drawn on and

@@ -380,7 +380,11 @@ pub(crate) use core::render;
 pub(crate) use core::repeat;
 pub(crate) use core::stash;
 pub(crate) use core::timing::{schedule, time};
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", feature = "d3d11"),
+    all(target_os = "macos", feature = "ort-coreml")
+))]
 pub(crate) use core::tone_map;
 pub(crate) use core::transform;
 

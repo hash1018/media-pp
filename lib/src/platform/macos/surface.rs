@@ -87,7 +87,9 @@ pub enum MetalSurfaceError {
 ///   may be written into it.
 /// - **Never write a picture you were handed.** It may be read on another
 ///   branch of a `Tee`, or be the one a source offers again. Write into a
-///   frame from a `VideoToolboxFramePool` instead, copying what you keep.
+///   frame from a `VideoToolboxFramePool` instead, copying what you keep,
+///   and have the pool `describe` it, so that its pixel buffer says its
+///   colour too.
 pub struct MetalSurfaceView<'a> {
     format: VideoToolboxFrameFormat,
     width: u32,
@@ -171,6 +173,7 @@ pub(crate) fn textures(
 ) -> Result<(VideoToolboxFrameFormat, MetalFramePlanes, ColorDescription), MetalSurfaceError> {
     let format = match sw_format_of(frame) {
         Ok(layout) => VideoToolboxFrameFormat::of(layout)
+            .filter(|format| *format != VideoToolboxFrameFormat::P010)
             .ok_or(MetalSurfaceError::UnsupportedLayout(layout))?,
         Err(NotVideoToolbox::Format(other)) => {
             return Err(MetalSurfaceError::NotVideoToolbox(other));
@@ -211,6 +214,7 @@ pub(crate) fn textures(
             },
             ColorDescription::of(frame),
         ),
+        VideoToolboxFrameFormat::P010 => unreachable!("refused above"),
     })
 }
 

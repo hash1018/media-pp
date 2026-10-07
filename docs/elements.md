@@ -83,7 +83,11 @@ A 10-bit file — an iPhone's HDR — stays ten bits on CUDA: `CudaDecoder`
 hands on P010, the detectors and classifiers look at an SDR copy of each
 picture, the overlays hide in its ten bits (drawing nothing), and
 `CudaEncoder` encodes HEVC Main 10 in the file's own colours
-(`with_color(stream.color())`), which `FileMuxer` writes as `hvc1`.
+(`with_color(stream.color())`), which `FileMuxer` writes as `hvc1`. On a
+Mac likewise: `VideoToolboxDecoder` hands on P010
+(`VideoToolboxFrameFormat::P010`), the Metal detectors, classifier and
+embedder look at an SDR copy, `MetalDetectionOverlay` hides in the ten
+bits, and `VideoToolboxEncoder` encodes HEVC Main 10.
 
 A phone's portrait recording is stored on its side, with a display matrix
 saying to turn it. Every decoder hands that on with each picture
@@ -116,7 +120,8 @@ yours before handing it on, never write one you were handed — and
 On macOS the same is done with Metal: `MetalSurfaceView` makes a VideoToolbox
 picture's planes into textures over its pixel buffer, on any Metal device
 since a pixel buffer belongs to none, and a `VideoToolboxFramePool` gives
-pictures to write into. Every element here that writes a picture waits for
+pictures to write into, whose pixel buffers its `describe` makes say their
+colour, where VideoToolbox reads it. Every element here that writes a picture waits for
 the GPU before handing it on; do the same before handing on yours, and never
 write one you were handed.
 [`metal_custom_element`](../lib/tests/metal_custom_element.rs) is one, between

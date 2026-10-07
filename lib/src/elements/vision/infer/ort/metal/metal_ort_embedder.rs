@@ -23,7 +23,7 @@ use crate::{
 use super::super::OrtError;
 use super::super::classify::{Input, Memory, Plan, apply_each};
 use super::super::embed::{OrtEmbedderOptions, Warp, embeddings};
-use super::fitting::{Fitting, Picture};
+use super::fitting::Fitting;
 use super::{CORE_ML_BATCH, object_model_session};
 
 /// Makes each object a detector found on each VideoToolbox picture into a
@@ -42,7 +42,8 @@ use super::{CORE_ML_BATCH, object_model_session};
 /// and best after an [`ObjectTracker`](crate::elements::ObjectTracker),
 /// which lets a followed object be embedded once and its vector kept, as
 /// [`OrtEmbedderOptions::reembed`] says. It takes NV12 or BGRA VideoToolbox
-/// pictures from any device, since a pixel buffer belongs to none. The
+/// pictures from any device, since a pixel buffer belongs to none, and HDR
+/// P010 through an SDR copy, as the detector does. The
 /// model has one input, `[batch, 3, height, width]` — 112 for a side it
 /// leaves open — and its first output is a vector for each, made of length
 /// 1 here whatever the model makes.
@@ -112,7 +113,7 @@ impl Embedder {
         frame: &ffmpeg::frame::Video,
         warps: &[Warp],
     ) -> std::result::Result<Vec<Option<Embedding>>, OrtError> {
-        let picture = Picture::of(frame)?;
+        let picture = self.fitting.picture(frame)?;
         let (width, height) = self.input.size;
         let mut found = Vec::with_capacity(warps.len());
         for group in warps.chunks(self.fitting.capacity()) {
@@ -153,11 +154,11 @@ impl Element for Embedder {
 }
 
 impl Filter for Embedder {
-    /// Decoded NV12 or BGRA video in VideoToolbox pixel buffers.
+    /// Decoded NV12, BGRA or HDR P010 video in VideoToolbox pixel buffers.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
-                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
+                .with_layouts(PixelLayoutSet::GPU_SCALABLE),
         )
     }
 

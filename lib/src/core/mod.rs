@@ -43,6 +43,10 @@ pub(crate) mod stash;
 pub mod stream;
 pub mod subtitle;
 pub mod timing;
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", feature = "d3d11"),
+    all(target_os = "macos", feature = "ort-coreml")
+))]
 pub(crate) mod tone_map;
 pub(crate) mod transform;

@@ -95,6 +95,11 @@ pub enum MetalVideoCompositorError {
     )]
     TranslucentBackground(u8),
 
+    /// A canvas of a format it does not compose on: P010, its layers and
+    /// fills being 8-bit.
+    #[error("MetalVideoCompositor composes on NV12 or BGRA, not {0:?}")]
+    UnsupportedCanvas(VideoToolboxFrameFormat),
+
     /// Output dimensions are odd, too small, or above the safety limit.
     #[error(
         "invalid output dimensions {width}x{height}; each dimension must be even and 2..={MAX_DIMENSION}"
@@ -695,6 +700,7 @@ impl Kernels {
         let finish = match format {
             VideoToolboxFrameFormat::Bgra => "to_bgra",
             VideoToolboxFrameFormat::Nv12 => "to_nv12",
+            VideoToolboxFrameFormat::P010 => unreachable!("refused by validate_output_options"),
         };
         let mut kernels = gpu
             .kernels(
@@ -1023,6 +1029,7 @@ impl Compositing {
                 ..ColorDescription::BT709_LIMITED
             }
             .describe(&mut output),
+            VideoToolboxFrameFormat::P010 => unreachable!("refused by validate_output_options"),
         }
         Ok(output)
     }
@@ -1269,6 +1276,7 @@ impl Compositing {
                 self.gpu
                     .plane(&output_buffer, 1, MTLPixelFormat::RG8Unorm, write)?,
             ],
+            VideoToolboxFrameFormat::P010 => unreachable!("refused by validate_output_options"),
         };
 
         let mut pass: Pass = self.gpu.pass()?;
@@ -1311,6 +1319,7 @@ impl Compositing {
             VideoToolboxFrameFormat::Bgra => (width, height),
             // One thread a 2x2 block.
             VideoToolboxFrameFormat::Nv12 => (width / 2, height / 2),
+            VideoToolboxFrameFormat::P010 => unreachable!("refused by validate_output_options"),
         };
         pass.dispatch(&self.kernels.finish, &bound, None, threads);
         pass.finish()?;
@@ -1533,6 +1542,9 @@ fn validate_output_options(
         return Err(MetalVideoCompositorError::InvalidFrameRate(
             options.frame_rate,
         ));
+    }
+    if format == VideoToolboxFrameFormat::P010 {
+        return Err(MetalVideoCompositorError::UnsupportedCanvas(format));
     }
     // NV12 has nowhere to keep it — refused rather than quietly made opaque.
     if options.background_alpha != 255 && format == VideoToolboxFrameFormat::Nv12 {

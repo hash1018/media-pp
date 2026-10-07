@@ -1,7 +1,7 @@
 //! HDR video brought into SDR BT.709 RGB — the one definition
-//! `D3d11ToneMap`'s shader and `CudaConverter`'s `p010_to_bgra` kernel both
-//! evaluate, and [`ToneMap::apply`] evaluates in Rust for a test to state
-//! what a colour should come out as.
+//! `D3d11ToneMap`'s shader, `CudaConverter`'s `p010_to_bgra` kernel and the
+//! Metal detectors' `hdr_to_bgra` kernel evaluate, and [`ToneMap::apply`]
+//! evaluates in Rust for a test to state what a colour should come out as.
 //!
 //! # Why this crate does it at all
 //!

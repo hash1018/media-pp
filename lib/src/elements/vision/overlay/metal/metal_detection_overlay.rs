@@ -22,7 +22,7 @@ use crate::{
     platform::macos::{
         metal::{Buffer, Kernel, MetalError, MetalGpu, Pass, Texture, write_texture},
         pixel_buffer::PixelBuffer,
-        videotoolbox::{NotVideoToolbox, create_frames_ctx, sw_format_of},
+        videotoolbox::{NotVideoToolbox, create_frames_ctx, describe_pixel_buffer, sw_format_of},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -30,7 +30,7 @@ use crate::{
 
 use super::super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, bt709_limited, hides, marks_turned, rasterize,
+    Rect, bt709_limited, hides, marks_turned, rasterize, ten_bit,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
@@ -46,9 +46,12 @@ pub enum MetalDetectionOverlayError {
     /// Something other than a decoded picture arrived.
     #[error("MetalDetectionOverlay only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
-    /// Not an NV12 or BGRA VideoToolbox picture: what it is, or for a
-    /// VideoToolbox picture what it holds.
-    #[error("MetalDetectionOverlay takes NV12 or BGRA VideoToolbox pictures, got {0:?}")]
+    /// Not an NV12 or BGRA VideoToolbox picture, nor a P010 one to hide in
+    /// with nothing drawn: what it is, or for a VideoToolbox picture what it
+    /// holds.
+    #[error(
+        "MetalDetectionOverlay draws on NV12 or BGRA VideoToolbox pictures, and hides in P010 where it draws nothing; got {0:?}"
+    )]
     UnsupportedPicture(ffmpeg::format::Pixel),
     /// A VideoToolbox picture with no frames context to say what it holds,
     /// or no pixel buffer in it.
@@ -68,6 +71,9 @@ pub enum MetalDetectionOverlayError {
     /// Taking a frame from those frames failed.
     #[error("failed to take a frame from the VideoToolbox pool (code {0})")]
     FrameGet(i32),
+    /// FFmpeg could not make the copy's pixel buffer say what colour it is.
+    #[error("failed to describe the copy's colour (code {0})")]
+    Describe(i32),
     /// Metal refused a kernel, a texture or a pass.
     #[error(transparent)]
     Metal(#[from] MetalError),
@@ -159,6 +165,7 @@ struct Overlaying {
     /// size of the pictures arriving — see `ForSize`.
     nv12_frames: ForSize<AvBufferRef>,
     bgra_frames: ForSize<AvBufferRef>,
+    p010_frames: ForSize<AvBufferRef>,
     /// Reuses only the CPU-side `AVFrame` wrapper; each pixel buffer comes
     /// from a frames pool.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -240,18 +247,20 @@ impl MetalDetectionOverlay {
             hw_device_ctx: device.retain(),
             nv12_frames: ForSize::new(),
             bgra_frames: ForSize::new(),
+            p010_frames: ForSize::new(),
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         })))
     }
 }
 
 /// The parameters of one plane's cells, as the redaction shader's `Cells`:
-/// blended with `smooth`, cut to the ellipse inside with `ellipse`.
+/// blended with `smooth`, cut to the ellipse inside with `ellipse`, and
+/// with `wide` read and written in the top ten bits of sixteen.
 fn cells(
     origin: (u32, u32),
     size: (u32, u32),
     cells: (u32, u32),
-    (smooth, ellipse): (bool, bool),
+    (smooth, ellipse, wide): (bool, bool, bool),
 ) -> Vec<u8> {
     [
         origin.0,
@@ -262,6 +271,8 @@ fn cells(
         cells.1,
         u32::from(smooth),
         u32::from(ellipse),
+        if wide { 6 } else { 0 },
+        0,
     ]
     .iter()
     .flat_map(|word| word.to_ne_bytes())
@@ -310,7 +321,7 @@ impl Overlaying {
         pass: &mut Pass,
         planes: &[Texture],
         rect: Rect,
-        (count, smooth, ellipse): ((u32, u32), bool, bool),
+        (count, smooth, ellipse, wide): ((u32, u32), bool, bool, bool),
         fill: Option<Vec<[f32; 4]>>,
         at: &mut usize,
     ) -> std::result::Result<(), MetalDetectionOverlayError> {
@@ -324,7 +335,7 @@ impl Overlaying {
         let whole = ((rect.x, rect.y), (rect.width, rect.height));
         let half = ((rect.x / 2, rect.y / 2), (rect.width / 2, rect.height / 2));
         for (index, (plane, (origin, size))) in planes.iter().zip([whole, half]).enumerate() {
-            let parameters = cells(origin, size, count, (smooth, ellipse));
+            let parameters = cells(origin, size, count, (smooth, ellipse, wide));
             let n = (count.0 * count.1) as usize;
             match &fill {
                 Some(colours) => {
@@ -416,10 +427,10 @@ impl Overlaying {
     ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, MetalDetectionOverlayError>
     {
         let (device, pp_log) = (&self.hw_device_ctx, &self.pp_log);
-        let pool = if layout == ffmpeg::format::Pixel::NV12 {
-            &mut self.nv12_frames
-        } else {
-            &mut self.bgra_frames
+        let pool = match layout {
+            ffmpeg::format::Pixel::NV12 => &mut self.nv12_frames,
+            ffmpeg::format::Pixel::P010LE => &mut self.p010_frames,
+            _ => &mut self.bgra_frames,
         };
         let frames_ctx = pool
             .try_get(width, height, |width, height| {
@@ -455,6 +466,8 @@ impl Overlaying {
     {
         let layout = match sw_format_of(source) {
             Ok(layout @ (ffmpeg::format::Pixel::NV12 | ffmpeg::format::Pixel::BGRA)) => layout,
+            // Hidden in, never drawn on, as the CPU's overlay does.
+            Ok(layout @ ffmpeg::format::Pixel::P010LE) if !self.options.draws_any() => layout,
             Ok(other) | Err(NotVideoToolbox::Format(other)) => {
                 return Err(MetalDetectionOverlayError::UnsupportedPicture(other));
             }
@@ -474,7 +487,9 @@ impl Overlaying {
                 surface,
             });
         }
-        let nv12 = layout == ffmpeg::format::Pixel::NV12;
+        // P010 is NV12 at two bytes a sample, ten bits at the top.
+        let wide = layout == ffmpeg::format::Pixel::P010LE;
+        let nv12 = layout != ffmpeg::format::Pixel::BGRA;
         let canvas = Canvas {
             width,
             height,
@@ -516,7 +531,18 @@ impl Overlaying {
             MTLTextureUsage::ShaderRead,
             MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
         );
-        let (targets, sources) = if nv12 {
+        let (targets, sources) = if wide {
+            (
+                vec![
+                    self.gpu.plane(&to, 0, MTLPixelFormat::R16Unorm, both)?,
+                    self.gpu.plane(&to, 1, MTLPixelFormat::RG16Unorm, both)?,
+                ],
+                vec![
+                    self.gpu.plane(&from, 0, MTLPixelFormat::R16Unorm, read)?,
+                    self.gpu.plane(&from, 1, MTLPixelFormat::RG16Unorm, read)?,
+                ],
+            )
+        } else if nv12 {
             (
                 vec![
                     self.gpu.plane(&to, 0, MTLPixelFormat::R8Unorm, both)?,
@@ -541,13 +567,20 @@ impl Overlaying {
             .iter()
             .map(|hide| match hide {
                 Hide::Cells { cells, .. } => planes_of(*cells),
-                // A fill cut to an ellipse is one cell its colour.
+                // A fill cut to an ellipse, or any in ten bits, is one cell
+                // its colour.
                 Hide::Fill { ellipse: true, .. } => planes_of((1, 1)),
+                Hide::Fill { .. } if wide => planes_of((1, 1)),
                 Hide::Fill { .. } => 0,
             })
             .sum();
         let integers = if wanted == 0 {
             Vec::new()
+        } else if wide {
+            vec![
+                self.gpu.plane(&to, 0, MTLPixelFormat::R16Uint, both)?,
+                self.gpu.plane(&to, 1, MTLPixelFormat::RG16Uint, both)?,
+            ]
         } else if nv12 {
             vec![
                 self.gpu.plane(&to, 0, MTLPixelFormat::R8Uint, both)?,
@@ -592,6 +625,23 @@ impl Overlaying {
                 Hide::Fill {
                     rect,
                     color,
+                    ellipse,
+                } if wide => {
+                    // As the CPU paints it: one cell of the colour in ten
+                    // bits, an SDR colour at the picture's reference white.
+                    let [y, cb, cr] = ten_bit(color, source.color_transfer_characteristic());
+                    self.hide_cells(
+                        &mut pass,
+                        &integers,
+                        rect,
+                        ((1, 1), false, ellipse, true),
+                        Some(vec![[y, 0.0, 0.0, 0.0], [cb, cr, 0.0, 0.0]]),
+                        &mut at,
+                    )?;
+                }
+                Hide::Fill {
+                    rect,
+                    color,
                     ellipse: false,
                 } => pass.dispatch(
                     paint_kernel,
@@ -615,7 +665,7 @@ impl Overlaying {
                         &mut pass,
                         &integers,
                         rect,
-                        ((1, 1), false, true),
+                        ((1, 1), false, true, false),
                         Some(colours.collect()),
                         &mut at,
                     )?;
@@ -629,7 +679,7 @@ impl Overlaying {
                     &mut pass,
                     &integers,
                     rect,
-                    (count, smooth, ellipse),
+                    (count, smooth, ellipse, wide),
                     None,
                     &mut at,
                 )?,
@@ -667,6 +717,8 @@ impl Overlaying {
         unsafe {
             ffi::av_frame_copy_props(destination.as_mut_ptr(), source.as_ptr());
         }
+        // And its pixel buffer says so, which is where an encoder reads it.
+        describe_pixel_buffer(&destination).map_err(MetalDetectionOverlayError::Describe)?;
         Ok(destination)
     }
 }
@@ -694,7 +746,7 @@ impl Filter for Overlaying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
-                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
+                .with_layouts(PixelLayoutSet::GPU_SCALABLE),
         )
     }
 
@@ -1081,6 +1133,7 @@ mod tests {
         let (width, height) = (frame.width() as usize, frame.height() as usize);
         let rows: Vec<(usize, usize)> = match frame.format() {
             ffmpeg::format::Pixel::NV12 => vec![(height, width), (height / 2, width)],
+            ffmpeg::format::Pixel::P010LE => vec![(height, width * 2), (height / 2, width * 2)],
             _ => vec![(height, width * 4)],
         };
         rows.into_iter()
@@ -1267,5 +1320,119 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// In a P010 picture — HLG, ten bits at the top of two bytes — a mosaic,
+    /// a blur and a fill, of the box or the ellipse inside it, write the
+    /// CPU's bytes, the samples around left as they were to the last bit; a
+    /// picture of it is refused where anything would be drawn.
+    #[test]
+    fn a_p010_picture_is_hidden_on_the_gpu_as_on_the_cpu() {
+        use super::super::super::{HideShape, Hiding, RedactStyle, Treatment};
+        use crate::elements::SwDetectionOverlay;
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let faces = Detections::new(
+            "test",
+            Arc::from(vec![Arc::<str>::from("face")]),
+            vec![
+                Detection::new(0, 0.9, 0.1, 0.2, 0.37, 0.55),
+                Detection::new(0, 0.8, 0.62, 0.05, 0.2, 0.3),
+            ],
+        );
+        let mut picture = noise(ffmpeg::format::Pixel::P010LE);
+        crate::color::ColorDescription {
+            space: ffmpeg::color::Space::BT2020NCL,
+            range: ffmpeg::color::Range::MPEG,
+            primaries: ffmpeg::color::Primaries::BT2020,
+            transfer: ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+        }
+        .describe(&mut picture);
+        let few = std::num::NonZeroU32::new(5).unwrap();
+        let styles = [
+            RedactStyle::mosaic(),
+            RedactStyle::blur(),
+            RedactStyle::Mosaic {
+                cells: few,
+                min_cell: 2,
+            },
+            RedactStyle::Fill(Color::new(200, 30, 60)),
+            RedactStyle::Fill(Color::WHITE),
+        ];
+        for style in styles {
+            for shape in [HideShape::Rectangle, HideShape::Ellipse] {
+                let options = DetectionOverlayOptions {
+                    others: Treatment {
+                        hide: Some(Hiding {
+                            shape,
+                            ..Hiding::new(style)
+                        }),
+                        ..Treatment::none()
+                    },
+                    ..DetectionOverlayOptions::default()
+                };
+                let mut cpu = SwDetectionOverlay::new("cpu", options.clone()).expect("opens");
+                let on_cpu = capture(&mut cpu);
+                cpu.consume(
+                    MediaBuffer::video(picture.clone())
+                        .with_metadata(Metadata::new().with(faces.clone())),
+                )
+                .expect("hidden on the CPU");
+                let MediaBuffer::Video(expected) = on_cpu.lock().unwrap().remove(0) else {
+                    panic!("a picture");
+                };
+                let mut upload = VideoToolboxUpload::new("upload", &device);
+                let uploaded = capture(&mut upload);
+                upload
+                    .consume(MediaBuffer::video(picture.clone()))
+                    .expect("uploads");
+                let input = uploaded
+                    .lock()
+                    .unwrap()
+                    .remove(0)
+                    .with_metadata(Metadata::new().with(faces.clone()));
+                let mut gpu = MetalDetectionOverlay::new("gpu", &device, options).expect("opens");
+                let on_gpu = capture(&mut gpu);
+                gpu.consume(input).expect("hidden on the GPU");
+                let actual = download(on_gpu.lock().unwrap().remove(0));
+                assert_eq!(actual.format(), ffmpeg::format::Pixel::P010LE);
+                let (expected, actual) = (shown(&expected), shown(&actual));
+                assert_ne!(
+                    expected,
+                    shown(&picture),
+                    "{style:?} {shape:?}: something hidden"
+                );
+                for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                    let differ = expected
+                        .iter()
+                        .zip(actual)
+                        .filter(|(expected, actual)| expected != actual)
+                        .count();
+                    assert_eq!(
+                        differ, 0,
+                        "{style:?} {shape:?}, plane {plane}: {differ} bytes differ"
+                    );
+                }
+            }
+        }
+
+        // Boxes would be drawn: refused, nothing handed on.
+        let mut drawing =
+            MetalDetectionOverlay::new("gpu", &device, DetectionOverlayOptions::default())
+                .expect("opens");
+        let kept = capture(&mut drawing);
+        let mut upload = VideoToolboxUpload::new("upload", &device);
+        let uploaded = capture(&mut upload);
+        upload
+            .consume(MediaBuffer::video(picture))
+            .expect("uploads");
+        let input = uploaded
+            .lock()
+            .unwrap()
+            .remove(0)
+            .with_metadata(Metadata::new().with(faces));
+        assert!(drawing.consume(input).is_err(), "nothing is drawn on P010");
+        assert!(kept.lock().unwrap().is_empty());
     }
 }

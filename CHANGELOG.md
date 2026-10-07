@@ -286,6 +286,19 @@ compile error with no explanation.
   a stream decodes to, and `cuda_detect` records a 10-bit file in ten
   bits, in its own colours, hiding what `--hide` says.
 
+  The same on a Mac. `VideoToolboxFrameFormat::P010` is what
+  `VideoToolboxDecoder` decodes 10-bit video to; `VideoToolboxEncoder`
+  encodes it as HEVC Main 10 in the colours `with_color` says, and refuses
+  it for H.264 with `TenBitsNeedHevc`, and `MetalVideoCompositor` refuses
+  to compose on it (`UnsupportedCanvas`). `MetalOrtDetector`,
+  `MetalOrtClassifier` and `MetalOrtEmbedder` look at an HLG or PQ P010
+  picture through an SDR copy a Metal kernel makes by the same
+  definition, to within 2 of 255 of it; `MetalDetectionOverlay` hides in
+  the ten bits, the CPU's bytes, where it draws nothing, and gives its
+  copies' pixel buffers the picture's colour, which VideoToolbox's HLG
+  encoder reads there; `MetalCutDetector` reads P010 too. `metal_detect`
+  records a 10-bit file in ten bits, in its own colours, as `hvc1`.
+
   What does not survive re-encoding: an iPhone's Dolby Vision metadata —
   what comes out is its HLG — and a PQ file's mastering display and
   light levels, which NVENC does not write.
@@ -354,8 +367,12 @@ compile error with no explanation.
   made over the pixel buffer's `IOSurface` on whichever Metal device you
   draw with, to read, write or render to. `VideoToolboxFramePool` hands out
   VideoToolbox pictures of one format and size to write into, which the
-  elements after yours take as from their own upload. `MetalSurfaceError`
-  and `VideoToolboxFramePoolError` say why either fails.
+  elements after yours take as from their own upload, and
+  `VideoToolboxFramePool::describe` makes one's pixel buffer say the colour
+  its frame says — where VideoToolbox reads it, an HLG encoder failing a
+  picture whose buffer says nothing — refusing a picture of another pool's.
+  `MetalSurfaceError` and `VideoToolboxFramePoolError` say why either
+  fails.
 
 - **The detection overlays do with each class what its rule says** —
   draw its box, hide it, both or neither. `DetectionOverlayOptions::rules`
