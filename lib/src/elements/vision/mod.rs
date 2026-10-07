@@ -10,6 +10,9 @@
 //! - `infer` — models that look at pictures: ONNX Runtime's, with the
 //!   `ort` features, as `SwOrtDetector`, `CudaOrtDetector` and
 //!   `MetalOrtDetector`.
+//! - `cut` — where one shot of an edited video ends and the next begins:
+//!   [`SwCutDetector`] and `CudaCutDetector`, which put a [`SceneCut`] on
+//!   the first picture of each shot.
 //! - `track` — following what was found from picture to picture:
 //!   [`ObjectTracker`], which numbers each object and fills in the pictures
 //!   a detector let by.
@@ -24,6 +27,7 @@
 
 mod analytics;
 mod batch;
+mod cut;
 #[cfg(feature = "ort")]
 mod infer;
 mod meta;
@@ -37,11 +41,14 @@ pub use batch::{
     BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,
     StreamMuxInput, StreamMuxOptions, StreamOrigin,
 };
+#[cfg(feature = "cuda")]
+pub use cut::{CudaCutDetector, CudaCutDetectorError};
+pub use cut::{CutDetectorOptions, CutDetectorOptionsError, SwCutDetector, SwCutDetectorError};
 #[cfg(feature = "ort")]
 pub use infer::*;
 pub use meta::{
     Analytics, COCO_CLASS_LABELS, Classification, Crossing, Detection, Detections, LineCount,
-    ZoneCount,
+    SceneCut, ZoneCount,
 };
 pub use overlay::{
     BoxColors, BoxStyle, ClassId, ClassRule, DetectionOverlayOptions, DetectionOverlayOptionsError,
@@ -53,3 +60,13 @@ pub use overlay::{CudaDetectionOverlay, CudaDetectionOverlayError};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use overlay::{MetalDetectionOverlay, MetalDetectionOverlayError};
 pub use track::{ObjectTracker, TrackerOptions};
+
+/// Whether `format` is a hardware frame's, whose pixels are not in it.
+pub(crate) fn is_hardware(format: crate::ffmpeg::format::Pixel) -> bool {
+    // SAFETY: a lookup in libavutil's static table of descriptors.
+    unsafe {
+        let descriptor = crate::ffmpeg::ffi::av_pix_fmt_desc_get(format.into());
+        !descriptor.is_null()
+            && (*descriptor).flags & (crate::ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL as u64) != 0
+    }
+}

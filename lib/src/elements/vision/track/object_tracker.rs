@@ -12,7 +12,7 @@ use crate::{
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     element::{Element, ElementType, element_pp_log},
     elements::vision::batch::PerStream,
-    elements::{Detection, Detections},
+    elements::{Detection, Detections, SceneCut},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
 };
@@ -64,7 +64,10 @@ const MAX_STEPS: u64 = 120;
 /// After a [`StreamMux`](crate::elements::StreamMux) each stream is followed
 /// on its own, by the [`StreamOrigin`](crate::elements::StreamOrigin) its
 /// pictures carry, and its objects numbered from one count shared by all, so
-/// that no two streams' objects ever share a number. A seek of one stream —
+/// that no two streams' objects ever share a number. A picture carrying a
+/// [`SceneCut`] — the first of a new shot, after a cut detector such as
+/// [`SwCutDetector`](crate::elements::SwCutDetector) — starts its stream
+/// over: nothing of the new shot is where anything was. A seek of one stream —
 /// its origin's `generation` moved — starts that stream over and leaves the
 /// others as they were.
 pub struct ObjectTracker(FilterStage<Tracking>);
@@ -422,10 +425,14 @@ impl Filter for Tracking {
             last: None,
         };
         let (stream, moved) = self.streams.get(&buf, |_| fresh());
-        if moved {
-            // That stream was sought: its objects are not where they were.
-            // Their filters go at the next detection, with every object no
-            // longer followed.
+        let cut = buf
+            .metadata()
+            .is_some_and(|metadata| metadata.get::<SceneCut>().is_some());
+        if moved || cut {
+            // That stream was sought, or its picture begins a new shot: its
+            // objects are not where they were. Their filters go at the next
+            // detection, with every object no longer followed; what the new
+            // shot holds is numbered anew.
             *stream = fresh();
         }
         let steps = stream.pace.steps(frame.pts());
@@ -625,6 +632,43 @@ mod tests {
 
     fn detections(buf: &MediaBuffer) -> Option<&Detections> {
         buf.metadata()?.get::<Detections>()
+    }
+
+    /// On a picture carrying a [`SceneCut`], what was followed is let go
+    /// of: an object of the new shot where one of the old shot was takes a
+    /// new number, and the pictures after the cut that the detector let by
+    /// carry nothing of the old shot's.
+    #[test]
+    fn a_new_shot_starts_over() {
+        let mut tracker = ObjectTracker::new(
+            "tracker",
+            TrackerOptions {
+                confirm_after: 1,
+                ..TrackerOptions::default()
+            },
+        );
+        let kept = capture(&mut tracker);
+        let there = || Some(vec![Detection::new(0, 0.9, 0.4, 0.2, 0.1, 0.5)]);
+        for n in 0..5 {
+            tracker.consume(picture(n, there())).expect("tracked");
+        }
+        let cut = picture(5, there());
+        let metadata = cut.metadata().cloned().unwrap_or_default().with(SceneCut {
+            detector: "cuts".into(),
+            score: 100.0,
+        });
+        tracker
+            .consume(cut.with_metadata(metadata))
+            .expect("tracked");
+        tracker.consume(picture(6, None)).expect("let by");
+        let kept = kept.lock().unwrap();
+        let id = |n: usize| detections(&kept[n]).unwrap().items[0].track_id;
+        assert!(id(4).is_some());
+        assert_ne!(id(5), id(4), "numbered anew after the cut");
+        assert!(id(5).is_some());
+        // The picture after carries what the new shot was seen to hold.
+        let after = detections(&kept[6]).unwrap();
+        assert!(after.items.iter().all(|item| item.track_id == id(5)));
     }
 
     /// An object moving right a fraction a picture, detected on every third

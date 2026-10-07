@@ -18,6 +18,7 @@ DeepStream is judged by:
 | [findings.md](findings.md) | What measuring turned up: the classifier's cost and its fix, a change that did nothing, engine caching, and the hardware's ceilings |
 | [macos.md](macos.md) | How the same experiments run on Apple silicon: the `metal` backend and Core ML's compute units |
 | [macos-m5-air.md](macos-m5-air.md) | The results on an M5 MacBook Air — fanless, so its sustained rate — each read |
+| [cuts.md](cuts.md) | How well the cut detectors find cuts marked by hand in three films, beside ffmpeg's `scdet`, and how fast |
 | [comparison.md](comparison.md) | Linux, Windows and macOS side by side: what each system costs, where the hardware is the limit, and how to build a pipeline on each |
 
 ## In short

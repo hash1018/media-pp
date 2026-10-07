@@ -8,8 +8,8 @@ use std::ffi::c_void;
 use super::ptx::REDACT_PTX;
 use super::{
     CUcontext, CUdeviceptr, CUfunction, CUmodule, CudaDriver, CudaDriverError, arg, check,
-    cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cuMemAlloc_v2, cuMemFree_v2, cuModuleUnload, launch,
-    load_module,
+    cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cuMemAlloc_v2, cuMemFree_v2, cuMemcpyDtoH_v2,
+    cuModuleUnload, launch, load_module,
 };
 
 /// The hiding kernels, JIT-compiled into the driver's context. Dropped
@@ -119,6 +119,96 @@ impl CudaDriver {
                 pointer,
                 floats,
             })
+        })
+    }
+
+    /// Writes the mean of each cell of `plane` to `means`, from float
+    /// `offset` on: `cells` rows of cells of `channels` floats, as the CPU's
+    /// `cut::cell_means` makes them. Launched on the default stream and not
+    /// waited for; [`Self::read_means`] waits.
+    pub(crate) fn measure_cells(
+        &self,
+        kernels: &RedactKernels,
+        means: &CellMeans,
+        offset: usize,
+        plane: CellPlane,
+    ) -> Result<(), CudaDriverError> {
+        let (cells_x, cells_y) = plane.cells;
+        let cells = cells_x as usize * cells_y as usize;
+        if cells_x == 0
+            || cells_y == 0
+            || cells_x > plane.width
+            || cells_y > plane.height
+            || !(1..=4).contains(&plane.channels)
+            || offset + cells * plane.channels as usize > means.floats
+            || plane.pitch < plane.width as usize * plane.channels as usize
+            || plane.pitch > u32::MAX as usize
+        {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "{}x{} samples of {} bytes in {cells_x}x{cells_y} cells, pitch {}, from float {offset} of {}",
+                plane.width, plane.height, plane.channels, plane.pitch, means.floats
+            )));
+        }
+        let mut source = plane.plane;
+        let mut pitch = plane.pitch as u32;
+        let (mut width, mut height) = (plane.width, plane.height);
+        let mut channels = plane.channels;
+        let (mut across, mut down) = (cells_x, cells_y);
+        let mut data = means.pointer + (offset * size_of::<f32>()) as CUdeviceptr;
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut source),
+                arg(&mut pitch),
+                arg(&mut width),
+                arg(&mut height),
+                arg(&mut channels),
+                arg(&mut across),
+                arg(&mut down),
+                arg(&mut data),
+            ];
+            // SAFETY: one pointer per parameter `cell_means` declares, in that
+            // order, each at a live local. It reads the plane's `width` by
+            // `height` samples, which the surface the caller took `plane`
+            // from holds, and writes `cells · channels` floats from `offset`,
+            // which the check above keeps inside `means`; the context is
+            // current.
+            unsafe {
+                launch(
+                    kernels.means,
+                    ((cells as u32).div_ceil(256), 1),
+                    16,
+                    &mut params,
+                )
+            }
+        })
+    }
+
+    /// The first `into.len()` floats of `means`, once everything launched
+    /// before on the default stream has finished.
+    pub(crate) fn read_means(
+        &self,
+        means: &CellMeans,
+        into: &mut [f32],
+    ) -> Result<(), CudaDriverError> {
+        if into.len() > means.floats {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "{} floats read from {}",
+                into.len(),
+                means.floats
+            )));
+        }
+        // SAFETY: `with_context` has the buffer's context current; `into` is a
+        // live slice no longer than the allocation, and a synchronous copy on
+        // the legacy default stream waits for the kernels before it.
+        self.with_context(|| unsafe {
+            check(
+                "cuMemcpyDtoH",
+                cuMemcpyDtoH_v2(
+                    into.as_mut_ptr().cast(),
+                    means.pointer,
+                    std::mem::size_of_val(into),
+                ),
+            )
         })
     }
 

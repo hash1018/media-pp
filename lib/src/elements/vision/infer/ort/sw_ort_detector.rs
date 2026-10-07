@@ -284,12 +284,7 @@ pub(super) fn to_rgb24(
 
 /// Whether `format` is a hardware frame's, whose pixels are not in it.
 pub(super) fn is_hardware(format: ffmpeg::format::Pixel) -> bool {
-    // SAFETY: a lookup in libavutil's static table of descriptors.
-    unsafe {
-        let descriptor = ffmpeg::ffi::av_pix_fmt_desc_get(format.into());
-        !descriptor.is_null()
-            && (*descriptor).flags & (ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL as u64) != 0
-    }
+    crate::elements::vision::is_hardware(format)
 }
 
 impl Element for Detecting {

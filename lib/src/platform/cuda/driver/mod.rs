@@ -95,7 +95,6 @@ load::cuda_driver! {
     fn cuMemAlloc_v2(ptr: *mut CUdeviceptr, size: usize) -> CUresult;
     fn cuMemFree_v2(ptr: CUdeviceptr) -> CUresult;
     fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const c_void, size: usize) -> CUresult;
-    #[cfg(any(feature = "cuda-visual-tracking", feature = "ort-cuda"))]
     fn cuMemcpyDtoH_v2(dst: *mut c_void, src: CUdeviceptr, size: usize) -> CUresult;
     #[cfg(feature = "cuda-visual-tracking")]
     fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, count: usize) -> CUresult;

@@ -81,6 +81,7 @@ use crate::elements::{
     CudaDriverError, CudaEncoderError, CudaFrameError, CudaFramePoolError, CudaRendererError,
     CudaScalerError, CudaUploadError, CudaVideoCompositorError, CudaVideoEffectError,
 };
+use crate::elements::{CutDetectorOptionsError, SwCutDetectorError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
     D3d11ChromaKeyError, D3d11DecoderError, D3d11DownloadError, D3d11GpuError, D3d11RendererError,
@@ -845,6 +846,19 @@ pub enum Error {
     /// Drawing detections onto a picture in system memory failed.
     #[error(transparent)]
     SwDetectionOverlayError(#[from] SwDetectionOverlayError),
+
+    /// A cut detector's options were refused.
+    #[error(transparent)]
+    CutDetectorOptionsError(#[from] CutDetectorOptionsError),
+
+    /// Finding cuts in pictures in system memory failed.
+    #[error(transparent)]
+    SwCutDetectorError(#[from] SwCutDetectorError),
+
+    /// Finding cuts in CUDA pictures failed.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaCutDetectorError(#[from] crate::elements::CudaCutDetectorError),
 
     /// Drawing detections onto a CUDA picture failed.
     #[cfg(feature = "cuda")]

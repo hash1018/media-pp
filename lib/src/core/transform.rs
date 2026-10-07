@@ -111,6 +111,12 @@ impl Output {
         self.made.push(buf);
     }
 
+    /// What was put here, for a test that drives a filter's work directly.
+    #[cfg(test)]
+    pub(crate) fn into_buffers(self) -> Vec<MediaBuffer> {
+        self.made
+    }
+
     /// Gives what `input` carries to every buffer made from it — of its
     /// sort, at its timestamp — that carries none of its own: see
     /// [`Filter`]'s section on metadata.

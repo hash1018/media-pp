@@ -204,6 +204,22 @@ compile error with no explanation.
 
 ### Added
 
+- **Where each shot of an edited video begins.** `SwCutDetector` and
+  `CudaCutDetector` hand each picture on, the first of each shot after the
+  stream's first carrying a `SceneCut`; an `ObjectTracker` starts over on
+  it, numbering what the new shot holds anew, and an `ObjectAnalytics`
+  forgets where each object was. Each picture is made a thumbnail — luma
+  in 64 by 36 cells, chroma in 32 by 18 — and a cut is a picture far from
+  the last, and further than the pictures before it moved, as
+  `CutDetectorOptions` says; a flash, the blur running up to a cut and a
+  fade through black are told apart by holding `lookahead` pictures. The
+  CUDA one averages the cells on the GPU with the overlay's mosaic kernel
+  and copies the thumbnail down, the same thumbnail the CPU makes, so the
+  two find the same cuts. On 222 cuts marked by hand in three Blender
+  films the defaults found 220 and called 14 that were none, where ffmpeg's
+  `scdet` at its best found 191 for 18
+  (`docs/benchmarks/vision/cuts.md`). `cut_detect` prints a file's cuts.
+
 - **A phone's portrait recording is analysed the right way up, and stays
   turned when re-encoded.** `media_pp::orientation::Orientation` is which
   way up a picture is shown — a quarter-turn `Rotation` and whether it is

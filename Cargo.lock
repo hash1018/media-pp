@@ -1023,6 +1023,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cut_detect"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "d3d11_chroma_key"
 version = "0.1.0"
 dependencies = [

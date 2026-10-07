@@ -299,9 +299,10 @@ pub use source::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};
 pub use vision::UseTensorRtPolicy;
 pub use vision::{
     Analytics, AnalyticsOptions, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassId, ClassRule,
-    Classification, Crossing, Detection, DetectionOverlayOptions, DetectionOverlayOptionsError,
-    Detections, Hiding, LabelStyle, Line, LineCount, ObjectAnalytics, ObjectAnalyticsError,
-    ObjectTracker, OverlayParts, RedactStyle, StreamAnalyticsOptions, SwDetectionOverlay,
+    Classification, Crossing, CutDetectorOptions, CutDetectorOptionsError, Detection,
+    DetectionOverlayOptions, DetectionOverlayOptionsError, Detections, Hiding, LabelStyle, Line,
+    LineCount, ObjectAnalytics, ObjectAnalyticsError, ObjectTracker, OverlayParts, RedactStyle,
+    SceneCut, StreamAnalyticsOptions, SwCutDetector, SwCutDetectorError, SwDetectionOverlay,
     SwDetectionOverlayError, TrackerOptions, Treatment, Zone, ZoneCount,
 };
 pub use vision::{
@@ -313,7 +314,9 @@ pub use vision::{
     CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
 };
 #[cfg(feature = "cuda")]
-pub use vision::{CudaDetectionOverlay, CudaDetectionOverlayError};
+pub use vision::{
+    CudaCutDetector, CudaCutDetectorError, CudaDetectionOverlay, CudaDetectionOverlayError,
+};
 #[cfg(feature = "ort-cuda")]
 pub use vision::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,

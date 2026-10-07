@@ -166,6 +166,23 @@ impl Detections {
     }
 }
 
+/// That a picture begins a new shot of an edited video — the first after a
+/// cut, or after a fade through black — as a cut detector such as
+/// [`SwCutDetector`](crate::elements::SwCutDetector) puts it on the
+/// picture. An [`ObjectTracker`](crate::elements::ObjectTracker) starts
+/// over on it, and an [`ObjectAnalytics`](crate::elements::ObjectAnalytics)
+/// forgets where each object was, since nothing in the new shot is where
+/// anything was. The first picture of a stream carries none.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct SceneCut {
+    /// The name of the element that found it.
+    pub detector: Arc<str>,
+    /// How far the picture was from the one before: the mean difference
+    /// of their luma, plus that of their chroma, each out of 255.
+    pub score: f32,
+}
+
 /// What an [`ObjectAnalytics`](crate::elements::ObjectAnalytics) made of one
 /// picture's [`Detections`]: for each of its zones the objects inside, and
 /// for each of its lines how many objects have crossed it so far and which

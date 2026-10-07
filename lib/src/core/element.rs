@@ -302,6 +302,11 @@ pub enum ElementType {
     /// Draws a detector's boxes and labels onto VideoToolbox pictures, with
     /// Metal.
     MetalDetectionOverlay,
+    /// Finds where one shot of an edited video ends and the next begins,
+    /// on pictures in system memory.
+    SwCutDetector,
+    /// The same on CUDA pictures.
+    CudaCutDetector,
     /// Numbers a detector's objects across pictures, and fills in the
     /// pictures it let by.
     ObjectTracker,

@@ -10,7 +10,7 @@ use crate::{
     contract::{InputContract, MediaKind, OutputContract, PortContract},
     element::{Element, ElementType, element_pp_log},
     elements::vision::batch::PerStream,
-    elements::{Analytics, Crossing, Detection, Detections, LineCount, ZoneCount},
+    elements::{Analytics, Crossing, Detection, Detections, LineCount, SceneCut, ZoneCount},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
 };
@@ -38,7 +38,8 @@ const FORGET_AFTER: u64 = 300;
 ///
 /// It reads metadata alone, never a pixel, so it takes pictures wherever
 /// they live and hands each on as it came. A picture carrying no
-/// `Detections` goes on carrying no `Analytics`. A seek forgets where each
+/// `Detections` goes on carrying no `Analytics`. A seek, and a picture
+/// carrying a [`SceneCut`] — the first of a new shot — forget where each
 /// object was, so a jump is not counted as a crossing; the totals carry on.
 ///
 /// After a [`StreamMux`](crate::elements::StreamMux) each stream is watched
@@ -459,8 +460,13 @@ impl Filter for Analysing {
                 .unwrap_or(rules);
             Watch::new(Arc::clone(rules))
         });
-        if moved {
-            // That stream was sought, as `reset` is for all of them.
+        let cut = buf
+            .metadata()
+            .is_some_and(|metadata| metadata.get::<SceneCut>().is_some());
+        if moved || cut {
+            // That stream was sought, as `reset` is for all of them, or its
+            // picture begins a new shot: where each object was is not where
+            // it comes from next.
             watch.last.clear();
         }
         let analytics = watch.analyse(found, (frame.width(), frame.height()), orientation);
@@ -805,6 +811,40 @@ mod tests {
         element.0.inner_mut().reset();
         element
             .consume(picture(Some(vec![standing(0, Some(1), 0.5, 0.7)])))
+            .expect("analysed");
+        assert_eq!(analytics(&kept.lock().unwrap()[1]).lines[0].forward, 0);
+    }
+
+    /// An object of one shot on one side of a line and an object of the next
+    /// on the other, though a tracker gave them one number, is not a
+    /// crossing: the picture that begins the shot says so.
+    #[test]
+    fn a_new_shot_is_not_a_crossing() {
+        let line = Line::new("middle", (0.0, 0.5), (1.0, 0.5));
+        let mut element = ObjectAnalytics::new(
+            "analytics",
+            AnalyticsOptions {
+                zones: vec![],
+                lines: vec![line],
+                ..AnalyticsOptions::default()
+            },
+        )
+        .expect("a line");
+        let kept = capture(&mut element);
+        element
+            .consume(picture(Some(vec![standing(0, Some(1), 0.5, 0.3)])))
+            .expect("analysed");
+        let next = picture(Some(vec![standing(0, Some(1), 0.5, 0.7)]));
+        let metadata =
+            next.metadata()
+                .cloned()
+                .unwrap_or_default()
+                .with(crate::elements::SceneCut {
+                    detector: "cuts".into(),
+                    score: 100.0,
+                });
+        element
+            .consume(next.with_metadata(metadata))
             .expect("analysed");
         assert_eq!(analytics(&kept.lock().unwrap()[1]).lines[0].forward, 0);
     }
