@@ -383,7 +383,7 @@ pub(crate) use core::timing::{schedule, time};
 #[cfg(any(
     feature = "cuda",
     all(target_os = "windows", feature = "d3d11"),
-    all(target_os = "macos", feature = "ort-coreml")
+    all(target_os = "macos", feature = "metal")
 ))]
 pub(crate) use core::tone_map;
 pub(crate) use core::transform;

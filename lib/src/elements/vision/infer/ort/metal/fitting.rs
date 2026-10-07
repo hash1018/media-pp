@@ -151,28 +151,7 @@ impl SdrCopy {
                 MTLTextureUsage::ShaderWrite,
             )?,
         ];
-        // As the shader's `ToneMap`: three rows, the transfer and the EETF's
-        // three numbers, three rows of the gamut, then the size.
-        let mut bytes: Vec<u8> = tone_map
-            .rows
-            .iter()
-            .flatten()
-            .flat_map(|value| value.to_ne_bytes())
-            .collect();
-        bytes.extend(tone_map.transfer.to_ne_bytes());
-        for value in [tone_map.source_peak_pq, tone_map.target_peak, tone_map.knee] {
-            bytes.extend(value.to_ne_bytes());
-        }
-        bytes.extend(
-            tone_map
-                .gamut
-                .iter()
-                .flatten()
-                .flat_map(|value| value.to_ne_bytes()),
-        );
-        for word in [size.0, size.1, 0, 0] {
-            bytes.extend(word.to_ne_bytes());
-        }
+        let bytes = crate::platform::macos::metal_pass::tone_map_parameters(tone_map, size);
         let bound: Vec<&Texture> = textures.iter().collect();
         let mut pass = gpu.pass()?;
         pass.dispatch(&self.kernel, &bound, Some(&bytes), size);

@@ -232,6 +232,13 @@ compile error with no explanation.
 
 ### Added
 
+- **`MetalConverter` brings HDR to SDR.** A P010 VideoToolbox frame tagged
+  PQ or HLG — what `VideoToolboxDecoder` makes of 10-bit HDR — comes out
+  SDR BT.709 BGRA by `core/tone_map.rs`'s definition, the one
+  `CudaConverter` and `D3d11ToneMap` draw with, and is tagged BT.709. SDR
+  P010 is refused with `MetalConverterError::SdrP010`. So an HDR file plays
+  through `MetalRenderer` behind a `MetalConverter`, as it does on CUDA.
+
 - **Detectors look in tiles.** `OrtDetectorOptions::tiles: Some(Tiles)`
   looks at each picture in overlapping tiles — three across and two down a
   wide one by default, two across and three down a tall one, a quarter

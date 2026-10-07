@@ -3,9 +3,15 @@
 // launches it on CUDA; `ToneMap` there fills the buffer below and says why
 // each step is what it is.
 //
-// Texture 0 is a P010 picture's luma as `r16Unorm`, texture 1 its chroma as
-// `rg16Unorm`, each sample read as it is stored; texture 2 the BGRA picture
-// written, a thread a pixel.
+// Two kernels, one step for each pixel (`to_sdr`), differing only in where
+// the textures are bound. A P010 picture's luma is read as `r16Unorm` and
+// its chroma as `rg16Unorm`, each sample as it is stored; the BGRA picture
+// is written, a thread a pixel.
+//
+// - `hdr_to_bgra`, the detectors' SDR copy: luma at texture 0, chroma at 1,
+//   the output at 2.
+// - `tone_map`, `MetalConverter`'s through `platform::macos::metal_pass`:
+//   the output at texture 0, luma at 1, chroma at 2.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -66,15 +72,8 @@ static float eetf(constant ToneMap &map, float normalised) {
         + (-2.0 * t3 + 3.0 * t2) * map.target_peak;
 }
 
-kernel void hdr_to_bgra(texture2d<float, access::read> luma [[texture(0)]],
-                        texture2d<float, access::read> chroma [[texture(1)]],
-                        texture2d<float, access::write> sdr [[texture(2)]],
-                        constant ToneMap &map [[buffer(0)]],
-                        uint2 id [[thread_position_in_grid]]) {
-    if (id.x >= map.size.x || id.y >= map.size.y) {
-        return;
-    }
-    float4 yuv = float4(luma.read(id).r, chroma.read(id / 2).rg, 1.0);
+// One pixel's Y'CbCr, normalised as read, to gamma-encoded SDR BT.709.
+static float3 to_sdr(constant ToneMap &map, float4 yuv) {
     float3 signal = saturate(float3(
         dot(yuv, map.yuv_to_red),
         dot(yuv, map.yuv_to_green),
@@ -96,5 +95,29 @@ kernel void hdr_to_bgra(texture2d<float, access::read> luma [[texture(0)]],
     }
 
     float3 out = saturate(bt709 * scale / SDR_WHITE_NITS);
-    sdr.write(float4(pow(out, 1.0 / 2.2), 1.0), id);
+    return pow(out, 1.0 / 2.2);
+}
+
+kernel void hdr_to_bgra(texture2d<float, access::read> luma [[texture(0)]],
+                        texture2d<float, access::read> chroma [[texture(1)]],
+                        texture2d<float, access::write> sdr [[texture(2)]],
+                        constant ToneMap &map [[buffer(0)]],
+                        uint2 id [[thread_position_in_grid]]) {
+    if (id.x >= map.size.x || id.y >= map.size.y) {
+        return;
+    }
+    float4 yuv = float4(luma.read(id).r, chroma.read(id / 2).rg, 1.0);
+    sdr.write(float4(to_sdr(map, yuv), 1.0), id);
+}
+
+kernel void tone_map(texture2d<float, access::write> sdr [[texture(0)]],
+                     texture2d<float, access::read> luma [[texture(1)]],
+                     texture2d<float, access::read> chroma [[texture(2)]],
+                     constant ToneMap &map [[buffer(0)]],
+                     uint2 id [[thread_position_in_grid]]) {
+    if (id.x >= map.size.x || id.y >= map.size.y) {
+        return;
+    }
+    float4 yuv = float4(luma.read(id).r, chroma.read(id / 2).rg, 1.0);
+    sdr.write(float4(to_sdr(map, yuv), 1.0), id);
 }

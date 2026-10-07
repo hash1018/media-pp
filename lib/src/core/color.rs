@@ -190,7 +190,7 @@ pub(crate) fn is_bt2020(space: ffmpeg_next::color::Space) -> bool {
 #[cfg(any(
     feature = "cuda",
     all(target_os = "windows", feature = "d3d11"),
-    all(target_os = "macos", feature = "ort-coreml")
+    all(target_os = "macos", feature = "metal")
 ))]
 pub(crate) const BT2020_TO_BT709: [[f32; 3]; 3] = [
     [1.6605, -0.5876, -0.0728],

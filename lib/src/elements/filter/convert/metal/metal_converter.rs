@@ -14,7 +14,8 @@ use crate::{
     error::Result,
     platform::macos::{
         metal::MetalError,
-        metal_pass::{MetalPass, MetalPassError, PassInput, parameters},
+        metal_pass::{MetalPass, MetalPassError, PassInput, parameters, tone_map_parameters},
+        videotoolbox::sw_format_of,
     },
     pool::UnboundObjectPoolRef,
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -22,6 +23,7 @@ use crate::{
 };
 
 const SHADER: &str = include_str!("../../../../shaders/metal/convert.metal");
+const TONE_MAP: &str = include_str!("../../../../shaders/metal/tone_map.metal");
 
 /// Errors specific to [`MetalConverter`]. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
@@ -36,9 +38,13 @@ pub enum MetalConverterError {
     #[error("MetalConverter only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
-    /// The frame is not an NV12 VideoToolbox frame.
+    /// The frame is not an NV12 VideoToolbox frame, nor an HDR P010 one.
     #[error("MetalConverter {0}")]
     Frame(String),
+    /// A P010 frame tagged neither PQ nor HLG: SDR, which has no tone map
+    /// to bring it down by.
+    #[error("MetalConverter takes P010 only as HDR, tagged PQ or HLG")]
+    SdrP010,
 
     /// A Metal call this element made failed.
     #[error(transparent)]
@@ -64,6 +70,12 @@ impl From<MetalPassError> for MetalConverterError {
 /// BT.709 above 576 rows and BT.601 at or below where it names none — and
 /// comes out full-range RGB, opaque, with its timing carried through and
 /// tagged as what it now is.
+///
+/// A P010 frame tagged PQ or HLG — the 10 bits HDR is decoded to — is
+/// brought to SDR BT.709 on the way instead, by `core/tone_map.rs`'s
+/// definition, the one `CudaConverter` and `D3d11ToneMap` draw with, and
+/// tagged BT.709 for it. SDR P010 is refused with
+/// [`MetalConverterError::SdrP010`].
 pub struct MetalConverter(FilterStage<Converting>);
 
 filter_stage!(MetalConverter);
@@ -74,6 +86,10 @@ struct Converting {
     pp_log: PpLog,
     name: Arc<str>,
     pass: MetalPass,
+    /// The HDR P010 pass, made at the first such frame.
+    tone_map: Option<MetalPass>,
+    /// What output frames are made on, for `tone_map` when it is made.
+    device: VideoToolboxDevice,
     repeated: RepeatedOutput,
 }
 
@@ -88,11 +104,13 @@ impl MetalConverter {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::MetalConverter, &name, None);
         let pass = MetalPass::new(device, SHADER, "convert", PassInput::Nv12)?;
-        pp_info!(pp_log: &pp_log, "opened: NV12 -> BGRA");
+        pp_info!(pp_log: &pp_log, "opened: NV12 or HDR P010 -> BGRA");
         Ok(Self(FilterStage::new(Converting {
             name,
             pp_log,
             pass,
+            tone_map: None,
+            device: device.clone(),
             repeated: RepeatedOutput::new(),
         })))
     }
@@ -103,6 +121,9 @@ impl Converting {
         &mut self,
         source: &ffmpeg::frame::Video,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        if sw_format_of(source) == Ok(ffmpeg::format::Pixel::P010LE) {
+            return self.tone_map(source);
+        }
         let rows = ColorDescription::of(source).yuv_to_rgb_rows(source.height());
         let mut words = vec![
             source.width().to_ne_bytes(),
@@ -122,6 +143,39 @@ impl Converting {
             space: ffmpeg::color::Space::RGB,
             range: ffmpeg::color::Range::JPEG,
             ..described
+        }
+        .describe(&mut output);
+        Ok(output)
+    }
+
+    /// An HDR P010 `source` brought to SDR BGRA.
+    fn tone_map(
+        &mut self,
+        source: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let map = crate::tone_map::ToneMap::of_frame(source).ok_or_else(|| {
+            let error = MetalConverterError::SdrP010;
+            pp_error!(self, "{error}");
+            error
+        })?;
+        let pass = match &mut self.tone_map {
+            Some(pass) => pass,
+            empty => empty.insert(
+                MetalPass::new(&self.device, TONE_MAP, "tone_map", PassInput::P010)
+                    .map_err(MetalConverterError::from)
+                    .inspect_err(|error| pp_error!(self, "{error}"))?,
+            ),
+        };
+        let parameters = tone_map_parameters(&map, (source.width(), source.height()));
+        let mut output = pass
+            .run(source, &parameters)
+            .map_err(MetalConverterError::from)
+            .inspect_err(|error| pp_error!(self, "{error}"))?;
+        // What it now is: full-range RGB, SDR BT.709.
+        ColorDescription {
+            space: ffmpeg::color::Space::RGB,
+            range: ffmpeg::color::Range::JPEG,
+            ..ColorDescription::BT709_LIMITED
         }
         .describe(&mut output);
         Ok(output)
@@ -168,7 +222,7 @@ impl Filter for Converting {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
-                .with_layouts(crate::contract::PixelLayoutSet::NV12),
+                .with_layouts(crate::contract::PixelLayoutSet::YUV420),
         )
     }
 
@@ -273,6 +327,113 @@ mod tests {
                     [r, g, b]
                 );
             }
+        }
+    }
+
+    /// An HDR P010 picture, HLG or PQ, comes out SDR BGRA by
+    /// `core/tone_map.rs`'s definition, pixel for pixel to within the
+    /// rounding of a GPU's powers, tagged BT.709 with its timestamp carried;
+    /// an SDR one is refused and nothing is handed on.
+    #[test]
+    fn hdr_p010_comes_out_tone_mapped() {
+        use crate::tone_map::ToneMap;
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let (width, height) = (64usize, 32usize);
+        // Ten-bit luma across the range, two chroma pairs off grey.
+        let luma = |x: usize, y: usize| (64 + (x * 13 + y * 7) % 877) as u16;
+        let chroma = |x: usize, y: usize| -> (u16, u16) {
+            match (x + y) % 3 {
+                0 => (512, 512),
+                1 => (400, 620),
+                _ => (600, 450),
+            }
+        };
+        let mut converter = MetalConverter::new("convert", &device).unwrap();
+        let converted = capture(&mut converter);
+        for transfer in [
+            ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+            ffmpeg::color::TransferCharacteristic::SMPTE2084,
+            ffmpeg::color::TransferCharacteristic::BT709,
+        ] {
+            let mut frame = ffmpeg::frame::Video::new(
+                ffmpeg::format::Pixel::P010LE,
+                width as u32,
+                height as u32,
+            );
+            frame.set_pts(Some(7));
+            let (stride, cstride) = (frame.stride(0), frame.stride(1));
+            for y in 0..height {
+                for x in 0..width {
+                    frame.data_mut(0)[y * stride + x * 2..][..2]
+                        .copy_from_slice(&(luma(x, y) << 6).to_le_bytes());
+                }
+            }
+            for y in 0..height / 2 {
+                for x in 0..width / 2 {
+                    let (cb, cr) = chroma(x, y);
+                    let at = y * cstride + x * 4;
+                    frame.data_mut(1)[at..at + 2].copy_from_slice(&(cb << 6).to_le_bytes());
+                    frame.data_mut(1)[at + 2..at + 4].copy_from_slice(&(cr << 6).to_le_bytes());
+                }
+            }
+            ColorDescription {
+                space: ffmpeg::color::Space::BT2020NCL,
+                range: ffmpeg::color::Range::MPEG,
+                primaries: ffmpeg::color::Primaries::BT2020,
+                transfer,
+            }
+            .describe(&mut frame);
+            let mut upload = VideoToolboxUpload::new("upload", &device);
+            let uploaded = capture(&mut upload);
+            upload.consume(MediaBuffer::video(frame.clone())).unwrap();
+            let input = uploaded.lock().unwrap().remove(0);
+
+            let Some(map) = ToneMap::of_frame(&frame) else {
+                assert!(
+                    matches!(
+                        converter.consume(input),
+                        Err(crate::error::Error::MetalConverterError(
+                            MetalConverterError::SdrP010
+                        ))
+                    ),
+                    "SDR P010 has no tone map"
+                );
+                assert!(converted.lock().unwrap().is_empty(), "nothing handed on");
+                continue;
+            };
+            converter.consume(input).unwrap();
+            let mut download = VideoToolboxDownload::new("download");
+            let back = capture(&mut download);
+            download
+                .consume(converted.lock().unwrap().remove(0))
+                .unwrap();
+            let MediaBuffer::Video(out) = back.lock().unwrap().remove(0) else {
+                panic!("a picture");
+            };
+            assert_eq!(out.format(), ffmpeg::format::Pixel::BGRA);
+            assert_eq!(out.pts(), Some(7));
+            assert_eq!(out.color_space(), ffmpeg::color::Space::RGB);
+            assert_eq!(out.color_primaries(), ffmpeg::color::Primaries::BT709);
+            assert_eq!(
+                out.color_transfer_characteristic(),
+                ffmpeg::color::TransferCharacteristic::BT709
+            );
+            let mut worst = 0;
+            for y in 0..height {
+                for x in 0..width {
+                    let (cb, cr) = chroma(x / 2, y / 2);
+                    let unit = |code: u16| f32::from(code << 6) / 65535.0;
+                    let want = map.apply(unit(luma(x, y)), unit(cb), unit(cr));
+                    let got = &out.data(0)[y * out.stride(0) + x * 4..][..4];
+                    assert_eq!(got[3], 255);
+                    for (got, want) in [got[2], got[1], got[0]].iter().zip(want) {
+                        worst = worst.max(got.abs_diff(want));
+                    }
+                }
+            }
+            assert!(worst <= 2, "{transfer:?}: off by {worst} of 255");
         }
     }
 }

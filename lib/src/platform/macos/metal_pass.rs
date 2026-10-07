@@ -1,13 +1,13 @@
 //! One Metal compute kernel over a VideoToolbox frame, into a new BGRA one of
 //! the same size — what a per-pixel filter on Metal is: `MetalVideoEffect`,
-//! `MetalChromaKey`, and `MetalConverter` from NV12. The Metal counterpart
+//! `MetalChromaKey`, and `MetalConverter` from NV12 or HDR P010. The Metal counterpart
 //! of `platform::vulkan::bgra_pass`.
 //!
 //! The kernel reads the source through textures made over its pixel
 //! buffer's `IOSurface` and writes the output frame's the same way, nothing
 //! copied: texture 0 is the output, `bgra8Unorm`, written; texture 1 the
-//! source — for NV12 its luma, and texture 2 its chroma — and buffer 0 the
-//! kernel's parameters, beginning with the picture's size.
+//! source — for NV12 and P010 its luma, and texture 2 its chroma — and
+//! buffer 0 the kernel's parameters, which say the picture's size.
 
 use std::sync::Arc;
 
@@ -52,6 +52,9 @@ pub(crate) enum MetalPassError {
 pub(crate) enum PassInput {
     Bgra,
     Nv12,
+    /// Luma as `r16Unorm` and chroma as `rg16Unorm`, each sample as it is
+    /// stored: ten bits at the top of two bytes.
+    P010,
 }
 
 impl PassInput {
@@ -59,6 +62,7 @@ impl PassInput {
         match self {
             Self::Bgra => ffmpeg::format::Pixel::BGRA,
             Self::Nv12 => ffmpeg::format::Pixel::NV12,
+            Self::P010 => ffmpeg::format::Pixel::P010LE,
         }
     }
 }
@@ -166,15 +170,14 @@ impl MetalPass {
                     read,
                 )?);
             }
-            PassInput::Nv12 => {
-                textures.push(
-                    self.gpu
-                        .plane(&source_buffer, 0, MTLPixelFormat::R8Unorm, read)?,
-                );
-                textures.push(
-                    self.gpu
-                        .plane(&source_buffer, 1, MTLPixelFormat::RG8Unorm, read)?,
-                );
+            PassInput::Nv12 | PassInput::P010 => {
+                let (luma, chroma) = if self.input == PassInput::Nv12 {
+                    (MTLPixelFormat::R8Unorm, MTLPixelFormat::RG8Unorm)
+                } else {
+                    (MTLPixelFormat::R16Unorm, MTLPixelFormat::RG16Unorm)
+                };
+                textures.push(self.gpu.plane(&source_buffer, 0, luma, read)?);
+                textures.push(self.gpu.plane(&source_buffer, 1, chroma, read)?);
             }
         }
         let bound: Vec<&Texture> = textures.iter().collect();
@@ -193,4 +196,30 @@ impl MetalPass {
 /// The kernel's parameters, as the words it reads them in.
 pub(crate) fn parameters(words: &[[u8; 4]]) -> Vec<u8> {
     words.iter().flatten().copied().collect()
+}
+
+/// `map` as `shaders/metal/tone_map.metal`'s `ToneMap` reads it, for a
+/// picture of `size`: three rows, the transfer and the EETF's three
+/// numbers, three rows of the gamut, then the size.
+pub(crate) fn tone_map_parameters(map: &crate::tone_map::ToneMap, size: (u32, u32)) -> Vec<u8> {
+    let mut bytes: Vec<u8> = map
+        .rows
+        .iter()
+        .flatten()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    bytes.extend(map.transfer.to_ne_bytes());
+    for value in [map.source_peak_pq, map.target_peak, map.knee] {
+        bytes.extend(value.to_ne_bytes());
+    }
+    bytes.extend(
+        map.gamut
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_ne_bytes()),
+    );
+    for word in [size.0, size.1, 0, 0] {
+        bytes.extend(word.to_ne_bytes());
+    }
+    bytes
 }
