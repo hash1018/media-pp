@@ -23,6 +23,7 @@ mod cuda;
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 mod metal;
 mod model;
+mod retinaface;
 mod sw_ort_classifier;
 mod sw_ort_detector;
 mod yolo;

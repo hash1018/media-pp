@@ -369,7 +369,10 @@ impl CudaOrtDetector {
                 OrtDetectorError::UnsupportedModel("the model has no output".into()).into(),
             );
         }
-        let labels = labels(options.detector.labels.as_deref(), &session);
+        let labels = options
+            .detector
+            .model
+            .labels(labels(options.detector.labels.as_deref(), &session));
         let driver = CudaDriver::retain_primary().map_err(OrtDetectorError::from)?;
         let kernels = driver.fit_kernels().map_err(OrtDetectorError::from)?;
         let max_batch = if open_batch(&session) {
@@ -420,7 +423,7 @@ impl CudaOrtDetector {
             pp_log,
             session,
             values: options.detector.model.input(),
-            decoder: options.detector.model.decoder(),
+            decoder: options.detector.model.decoder(model),
             options: options.detector,
             labels,
             model,
@@ -1012,6 +1015,93 @@ mod tests {
                     best > 0.8,
                     "{format:?}: {wanted:?} found at IoU {best} only"
                 );
+            }
+        }
+    }
+
+    /// A RetinaFace model on the GPU finds the faces the CPU finds, in the
+    /// same places, with their five points — through the model's own BGR
+    /// values, made on the GPU by `swap_planes` and `scale_planes`. Needs a
+    /// RetinaFace ONNX model and a video with faces in it.
+    #[test]
+    fn retinaface_finds_on_the_gpu_the_faces_the_cpu_finds() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_RETINAFACE"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_RETINAFACE and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Ok(device) = CudaDevice::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        if let CudaRuntime::Unavailable { cuda } = CudaOrtDetector::runtime() {
+            eprintln!("skipping: the CUDA runtime cannot be used ({cuda})");
+            return;
+        }
+        let options = CudaOrtDetectorOptions {
+            detector: OrtDetectorOptions {
+                model: crate::elements::DetectorModel::RetinaFace,
+                ..OrtDetectorOptions::default()
+            },
+            #[cfg(feature = "ort-tensorrt")]
+            tensorrt: UseTensorRtPolicy::Off,
+            ..CudaOrtDetectorOptions::default()
+        };
+        let Some(&n) =
+            crate::test_support::pictures_found_on(&model, &video, 1, options.detector.clone())
+                .first()
+        else {
+            eprintln!("skipping: no face in {video} that the CPU is sure of");
+            return;
+        };
+        let mut cpu = SwOrtDetector::new("cpu", &model, options.detector.clone()).expect("loads");
+        let expected = found(
+            &mut cpu,
+            MediaBuffer::video(crate::test_support::nth_picture(
+                &video,
+                n,
+                ffmpeg::format::Pixel::NV12,
+            )),
+        );
+        assert_eq!(expected.labels.as_ref(), [Arc::from("face")]);
+
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+        let uploaded = capture(&mut upload);
+        upload
+            .consume(MediaBuffer::video(crate::test_support::nth_picture(
+                &video,
+                n,
+                ffmpeg::format::Pixel::NV12,
+            )))
+            .expect("uploads");
+        let on_gpu = uploaded.lock().unwrap().remove(0);
+        let mut gpu = CudaOrtDetector::new("gpu", &device, &model, options).expect("loads on CUDA");
+        let actual = found(&mut gpu, on_gpu);
+        for wanted in expected.items.iter().filter(|found| found.score > 0.5) {
+            let best = actual
+                .items
+                .iter()
+                .max_by(|a, b| iou(a, wanted).total_cmp(&iou(b, wanted)))
+                .expect("a face found on the GPU");
+            assert!(
+                iou(best, wanted) > 0.8,
+                "{wanted:?} found at IoU {} only",
+                iou(best, wanted)
+            );
+            assert_eq!(best.landmarks.len(), 5, "{best:?}");
+            // The eyes are inside the face, and its points near the CPU's —
+            // within a tenth of the face's width.
+            for &(x, y) in &best.landmarks[..2] {
+                assert!(
+                    x > best.x && x < best.x + best.width && y > best.y && y < best.y + best.height,
+                    "{best:?}"
+                );
+            }
+            for (got, want) in best.landmarks.iter().zip(&wanted.landmarks) {
+                let off = (got.0 - want.0).hypot(got.1 - want.1);
+                assert!(off < wanted.width / 10.0, "{got:?} against {want:?}");
             }
         }
     }

@@ -232,6 +232,18 @@ compile error with no explanation.
 
 ### Added
 
+- **RetinaFace, a face detector, in every ORT detector.**
+  `DetectorModel::RetinaFace` reads biubug6's `Pytorch_Retinaface` exports,
+  MobileNet or ResNet: BGR from 0 to 255 less a mean, made on the GPU by a
+  new `swap_planes` kernel and `scale_planes`; three outputs of a row per
+  anchor, told apart by their shape, whatever an export names them. Each
+  face is class 0, named `face`, with its eyes, nose and mouth corners as
+  `Detection::landmarks`. On a Tears of Steel clip it finds the faces a
+  reference decoding in Python does, in the same places; MobileNet 0.25
+  runs about 440 pictures a second on an RTX 3050 through TensorRT, decode
+  included. `cuda_detect --retinaface --hide face=mosaic,ellipse` hides
+  every face.
+
 - **An iPhone's HDR goes through in ten bits.** `CudaFrameFormat::P010` is
   what NVDEC decodes 10-bit video to. `CudaEncoder` takes it and encodes
   HEVC Main 10 — `with_color` saying BT.2020 and HLG or PQ, as

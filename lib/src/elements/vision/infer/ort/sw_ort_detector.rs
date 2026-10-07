@@ -103,7 +103,9 @@ impl SwOrtDetector {
             .commit_from_file(model_path)
             .map_err(OrtDetectorError::from)?;
         let model = model_input(&session)?;
-        let labels = labels(options.labels.as_deref(), &session);
+        let labels = options
+            .model
+            .labels(labels(options.labels.as_deref(), &session));
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwOrtDetector, &name, None);
         pp_info!(
@@ -127,7 +129,7 @@ impl SwOrtDetector {
             pp_log,
             session,
             values: options.model.input(),
-            decoder: options.model.decoder(),
+            decoder: options.model.decoder(model),
             options,
             labels,
             model,

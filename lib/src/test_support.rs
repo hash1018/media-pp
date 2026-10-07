@@ -1209,9 +1209,21 @@ pub(crate) fn each_picture(
 /// its number. Fewer than `count` where the clip has fewer.
 #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 pub(crate) fn pictures_with_objects(model: &str, video: &str, count: usize) -> Vec<usize> {
+    pictures_found_on(model, video, count, Default::default())
+}
+
+/// [`pictures_with_objects`] for a detector told `options`: a model of
+/// another kind.
+#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+pub(crate) fn pictures_found_on(
+    model: &str,
+    video: &str,
+    count: usize,
+    options: crate::elements::OrtDetectorOptions,
+) -> Vec<usize> {
     use crate::element::SrcPads;
-    use crate::elements::{AppSink, Detections, OrtDetectorOptions, SwOrtDetector};
-    let Ok(mut detector) = SwOrtDetector::new("scan", model, OrtDetectorOptions::default()) else {
+    use crate::elements::{AppSink, Detections, SwOrtDetector};
+    let Ok(mut detector) = SwOrtDetector::new("scan", model, options) else {
         return Vec::new();
     };
     let kept: Arc<Mutex<Vec<MediaBuffer>>> = Arc::default();

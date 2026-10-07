@@ -12,7 +12,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::{OrtDetectorOptions, OrtError, yolo::Yolo};
+use super::{OrtDetectorOptions, OrtError, retinaface, retinaface::RetinaFace, yolo::Yolo};
 use crate::elements::Detection;
 use crate::orientation::Orientation;
 
@@ -25,6 +25,19 @@ pub enum DetectorModel {
     /// [`OrtDetectorOptions`].
     #[default]
     Yolo,
+    /// A RetinaFace face detector, as biubug6's `Pytorch_Retinaface`
+    /// trains one and its exports to ONNX take and make it — MobileNet or
+    /// ResNet: one input of OpenCV's BGR from 0 to 255 less a mean per
+    /// channel, and three outputs of a row per anchor, the box's offsets
+    /// from its anchor (`[batch, anchors, 4]`), the scores of background
+    /// and face (`[batch, anchors, 2]`, probabilities or not) and the
+    /// offsets of five points (`[batch, anchors, 10]`), in any order and by
+    /// any name. Every box is a face, class 0, named `face` unless
+    /// [`OrtDetectorOptions::labels`] names it otherwise, and carries the
+    /// five points as its [`Detection::landmarks`]: the eyes, the nose and
+    /// the corners of the mouth, as the model orders them. Duplicates are
+    /// suppressed by [`OrtDetectorOptions::iou_threshold`].
+    RetinaFace,
     /// A model this crate does not read: its input filled as `input` says,
     /// and its output read by `decoder`.
     Custom {
@@ -39,6 +52,7 @@ impl fmt::Debug for DetectorModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Yolo => f.write_str("Yolo"),
+            Self::RetinaFace => f.write_str("RetinaFace"),
             Self::Custom { input, decoder } => f
                 .debug_struct("Custom")
                 .field("input", input)
@@ -53,7 +67,7 @@ impl fmt::Debug for DetectorModel {
 impl PartialEq for DetectorModel {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Yolo, Self::Yolo) => true,
+            (Self::Yolo, Self::Yolo) | (Self::RetinaFace, Self::RetinaFace) => true,
             (
                 Self::Custom { input, decoder },
                 Self::Custom {
@@ -71,15 +85,27 @@ impl DetectorModel {
     pub(crate) fn input(&self) -> ModelInput {
         match self {
             Self::Yolo => ModelInput::default(),
+            Self::RetinaFace => retinaface::INPUT,
             Self::Custom { input, .. } => *input,
         }
     }
 
-    /// What reads the output of a model of this kind.
-    pub(crate) fn decoder(&self) -> Arc<dyn DetectorDecoder> {
+    /// What reads the output of a model of this kind, whose input is
+    /// `input` in size.
+    pub(crate) fn decoder(&self, input: (u32, u32)) -> Arc<dyn DetectorDecoder> {
         match self {
             Self::Yolo => Arc::new(Yolo),
+            Self::RetinaFace => Arc::new(RetinaFace::new(input)),
             Self::Custom { decoder, .. } => Arc::clone(decoder),
+        }
+    }
+
+    /// The class names a model of this kind has where it names none
+    /// itself and none were given: `face`, for a face detector's one class.
+    pub(crate) fn labels(&self, read: Arc<[Arc<str>]>) -> Arc<[Arc<str>]> {
+        match self {
+            Self::RetinaFace if read.is_empty() => Arc::from([Arc::from("face")]),
+            _ => read,
         }
     }
 

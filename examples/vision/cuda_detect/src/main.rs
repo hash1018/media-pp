@@ -22,7 +22,9 @@
 //! file does.
 //!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
-//! YOLOv10 and YOLO26. The first run builds a TensorRT engine for the model
+//! YOLOv10 and YOLO26 — or with `--retinaface` a RetinaFace export, whose
+//! faces are labelled `face` and carry five points each: `--retinaface
+//! --hide face=mosaic,ellipse` hides every face. The first run builds a TensorRT engine for the model
 //! and this GPU, which takes minutes; later runs load it from the cache in
 //! under a second. Built with `ort-tensorrt`, which links CUDA 13, cuDNN 9
 //! and TensorRT 10 into it: on Linux building and running need them where
@@ -31,7 +33,8 @@
 //! `PATH`.
 //!
 //!     cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
+//!         [--retinaface] [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] \
+//!         [--pictures N]
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
@@ -64,8 +67,8 @@ mod example {
             AppSink, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtDetector, CudaOrtDetectorOptions, DetectionOverlayOptions, Detections,
-            FileDemuxer, FileMuxer, HideShape, Hiding, LabelStyle, RedactStyle, TrackFormat,
-            Treatment,
+            DetectorModel, FileDemuxer, FileMuxer, HideShape, Hiding, LabelStyle,
+            OrtDetectorOptions, RedactStyle, TrackFormat, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -85,6 +88,8 @@ mod example {
         out: Option<String>,
         hide: Vec<ClassRule>,
         pictures: usize,
+        /// The model is a RetinaFace face detector, not YOLO.
+        retinaface: bool,
     }
 
     /// `CLASS[=mosaic|blur|fill][,ellipse]` from `--hide`: that class's
@@ -122,7 +127,7 @@ mod example {
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
-                "usage: cuda_detect <model.onnx> <video.mp4> \
+                "usage: cuda_detect <model.onnx> <video.mp4> [--retinaface] \
                  [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]"
             );
             std::process::exit(1);
@@ -130,10 +135,12 @@ mod example {
         let mut positional = Vec::new();
         let (mut out, mut pictures) = (None, usize::MAX);
         let mut hide = Vec::new();
+        let mut retinaface = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
+                "--retinaface" => retinaface = true,
                 "--hide" => hide.push(
                     args.next()
                         .as_deref()
@@ -159,6 +166,7 @@ mod example {
             out,
             hide,
             pictures,
+            retinaface,
         }
     }
 
@@ -175,6 +183,7 @@ mod example {
             out,
             hide,
             pictures: limit,
+            retinaface,
         } = args();
 
         let device = CudaDevice::new()?;
@@ -183,7 +192,17 @@ mod example {
             "detector",
             &device,
             &model,
-            CudaOrtDetectorOptions::default(),
+            CudaOrtDetectorOptions {
+                detector: OrtDetectorOptions {
+                    model: if retinaface {
+                        DetectorModel::RetinaFace
+                    } else {
+                        DetectorModel::Yolo
+                    },
+                    ..OrtDetectorOptions::default()
+                },
+                ..CudaOrtDetectorOptions::default()
+            },
         )?;
         println!("detector ready in {:.1?}", started.elapsed());
 

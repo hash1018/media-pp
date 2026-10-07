@@ -31,7 +31,10 @@ above, was found as a chair or a toilet, or not at all, for the half second
 before their shoulders showed.
 
 The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
-and YOLO26. The first run builds a TensorRT engine for the model and this GPU,
+and YOLO26 — or with `--retinaface` a RetinaFace export (biubug6's
+`Pytorch_Retinaface`, MobileNet or ResNet), whose faces are labelled `face`
+and carry five points each: `--retinaface --out faces.mp4 --hide
+face=mosaic,ellipse` hides every face. The first run builds a TensorRT engine for the model and this GPU,
 which takes minutes; later runs load it from `~/.cache/media-pp/tensorrt`
 (`%LOCALAPPDATA%\media-pp\tensorrt` on Windows) in under a second.
 
@@ -43,7 +46,8 @@ linker finds them, and running where the loader does — here both through
 ```sh
 LD_LIBRARY_PATH=/path/to/cuda13-cudnn9-tensorrt10/lib \
   cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-    [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
+    [--retinaface] [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] \
+    [--pictures N]
 ```
 
 On Windows building needs none of them, and running needs the directories

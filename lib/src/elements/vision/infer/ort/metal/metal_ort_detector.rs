@@ -219,7 +219,10 @@ impl MetalOrtDetector {
             .collect();
         let session = core_ml_session(model_path, &fixed, options.compute_units)?;
         let model = model_input(&session)?;
-        let labels = labels(options.detector.labels.as_deref(), &session);
+        let labels = options
+            .detector
+            .model
+            .labels(labels(options.detector.labels.as_deref(), &session));
         let fitting = Fitting::new(model, rows.unwrap_or(max_batch))?;
 
         pp_info!(
@@ -242,7 +245,7 @@ impl MetalOrtDetector {
             pp_log,
             session,
             values: options.detector.model.input(),
-            decoder: options.detector.model.decoder(),
+            decoder: options.detector.model.decoder(model),
             options: options.detector,
             labels,
             interval,
