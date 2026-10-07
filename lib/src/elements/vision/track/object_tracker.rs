@@ -896,7 +896,8 @@ mod tests {
     }
 
     /// The same turn, on VideoToolbox pictures: the look is read where the
-    /// pictures are, and holds the block as it does in system memory.
+    /// pictures are, and holds the block as it does in system memory, saying
+    /// how sure it was as the CPU's does.
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn following_by_look_reads_videotoolbox_pictures() {
@@ -918,6 +919,9 @@ mod tests {
             upload.consume(MediaBuffer::video(nv12)).expect("uploaded");
             uploaded.lock().unwrap().remove(0)
         };
+        let looks = looks_on(true, &upload);
+        eprintln!("looks on VideoToolbox: {looks:?}");
+        assert_looks(&looks);
         let by_look = worst_miss_on(true, &upload);
         eprintln!("worst miss on VideoToolbox: by look {by_look}");
         assert!(by_look < 16.0, "by look, {by_look} pixels at worst");
