@@ -5,11 +5,7 @@
 use crate::orientation::Orientations;
 use std::{path::Path, sync::Arc};
 
-use ort::{
-    inputs,
-    session::Session,
-    value::{TensorRef, ValueType},
-};
+use ort::{inputs, session::Session, value::TensorRef};
 
 use crate::ffmpeg;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
@@ -25,26 +21,11 @@ use crate::{
 };
 
 use super::super::classify::{
-    Crop, Input, Memory, OrtClassifierOptions, Plan, answer, apply, best, classifier_input,
+    Crop, Input, Memory, OrtClassifierOptions, Plan, answer, apply, best,
 };
 use super::super::{OrtError, labels};
 use super::fitting::{Cut, Fitting, Picture};
-use super::{CoreMlComputeUnits, core_ml_session};
-
-/// How many objects a model that takes any number at once is fixed to take
-/// through Core ML, the inputs past those a picture has left as they were.
-///
-/// Core ML compiles a model of open shape again for each new batch — 0.6
-/// seconds a time for MobileNetV2 — and runs it no faster than the CPU, a
-/// batch of one through an error it then recovers from; of fixed shape it
-/// compiles once and runs on the Neural Engine. Which size is a trade: after
-/// a tracker most pictures have an object or two to classify, which a
-/// smaller batch runs sooner, and a crowd first seen comes in a run per
-/// batch. On an M5 with MobileNetV2 behind YOLOv10n and a tracker, 4 kept
-/// Intel's walking people at 195 pictures a second against 199 for 1 and
-/// 112 for 8, and a clip with an object classified on every picture at 137
-/// against 166 for 1, while taking a crowd in a quarter of the runs.
-const CORE_ML_BATCH: usize = 4;
+use super::{CORE_ML_BATCH, object_model_session};
 
 /// Classifies the objects a detector found on each VideoToolbox picture
 /// with a second model — what
@@ -103,39 +84,7 @@ impl MetalOrtClassifier {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::MetalOrtClassifier, &name, None);
         let path = model_path.as_ref().display().to_string();
-        // Read on the CPU first, which compiles nothing: what the model
-        // calls a batch it leaves open, to fix it for Core ML.
-        let open = Session::builder()
-            .map_err(OrtError::from)?
-            .commit_from_file(model_path.as_ref())
-            .map_err(OrtError::from)?;
-        let batch = match (classifier_input(&open)?.batch, open.inputs()[0].dtype()) {
-            (
-                None,
-                ValueType::Tensor {
-                    dimension_symbols, ..
-                },
-            ) if !dimension_symbols[0].is_empty() => Some(dimension_symbols[0].clone()),
-            (None, _) => {
-                pp_warn!(
-                    pp_log: &pp_log,
-                    "the model leaves its batch open without a name to fix it by: \
-                     Core ML compiles it again for each number of objects"
-                );
-                None
-            }
-            (Some(_), _) => None,
-        };
-        drop(open);
-        let session = core_ml_session(
-            model_path,
-            batch
-                .as_deref()
-                .map(|name| (name, CORE_ML_BATCH as i64))
-                .as_slice(),
-            CoreMlComputeUnits::All,
-        )?;
-        let input = classifier_input(&session)?;
+        let (session, input) = object_model_session(model_path.as_ref(), 224, &pp_log)?;
         let labels = labels(options.labels.as_deref(), &session);
         let fitting = Fitting::new(input.size, input.batch.unwrap_or(CORE_ML_BATCH))?;
         pp_info!(

@@ -1,6 +1,7 @@
-//! What the Metal detector and classifier share: the kernels that fit a
-//! VideoToolbox picture — or a rectangle of it — into a model's input, and
-//! the input they fit it into, in memory the CPU and GPU share.
+//! What the Metal detector, classifier and embedder share: the kernels that
+//! fit a VideoToolbox picture — or a rectangle of it, or an object through
+//! an affine map — into a model's input, and the input they fit it into, in
+//! memory the CPU and GPU share.
 
 use objc2_metal::{MTLBuffer, MTLPixelFormat, MTLTextureUsage};
 
@@ -87,6 +88,8 @@ pub(super) struct Fitting {
     gpu: MetalGpu,
     nv12: Kernel,
     bgra: Kernel,
+    warp_nv12: Kernel,
+    warp_bgra: Kernel,
     /// The inputs, each three planes of `f32`, which the kernels write and
     /// a session reads.
     tensor: Buffer,
@@ -102,7 +105,8 @@ impl Fitting {
     /// The kernels, and `capacity` inputs of `model`'s size.
     pub(super) fn new(model: (u32, u32), capacity: usize) -> Result<Self, OrtError> {
         let gpu = MetalGpu::new()?;
-        let [nv12, bgra] = gpu.kernel_array(SHADER, ["fit_nv12", "fit_bgra"])?;
+        let [nv12, bgra, warp_nv12, warp_bgra] =
+            gpu.kernel_array(SHADER, ["fit_nv12", "fit_bgra", "warp_nv12", "warp_bgra"])?;
         let capacity = capacity.max(1);
         let tensor = gpu.shared_buffer(capacity * Self::floats(model) * size_of::<f32>())?;
         Ok(Self {
@@ -111,6 +115,8 @@ impl Fitting {
             gpu,
             nv12,
             bgra,
+            warp_nv12,
+            warp_bgra,
             tensor,
         })
     }
@@ -245,6 +251,89 @@ impl Fitting {
                 );
                 pass.dispatch(kernel, &bound, Some(&parameters), self.model);
             }
+        }
+        pass.finish()?;
+        Ok(())
+    }
+
+    /// Reads `picture` through each of `maps` into the input of its index,
+    /// in the model's `values`, in one pass on the GPU, and waits for it:
+    /// input pixel `(u, v)` from `(m[0] u + m[1] v + m[2], m[3] u + m[4] v +
+    /// m[5])` of the picture, between the four pixels around it, black
+    /// outside it — what the CUDA embedder's `warp_nv12` and `warp_bgra`
+    /// read.
+    ///
+    /// # Panics
+    ///
+    /// If there are more maps than inputs: the caller's own arithmetic.
+    pub(super) fn warp(
+        &mut self,
+        picture: &Picture,
+        maps: &[[f32; 6]],
+        values: ModelInput,
+    ) -> Result<(), OrtError> {
+        assert!(
+            maps.len() <= self.capacity,
+            "{} maps for {} inputs",
+            maps.len(),
+            self.capacity
+        );
+        let ModelInput { scale, bias, order } = values;
+        let read = MTLTextureUsage::ShaderRead;
+        let (kernel, textures) = if picture.nv12 {
+            (
+                &self.warp_nv12,
+                vec![
+                    self.gpu
+                        .plane(&picture.buffer, 0, MTLPixelFormat::R8Unorm, read)?,
+                    self.gpu
+                        .plane(&picture.buffer, 1, MTLPixelFormat::RG8Unorm, read)?,
+                ],
+            )
+        } else {
+            (
+                &self.warp_bgra,
+                vec![
+                    self.gpu
+                        .plane(&picture.buffer, 0, MTLPixelFormat::BGRA8Unorm, read)?,
+                ],
+            )
+        };
+        let bound: Vec<&Texture> = textures.iter().collect();
+        let mut pass = self.gpu.pass()?;
+        pass.bind_buffer(&self.tensor, 1);
+        for (slot, map) in maps.iter().enumerate() {
+            let mut parameters: Vec<u8> = [
+                self.model.0,
+                self.model.1,
+                picture.size.0,
+                picture.size.1,
+                slot as u32,
+                u32::from(order == ChannelOrder::Bgr),
+                0,
+                0,
+            ]
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .collect();
+            // From 32 bytes, where a `float4` may start: the map's two rows,
+            // the colour rows, then the model's scale and bias.
+            let floats = [
+                [map[0], map[1], map[2], 0.0],
+                [map[3], map[4], map[5], 0.0],
+                picture.rows[0],
+                picture.rows[1],
+                picture.rows[2],
+                [scale[0], scale[1], scale[2], 1.0],
+                [bias[0], bias[1], bias[2], 0.0],
+            ];
+            parameters.extend(
+                floats
+                    .iter()
+                    .flatten()
+                    .flat_map(|value| value.to_ne_bytes()),
+            );
+            pass.dispatch(kernel, &bound, Some(&parameters), self.model);
         }
         pass.finish()?;
         Ok(())
@@ -575,6 +664,119 @@ pub(super) mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    fn warp_pattern(x: usize, y: usize) -> u8 {
+        ((x * 5 + y * 3) % 200 + 20) as u8
+    }
+
+    /// The warp kernels read each input pixel from where the map says,
+    /// between the four pixels around it, black outside the picture — what
+    /// the CPU embedder samples — through a turn and a scale, from NV12 and
+    /// BGRA, into the input of the map's place; and in the model's order and
+    /// values.
+    #[test]
+    fn the_warp_kernels_read_through_the_map() {
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let model = (12, 10);
+        let mut fitting = Fitting::new(model, 2).expect("the kernels compile");
+        // A third of a quarter turn, scaled by 2.5, moved so that part of
+        // the input falls off the picture's left and top.
+        let (c, d) = (2.5 * 0.5f32.cos(), 2.5 * 0.5f32.sin());
+        let map = [c, -d, 3.0, d, c, -4.0];
+        let expected = |u: usize, v: usize| -> f32 {
+            let (u, v) = (u as f32, v as f32);
+            let (x, y) = (
+                map[0] * u + map[1] * v + map[2],
+                map[3] * u + map[4] * v + map[5],
+            );
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let mut sum = 0.0;
+            for (dx, dy, w) in [
+                (0.0, 0.0, (1.0 - fx) * (1.0 - fy)),
+                (1.0, 0.0, fx * (1.0 - fy)),
+                (0.0, 1.0, (1.0 - fx) * fy),
+                (1.0, 1.0, fx * fy),
+            ] {
+                let (px, py) = (x0 + dx, y0 + dy);
+                if px >= 0.0 && py >= 0.0 && px < 40.0 && py < 30.0 {
+                    sum += w * f32::from(warp_pattern(px as usize, py as usize));
+                }
+            }
+            sum / 255.0
+        };
+        let plane = model.0 * model.1;
+        for format in [ffmpeg::format::Pixel::BGRA, ffmpeg::format::Pixel::NV12] {
+            let mut frame = ffmpeg::frame::Video::new(format, 40, 30);
+            let stride = frame.stride(0);
+            for y in 0..30 {
+                for x in 0..40 {
+                    let v = warp_pattern(x, y);
+                    if format == ffmpeg::format::Pixel::BGRA {
+                        frame.data_mut(0)[y * stride + x * 4..][..4]
+                            .copy_from_slice(&[v, v, v, 255]);
+                    } else {
+                        frame.data_mut(0)[y * stride + x] = v;
+                    }
+                }
+            }
+            if format == ffmpeg::format::Pixel::NV12 {
+                frame.data_mut(1).fill(128);
+                // Full range, so that a neutral chroma leaves R = G = B = Y'.
+                frame.set_color_range(ffmpeg::color::Range::JPEG);
+                frame.set_color_space(ffmpeg::color::Space::BT709);
+            }
+            let MediaBuffer::Video(frame) = upload(&device, frame) else {
+                panic!("a picture is uploaded");
+            };
+            let picture = Picture::of(&frame).expect("readable");
+            // The first input left grey by a fit; the map into the second.
+            let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+            fitting
+                .warp(&picture, &[identity, map], ModelInput::default())
+                .expect("warps");
+            let input = fitting.input(2);
+            let mut outside = 0;
+            for v in 0..model.1 as usize {
+                for u in 0..model.0 as usize {
+                    let want = expected(u, v);
+                    outside += usize::from(want == 0.0);
+                    for channel in 0..3 {
+                        let got = input[(3 + channel) * plane as usize + v * model.0 as usize + u];
+                        assert!(
+                            (got - want).abs() < 2.0 / 255.0,
+                            "{format:?} channel {channel}, ({u}, {v}): {got} against {want}"
+                        );
+                    }
+                }
+            }
+            assert!(outside > 0, "some of the input is off the picture");
+            // The identity reads the picture's own top-left pixels.
+            assert!((input[0] - f32::from(warp_pattern(0, 0)) / 255.0).abs() < 1e-3);
+
+            // BGR, times two less one: the planes swapped, then each scaled.
+            let values = ModelInput {
+                order: ChannelOrder::Bgr,
+                scale: [2.0, 3.0, 4.0],
+                bias: [-1.0, -2.0, -3.0],
+            };
+            fitting.warp(&picture, &[identity], values).expect("warps");
+            let input = fitting.input(1);
+            let want = f32::from(warp_pattern(0, 0)) / 255.0;
+            for (channel, (scale, bias)) in [(2.0, -1.0), (3.0, -2.0), (4.0, -3.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let got = input[channel * plane as usize];
+                assert!(
+                    (got - (want * scale + bias)).abs() < 1e-2,
+                    "{format:?} plane {channel}: {got}"
+                );
             }
         }
     }

@@ -299,6 +299,9 @@ pub enum ElementType {
     /// ONNX Runtime classifier of detected objects on VideoToolbox pictures,
     /// through Core ML.
     MetalOrtClassifier,
+    /// ONNX Runtime embedder of detected objects on VideoToolbox pictures,
+    /// through Core ML.
+    MetalOrtEmbedder,
     /// Draws a detector's boxes and labels onto pictures in system memory.
     SwDetectionOverlay,
     /// Draws a detector's boxes and labels onto CUDA pictures.

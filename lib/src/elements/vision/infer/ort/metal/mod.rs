@@ -1,11 +1,12 @@
-//! Inference on VideoToolbox pictures through Core ML: [`MetalOrtDetector`]
-//! and [`MetalOrtClassifier`], each fitting what it reads into its model's
-//! input with Metal.
+//! Inference on VideoToolbox pictures through Core ML: [`MetalOrtDetector`],
+//! [`MetalOrtClassifier`] and [`MetalOrtEmbedder`], each fitting what it
+//! reads into its model's input with Metal.
 
 mod best_class;
 mod fitting;
 mod metal_ort_classifier;
 mod metal_ort_detector;
+mod metal_ort_embedder;
 
 use std::path::Path;
 
@@ -15,10 +16,15 @@ use ort::{
     session::Session,
 };
 
+use ort::value::ValueType;
+
 use super::OrtError;
+use super::classify::{Input, image_input};
+use crate::pp_log::{PpLog, pp_warn};
 
 pub use metal_ort_classifier::MetalOrtClassifier;
 pub use metal_ort_detector::{MetalOrtDetector, MetalOrtDetectorOptions};
+pub use metal_ort_embedder::MetalOrtEmbedder;
 
 /// Where Core ML may run a model: what its `MLComputeUnits` allows. The
 /// CPU is allowed in each, for the layers the others do not take — a
@@ -70,4 +76,61 @@ fn core_ml_session(
         .map_err(|error| OrtError::Ort(error.into()))?
         .commit_from_file(model_path)
         .map_err(OrtError::from)
+}
+
+/// How many objects a model that takes any number at once is fixed to take
+/// through Core ML, the inputs past those a picture has left as they were.
+///
+/// Core ML compiles a model of open shape again for each new batch — 0.6
+/// seconds a time for MobileNetV2 — and runs it no faster than the CPU, a
+/// batch of one through an error it then recovers from; of fixed shape it
+/// compiles once and runs on the Neural Engine. Which size is a trade: after
+/// a tracker most pictures have an object or two to classify, which a
+/// smaller batch runs sooner, and a crowd first seen comes in a run per
+/// batch. On an M5 with MobileNetV2 behind YOLOv10n and a tracker, 4 kept
+/// Intel's walking people at 195 pictures a second against 199 for 1 and
+/// 112 for 8, and a clip with an object classified on every picture at 137
+/// against 166 for 1, while taking a crowd in a quarter of the runs.
+const CORE_ML_BATCH: usize = 4;
+
+/// A session through Core ML for a model run on the objects a detector
+/// found — a classifier's, an embedder's — and its input, `open` for a side
+/// it leaves open. A batch it leaves open is fixed to [`CORE_ML_BATCH`] by
+/// its name; one with no name to fix it by is left open, with a warning.
+fn object_model_session(
+    model_path: &Path,
+    open: u32,
+    pp_log: &PpLog,
+) -> Result<(Session, Input), OrtError> {
+    // Read on the CPU first, which compiles nothing: what the model calls a
+    // batch it leaves open, to fix it for Core ML.
+    let probe = Session::builder()?.commit_from_file(model_path)?;
+    let batch = match (image_input(&probe, open)?.batch, probe.inputs()[0].dtype()) {
+        (
+            None,
+            ValueType::Tensor {
+                dimension_symbols, ..
+            },
+        ) if !dimension_symbols[0].is_empty() => Some(dimension_symbols[0].clone()),
+        (None, _) => {
+            pp_warn!(
+                pp_log: pp_log,
+                "the model leaves its batch open without a name to fix it by: \
+                 Core ML compiles it again for each number of objects"
+            );
+            None
+        }
+        (Some(_), _) => None,
+    };
+    drop(probe);
+    let session = core_ml_session(
+        model_path,
+        batch
+            .as_deref()
+            .map(|name| (name, CORE_ML_BATCH as i64))
+            .as_slice(),
+        CoreMlComputeUnits::All,
+    )?;
+    let input = image_input(&session, open)?;
+    Ok((session, input))
 }

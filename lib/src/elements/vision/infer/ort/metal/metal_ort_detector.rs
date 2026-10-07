@@ -967,4 +967,68 @@ mod tests {
                 .any(|buf| !found_in(buf).is_empty())
         );
     }
+
+    /// A RetinaFace model through Core ML finds the faces the CPU finds, in
+    /// the same places, with their five points — through the model's own
+    /// BGR values, made by the fitting kernels. Needs a RetinaFace ONNX
+    /// model and a video with faces in it, as the CUDA detector's test does.
+    #[test]
+    fn retinaface_finds_through_core_ml_the_faces_the_cpu_finds() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_RETINAFACE"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_RETINAFACE and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let options = MetalOrtDetectorOptions {
+            detector: OrtDetectorOptions {
+                model: crate::elements::DetectorModel::RetinaFace,
+                ..OrtDetectorOptions::default()
+            },
+            ..MetalOrtDetectorOptions::default()
+        };
+        let Some(&n) =
+            crate::test_support::pictures_found_on(&model, &video, 1, options.detector.clone())
+                .first()
+        else {
+            eprintln!("skipping: no face in {video} that the CPU is sure of");
+            return;
+        };
+        let picture = || nth_picture(&video, n, ffmpeg::format::Pixel::NV12);
+        let mut cpu = SwOrtDetector::new("cpu", &model, options.detector.clone()).expect("loads");
+        let expected = found(&mut cpu, MediaBuffer::video(picture()));
+        assert_eq!(expected.labels.as_ref(), [Arc::from("face")]);
+
+        let on_gpu = upload(&device, picture());
+        let mut gpu = MetalOrtDetector::new("gpu", &model, options).expect("loads on Core ML");
+        let actual = found(&mut gpu, on_gpu);
+        let sure: Vec<_> = expected
+            .items
+            .iter()
+            .filter(|found| found.score > 0.5)
+            .collect();
+        assert!(!sure.is_empty());
+        for wanted in sure {
+            let best = actual
+                .items
+                .iter()
+                .max_by(|a, b| iou(a, wanted).total_cmp(&iou(b, wanted)))
+                .expect("a face found through Core ML");
+            assert!(
+                iou(best, wanted) > 0.8,
+                "{wanted:?} found at IoU {} only",
+                iou(best, wanted)
+            );
+            assert_eq!(best.landmarks.len(), 5, "{best:?}");
+            // Its points near the CPU's — within a tenth of the face's width.
+            for (got, want) in best.landmarks.iter().zip(&wanted.landmarks) {
+                let off = (got.0 - want.0).hypot(got.1 - want.1);
+                assert!(off < wanted.width / 10.0, "{got:?} against {want:?}");
+            }
+        }
+    }
 }

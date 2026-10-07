@@ -14,6 +14,7 @@ pub use self::ort::{
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use self::ort::{
     CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
+    MetalOrtEmbedder,
 };
 #[cfg(feature = "ort-cuda")]
 pub use self::ort::{

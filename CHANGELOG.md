@@ -248,7 +248,11 @@ compile error with no explanation.
   the picture never leaves the GPU; its vectors are the CPU's to 0.998 of
   a cosine on NV12 and 0.99998 on BGRA. On five people of Tears of Steel,
   AdaFace IR-18's vectors put each of 34 faces nearest one of its own
-  person, as a reference alignment in Python did. No Metal embedder yet.
+  person, as a reference alignment in Python did. `MetalOrtEmbedder` does
+  the same on VideoToolbox pictures through Core ML, a Metal kernel reading
+  each object through its map; on three faces of a NASA crew portrait found
+  by RetinaFace, SFace's vectors were the CPU's to a cosine of 0.9998 on
+  NV12 and 0.99999 on BGRA.
 
 - **RetinaFace, a face detector, in every ORT detector.**
   `DetectorModel::RetinaFace` reads biubug6's `Pytorch_Retinaface` exports,

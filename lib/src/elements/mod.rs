@@ -318,6 +318,7 @@ pub use vision::{
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use vision::{
     CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
+    MetalOrtEmbedder,
 };
 #[cfg(feature = "cuda")]
 pub use vision::{

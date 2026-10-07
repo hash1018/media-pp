@@ -42,6 +42,7 @@ pub use embed::{Alignment, OrtEmbedderOptions};
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use metal::{
     CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
+    MetalOrtEmbedder,
 };
 pub use model::{
     ChannelOrder, DetectorDecoder, DetectorModel, ModelBox, ModelInput, ModelOutput,

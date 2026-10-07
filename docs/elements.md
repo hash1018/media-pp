@@ -18,7 +18,7 @@ Each type's own documentation says what it accepts, owns and how it fails.
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` | `VideoToolboxUpload`, `VideoToolboxDownload` |
 | Detect | `SwOrtDetector` | | | `CudaOrtDetector` | | `MetalOrtDetector` |
 | Classify what was found | `SwOrtClassifier` | | | `CudaOrtClassifier` | | `MetalOrtClassifier` |
-| Embed what was found | `SwOrtEmbedder` | | | `CudaOrtEmbedder` | | |
+| Embed what was found | `SwOrtEmbedder` | | | `CudaOrtEmbedder` | | `MetalOrtEmbedder` |
 | Draw or hide detections | `SwDetectionOverlay` | | | `CudaDetectionOverlay` | | `MetalDetectionOverlay` |
 | Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | `MetalWindowRenderer`, `MetalRenderer` |
 
@@ -60,9 +60,10 @@ Each type's own documentation says what it accepts, owns and how it fails.
   application's own, read by its `DetectorDecoder`, finds on each picture
   as `Detections` metadata; `SwOrtClassifier`, `CudaOrtClassifier` and
   `MetalOrtClassifier`, which name each object found with a second model;
-  `SwOrtEmbedder` and `CudaOrtEmbedder`, which make each object found a
-  vector — a face straightened by its five points, or a whole box — that
-  lies near another's where the two look alike; `ObjectTracker`, which numbers each
+  `SwOrtEmbedder`, `CudaOrtEmbedder` and `MetalOrtEmbedder`, which make
+  each object found a vector — a face straightened by its five points, or
+  a whole box — that lies near another's where the two look alike;
+  `ObjectTracker`, which numbers each
   object across pictures and fills in the pictures a detector let by;
   `ObjectAnalytics`, which counts the objects in zones of the picture and
   across lines; `SwCutDetector` and `CudaCutDetector`, which mark the first

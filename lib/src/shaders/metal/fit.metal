@@ -140,3 +140,127 @@ kernel void fit_bgra(texture2d<float, access::read> pixels [[texture(0)]],
     }
     store(tensor, fit, id, rgb);
 }
+
+// `warp_nv12` and `warp_bgra` fit an object to an embedding model's input
+// through an affine map, the Metal counterpart of the CUDA kernels of those
+// names: input pixel `(u, v)` is read from the picture at `(dot(x_of.xyz,
+// (u, v, 1)), dot(y_of.xyz, (u, v, 1)))` — each pixel's centre at whole
+// numbers — between the four pixels around it, as `cv2.warpAffine` reads a
+// face onto the ArcFace template. Outside the picture, `size` in pixels, is
+// black. An NV12 picture's luma and chroma are each mixed over the pixels
+// inside and made RGB by its rows, then darkened by how much of the four
+// was outside, which is what mixing the RGB of each comes to.
+struct Warp {
+    // The model's input size.
+    uint2 model;
+    // The picture's size: what is inside it.
+    uint2 size;
+    // x: which input of the buffer, from 0; y: nonzero for B, G, R.
+    uint2 slot;
+    uint2 unused;
+    // Where input pixel (u, v) is read from, of u, v and 1.
+    float4 x_of;
+    float4 y_of;
+    // NV12 only: the rows that make a `(Y', Cb, Cr, 1)` sample RGB.
+    float4 r;
+    float4 g;
+    float4 b;
+    // Each channel, in the model's order, times `scale` plus `bias`.
+    float4 scale;
+    float4 bias;
+};
+
+// The four pixels around `p` in a plane `size` in pixels: where each is,
+// held inside the plane, and its weight, naught for one outside it.
+struct Four {
+    uint2 at[4];
+    float weight[4];
+    float inside;
+};
+
+static Four around(float2 p, uint2 size) {
+    float2 corner = floor(p);
+    float2 t = p - corner;
+    float2 s = 1.0 - t;
+    int2 first = int2(corner);
+    const int2 step[4] = {int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1)};
+    const float weight[4] = {s.x * s.y, t.x * s.y, s.x * t.y, t.x * t.y};
+    int2 last = int2(size) - 1;
+    Four four;
+    four.inside = 0.0;
+    for (int i = 0; i < 4; i++) {
+        int2 q = first + step[i];
+        bool in = q.x >= 0 && q.y >= 0 && q.x <= last.x && q.y <= last.y;
+        four.at[i] = uint2(clamp(q, int2(0), last));
+        four.weight[i] = in ? weight[i] : 0.0;
+        four.inside += four.weight[i];
+    }
+    return four;
+}
+
+static float2 source_of(constant Warp &warp, uint2 id) {
+    float3 at = float3(float(id.x), float(id.y), 1.0);
+    return float2(dot(warp.x_of.xyz, at), dot(warp.y_of.xyz, at));
+}
+
+static void store_warp(device float *tensor, constant Warp &warp, uint2 id, float3 rgb) {
+    uint plane = warp.model.x * warp.model.y;
+    uint at = warp.slot.x * 3 * plane + id.y * warp.model.x + id.x;
+    if (warp.slot.y != 0) {
+        rgb = rgb.bgr;
+    }
+    rgb = rgb * warp.scale.rgb + warp.bias.rgb;
+    tensor[at] = rgb.r;
+    tensor[plane + at] = rgb.g;
+    tensor[2 * plane + at] = rgb.b;
+}
+
+kernel void warp_nv12(texture2d<float, access::read> luma [[texture(0)]],
+                      texture2d<float, access::read> chroma [[texture(1)]],
+                      constant Warp &warp [[buffer(0)]],
+                      device float *tensor [[buffer(1)]],
+                      uint2 id [[thread_position_in_grid]]) {
+    if (id.x >= warp.model.x || id.y >= warp.model.y) {
+        return;
+    }
+    float2 p = source_of(warp, id);
+    Four four = around(p, warp.size);
+    float3 rgb = float3(0.0);
+    if (four.inside > 0.0) {
+        float y = 0.0;
+        for (int i = 0; i < 4; i++) {
+            y += luma.read(four.at[i]).r * four.weight[i];
+        }
+        y /= four.inside;
+        // The chroma plane, half each way, rounded up; a luma point's place
+        // in it, centres to centres.
+        Four cs = around((p + 0.5) * 0.5 - 0.5, (warp.size + 1) / 2);
+        float2 c = float2(0.5);
+        if (cs.inside > 0.0) {
+            c = float2(0.0);
+            for (int i = 0; i < 4; i++) {
+                c += chroma.read(cs.at[i]).rg * cs.weight[i];
+            }
+            c /= cs.inside;
+        }
+        float4 yuv = float4(y, c, 1.0);
+        rgb = clamp(float3(dot(warp.r, yuv), dot(warp.g, yuv), dot(warp.b, yuv)),
+                    float3(0.0), float3(1.0)) * four.inside;
+    }
+    store_warp(tensor, warp, id, rgb);
+}
+
+kernel void warp_bgra(texture2d<float, access::read> pixels [[texture(0)]],
+                      constant Warp &warp [[buffer(0)]],
+                      device float *tensor [[buffer(1)]],
+                      uint2 id [[thread_position_in_grid]]) {
+    if (id.x >= warp.model.x || id.y >= warp.model.y) {
+        return;
+    }
+    Four four = around(source_of(warp, id), warp.size);
+    float3 rgb = float3(0.0);
+    for (int i = 0; i < 4; i++) {
+        rgb += pixels.read(four.at[i]).rgb * four.weight[i];
+    }
+    store_warp(tensor, warp, id, rgb);
+}
