@@ -20,12 +20,14 @@ use crate::ffmpeg;
 mod classify;
 #[cfg(feature = "ort-cuda")]
 mod cuda;
+mod embed;
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 mod metal;
 mod model;
 mod retinaface;
 mod sw_ort_classifier;
 mod sw_ort_detector;
+mod sw_ort_embedder;
 mod yolo;
 
 pub use classify::{InputScale, OrtClassifierOptions};
@@ -33,9 +35,10 @@ pub use classify::{InputScale, OrtClassifierOptions};
 pub use cuda::UseTensorRtPolicy;
 #[cfg(feature = "ort-cuda")]
 pub use cuda::{
-    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
-    RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder, CudaRuntime,
+    LibraryVersion, RuntimeShortfall,
 };
+pub use embed::{Alignment, OrtEmbedderOptions};
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use metal::{
     CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
@@ -47,6 +50,7 @@ pub use model::{
 use model::{Letterbox, decode_batch};
 pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
+pub use sw_ort_embedder::SwOrtEmbedder;
 #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 use yolo::decode_best;
 

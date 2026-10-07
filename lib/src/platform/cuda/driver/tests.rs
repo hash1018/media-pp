@@ -753,6 +753,112 @@ fn a_picture_is_fitted_from_every_pixel_it_is_shrunk_from() {
     }
 }
 
+/// What the warp kernels read through `map` into a 12 by 10 input from a
+/// 40 by 30 picture whose luma — and, as BGRA, red — at pixel `(x, y)` is
+/// `pattern(x, y)`: the red plane, row by row.
+#[cfg(feature = "ort-cuda")]
+fn warped(device: &crate::elements::CudaDevice, bgra: bool, map: [f32; 6]) -> Vec<f32> {
+    let buf = if bgra {
+        cuda_bgra_surface(device, 40, 30, |x, y| {
+            let v = warp_pattern(x, y);
+            [v, v, v, 255]
+        })
+    } else {
+        cuda_surface_with(device, 40, 30, warp_pattern, 128)
+    }
+    .expect("uploaded");
+    let MediaBuffer::Video(frame) = &buf else {
+        panic!("a picture");
+    };
+    let driver = CudaDriver::retain_primary().expect("driver");
+    let kernels = driver.fit_kernels().expect("kernels");
+    let tensor = driver.batch_tensor(12, 10, 2).expect("tensor");
+    if bgra {
+        let source = BgraSurface::from_frame(frame).expect("surface");
+        driver
+            .warp_bgra(&kernels, &tensor, 1, (12, 10), map, source, (40, 30))
+            .expect("warps");
+    } else {
+        // Full range, so that a neutral chroma leaves R = G = B = Y'.
+        let colour = YuvToBgra::of(ffmpeg::color::Space::BT709, ffmpeg::color::Range::JPEG, 30);
+        let source = Nv12Surface::from_frame(frame).expect("surface");
+        driver
+            .warp_nv12(
+                &kernels,
+                &tensor,
+                1,
+                (12, 10),
+                map,
+                source,
+                (40, 30),
+                &colour,
+            )
+            .expect("warps");
+    }
+    driver.synchronize().expect("ran");
+    let mut planes = vec![0.0; 2 * 3 * 12 * 10];
+    driver.download(&tensor, &mut planes).expect("copied down");
+    // The second input's red plane: the first is left as it was.
+    planes[3 * 120..4 * 120].to_vec()
+}
+
+#[cfg(feature = "ort-cuda")]
+fn warp_pattern(x: u32, y: u32) -> u8 {
+    ((x * 5 + y * 3) % 200 + 20) as u8
+}
+
+/// The warp kernels read each input pixel from where the map says, between
+/// the four pixels around it, black outside the picture — what the CPU
+/// embedder samples — through a turn and a scale, from NV12 and BGRA.
+#[cfg(feature = "ort-cuda")]
+#[test]
+fn the_warp_kernels_read_through_the_map() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    // A third of a quarter turn, scaled by 2.5, moved so that part of the
+    // input falls off the picture's left and top.
+    let (c, d) = (2.5 * 0.5f32.cos(), 2.5 * 0.5f32.sin());
+    let map = [c, -d, 3.0, d, c, -4.0];
+    let expected = |u: u32, v: u32| -> f32 {
+        let (u, v) = (u as f32, v as f32);
+        let (x, y) = (
+            map[0] * u + map[1] * v + map[2],
+            map[3] * u + map[4] * v + map[5],
+        );
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let mut sum = 0.0;
+        for (dx, dy, w) in [
+            (0.0, 0.0, (1.0 - fx) * (1.0 - fy)),
+            (1.0, 0.0, fx * (1.0 - fy)),
+            (0.0, 1.0, (1.0 - fx) * fy),
+            (1.0, 1.0, fx * fy),
+        ] {
+            let (px, py) = (x0 + dx, y0 + dy);
+            if px >= 0.0 && py >= 0.0 && px < 40.0 && py < 30.0 {
+                sum += w * f32::from(warp_pattern(px as u32, py as u32));
+            }
+        }
+        sum / 255.0
+    };
+    for bgra in [true, false] {
+        let red = warped(&device, bgra, map);
+        let mut outside = 0;
+        for v in 0..10 {
+            for u in 0..12 {
+                let (got, want) = (red[(v * 12 + u) as usize], expected(u, v));
+                outside += usize::from(want == 0.0);
+                assert!(
+                    (got - want).abs() < 2.0 / 255.0,
+                    "bgra={bgra}, ({u}, {v}): {got} against {want}"
+                );
+            }
+        }
+        assert!(outside > 0, "some of the input is off the picture");
+    }
+}
+
 /// A model reading OpenCV's BGR from 0 to 255 less a mean is handed its
 /// own values: each picture's red and blue planes swapped, and each plane
 /// then scaled by the model's own channel — for a batch of two, and only

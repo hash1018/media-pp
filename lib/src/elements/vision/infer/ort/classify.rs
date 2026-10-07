@@ -2,7 +2,8 @@
 //! input and output are read, which objects to classify on a picture, and
 //! what is remembered of each followed one — DeepStream's secondary
 //! inference, and its asynchronous mode, where an object is classified once
-//! and the answer kept for as long as it is followed.
+//! and the answer kept for as long as it is followed. The embedders choose
+//! and remember their objects the same way, an answer being a vector.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use super::OrtError;
 use crate::buffer::MediaBuffer;
 use crate::elements::vision::batch::StreamId;
 use crate::elements::vision::batch::per_stream::{PerStream, stream_of};
-use crate::elements::{Classification, Detections};
+use crate::elements::{Classification, Detection, Detections};
 
 /// How a classifier decides what to classify, and what its answers are.
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +66,38 @@ impl Default for OrtClassifierOptions {
     }
 }
 
+/// Which of a detector's objects a second model looks at, and how often
+/// again: what a classifier's and an embedder's options both say.
+pub(crate) trait Selects {
+    /// The detected classes looked at, or `None` for every one.
+    fn classes(&self) -> Option<&[usize]>;
+    /// The fewest pixels across or down a box may have.
+    fn min_size(&self) -> u32;
+    /// The lowest detection score looked at.
+    fn min_detection_score(&self) -> f32;
+    /// How many pictures a followed object's answer is kept; 0 for as long
+    /// as it is followed.
+    fn refresh(&self) -> u32;
+}
+
+impl Selects for OrtClassifierOptions {
+    fn classes(&self) -> Option<&[usize]> {
+        self.classes.as_deref()
+    }
+
+    fn min_size(&self) -> u32 {
+        self.min_size
+    }
+
+    fn min_detection_score(&self) -> f32 {
+        self.min_detection_score
+    }
+
+    fn refresh(&self) -> u32 {
+        self.reclassify
+    }
+}
+
 /// How a model wants its input's values.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum InputScale {
@@ -107,6 +140,11 @@ pub(crate) struct Input {
 /// The model's input, from its first input's `[batch, 3, height, width]`;
 /// 224 for a side the model leaves open.
 pub(crate) fn classifier_input(session: &Session) -> Result<Input, OrtError> {
+    image_input(session, 224)
+}
+
+/// [`classifier_input`], `open` for a side the model leaves open.
+pub(crate) fn image_input(session: &Session, open: u32) -> Result<Input, OrtError> {
     let input = session
         .inputs()
         .first()
@@ -115,7 +153,7 @@ pub(crate) fn classifier_input(session: &Session) -> Result<Input, OrtError> {
         .dtype()
         .tensor_shape()
         .ok_or_else(|| OrtError::UnsupportedModel("its input is not a tensor".into()))?;
-    let side = |value: i64| if value > 0 { value as u32 } else { 224 };
+    let side = |value: i64| if value > 0 { value as u32 } else { open };
     match shape.iter().as_slice() {
         [batch, 3, height, width] => Ok(Input {
             size: (side(*width), side(*height)),
@@ -143,48 +181,75 @@ pub(crate) fn best(row: &[f32]) -> Option<(usize, f32)> {
 /// An object's box in pixels, cut to the picture: left, top, width, height.
 pub(crate) type Crop = (u32, u32, u32, u32);
 
-/// What a classifier does with one picture's detections: which to classify
-/// now, by index and box, and which carry a remembered answer.
-#[derive(Debug, Default)]
-pub(crate) struct Plan {
+/// What a classifier — or an embedder, whose answer `T` is a vector — does
+/// with one picture's detections: which to look at now, by index and box,
+/// and which carry a remembered answer.
+#[derive(Debug)]
+pub(crate) struct Plan<T = Classification> {
     pub(crate) classify: Vec<(usize, Crop)>,
-    pub(crate) remembered: Vec<(usize, Classification)>,
+    pub(crate) remembered: Vec<(usize, T)>,
     /// The stream the picture is of, whose memory its answers go into.
     stream: Option<StreamId>,
+}
+
+impl<T> Default for Plan<T> {
+    fn default() -> Self {
+        Self {
+            classify: Vec::new(),
+            remembered: Vec::new(),
+            stream: None,
+        }
+    }
 }
 
 /// What a classifier knows of the objects it has classified, kept for each
 /// stream after a [`StreamMux`](crate::elements::StreamMux): what an answer
 /// ages by is its own stream's pictures, not every stream's.
-#[derive(Default)]
-pub(crate) struct Memory {
-    streams: PerStream<Answers>,
+pub(crate) struct Memory<T = Classification> {
+    streams: PerStream<Answers<T>>,
+}
+
+impl<T> Default for Memory<T> {
+    fn default() -> Self {
+        Self {
+            streams: PerStream::default(),
+        }
+    }
 }
 
 /// What a classifier knows of one stream's objects, by a tracker's number.
-#[derive(Debug, Default)]
-struct Answers {
+#[derive(Debug)]
+struct Answers<T> {
     /// The stream's pictures so far.
     picture: u64,
     /// Each followed object's answer, the picture it was given on, and the
     /// last picture the object was seen on.
-    answers: HashMap<u64, (Classification, u64, u64)>,
+    answers: HashMap<u64, (T, u64, u64)>,
+}
+
+impl<T> Default for Answers<T> {
+    fn default() -> Self {
+        Self {
+            picture: 0,
+            answers: HashMap::new(),
+        }
+    }
 }
 
 /// How many pictures an object may go unseen before its answer is
 /// forgotten.
 const FORGET_AFTER: u64 = 300;
 
-impl Memory {
+impl<T: Clone> Memory<T> {
     /// What to do with `detections`, on `buf`, a picture `width` by
     /// `height`.
     pub(crate) fn plan(
         &mut self,
         buf: &MediaBuffer,
         detections: &Detections,
-        options: &OrtClassifierOptions,
+        options: &impl Selects,
         size: (u32, u32),
-    ) -> Plan {
+    ) -> Plan<T> {
         // A stream sought keeps what it knew: its objects after the seek
         // are numbered anew, and the answers of those before age out.
         let (answers, _) = self.streams.get(buf, |_| Answers::default());
@@ -196,7 +261,7 @@ impl Memory {
 
     /// Remembers `answer` for object `id`, given on the picture `plan` was
     /// made for.
-    fn remember(&mut self, plan: &Plan, id: u64, answer: Classification) {
+    fn remember(&mut self, plan: &Plan<T>, id: u64, answer: T) {
         if let Some(answers) = self.streams.of(plan.stream) {
             answers.remember(id, answer);
         }
@@ -208,13 +273,13 @@ impl Memory {
     }
 }
 
-impl Answers {
+impl<T: Clone> Answers<T> {
     fn plan(
         &mut self,
         detections: &Detections,
-        options: &OrtClassifierOptions,
+        options: &impl Selects,
         (width, height): (u32, u32),
-    ) -> Plan {
+    ) -> Plan<T> {
         self.picture += 1;
         let picture = self.picture;
         let mut plan = Plan::default();
@@ -224,7 +289,7 @@ impl Answers {
             {
                 *seen = picture;
                 let fresh =
-                    options.reclassify == 0 || picture - *given < u64::from(options.reclassify);
+                    options.refresh() == 0 || picture - *given < u64::from(options.refresh());
                 if fresh || detections.predicted {
                     plan.remembered.push((index, answer.clone()));
                     continue;
@@ -235,10 +300,9 @@ impl Answers {
             if detections.predicted {
                 continue;
             }
-            if item.score < options.min_detection_score
+            if item.score < options.min_detection_score()
                 || options
-                    .classes
-                    .as_ref()
+                    .classes()
                     .is_some_and(|classes| !classes.contains(&item.class_id))
             {
                 continue;
@@ -253,7 +317,7 @@ impl Answers {
             let right = at(item.x + item.width, width, f64::ceil, -1e-3);
             let bottom = at(item.y + item.height, height, f64::ceil, -1e-3);
             let (w, h) = (right.saturating_sub(left), bottom.saturating_sub(top));
-            if w < options.min_size || h < options.min_size {
+            if w < options.min_size() || h < options.min_size() {
                 continue;
             }
             plan.classify.push((index, (left, top, w, h)));
@@ -264,7 +328,7 @@ impl Answers {
     }
 
     /// Remembers `answer` for object `id`, given on this picture.
-    fn remember(&mut self, id: u64, answer: Classification) {
+    fn remember(&mut self, id: u64, answer: T) {
         self.answers
             .insert(id, (answer, self.picture, self.picture));
     }
@@ -275,11 +339,24 @@ impl Answers {
 pub(crate) fn apply(
     detections: &mut Detections,
     memory: &mut Memory,
-    mut plan: Plan,
+    plan: Plan,
     answers: Vec<(usize, Option<Classification>)>,
 ) {
+    apply_each(detections, memory, plan, answers, |item, answer| {
+        item.classes.push(answer)
+    });
+}
+
+/// [`apply`] for answers of any kind, each put on its item by `put`.
+pub(crate) fn apply_each<T: Clone>(
+    detections: &mut Detections,
+    memory: &mut Memory<T>,
+    mut plan: Plan<T>,
+    answers: Vec<(usize, Option<T>)>,
+    put: impl Fn(&mut Detection, T),
+) {
     for (index, answer) in std::mem::take(&mut plan.remembered) {
-        detections.items[index].classes.push(answer);
+        put(&mut detections.items[index], answer);
     }
     for (index, answer) in answers {
         let Some(answer) = answer else {
@@ -288,7 +365,7 @@ pub(crate) fn apply(
         if let Some(id) = detections.items[index].track_id {
             memory.remember(&plan, id, answer.clone());
         }
-        detections.items[index].classes.push(answer);
+        put(&mut detections.items[index], answer);
     }
 }
 
@@ -307,7 +384,6 @@ pub(crate) fn answer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elements::Detection;
 
     fn found(items: Vec<Detection>, predicted: bool) -> Detections {
         Detections {
@@ -438,7 +514,7 @@ mod tests {
             min_size: 50,
             ..OrtClassifierOptions::default()
         };
-        let mut memory = Memory::default();
+        let mut memory: Memory = Memory::default();
         let picture = found(
             vec![
                 tracked(None, 0),

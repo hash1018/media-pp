@@ -26,6 +26,8 @@ pub(crate) struct FitKernels {
     scale: CUfunction,
     swap: CUfunction,
     best: CUfunction,
+    warp_nv12: CUfunction,
+    warp_bgra: CUfunction,
 }
 
 // SAFETY: a module and two function handles in a context that is pushed
@@ -113,7 +115,7 @@ impl CudaDriver {
         self.with_context(|| {
             // SAFETY: the context is current inside `with_context`, which is
             // `load_module`'s whole contract.
-            let (module, [nv12, bgra, scale, swap, best]) = unsafe {
+            let (module, [nv12, bgra, scale, swap, best, warp_nv12, warp_bgra]) = unsafe {
                 load_module(
                     FIT_PTX,
                     [
@@ -122,6 +124,8 @@ impl CudaDriver {
                         "scale_planes",
                         "swap_planes",
                         "best_class",
+                        "warp_nv12",
+                        "warp_bgra",
                     ],
                 )?
             };
@@ -133,6 +137,8 @@ impl CudaDriver {
                 scale,
                 swap,
                 best,
+                warp_nv12,
+                warp_bgra,
             })
         })
     }
@@ -259,6 +265,95 @@ impl CudaDriver {
     }
 }
 
+impl CudaDriver {
+    /// Reads an NV12 picture, stored `size` in pixels, into the `slot`th
+    /// input of `tensor`, `model` in size, through `map` — input pixel `(u,
+    /// v)` from `(m0 u + m1 v + m2, m3 u + m4 v + m5)` — made RGB by
+    /// `colour`'s rows.
+    ///
+    /// Launches asynchronously, as the fits do.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn warp_nv12(
+        &self,
+        kernels: &FitKernels,
+        tensor: &CudaTensor,
+        slot: usize,
+        model: (u32, u32),
+        map: [f32; 6],
+        source: Nv12Surface,
+        size: (u32, u32),
+        colour: &YuvToBgra,
+    ) -> Result<(), CudaDriverError> {
+        let (grid, block, mut dst) = grid_of(model, tensor, slot)?;
+        let (mut model_w, mut model_h) = model;
+        let mut luma = source.luma;
+        let mut luma_pitch = source.luma_pitch as u32;
+        let mut chroma = source.chroma;
+        let mut chroma_pitch = source.chroma_pitch as u32;
+        let (mut src_w, mut src_h) = size;
+        let mut map = map;
+        let mut rows = colour.rows;
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut dst),
+                arg(&mut model_w),
+                arg(&mut model_h),
+                arg(&mut luma),
+                arg(&mut luma_pitch),
+                arg(&mut chroma),
+                arg(&mut chroma_pitch),
+                arg(&mut src_w),
+                arg(&mut src_h),
+            ];
+            params.extend(map.iter_mut().map(arg));
+            params.extend(rows.iter_mut().flatten().map(arg));
+            // SAFETY: one pointer per parameter `warp_nv12` declares, in that
+            // order — nine buffer and size values, six of the map, twelve row
+            // coefficients — each at a live local. The kernel reads the
+            // picture only inside `size`, clamped there, and writes the one
+            // input `grid_of` checked the tensor holds; the context is
+            // current inside `with_context`, and the kernel is this
+            // context's.
+            unsafe { launch(kernels.warp_nv12, grid, block, &mut params) }
+        })
+    }
+
+    /// The same for a BGRA picture.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn warp_bgra(
+        &self,
+        kernels: &FitKernels,
+        tensor: &CudaTensor,
+        slot: usize,
+        model: (u32, u32),
+        map: [f32; 6],
+        source: BgraSurface,
+        size: (u32, u32),
+    ) -> Result<(), CudaDriverError> {
+        let (grid, block, mut dst) = grid_of(model, tensor, slot)?;
+        let (mut model_w, mut model_h) = model;
+        let mut src = source.pixels;
+        let mut src_pitch = source.pitch as u32;
+        let (mut src_w, mut src_h) = size;
+        let mut map = map;
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut dst),
+                arg(&mut model_w),
+                arg(&mut model_h),
+                arg(&mut src),
+                arg(&mut src_pitch),
+                arg(&mut src_w),
+                arg(&mut src_h),
+            ];
+            params.extend(map.iter_mut().map(arg));
+            // SAFETY: one pointer per parameter `warp_bgra` declares, in that
+            // order, each at a live local; as `warp_nv12`.
+            unsafe { launch(kernels.warp_bgra, grid, block, &mut params) }
+        })
+    }
+}
+
 /// The launch shape for `fit` — a thread per input pixel — and where the
 /// `slot`th input starts, after checking `tensor` holds it, which is what
 /// keeps the kernel's stores inside it.
@@ -267,8 +362,17 @@ fn grid(
     tensor: &CudaTensor,
     slot: usize,
 ) -> Result<((u32, u32), u32, CUdeviceptr), CudaDriverError> {
+    grid_of(fit.model, tensor, slot)
+}
+
+/// [`grid`] for an input `model` in size.
+fn grid_of(
+    model: (u32, u32),
+    tensor: &CudaTensor,
+    slot: usize,
+) -> Result<((u32, u32), u32, CUdeviceptr), CudaDriverError> {
     const BLOCK: u32 = 16;
-    let (width, height) = fit.model;
+    let (width, height) = model;
     let input = 3 * (width as usize) * (height as usize);
     if (slot + 1) * input > tensor.floats {
         return Err(CudaDriverError::KernelRejected(format!(

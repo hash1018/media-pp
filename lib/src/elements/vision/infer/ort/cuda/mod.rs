@@ -3,12 +3,14 @@
 
 mod cuda_ort_classifier;
 mod cuda_ort_detector;
+mod cuda_ort_embedder;
 mod runtime;
 
 pub use cuda_ort_classifier::CudaOrtClassifier;
 #[cfg(feature = "ort-tensorrt")]
 pub use cuda_ort_detector::UseTensorRtPolicy;
 pub use cuda_ort_detector::{CudaOrtDetector, CudaOrtDetectorOptions};
+pub use cuda_ort_embedder::CudaOrtEmbedder;
 pub use runtime::{CudaRuntime, LibraryVersion, RuntimeShortfall};
 
 use crate::element::ElementType;
@@ -82,6 +84,115 @@ impl From<SdrCopyError> for super::OrtError {
             SdrCopyError::MissingSurface => Self::MissingSurface,
         }
     }
+}
+
+/// The batch TensorRT builds a second model's engine to be quickest at: a
+/// picture has a few objects to classify at once, seldom the most there is
+/// room for. Every batch from 1 to the most runs on the one engine. On an
+/// RTX 3050, MobileNetV2's engine built for 2 ran one to three objects
+/// 2–10% faster than one built for 8, and eight 6% slower; a pipeline
+/// classifying every object on every picture went 1% faster.
+#[cfg(feature = "ort-tensorrt")]
+const TENSORRT_OPT_BATCH: usize = 2;
+
+/// A session for a model run on the objects a detector found — a
+/// classifier's, an embedder's — on CUDA, or through TensorRT in half
+/// precision where it can run: its input, `open` for a side it leaves open,
+/// what it runs on, for the log, and the libraries asked. Its engine is
+/// built for every batch from one to `most`, where the model's batch is
+/// open; `doing` is what a warning says runs on CUDA alone.
+fn object_model_session(
+    model_path: &std::path::Path,
+    open: u32,
+    most: usize,
+    pp_log: &crate::pp_log::PpLog,
+    doing: &str,
+) -> Result<
+    (
+        ort::session::Session,
+        super::classify::Input,
+        &'static str,
+        runtime::Linked,
+    ),
+    super::OrtError,
+> {
+    #[cfg(feature = "ort-tensorrt")]
+    use crate::pp_log::pp_warn;
+    #[cfg(feature = "ort-tensorrt")]
+    use ort::ep::TensorRT;
+    use ort::{ep::CUDA, session::Session};
+
+    use super::OrtError;
+    use runtime::CudaRuntime;
+
+    let linked = runtime::Linked::ask();
+    let runtime = runtime::runtime(&linked);
+    #[cfg(feature = "ort-tensorrt")]
+    if let CudaRuntime::CudaOnly { tensorrt } = &runtime {
+        pp_warn!(pp_log: pp_log, "TensorRT cannot be used ({tensorrt}): {doing} on CUDA alone");
+    }
+    #[cfg(not(feature = "ort-tensorrt"))]
+    let _ = (pp_log, doing);
+    #[cfg(feature = "ort-tensorrt")]
+    let tensorrt = runtime == CudaRuntime::TensorRt;
+    if let CudaRuntime::Unavailable { cuda } = runtime {
+        return Err(OrtError::CudaRuntimeUnavailable(cuda));
+    }
+
+    // The input is read first, on the CPU: TensorRT is told the batches
+    // it will be given before its session is made.
+    let probe = Session::builder()?.commit_from_file(model_path)?;
+    let input = super::classify::image_input(&probe, open)?;
+    #[cfg(feature = "ort-tensorrt")]
+    let input_name = probe.inputs()[0].name().to_owned();
+    drop(probe);
+    #[cfg(not(feature = "ort-tensorrt"))]
+    let _ = most;
+
+    let mut providers = Vec::new();
+    #[cfg(feature = "ort-tensorrt")]
+    let provider = if tensorrt {
+        let capacity = input.batch.unwrap_or(most).max(1);
+        let profile = input.batch.is_none().then(|| BatchProfile {
+            min: 1,
+            opt: TENSORRT_OPT_BATCH.min(capacity),
+            max: capacity,
+        });
+        let root = default_engine_cache();
+        let cache = engine_directory(&root, profile);
+        if let Err(error) = std::fs::create_dir_all(&cache) {
+            pp_warn!(pp_log: pp_log, "no engine cache at {}: {error}", cache.display());
+        }
+        let mut provider = TensorRT::default()
+            .with_device_id(0)
+            .with_fp16(true)
+            .with_engine_cache(true)
+            .with_engine_cache_path(cache.display())
+            .with_timing_cache(true)
+            .with_timing_cache_path(root.display());
+        if let Some(profile) = profile {
+            let (width, height) = input.size;
+            let shape = |batch: usize| format!("{input_name}:{batch}x3x{height}x{width}");
+            provider = provider
+                .with_profile_min_shapes(shape(profile.min))
+                .with_profile_opt_shapes(shape(profile.opt))
+                .with_profile_max_shapes(shape(profile.max));
+        }
+        // Preferred: where TensorRT will not start, ONNX Runtime passes
+        // over it to CUDA.
+        providers.push(provider.build());
+        "TensorRT, fp16"
+    } else {
+        "CUDA"
+    };
+    #[cfg(not(feature = "ort-tensorrt"))]
+    let provider = "CUDA";
+    providers.push(CUDA::default().with_device_id(0).build().error_on_failure());
+    let session = Session::builder()?
+        .with_execution_providers(providers)
+        .map_err(|error| OrtError::Ort(error.into()))?
+        .commit_from_file(model_path)?;
+    Ok((session, input, provider, linked))
 }
 
 /// Where TensorRT keeps the engines it builds, unless told otherwise:

@@ -297,23 +297,23 @@ pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceE
 pub use source::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};
 #[cfg(feature = "ort-tensorrt")]
 pub use vision::UseTensorRtPolicy;
+#[cfg(feature = "ort")]
+pub use vision::{
+    Alignment, ChannelOrder, DetectorDecoder, DetectorModel, InputScale, ModelBox, ModelInput,
+    ModelOutput, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtEmbedderOptions,
+    OrtError, SwOrtClassifier, SwOrtDetector, SwOrtEmbedder, non_max_suppression,
+};
 pub use vision::{
     Analytics, AnalyticsOptions, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassId, ClassRule,
     Classification, Crossing, CutDetectorOptions, CutDetectorOptionsError, Detection,
-    DetectionOverlayOptions, DetectionOverlayOptionsError, Detections, HideShape, Hiding,
-    LabelStyle, Line, LineCount, ObjectAnalytics, ObjectAnalyticsError, ObjectTracker,
+    DetectionOverlayOptions, DetectionOverlayOptionsError, Detections, Embedding, HideShape,
+    Hiding, LabelStyle, Line, LineCount, ObjectAnalytics, ObjectAnalyticsError, ObjectTracker,
     OverlayParts, RedactStyle, SceneCut, StreamAnalyticsOptions, SwCutDetector, SwCutDetectorError,
     SwDetectionOverlay, SwDetectionOverlayError, TrackerOptions, Treatment, Zone, ZoneCount,
 };
 pub use vision::{
     BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,
     StreamMuxInput, StreamMuxOptions, StreamOrigin,
-};
-#[cfg(feature = "ort")]
-pub use vision::{
-    ChannelOrder, DetectorDecoder, DetectorModel, InputScale, ModelBox, ModelInput, ModelOutput,
-    OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtError, SwOrtClassifier,
-    SwOrtDetector, non_max_suppression,
 };
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use vision::{
@@ -325,8 +325,8 @@ pub use vision::{
 };
 #[cfg(feature = "ort-cuda")]
 pub use vision::{
-    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaRuntime, LibraryVersion,
-    RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder, CudaRuntime,
+    LibraryVersion, RuntimeShortfall,
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use vision::{MetalDetectionOverlay, MetalDetectionOverlayError};

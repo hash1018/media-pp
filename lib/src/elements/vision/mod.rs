@@ -47,8 +47,8 @@ pub use cut::{CutDetectorOptions, CutDetectorOptionsError, SwCutDetector, SwCutD
 #[cfg(feature = "ort")]
 pub use infer::*;
 pub use meta::{
-    Analytics, COCO_CLASS_LABELS, Classification, Crossing, Detection, Detections, LineCount,
-    SceneCut, ZoneCount,
+    Analytics, COCO_CLASS_LABELS, Classification, Crossing, Detection, Detections, Embedding,
+    LineCount, SceneCut, ZoneCount,
 };
 pub use overlay::{
     BoxColors, BoxStyle, ClassId, ClassRule, DetectionOverlayOptions, DetectionOverlayOptionsError,

@@ -232,6 +232,24 @@ compile error with no explanation.
 
 ### Added
 
+- **Embedders: what a detector found, made into vectors.** `SwOrtEmbedder`
+  and `CudaOrtEmbedder` run an embedding model on each object and put its
+  vector, of length 1, in the object's `Detection::embeddings` — vectors
+  that lie near each other where two objects look alike, compared with
+  `Embedding::similarity`, for telling which boxes across a video are the
+  same thing. `OrtEmbedderOptions::align` says how an object is cut:
+  `Alignment::FivePoints` straightens a face by the five points a
+  RetinaFace detector finds onto the ArcFace template a face recognition
+  model is trained on, `Alignment::Box` stretches a whole object's box.
+  The model's values are a `ModelInput`, as a detector's are. A followed
+  object is embedded once and kept, as the classifiers keep their answers
+  (`reembed`). On CUDA a new `warp_nv12`/`warp_bgra` kernel reads each
+  object through its map, between the four pixels around each point, and
+  the picture never leaves the GPU; its vectors are the CPU's to 0.998 of
+  a cosine on NV12 and 0.99998 on BGRA. On five people of Tears of Steel,
+  AdaFace IR-18's vectors put each of 34 faces nearest one of its own
+  person, as a reference alignment in Python did. No Metal embedder yet.
+
 - **RetinaFace, a face detector, in every ORT detector.**
   `DetectorModel::RetinaFace` reads biubug6's `Pytorch_Retinaface` exports,
   MobileNet or ResNet: BGR from 0 to 255 less a mean, made on the GPU by a

@@ -289,6 +289,10 @@ pub enum ElementType {
     SwOrtClassifier,
     /// ONNX Runtime classifier of detected objects on CUDA pictures.
     CudaOrtClassifier,
+    /// ONNX Runtime embedder of detected objects, on the CPU.
+    SwOrtEmbedder,
+    /// ONNX Runtime embedder of detected objects on CUDA pictures.
+    CudaOrtEmbedder,
     /// ONNX Runtime object-detection filter on VideoToolbox pictures,
     /// through Core ML.
     MetalOrtDetector,

@@ -322,6 +322,60 @@ pub(super) fn to_rgb24(
     Ok(context)
 }
 
+/// Pictures made RGB24 at their own size, as [`to_rgb24`] makes them,
+/// through a conversion kept while pictures keep their shape.
+#[derive(Default)]
+pub(super) struct ToRgb(Option<Converting>);
+
+/// The conversion of one picture shape, and the picture it makes.
+struct Converting {
+    from: (
+        ffmpeg::format::Pixel,
+        u32,
+        u32,
+        ffmpeg::color::Space,
+        ffmpeg::color::Range,
+    ),
+    context: ffmpeg::software::scaling::Context,
+    rgb: ffmpeg::frame::Video,
+}
+
+// SAFETY: the scaling context and frame are heap allocations owned solely by
+// this conversion, used only by the one thread transforming at a time, as the
+// detector's fitting holds its own.
+unsafe impl Send for Converting {}
+
+impl ToRgb {
+    /// `frame` as RGB24.
+    pub(super) fn run(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> std::result::Result<&ffmpeg::frame::Video, OrtDetectorError> {
+        let from = (
+            frame.format(),
+            frame.width(),
+            frame.height(),
+            frame.color_space(),
+            frame.color_range(),
+        );
+        // Taken out and put back, so that what is returned borrows only the
+        // slot it is put in.
+        let converting = match self.0.take() {
+            Some(converting) if converting.from == from => self.0.insert(converting),
+            _ => self.0.insert(Converting {
+                from,
+                context: to_rgb24(from, (from.1, from.2))?,
+                rgb: ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, from.1, from.2),
+            }),
+        };
+        converting
+            .context
+            .run(frame, &mut converting.rgb)
+            .map_err(OrtDetectorError::Convert)?;
+        Ok(&converting.rgb)
+    }
+}
+
 /// Whether `format` is a hardware frame's, whose pixels are not in it.
 pub(super) fn is_hardware(format: ffmpeg::format::Pixel) -> bool {
     crate::elements::vision::is_hardware(format)

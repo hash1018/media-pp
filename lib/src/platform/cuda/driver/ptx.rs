@@ -1640,6 +1640,7 @@ BBDONE:
 BMDONE:
     ret;
 }
+
 "#;
 
 /// What [`crate::elements::CudaOrtDetector`] runs to fit a picture into a
@@ -1675,6 +1676,16 @@ BMDONE:
 /// `setp.gt` keeps the first of equal scores, as the CPU's reading does. A
 /// thread a box, so neighbouring threads read neighbouring floats of each
 /// row; what is copied down is six floats a box rather than every class's.
+///
+/// `warp_nv12` and `warp_bgra` fit an object to an embedding model's input
+/// through an affine map, the input pixel `(u, v)` read from the picture at
+/// `(m0 u + m1 v + m2, m3 u + m4 v + m5)` — each pixel's centre at whole
+/// numbers — between the four pixels around it, as `cv2.warpAffine` reads
+/// a face onto the ArcFace template: a turn and a scale, which the fits'
+/// sampling numbers cannot say. Outside the picture is black. An NV12
+/// picture's luma and chroma are each mixed over the pixels inside and
+/// made RGB by its rows, then darkened by how much of the four was outside,
+/// which is what mixing the RGB of each comes to.
 ///
 /// Kept apart from [`CONVERT_PTX`], and loaded by the detector alone: every
 /// other CUDA element would otherwise pay for its JIT at construction.
@@ -2240,6 +2251,534 @@ BEST_WRITE:
     st.global.f32   [%rd7+20], %f7;
 
 BEST_DONE:
+    ret;
+}
+
+// Each thread one pixel of an embedding model's input, read through an
+// affine map from a picture: see the doc comment above.
+.visible .entry warp_bgra(
+    .param .u64 dst,
+    .param .u32 model_w,
+    .param .u32 model_h,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u32 src_w,
+    .param .u32 src_h,
+    .param .f32 m0,
+    .param .f32 m1,
+    .param .f32 m2,
+    .param .f32 m3,
+    .param .f32 m4,
+    .param .f32 m5
+)
+{
+    .reg .pred %p, %px0, %px1, %py0, %py1, %pin;
+    .reg .b16 %byte;
+    .reg .b32 %mw, %mh, %t0, %t1, %t2, %ox, %oy, %sw, %sh, %x0, %y0, %x1, %y1, %lx, %ly, %cx0, %cx1, %cy0, %cy1, %at, %bx, %wide, %pitch;
+    .reg .f32 %u, %v, %m0, %m1, %m2, %m3, %m4, %m5, %sx, %sy, %fl, %ft, %fx, %fy, %gx, %gy, %one, %w00, %w10, %w01, %w11, %val, %r, %g, %b, %in, %scale;
+    .reg .b64 %dst, %src, %off, %ad, %plane;
+
+    ld.param.u32    %mw, [model_w];
+    ld.param.u32    %mh, [model_h];
+    mov.u32         %t0, %ctaid.x;
+    mov.u32         %t1, %ntid.x;
+    mov.u32         %t2, %tid.x;
+    mad.lo.s32      %ox, %t0, %t1, %t2;
+    mov.u32         %t0, %ctaid.y;
+    mov.u32         %t1, %ntid.y;
+    mov.u32         %t2, %tid.y;
+    mad.lo.s32      %oy, %t0, %t1, %t2;
+    setp.ge.u32     %p, %ox, %mw;
+    @%p bra         WARP_BGRA_DONE;
+    setp.ge.u32     %p, %oy, %mh;
+    @%p bra         WARP_BGRA_DONE;
+
+    // Where the input pixel is read from: (m0 u + m1 v + m2, m3 u + m4 v + m5).
+    cvt.rn.f32.u32  %u, %ox;
+    cvt.rn.f32.u32  %v, %oy;
+    ld.param.f32    %m0, [m0];
+    ld.param.f32    %m1, [m1];
+    ld.param.f32    %m2, [m2];
+    ld.param.f32    %m3, [m3];
+    ld.param.f32    %m4, [m4];
+    ld.param.f32    %m5, [m5];
+    fma.rn.f32      %sx, %m1, %v, %m2;
+    fma.rn.f32      %sx, %m0, %u, %sx;
+    fma.rn.f32      %sy, %m4, %v, %m5;
+    fma.rn.f32      %sy, %m3, %u, %sy;
+    ld.param.u32    %sw, [src_w];
+    ld.param.u32    %sh, [src_h];
+
+    ld.param.u64    %src, [src];
+    ld.param.u32    %pitch, [src_pitch];
+
+    // BGRA: the four pixels around (%sx, %sy), weighed.
+    cvt.rmi.f32.f32 %fl, %sx;
+    cvt.rmi.f32.f32 %ft, %sy;
+    sub.f32         %fx, %sx, %fl;
+    sub.f32         %fy, %sy, %ft;
+    cvt.rzi.s32.f32 %x0, %fl;
+    cvt.rzi.s32.f32 %y0, %ft;
+    add.s32         %x1, %x0, 1;
+    add.s32         %y1, %y0, 1;
+    // Inside, each: unsigned, so that a negative one is past the end.
+    setp.lt.u32     %px0, %x0, %sw;
+    setp.lt.u32     %px1, %x1, %sw;
+    setp.lt.u32     %py0, %y0, %sh;
+    setp.lt.u32     %py1, %y1, %sh;
+    // Read from the nearest pixel inside, and weighed naught.
+    sub.s32         %lx, %sw, 1;
+    sub.s32         %ly, %sh, 1;
+    max.s32         %cx0, %x0, 0;
+    min.s32         %cx0, %cx0, %lx;
+    max.s32         %cx1, %x1, 0;
+    min.s32         %cx1, %cx1, %lx;
+    max.s32         %cy0, %y0, 0;
+    min.s32         %cy0, %cy0, %ly;
+    max.s32         %cy1, %y1, 0;
+    min.s32         %cy1, %cy1, %ly;
+    mov.f32         %one, 0f3F800000;
+    sub.f32         %gx, %one, %fx;
+    sub.f32         %gy, %one, %fy;
+    mul.f32         %w00, %gx, %gy;
+    mul.f32         %w10, %fx, %gy;
+    mul.f32         %w01, %gx, %fy;
+    mul.f32         %w11, %fx, %fy;
+    and.pred        %pin, %px0, %py0;
+    selp.f32        %w00, %w00, 0f00000000, %pin;
+    and.pred        %pin, %px1, %py0;
+    selp.f32        %w10, %w10, 0f00000000, %pin;
+    and.pred        %pin, %px0, %py1;
+    selp.f32        %w01, %w01, 0f00000000, %pin;
+    and.pred        %pin, %px1, %py1;
+    selp.f32        %w11, %w11, 0f00000000, %pin;
+    add.f32         %in, %w00, %w10;
+    add.f32         %in, %in, %w01;
+    add.f32         %in, %in, %w11;
+    mov.f32         %r, 0f00000000;
+    mov.f32         %g, 0f00000000;
+    mov.f32         %b, 0f00000000;
+    mul.lo.s32      %at, %cy0, %pitch;
+    shl.b32         %bx, %cx0, 2;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+2];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %r, %val, %w00, %r;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %g, %val, %w00, %g;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %b, %val, %w00, %b;
+    mul.lo.s32      %at, %cy0, %pitch;
+    shl.b32         %bx, %cx1, 2;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+2];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %r, %val, %w10, %r;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %g, %val, %w10, %g;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %b, %val, %w10, %b;
+    mul.lo.s32      %at, %cy1, %pitch;
+    shl.b32         %bx, %cx0, 2;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+2];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %r, %val, %w01, %r;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %g, %val, %w01, %g;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %b, %val, %w01, %b;
+    mul.lo.s32      %at, %cy1, %pitch;
+    shl.b32         %bx, %cx1, 2;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+2];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %r, %val, %w11, %r;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %g, %val, %w11, %g;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %b, %val, %w11, %b;
+
+    // R at v * model_w + u, G a plane later, B two; 0 to 1.
+    ld.param.u64    %dst, [dst];
+    mad.lo.s32      %at, %oy, %mw, %ox;
+    mul.wide.u32    %off, %at, 4;
+    add.s64         %ad, %dst, %off;
+    mul.lo.s32      %at, %mw, %mh;
+    mul.wide.u32    %plane, %at, 4;
+    mov.f32         %scale, 0f3B808081;
+    mul.f32         %r, %r, %scale;
+    mul.f32         %g, %g, %scale;
+    mul.f32         %b, %b, %scale;
+    st.global.f32   [%ad], %r;
+    add.s64         %ad, %ad, %plane;
+    st.global.f32   [%ad], %g;
+    add.s64         %ad, %ad, %plane;
+    st.global.f32   [%ad], %b;
+
+WARP_BGRA_DONE:
+    ret;
+}
+
+.visible .entry warp_nv12(
+    .param .u64 dst,
+    .param .u32 model_w,
+    .param .u32 model_h,
+    .param .u64 luma,
+    .param .u32 luma_pitch,
+    .param .u64 chroma,
+    .param .u32 chroma_pitch,
+    .param .u32 src_w,
+    .param .u32 src_h,
+    .param .f32 m0,
+    .param .f32 m1,
+    .param .f32 m2,
+    .param .f32 m3,
+    .param .f32 m4,
+    .param .f32 m5,
+    .param .f32 red_y,
+    .param .f32 red_cb,
+    .param .f32 red_cr,
+    .param .f32 red_offset,
+    .param .f32 green_y,
+    .param .f32 green_cb,
+    .param .f32 green_cr,
+    .param .f32 green_offset,
+    .param .f32 blue_y,
+    .param .f32 blue_cb,
+    .param .f32 blue_cr,
+    .param .f32 blue_offset
+)
+{
+    .reg .pred %p, %px0, %px1, %py0, %py1, %pin;
+    .reg .b16 %byte;
+    .reg .b32 %mw, %mh, %t0, %t1, %t2, %ox, %oy, %sw, %sh, %x0, %y0, %x1, %y1, %lx, %ly, %cx0, %cx1, %cy0, %cy1, %at, %bx, %wide, %pitch, %cw, %ch, %cpitch;
+    .reg .f32 %u, %v, %m0, %m1, %m2, %m3, %m4, %m5, %sx, %sy, %fl, %ft, %fx, %fy, %gx, %gy, %one, %w00, %w10, %w01, %w11, %val, %r, %g, %b, %in, %scale, %y, %cb, %cr, %cin, %csx, %csy, %half, %k0, %k1, %k2, %k3, %k4, %k5, %k6, %k7, %k8, %k9, %k10, %k11;
+    .reg .b64 %dst, %src, %off, %ad, %plane, %chroma;
+
+    ld.param.u32    %mw, [model_w];
+    ld.param.u32    %mh, [model_h];
+    mov.u32         %t0, %ctaid.x;
+    mov.u32         %t1, %ntid.x;
+    mov.u32         %t2, %tid.x;
+    mad.lo.s32      %ox, %t0, %t1, %t2;
+    mov.u32         %t0, %ctaid.y;
+    mov.u32         %t1, %ntid.y;
+    mov.u32         %t2, %tid.y;
+    mad.lo.s32      %oy, %t0, %t1, %t2;
+    setp.ge.u32     %p, %ox, %mw;
+    @%p bra         WARP_NV12_DONE;
+    setp.ge.u32     %p, %oy, %mh;
+    @%p bra         WARP_NV12_DONE;
+
+    // Where the input pixel is read from: (m0 u + m1 v + m2, m3 u + m4 v + m5).
+    cvt.rn.f32.u32  %u, %ox;
+    cvt.rn.f32.u32  %v, %oy;
+    ld.param.f32    %m0, [m0];
+    ld.param.f32    %m1, [m1];
+    ld.param.f32    %m2, [m2];
+    ld.param.f32    %m3, [m3];
+    ld.param.f32    %m4, [m4];
+    ld.param.f32    %m5, [m5];
+    fma.rn.f32      %sx, %m1, %v, %m2;
+    fma.rn.f32      %sx, %m0, %u, %sx;
+    fma.rn.f32      %sy, %m4, %v, %m5;
+    fma.rn.f32      %sy, %m3, %u, %sy;
+    ld.param.u32    %sw, [src_w];
+    ld.param.u32    %sh, [src_h];
+
+    ld.param.u64    %src, [luma];
+    ld.param.u32    %pitch, [luma_pitch];
+    ld.param.u64    %chroma, [chroma];
+    ld.param.u32    %cpitch, [chroma_pitch];
+    // The chroma plane, half each way, rounded up; a luma point's place in
+    // it, centres to centres.
+    add.s32         %cw, %sw, 1;
+    shr.u32         %cw, %cw, 1;
+    add.s32         %ch, %sh, 1;
+    shr.u32         %ch, %ch, 1;
+    mov.f32         %half, 0f3F000000;
+    add.f32         %csx, %sx, %half;
+    fma.rn.f32      %csx, %csx, %half, 0fBF000000;
+    add.f32         %csy, %sy, %half;
+    fma.rn.f32      %csy, %csy, %half, 0fBF000000;
+
+    // luma: the four pixels around (%sx, %sy), weighed.
+    cvt.rmi.f32.f32 %fl, %sx;
+    cvt.rmi.f32.f32 %ft, %sy;
+    sub.f32         %fx, %sx, %fl;
+    sub.f32         %fy, %sy, %ft;
+    cvt.rzi.s32.f32 %x0, %fl;
+    cvt.rzi.s32.f32 %y0, %ft;
+    add.s32         %x1, %x0, 1;
+    add.s32         %y1, %y0, 1;
+    // Inside, each: unsigned, so that a negative one is past the end.
+    setp.lt.u32     %px0, %x0, %sw;
+    setp.lt.u32     %px1, %x1, %sw;
+    setp.lt.u32     %py0, %y0, %sh;
+    setp.lt.u32     %py1, %y1, %sh;
+    // Read from the nearest pixel inside, and weighed naught.
+    sub.s32         %lx, %sw, 1;
+    sub.s32         %ly, %sh, 1;
+    max.s32         %cx0, %x0, 0;
+    min.s32         %cx0, %cx0, %lx;
+    max.s32         %cx1, %x1, 0;
+    min.s32         %cx1, %cx1, %lx;
+    max.s32         %cy0, %y0, 0;
+    min.s32         %cy0, %cy0, %ly;
+    max.s32         %cy1, %y1, 0;
+    min.s32         %cy1, %cy1, %ly;
+    mov.f32         %one, 0f3F800000;
+    sub.f32         %gx, %one, %fx;
+    sub.f32         %gy, %one, %fy;
+    mul.f32         %w00, %gx, %gy;
+    mul.f32         %w10, %fx, %gy;
+    mul.f32         %w01, %gx, %fy;
+    mul.f32         %w11, %fx, %fy;
+    and.pred        %pin, %px0, %py0;
+    selp.f32        %w00, %w00, 0f00000000, %pin;
+    and.pred        %pin, %px1, %py0;
+    selp.f32        %w10, %w10, 0f00000000, %pin;
+    and.pred        %pin, %px0, %py1;
+    selp.f32        %w01, %w01, 0f00000000, %pin;
+    and.pred        %pin, %px1, %py1;
+    selp.f32        %w11, %w11, 0f00000000, %pin;
+    add.f32         %in, %w00, %w10;
+    add.f32         %in, %in, %w01;
+    add.f32         %in, %in, %w11;
+    mov.f32         %y, 0f00000000;
+    mul.lo.s32      %at, %cy0, %pitch;
+    add.s32         %at, %at, %cx0;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %y, %val, %w00, %y;
+    mul.lo.s32      %at, %cy0, %pitch;
+    add.s32         %at, %at, %cx1;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %y, %val, %w10, %y;
+    mul.lo.s32      %at, %cy1, %pitch;
+    add.s32         %at, %at, %cx0;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %y, %val, %w01, %y;
+    mul.lo.s32      %at, %cy1, %pitch;
+    add.s32         %at, %at, %cx1;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %src, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %y, %val, %w11, %y;
+
+    // chroma: the four pixels around (%csx, %csy), weighed.
+    cvt.rmi.f32.f32 %fl, %csx;
+    cvt.rmi.f32.f32 %ft, %csy;
+    sub.f32         %fx, %csx, %fl;
+    sub.f32         %fy, %csy, %ft;
+    cvt.rzi.s32.f32 %x0, %fl;
+    cvt.rzi.s32.f32 %y0, %ft;
+    add.s32         %x1, %x0, 1;
+    add.s32         %y1, %y0, 1;
+    // Inside, each: unsigned, so that a negative one is past the end.
+    setp.lt.u32     %px0, %x0, %cw;
+    setp.lt.u32     %px1, %x1, %cw;
+    setp.lt.u32     %py0, %y0, %ch;
+    setp.lt.u32     %py1, %y1, %ch;
+    // Read from the nearest pixel inside, and weighed naught.
+    sub.s32         %lx, %cw, 1;
+    sub.s32         %ly, %ch, 1;
+    max.s32         %cx0, %x0, 0;
+    min.s32         %cx0, %cx0, %lx;
+    max.s32         %cx1, %x1, 0;
+    min.s32         %cx1, %cx1, %lx;
+    max.s32         %cy0, %y0, 0;
+    min.s32         %cy0, %cy0, %ly;
+    max.s32         %cy1, %y1, 0;
+    min.s32         %cy1, %cy1, %ly;
+    mov.f32         %one, 0f3F800000;
+    sub.f32         %gx, %one, %fx;
+    sub.f32         %gy, %one, %fy;
+    mul.f32         %w00, %gx, %gy;
+    mul.f32         %w10, %fx, %gy;
+    mul.f32         %w01, %gx, %fy;
+    mul.f32         %w11, %fx, %fy;
+    and.pred        %pin, %px0, %py0;
+    selp.f32        %w00, %w00, 0f00000000, %pin;
+    and.pred        %pin, %px1, %py0;
+    selp.f32        %w10, %w10, 0f00000000, %pin;
+    and.pred        %pin, %px0, %py1;
+    selp.f32        %w01, %w01, 0f00000000, %pin;
+    and.pred        %pin, %px1, %py1;
+    selp.f32        %w11, %w11, 0f00000000, %pin;
+    add.f32         %cin, %w00, %w10;
+    add.f32         %cin, %cin, %w01;
+    add.f32         %cin, %cin, %w11;
+    mov.f32         %cb, 0f00000000;
+    mov.f32         %cr, 0f00000000;
+    mul.lo.s32      %at, %cy0, %cpitch;
+    shl.b32         %bx, %cx0, 1;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %chroma, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cb, %val, %w00, %cb;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cr, %val, %w00, %cr;
+    mul.lo.s32      %at, %cy0, %cpitch;
+    shl.b32         %bx, %cx1, 1;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %chroma, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cb, %val, %w10, %cb;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cr, %val, %w10, %cr;
+    mul.lo.s32      %at, %cy1, %cpitch;
+    shl.b32         %bx, %cx0, 1;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %chroma, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cb, %val, %w01, %cb;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cr, %val, %w01, %cr;
+    mul.lo.s32      %at, %cy1, %cpitch;
+    shl.b32         %bx, %cx1, 1;
+    add.s32         %at, %at, %bx;
+    cvt.u64.u32     %off, %at;
+    add.s64         %ad, %chroma, %off;
+    ld.global.u8    %byte, [%ad+0];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cb, %val, %w11, %cb;
+    ld.global.u8    %byte, [%ad+1];
+    cvt.u32.u16     %wide, %byte;
+    cvt.rn.f32.u32  %val, %wide;
+    fma.rn.f32      %cr, %val, %w11, %cr;
+
+    // Each a mean over the pixels inside, 0 to 1 (the chroma grey where
+    // none is), made RGB, and then as much of it as is inside the picture:
+    // black beyond it, as the CPU's sample of an RGB picture is.
+    mov.f32         %r, 0f00000000;
+    mov.f32         %g, 0f00000000;
+    mov.f32         %b, 0f00000000;
+    setp.le.f32     %p, %in, 0f00000000;
+    @%p bra         WARP_NV12_STORE;
+    div.rn.f32      %y, %y, %in;
+    mov.f32         %scale, 0f3B808081;
+    mul.f32         %y, %y, %scale;
+    setp.le.f32     %p, %cin, 0f00000000;
+    @%p bra         WARP_NV12_GREY;
+    div.rn.f32      %cb, %cb, %cin;
+    div.rn.f32      %cr, %cr, %cin;
+    mul.f32         %cb, %cb, %scale;
+    mul.f32         %cr, %cr, %scale;
+    bra             WARP_NV12_CONVERT;
+WARP_NV12_GREY:
+    mov.f32         %cb, 0f3F000000;
+    mov.f32         %cr, 0f3F000000;
+WARP_NV12_CONVERT:
+    ld.param.f32    %k0, [red_y];
+    ld.param.f32    %k1, [red_cb];
+    ld.param.f32    %k2, [red_cr];
+    ld.param.f32    %k3, [red_offset];
+    ld.param.f32    %k4, [green_y];
+    ld.param.f32    %k5, [green_cb];
+    ld.param.f32    %k6, [green_cr];
+    ld.param.f32    %k7, [green_offset];
+    ld.param.f32    %k8, [blue_y];
+    ld.param.f32    %k9, [blue_cb];
+    ld.param.f32    %k10, [blue_cr];
+    ld.param.f32    %k11, [blue_offset];
+    fma.rn.f32      %r, %k0, %y, %k3;
+    fma.rn.f32      %r, %k1, %cb, %r;
+    fma.rn.f32      %r, %k2, %cr, %r;
+    add.sat.f32     %r, %r, 0f00000000;
+    mul.f32         %r, %r, %in;
+    fma.rn.f32      %g, %k4, %y, %k7;
+    fma.rn.f32      %g, %k5, %cb, %g;
+    fma.rn.f32      %g, %k6, %cr, %g;
+    add.sat.f32     %g, %g, 0f00000000;
+    mul.f32         %g, %g, %in;
+    fma.rn.f32      %b, %k8, %y, %k11;
+    fma.rn.f32      %b, %k9, %cb, %b;
+    fma.rn.f32      %b, %k10, %cr, %b;
+    add.sat.f32     %b, %b, 0f00000000;
+    mul.f32         %b, %b, %in;
+    // Back to 0 to 255, as the store divides.
+    mov.f32         %scale, 0f437F0000;
+    mul.f32         %r, %r, %scale;
+    mul.f32         %g, %g, %scale;
+    mul.f32         %b, %b, %scale;
+WARP_NV12_STORE:
+    // R at v * model_w + u, G a plane later, B two; 0 to 1.
+    ld.param.u64    %dst, [dst];
+    mad.lo.s32      %at, %oy, %mw, %ox;
+    mul.wide.u32    %off, %at, 4;
+    add.s64         %ad, %dst, %off;
+    mul.lo.s32      %at, %mw, %mh;
+    mul.wide.u32    %plane, %at, 4;
+    mov.f32         %scale, 0f3B808081;
+    mul.f32         %r, %r, %scale;
+    mul.f32         %g, %g, %scale;
+    mul.f32         %b, %b, %scale;
+    st.global.f32   [%ad], %r;
+    add.s64         %ad, %ad, %plane;
+    st.global.f32   [%ad], %g;
+    add.s64         %ad, %ad, %plane;
+    st.global.f32   [%ad], %b;
+
+WARP_NV12_DONE:
     ret;
 }
 "#;

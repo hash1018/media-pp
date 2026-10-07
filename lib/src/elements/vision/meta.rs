@@ -57,6 +57,48 @@ pub struct Detection {
     /// that finds none, and on a box a tracker put where it expects the
     /// object to be.
     pub landmarks: Vec<(f32, f32)>,
+    /// What embedding models made of the object — a vector that lies near
+    /// another's where the two look alike, for telling which boxes are the
+    /// same thing across a video. One per embedder that looked at it, in the
+    /// order they ran.
+    pub embeddings: Vec<Embedding>,
+}
+
+/// What an embedding model made of an object: a vector of unit length, so
+/// that how alike two objects look is the dot product of theirs —
+/// [`Embedding::similarity`]. Only vectors of one embedder compare.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Embedding {
+    /// The name of the element that made it.
+    pub embedder: Arc<str>,
+    /// The vector, of length 1.
+    pub vector: Arc<[f32]>,
+}
+
+impl Embedding {
+    /// `embedder`'s vector `vector`, scaled to length 1; `None` for a vector
+    /// of no length, which points nowhere.
+    pub fn new(embedder: impl Into<Arc<str>>, vector: &[f32]) -> Option<Self> {
+        let length = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        (length.is_finite() && length > 0.0).then(|| Self {
+            embedder: embedder.into(),
+            vector: vector.iter().map(|v| v / length).collect(),
+        })
+    }
+
+    /// How alike the two objects look, from -1 to 1: the cosine of the angle
+    /// between the vectors. `None` where they are not of one length — two
+    /// embedders' — and so do not compare.
+    pub fn similarity(&self, other: &Embedding) -> Option<f32> {
+        (self.vector.len() == other.vector.len()).then(|| {
+            self.vector
+                .iter()
+                .zip(other.vector.iter())
+                .map(|(a, b)| a * b)
+                .sum()
+        })
+    }
 }
 
 /// What a classifier said of an object a detector found.
@@ -110,6 +152,7 @@ impl Detection {
             track_id: None,
             classes: Vec::new(),
             landmarks: Vec::new(),
+            embeddings: Vec::new(),
         }
     }
 }
@@ -292,6 +335,19 @@ mod tests {
             ..bicycle
         };
         assert_eq!(detections.label(&unnamed), None);
+    }
+
+    #[test]
+    fn embeddings_are_of_unit_length_and_compare_by_their_angle() {
+        let a = Embedding::new("e", &[3.0, 4.0]).expect("a direction");
+        assert_eq!(&*a.vector, [0.6, 0.8]);
+        let b = Embedding::new("e", &[4.0, -3.0]).unwrap();
+        assert_eq!(a.similarity(&b), Some(0.0));
+        let same = a.similarity(&a).unwrap();
+        assert!((same - 1.0).abs() < 1e-6, "{same}");
+        assert_eq!(a.similarity(&Embedding::new("f", &[1.0]).unwrap()), None);
+        assert!(Embedding::new("e", &[0.0, 0.0]).is_none());
+        assert!(Embedding::new("e", &[f32::NAN]).is_none());
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::{
 use super::classify::{
     Crop, Input, Memory, OrtClassifierOptions, Plan, answer, apply, best, classifier_input,
 };
-use super::sw_ort_detector::{is_hardware, to_rgb24};
+use super::sw_ort_detector::{ToRgb, is_hardware};
 use super::{OrtError, labels};
 use crate::orientation::{Orientation, Orientations};
 
@@ -49,25 +49,6 @@ pub struct SwOrtClassifier(FilterStage<Classifying>);
 
 filter_stage!(SwOrtClassifier);
 
-/// The conversion of one picture shape to RGB24 at its own size, and the
-/// picture it makes.
-struct Converting {
-    from: (
-        ffmpeg::format::Pixel,
-        u32,
-        u32,
-        ffmpeg::color::Space,
-        ffmpeg::color::Range,
-    ),
-    context: ffmpeg::software::scaling::Context,
-    rgb: ffmpeg::frame::Video,
-}
-
-// SAFETY: the scaling context and frame are heap allocations owned solely by
-// this conversion, used only by the one thread transforming at a time, as the
-// detector's fitting holds its own.
-unsafe impl Send for Converting {}
-
 /// What an [`SwOrtClassifier`] does with each picture.
 struct Classifying {
     name: Arc<str>,
@@ -77,7 +58,7 @@ struct Classifying {
     labels: Arc<[Arc<str>]>,
     input: Input,
     memory: Memory,
-    converting: Option<Converting>,
+    converting: ToRgb,
     /// How each picture is turned to be shown.
     orientations: Orientations,
 }
@@ -121,40 +102,13 @@ impl SwOrtClassifier {
             labels,
             input,
             memory: Memory::default(),
-            converting: None,
+            converting: ToRgb::default(),
             orientations: Orientations::default(),
         })))
     }
 }
 
 impl Classifying {
-    /// `frame` as RGB24 at its own size, through a conversion kept while
-    /// pictures keep their shape.
-    fn rgb(&mut self, frame: &ffmpeg::frame::Video) -> Result<&ffmpeg::frame::Video> {
-        let from = (
-            frame.format(),
-            frame.width(),
-            frame.height(),
-            frame.color_space(),
-            frame.color_range(),
-        );
-        // Taken out and put back, so that what is returned borrows only the
-        // slot it is put in.
-        let converting = match self.converting.take() {
-            Some(converting) if converting.from == from => self.converting.insert(converting),
-            _ => self.converting.insert(Converting {
-                from,
-                context: to_rgb24(from, (from.1, from.2))?,
-                rgb: ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, from.1, from.2),
-            }),
-        };
-        converting
-            .context
-            .run(frame, &mut converting.rgb)
-            .map_err(OrtError::Convert)?;
-        Ok(&converting.rgb)
-    }
-
     /// The model's answer for each of `crops` of `frame`, in order.
     fn classify(
         &mut self,
@@ -165,7 +119,7 @@ impl Classifying {
         let (scale, bias) = self.options.input.affine();
         let batch = self.input.batch.unwrap_or(MAX_BATCH).max(1);
         let orientation = self.orientations.of(frame, &self.pp_log);
-        let rgb = self.rgb(frame)?.clone();
+        let rgb = self.converting.run(frame)?.clone();
         let mut answers = Vec::with_capacity(crops.len());
         for group in crops.chunks(batch) {
             // A model of fixed batch is handed exactly that many, the rest
