@@ -52,8 +52,8 @@ pub use meta::{
 };
 pub use overlay::{
     BoxColors, BoxStyle, ClassId, ClassRule, DetectionOverlayOptions, DetectionOverlayOptionsError,
-    Hiding, LabelStyle, OverlayParts, RedactStyle, SwDetectionOverlay, SwDetectionOverlayError,
-    Treatment,
+    HideShape, Hiding, LabelStyle, OverlayParts, RedactStyle, SwDetectionOverlay,
+    SwDetectionOverlayError, Treatment,
 };
 #[cfg(feature = "cuda")]
 pub use overlay::{CudaDetectionOverlay, CudaDetectionOverlayError};

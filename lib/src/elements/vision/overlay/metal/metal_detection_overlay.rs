@@ -77,6 +77,10 @@ pub enum MetalDetectionOverlayError {
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
+    /// A rule hides an ellipse, which this overlay does not cut yet: it
+    /// would hide the whole box.
+    #[error("MetalDetectionOverlay hides whole boxes only, not ellipses")]
+    EllipseUnsupported,
 }
 
 impl From<TextFontError> for MetalDetectionOverlayError {
@@ -185,6 +189,9 @@ impl MetalDetectionOverlay {
     ) -> std::result::Result<Self, MetalDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
         options.check()?;
+        if options.hides_ellipses() {
+            return Err(MetalDetectionOverlayError::EllipseUnsupported);
+        }
         let pp_log = element_pp_log(ElementType::MetalDetectionOverlay, &name, None);
         // Read once at any size: each label is rasterized at its own.
         let font = options
@@ -509,7 +516,7 @@ impl Overlaying {
         let mut at = 0;
         for hide in &hidden {
             match *hide {
-                Hide::Fill { rect, color } => pass.dispatch(
+                Hide::Fill { rect, color, .. } => pass.dispatch(
                     paint_kernel,
                     &solid,
                     Some(&paint(rect, colour_of(color, nv12), false)),
@@ -519,6 +526,7 @@ impl Overlaying {
                     rect,
                     cells: count,
                     smooth,
+                    ..
                 } => {
                     let (Some([means_kernel, cells_kernel]), Some(means)) =
                         (&self.cells, &self.means)

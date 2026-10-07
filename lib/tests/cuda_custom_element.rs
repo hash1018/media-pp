@@ -367,8 +367,8 @@ fn an_application_element_works_on_cuda_pictures_between_this_crates_own() {
             others: Treatment {
                 draw: None,
                 hide: Some(Hiding {
-                    style: RedactStyle::Fill(Color::WHITE),
                     margin: 0.0,
+                    ..Hiding::new(RedactStyle::Fill(Color::WHITE))
                 }),
                 min_score: 0.0,
             },

@@ -9,7 +9,7 @@ use super::ptx::REDACT_PTX;
 use super::{
     CUcontext, CUdeviceptr, CUfunction, CUmodule, CudaDriver, CudaDriverError, arg, check,
     cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cuMemAlloc_v2, cuMemFree_v2, cuMemcpyDtoH_v2,
-    cuModuleUnload, launch, load_module,
+    cuMemcpyHtoD_v2, cuModuleUnload, launch, load_module,
 };
 
 /// The hiding kernels, JIT-compiled into the driver's context. Dropped
@@ -213,15 +213,19 @@ impl CudaDriver {
     }
 
     /// Paints each cell of `plane` its mean — or, with `smooth`, its mean
-    /// blended into its neighbours' — through `means`. Two launches on the
-    /// default stream, the second reading what the first wrote; nothing is
-    /// waited for.
+    /// blended into its neighbours' — through `means`; with `ellipse`, only
+    /// the samples inside the ellipse touching the plane's sides. With
+    /// `fill`, the means are not taken: the plane, as one cell, is painted
+    /// those values — a fill cut to an ellipse. Launches on the default
+    /// stream, each reading what the one before wrote; nothing is waited
+    /// for.
     pub(crate) fn hide_cells(
         &self,
         kernels: &RedactKernels,
         means: &CellMeans,
         plane: CellPlane,
-        smooth: bool,
+        (smooth, ellipse): (bool, bool),
+        fill: Option<&[f32]>,
     ) -> Result<(), CudaDriverError> {
         let (cells_x, cells_y) = plane.cells;
         let cells = cells_x as usize * cells_y as usize;
@@ -233,6 +237,7 @@ impl CudaDriver {
             || cells * plane.channels as usize > means.floats
             || plane.pitch < plane.width as usize * plane.channels as usize
             || plane.pitch > u32::MAX as usize
+            || fill.is_some_and(|values| values.len() != cells * plane.channels as usize)
         {
             return Err(CudaDriverError::KernelRejected(format!(
                 "{}x{} samples of {} bytes in {cells_x}x{cells_y} cells, pitch {}, means for {} floats",
@@ -246,6 +251,7 @@ impl CudaDriver {
         let (mut across, mut down) = (cells_x, cells_y);
         let mut data = means.pointer;
         let mut smooth = u32::from(smooth);
+        let mut ellipse = u32::from(ellipse);
         self.with_context(|| {
             let mut params: Vec<*mut c_void> = vec![
                 arg(&mut source),
@@ -257,22 +263,41 @@ impl CudaDriver {
                 arg(&mut down),
                 arg(&mut data),
             ];
-            // SAFETY: one pointer per parameter `cell_means` declares, in that
-            // order, each at a live local. It reads the plane's `width` by
-            // `height` samples, which the surface the caller took `plane`
-            // from holds, and writes `cells · channels` floats of `means`,
-            // which the check above holds it to; the context is current.
-            unsafe {
-                launch(
-                    kernels.means,
-                    ((cells as u32).div_ceil(256), 1),
-                    16,
-                    &mut params,
-                )?
-            };
+            match fill {
+                // SAFETY: the values, checked above to be the plane's one
+                // cell's channels, into the first floats of `means`, which
+                // hold them; a synchronous copy on the default stream, before
+                // the launch that reads them.
+                Some(values) => unsafe {
+                    check(
+                        "cuMemcpyHtoD",
+                        cuMemcpyHtoD_v2(
+                            data,
+                            values.as_ptr().cast(),
+                            std::mem::size_of_val(values),
+                        ),
+                    )?
+                },
+                // SAFETY: one pointer per parameter `cell_means` declares, in
+                // that order, each at a live local. It reads the plane's
+                // `width` by `height` samples, which the surface the caller
+                // took `plane` from holds, and writes `cells · channels` floats
+                // of `means`, which the check above holds it to; the context
+                // is current.
+                None => unsafe {
+                    launch(
+                        kernels.means,
+                        ((cells as u32).div_ceil(256), 1),
+                        16,
+                        &mut params,
+                    )?
+                },
+            }
             params.push(arg(&mut smooth));
-            // SAFETY: as above, with `smooth` last as `cell_paint` declares
-            // it; a thread a sample of the same plane, each writing its own.
+            params.push(arg(&mut ellipse));
+            // SAFETY: as above, with `smooth` and `ellipse` last as
+            // `cell_paint` declares them; a thread a sample of the same
+            // plane, each writing its own.
             unsafe {
                 launch(
                     kernels.paint,

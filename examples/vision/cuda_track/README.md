@@ -18,7 +18,8 @@ A phone's portrait recording, stored on its side, is looked at and labelled
 the right way up, and recorded saying it is turned, as the file does.
 
 `--hide person=blur` hides a class in the recording instead, as
-[`cuda_detect`](../cuda_detect/README.md)'s does. Hide with the detector on
+[`cuda_detect`](../cuda_detect/README.md)'s does — `,ellipse` after it, the
+ellipse inside each box. Hide with the detector on
 every picture, `--interval 0`: a box the tracker filled in is where it
 expects the object, and an object only just come into the picture has no
 motion to expect it by yet. On the people clip, at `--interval 2`, someone

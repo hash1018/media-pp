@@ -33,7 +33,7 @@ use crate::{
 
 use super::super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, hides, marks_turned, rasterize,
+    Rect, bt709_limited, hides, marks_turned, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
@@ -323,8 +323,8 @@ impl Overlaying {
         &mut self,
         surface: Surface,
         rect: Rect,
-        cells: (u32, u32),
-        smooth: bool,
+        (cells, smooth, ellipse): ((u32, u32), bool, bool),
+        fill: Option<Color>,
     ) -> std::result::Result<(), CudaDriverError> {
         let Some((kernels, means)) = &mut self.cells else {
             // Made with the element wherever its style cuts cells.
@@ -365,8 +365,22 @@ impl Overlaying {
                 cells,
             }],
         };
-        for plane in planes {
-            self.driver.hide_cells(kernels, means, plane, smooth)?;
+        // A fill's colour, plane by plane, as the cell's means.
+        let (luma, cb, cr) = fill.map_or((0, 0, 0), bt709_limited);
+        let colours: Vec<Option<Vec<f32>>> = match surface {
+            Surface::Nv12(_) => vec![
+                fill.map(|_| vec![f32::from(luma)]),
+                fill.map(|_| vec![f32::from(cb), f32::from(cr)]),
+            ],
+            Surface::Bgra(_) => vec![fill.map(|color| {
+                [color.blue, color.green, color.red, 255]
+                    .map(f32::from)
+                    .to_vec()
+            })],
+        };
+        for (plane, colour) in planes.into_iter().zip(colours) {
+            self.driver
+                .hide_cells(kernels, means, plane, (smooth, ellipse), colour.as_deref())?;
         }
         Ok(())
     }
@@ -459,12 +473,22 @@ impl Overlaying {
         if let Some(detections) = detections {
             for hide in hides(canvas, &self.options, detections) {
                 match hide {
-                    Hide::Fill { rect, color } => self.fill(surface, rect, color)?,
+                    Hide::Fill {
+                        rect,
+                        color,
+                        ellipse: false,
+                    } => self.fill(surface, rect, color)?,
+                    Hide::Fill {
+                        rect,
+                        color,
+                        ellipse: true,
+                    } => self.hide_cells(surface, rect, ((1, 1), false, true), Some(color))?,
                     Hide::Cells {
                         rect,
                         cells,
                         smooth,
-                    } => self.hide_cells(surface, rect, cells, smooth)?,
+                        ellipse,
+                    } => self.hide_cells(surface, rect, (cells, smooth, ellipse), None)?,
                 }
             }
         }
@@ -605,7 +629,8 @@ impl Drop for Overlaying {
 #[cfg(test)]
 mod tests {
     use super::super::super::{
-        BoxColors, BoxStyle, LabelStyle, RedactStyle, Treatment, tests::system_font,
+        BoxColors, BoxStyle, HideShape, Hiding, LabelStyle, RedactStyle, Treatment,
+        tests::system_font,
     };
     use super::*;
     use crate::buffer::Metadata;
@@ -881,6 +906,7 @@ mod tests {
             )
         };
         let styles = [
+            RedactStyle::Fill(Color::new(200, 30, 60)),
             RedactStyle::mosaic(),
             RedactStyle::blur(),
             RedactStyle::Mosaic {
@@ -896,9 +922,17 @@ mod tests {
             (CudaFrameFormat::Nv12, ffmpeg::format::Pixel::NV12),
             (CudaFrameFormat::Bgra, ffmpeg::format::Pixel::BGRA),
         ] {
-            for style in styles {
+            for (style, shape) in styles.into_iter().flat_map(|style| {
+                [HideShape::Rectangle, HideShape::Ellipse].map(|shape| (style, shape))
+            }) {
                 let options = DetectionOverlayOptions {
-                    others: Treatment::hidden(style),
+                    others: Treatment {
+                        hide: Some(Hiding {
+                            shape,
+                            ..Hiding::new(style)
+                        }),
+                        ..Treatment::none()
+                    },
                     ..DetectionOverlayOptions::default()
                 };
                 let picture = noise(pixel);
@@ -934,7 +968,7 @@ mod tests {
                 assert_ne!(
                     expected,
                     shown(&picture),
-                    "{format:?} {style:?}: something hidden"
+                    "{format:?} {style:?} {shape:?}: something hidden"
                 );
                 for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
                     let differ = expected
@@ -944,7 +978,7 @@ mod tests {
                         .count();
                     assert_eq!(
                         differ, 0,
-                        "{format:?} {style:?}, plane {plane}: {differ} bytes differ"
+                        "{format:?} {style:?} {shape:?}, plane {plane}: {differ} bytes differ"
                     );
                 }
             }

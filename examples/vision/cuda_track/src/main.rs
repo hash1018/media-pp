@@ -6,9 +6,10 @@
 //! `--out tracked.mp4` records it: `-> CudaDetectionOverlay -> Queue ->
 //! CudaEncoder -> FileMuxer`, each object in a colour of its own and
 //! labelled with its number. `--hide person=blur` hides a class there
-//! instead — `mosaic`, `blur` or `fill`, a mosaic where none is said —
-//! following each object from picture to picture as the tracker does, and
-//! may be given once for each class.
+//! instead — `mosaic`, `blur` or `fill`, a mosaic where none is said, the
+//! ellipse inside each box with `,ellipse` after it — following each
+//! object from picture to picture as the tracker does, and may be given
+//! once for each class.
 //!
 //! A phone's portrait recording, stored on its side, is looked at and
 //! labelled the right way up, and recorded saying it is turned, as the
@@ -23,7 +24,7 @@
 //! would give.
 //!
 //!     cargo run --release -p cuda_track -- model.onnx video.mp4 [--interval N] \
-//!         [--out tracked.mp4 [--hide CLASS[=mosaic|blur|fill]]...]
+//!         [--out tracked.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...]
 //!     cargo run --release -p cuda_track -- model.onnx video.mp4 --eval 1,2,4,9
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -54,9 +55,9 @@ mod example {
             AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, Detection,
-            DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale, LabelStyle,
-            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, RedactStyle, TrackFormat,
-            TrackerOptions, Treatment,
+            DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, HideShape, Hiding,
+            InputScale, LabelStyle, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions,
+            RedactStyle, TrackFormat, TrackerOptions, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -88,9 +89,15 @@ mod example {
         eval: Option<Vec<u32>>,
     }
 
-    /// `CLASS[=mosaic|blur|fill]` from `--hide`: that class's detections
-    /// hidden that way — a mosaic where no way is said — and drawn no box.
+    /// `CLASS[=mosaic|blur|fill][,ellipse]` from `--hide`: that class's
+    /// detections hidden that way — a mosaic where no way is said, the whole
+    /// box unless `,ellipse` — and drawn no box.
     fn hide_rule(spec: &str) -> Option<ClassRule> {
+        // `,ellipse` last hides the ellipse inside the box, not the box.
+        let (spec, shape) = match spec.strip_suffix(",ellipse") {
+            Some(spec) => (spec, HideShape::Ellipse),
+            None => (spec, HideShape::Rectangle),
+        };
         let (class, style) = spec.split_once('=').unwrap_or((spec, "mosaic"));
         let style = match style {
             "mosaic" => RedactStyle::mosaic(),
@@ -98,7 +105,20 @@ mod example {
             "fill" => RedactStyle::Fill(Color::BLACK),
             _ => return None,
         };
-        (!class.is_empty()).then(|| ClassRule::new(class, Treatment::hidden(style)))
+        let hiding = Hiding {
+            shape,
+            ..Hiding::new(style)
+        };
+        (!class.is_empty()).then(|| {
+            ClassRule::new(
+                class,
+                Treatment {
+                    draw: None,
+                    hide: Some(hiding),
+                    ..Treatment::none()
+                },
+            )
+        })
     }
 
     fn args() -> Args {
@@ -106,7 +126,7 @@ mod example {
             eprintln!(
                 "usage: cuda_track <model.onnx> <video.mp4> [--interval N] [--confirm N] [--visual]\n\
                  \x20        [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]]\n\
-                 \x20        [--out tracked.mp4 [--hide CLASS[=mosaic|blur|fill]]...]\n\
+                 \x20        [--out tracked.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...]\n\
                  \x20      cuda_track <model.onnx> <video.mp4> --eval 1,2,4,9 [--confirm N] [--visual]"
             );
             std::process::exit(1);

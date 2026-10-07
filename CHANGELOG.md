@@ -12,6 +12,18 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`Hiding` has a `shape`.** `HideShape::Rectangle` covers the box as
+  before; `HideShape::Ellipse` covers only the ellipse inside it, a pixel —
+  or a 2x2 block of NV12 colour — where its centre is inside. The CPU and
+  CUDA overlays cover the same pixels with the same bytes, for a mosaic, a
+  blur and a fill; `MetalDetectionOverlay` refuses an ellipse with
+  `EllipseUnsupported` for now. `cuda_detect` and `cuda_track` take
+  `--hide face=mosaic,ellipse`.
+
+  | Before | Now |
+  |---|---|
+  | `Hiding { style, margin }` | `Hiding { style, margin, shape: HideShape::Rectangle }`, or `Hiding { margin, ..Hiding::new(style) }` |
+
 - **`OrtDetector` is `SwOrtDetector`, a filter that hands each picture on
   with what it found.** Renamed as the scalers are named, beside the new
   `CudaOrtDetector` (see Added). It was a sink that called a closure; it

@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, bt709_limited, cell_edge, hides, marks_turned, rasterize,
+    Rect, bt709_limited, cell_edge, hides, inside_ellipse, marks_turned, rasterize,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, TextMask, load_font};
@@ -278,47 +278,68 @@ fn paint(
     }
 }
 
-/// Paints each cell of a plane its mean — or with `smooth` its mean blended
-/// into its neighbours' — as the CUDA overlay's `cell_means` and
-/// `cell_paint` do, in the same `f32` operations in the same order, so
-/// that the two write the same bytes: `size` samples of `channels` bytes
-/// each from byte `offset` of `data`, rows `stride` apart, cut into
-/// `cells` across and down.
-fn hide_plane(
-    data: &mut [u8],
+/// One plane of a box to hide: `size` samples of `channels` bytes each
+/// from byte `offset` of a plane, rows `stride` apart, cut into `cells`
+/// across and down — and, with `ellipse`, only the samples
+/// [`inside_ellipse`] of it painted.
+#[derive(Clone, Copy)]
+struct CellPlane {
     stride: usize,
     offset: usize,
     size: (u32, u32),
     channels: usize,
     cells: (u32, u32),
     smooth: bool,
-) {
-    let ((width, height), (across, down)) = (size, cells);
+    ellipse: bool,
+}
+
+/// Paints each cell of a plane its mean — or with `smooth` its mean blended
+/// into its neighbours' — as the CUDA overlay's `cell_means` and
+/// `cell_paint` do, in the same `f32` operations in the same order, so
+/// that the two write the same bytes. With `fill`, each cell is painted
+/// those values instead of its mean: a fill cut to an ellipse, as one
+/// cell.
+fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
+    let CellPlane {
+        stride,
+        offset,
+        size: (width, height),
+        channels,
+        cells: (across, down),
+        smooth,
+        ellipse,
+    } = plane;
     let at = |x: u32, y: u32| offset + y as usize * stride + x as usize * channels;
-    let mut means = vec![0.0f32; across as usize * down as usize * channels];
-    for cy in 0..down {
-        let (y0, y1) = (cell_edge(cy, down, height), cell_edge(cy + 1, down, height));
-        for cx in 0..across {
-            let (x0, x1) = (
-                cell_edge(cx, across, width),
-                cell_edge(cx + 1, across, width),
-            );
-            let mut sums = [0.0f32; 4];
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let sample = &data[at(x, y)..][..channels];
-                    for (sum, &byte) in sums.iter_mut().zip(sample) {
-                        *sum += f32::from(byte);
+    let means = match fill {
+        Some(values) => values.to_vec(),
+        None => {
+            let mut means = vec![0.0f32; across as usize * down as usize * channels];
+            for cy in 0..down {
+                let (y0, y1) = (cell_edge(cy, down, height), cell_edge(cy + 1, down, height));
+                for cx in 0..across {
+                    let (x0, x1) = (
+                        cell_edge(cx, across, width),
+                        cell_edge(cx + 1, across, width),
+                    );
+                    let mut sums = [0.0f32; 4];
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let sample = &data[at(x, y)..][..channels];
+                            for (sum, &byte) in sums.iter_mut().zip(sample) {
+                                *sum += f32::from(byte);
+                            }
+                        }
+                    }
+                    let reciprocal = 1.0f32 / ((x1 - x0) * (y1 - y0)) as f32;
+                    let first = (cy * across + cx) as usize * channels;
+                    for (mean, sum) in means[first..first + channels].iter_mut().zip(sums) {
+                        *mean = sum * reciprocal;
                     }
                 }
             }
-            let reciprocal = 1.0f32 / ((x1 - x0) * (y1 - y0)) as f32;
-            let first = (cy * across + cx) as usize * channels;
-            for (mean, sum) in means[first..first + channels].iter_mut().zip(sums) {
-                *mean = sum * reciprocal;
-            }
+            means
         }
-    }
+    };
     // Where a sample sits among the cells' centres along a side: the cells
     // either side and how far it is from the first's centre to the second's.
     let between = |sample: u32, cells: u32, length: u32| {
@@ -332,6 +353,9 @@ fn hide_plane(
     let byte = |value: f32| value.round_ties_even() as u8;
     for y in 0..height {
         for x in 0..width {
+            if ellipse && !inside_ellipse(x, y, width, height) {
+                continue;
+            }
             let sample = at(x, y);
             if smooth {
                 let (c0, c1, t) = between(x, across, width);
@@ -360,68 +384,92 @@ fn hide_plane(
 
 /// Hides `rect` of `frame` by its cells, plane by plane: a picture whose
 /// colour is stored per 2x2 block has its colour cut into the same cells
-/// at half the size, `rect` being on whole blocks.
+/// at half the size, `rect` being on whole blocks. With `fill`, as one
+/// cell that colour — a fill cut to an ellipse.
 fn hide_cells(
     frame: &mut ffmpeg::frame::Video,
     planes: Planes,
     rect: Rect,
-    cells: (u32, u32),
-    smooth: bool,
+    (cells, smooth, ellipse): ((u32, u32), bool, bool),
+    fill: Option<Color>,
 ) {
     let (x, y) = (rect.x as usize, rect.y as usize);
     let size = (rect.width, rect.height);
     let half = (rect.width / 2, rect.height / 2);
+    let plane = |stride: usize, offset: usize, size: (u32, u32), channels: usize| CellPlane {
+        stride,
+        offset,
+        size,
+        channels,
+        cells,
+        smooth,
+        ellipse,
+    };
+    let (luma, cb, cr) = fill.map_or((0, 0, 0), bt709_limited);
+    let values = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|&byte| f32::from(byte))
+            .collect::<Vec<_>>()
+    };
     match planes {
-        Planes::Packed { bytes, .. } => {
+        Planes::Packed {
+            bytes,
+            red,
+            green,
+            blue,
+            alpha,
+        } => {
+            let color = fill.map(|color| {
+                let mut pixel = vec![0u8; bytes];
+                pixel[red] = color.red;
+                pixel[green] = color.green;
+                pixel[blue] = color.blue;
+                if let Some(alpha) = alpha {
+                    pixel[alpha] = 255;
+                }
+                values(&pixel)
+            });
             let stride = frame.stride(0);
             let offset = y * stride + x * bytes;
             hide_plane(
                 frame.data_mut(0),
-                stride,
-                offset,
-                size,
-                bytes,
-                cells,
-                smooth,
+                plane(stride, offset, size, bytes),
+                color.as_deref(),
             );
         }
         Planes::Nv12 => {
             let stride = frame.stride(0);
+            let luma = fill.map(|_| values(&[luma]));
             hide_plane(
                 frame.data_mut(0),
-                stride,
-                y * stride + x,
-                size,
-                1,
-                cells,
-                smooth,
+                plane(stride, y * stride + x, size, 1),
+                luma.as_deref(),
             );
             let stride = frame.stride(1);
-            let offset = (y / 2) * stride + x;
-            hide_plane(frame.data_mut(1), stride, offset, half, 2, cells, smooth);
+            let chroma = fill.map(|_| values(&[cb, cr]));
+            hide_plane(
+                frame.data_mut(1),
+                plane(stride, (y / 2) * stride + x, half, 2),
+                chroma.as_deref(),
+            );
         }
         Planes::Yuv420p => {
             let stride = frame.stride(0);
+            let luma = fill.map(|_| values(&[luma]));
             hide_plane(
                 frame.data_mut(0),
-                stride,
-                y * stride + x,
-                size,
-                1,
-                cells,
-                smooth,
+                plane(stride, y * stride + x, size, 1),
+                luma.as_deref(),
             );
-            for plane in [1, 2] {
-                let stride = frame.stride(plane);
+            for (index, value) in [(1, cb), (2, cr)] {
+                let stride = frame.stride(index);
                 let offset = (y / 2) * stride + x / 2;
+                let colour = fill.map(|_| values(&[value]));
                 hide_plane(
-                    frame.data_mut(plane),
-                    stride,
-                    offset,
-                    half,
-                    1,
-                    cells,
-                    smooth,
+                    frame.data_mut(index),
+                    plane(stride, offset, half, 1),
+                    colour.as_deref(),
                 );
             }
         }
@@ -484,12 +532,22 @@ impl Overlaying {
         if let Some(detections) = detections {
             for hide in hides(canvas, &self.options, detections) {
                 match hide {
-                    Hide::Fill { rect, color } => paint(&mut copy, planes, rect, color, None),
+                    Hide::Fill {
+                        rect,
+                        color,
+                        ellipse: false,
+                    } => paint(&mut copy, planes, rect, color, None),
+                    Hide::Fill {
+                        rect,
+                        color,
+                        ellipse: true,
+                    } => hide_cells(&mut copy, planes, rect, ((1, 1), false, true), Some(color)),
                     Hide::Cells {
                         rect,
                         cells,
                         smooth,
-                    } => hide_cells(&mut copy, planes, rect, cells, smooth),
+                        ellipse,
+                    } => hide_cells(&mut copy, planes, rect, (cells, smooth, ellipse), None),
                 }
             }
         }
@@ -1042,7 +1100,10 @@ mod tests {
     fn hiding(style: RedactStyle) -> DetectionOverlayOptions {
         DetectionOverlayOptions {
             others: Treatment {
-                hide: Some(Hiding { style, margin: 0.0 }),
+                hide: Some(Hiding {
+                    margin: 0.0,
+                    ..Hiding::new(style)
+                }),
                 ..Treatment::none()
             },
             ..DetectionOverlayOptions::default()
@@ -1141,6 +1202,52 @@ mod tests {
         }
     }
 
+    /// An ellipse covers what is inside it and leaves the box's corners: a
+    /// fill of the box at (12, 6) to (36, 18) blackens its middle and every
+    /// pixel whose centre is inside the ellipse, and nothing else — on
+    /// packed RGB pixel by pixel, on NV12 the colour a 2x2 block at a time.
+    #[test]
+    fn an_ellipse_covers_only_what_is_inside_it() {
+        for format in [Pixel::RGB24, Pixel::NV12] {
+            let input = stripes(format);
+            let options = DetectionOverlayOptions {
+                others: Treatment {
+                    hide: Some(Hiding {
+                        margin: 0.0,
+                        shape: super::super::HideShape::Ellipse,
+                        ..Hiding::new(RedactStyle::Fill(Color::BLACK))
+                    }),
+                    ..Treatment::none()
+                },
+                ..DetectionOverlayOptions::default()
+            };
+            let mut overlay = SwDetectionOverlay::new("overlay", options).unwrap();
+            let kept = capture(&mut overlay);
+            overlay.consume(input.clone()).expect("hidden");
+            let output = kept.lock().unwrap().remove(0);
+            let black = if format == Pixel::NV12 { 16 } else { 0 };
+            for y in 0..24u32 {
+                for x in 0..48u32 {
+                    let inside = (12..36).contains(&x)
+                        && (6..18).contains(&y)
+                        && super::super::inside_ellipse(x - 12, y - 6, 24, 12);
+                    let (now, was) = (
+                        sample(&output, x as usize, y as usize),
+                        sample(&input, x as usize, y as usize),
+                    );
+                    if inside {
+                        assert_eq!(now, black, "{format:?} ({x}, {y}) is covered");
+                    } else {
+                        assert_eq!(now, was, "{format:?} ({x}, {y}) is left");
+                    }
+                }
+            }
+            // The middle is covered, the corners of the box are not.
+            assert!(super::super::inside_ellipse(12, 6, 24, 12));
+            assert!(!super::super::inside_ellipse(0, 0, 24, 12));
+        }
+    }
+
     /// The cells follow the box: its shorter side cut into `cells`, but
     /// none smaller than `min_cell`; the margin grows the box first; a
     /// class no rule hides, or a score below its rule's, is left as it is.
@@ -1176,7 +1283,10 @@ mod tests {
             height: side,
         };
         let near = faces(Treatment {
-            hide: Some(Hiding { style, margin: 0.0 }),
+            hide: Some(Hiding {
+                margin: 0.0,
+                ..Hiding::new(style)
+            }),
             ..Treatment::none()
         });
         assert_eq!(
@@ -1185,6 +1295,7 @@ mod tests {
                 rect: square(100, 300),
                 cells: (6, 6),
                 smooth: false,
+                ellipse: false,
             }],
             "a near face: six cells of fifty"
         );
@@ -1194,6 +1305,7 @@ mod tests {
                 rect: square(100, 20),
                 cells: (3, 3),
                 smooth: false,
+                ellipse: false,
             }],
             "a far face: cells of at least eight, about three across"
         );
@@ -1222,8 +1334,8 @@ mod tests {
         let options = |margin| DetectionOverlayOptions {
             others: Treatment {
                 hide: Some(Hiding {
-                    style: RedactStyle::mosaic(),
                     margin,
+                    ..Hiding::new(RedactStyle::mosaic())
                 }),
                 ..Treatment::none()
             },

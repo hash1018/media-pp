@@ -10,7 +10,8 @@
 //! overlay draws on copies, so the branch printing beside it sees the
 //! pictures as the detector handed them on. `--hide person=blur` hides a
 //! class there instead of boxing it — `mosaic`, `blur` or `fill`, a mosaic
-//! where none is said — and may be given once for each class.
+//! where none is said, the ellipse inside each box with `,ellipse` after
+//! it — and may be given once for each class.
 //!
 //! A phone's portrait recording, stored on its side, is looked at and
 //! labelled the right way up, and recorded saying it is turned, as the
@@ -26,7 +27,7 @@
 //! `PATH`.
 //!
 //!     cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
+//!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
@@ -58,7 +59,8 @@ mod example {
             AppSink, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtDetector, CudaOrtDetectorOptions, DetectionOverlayOptions, Detections,
-            FileDemuxer, FileMuxer, LabelStyle, RedactStyle, TrackFormat, Treatment,
+            FileDemuxer, FileMuxer, HideShape, Hiding, LabelStyle, RedactStyle, TrackFormat,
+            Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -80,9 +82,15 @@ mod example {
         pictures: usize,
     }
 
-    /// `CLASS[=mosaic|blur|fill]` from `--hide`: that class's detections
-    /// hidden that way — a mosaic where no way is said — and drawn no box.
+    /// `CLASS[=mosaic|blur|fill][,ellipse]` from `--hide`: that class's
+    /// detections hidden that way — a mosaic where no way is said, the whole
+    /// box unless `,ellipse` — and drawn no box.
     fn hide_rule(spec: &str) -> Option<ClassRule> {
+        // `,ellipse` last hides the ellipse inside the box, not the box.
+        let (spec, shape) = match spec.strip_suffix(",ellipse") {
+            Some(spec) => (spec, HideShape::Ellipse),
+            None => (spec, HideShape::Rectangle),
+        };
         let (class, style) = spec.split_once('=').unwrap_or((spec, "mosaic"));
         let style = match style {
             "mosaic" => RedactStyle::mosaic(),
@@ -90,14 +98,27 @@ mod example {
             "fill" => RedactStyle::Fill(Color::BLACK),
             _ => return None,
         };
-        (!class.is_empty()).then(|| ClassRule::new(class, Treatment::hidden(style)))
+        let hiding = Hiding {
+            shape,
+            ..Hiding::new(style)
+        };
+        (!class.is_empty()).then(|| {
+            ClassRule::new(
+                class,
+                Treatment {
+                    draw: None,
+                    hide: Some(hiding),
+                    ..Treatment::none()
+                },
+            )
+        })
     }
 
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
                 "usage: cuda_detect <model.onnx> <video.mp4> \
-                 [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]"
+                 [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]"
             );
             std::process::exit(1);
         };

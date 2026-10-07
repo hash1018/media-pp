@@ -3840,7 +3840,8 @@ LEARN_DONE:
 ///   floats — each sum times the reciprocal of the count.
 /// - `cell_paint`: a thread a sample, writing over it its cell's mean, or
 ///   with `smooth` the means of the four cells around it blended by where
-///   it sits between their centres. The cell that holds sample `x` is
+///   it sits between their centres — with `ellipse`, only a sample whose
+///   centre is inside the ellipse touching the plane's four sides. The cell that holds sample `x` is
 ///   `((x + 1) * n - 1) / length`, and the sample sits at
 ///   `(x + 0.5) * n / length - 0.5` measured in cells.
 ///
@@ -3988,7 +3989,8 @@ MEANS_DONE:
     .param .u32 cells_x,
     .param .u32 cells_y,
     .param .u64 means,
-    .param .u32 smooth
+    .param .u32 smooth,
+    .param .u32 ellipse
 )
 {
     .reg .pred  %p<8>;
@@ -4019,6 +4021,31 @@ MEANS_DONE:
     @%p1 bra        PAINT_DONE;
     setp.ge.u32     %p1, %r13, %r3;
     @%p1 bra        PAINT_DONE;
+
+    // Cut to the ellipse inside the plane where asked: a sample whose
+    // centre is outside it is left as it is. dx = (x + 0.5) * 2 / width - 1,
+    // and dy so down, each step rounded as the CPU's overlay rounds it.
+    ld.param.u32    %r31, [ellipse];
+    setp.eq.u32     %p4, %r31, 0;
+    @%p4 bra        PAINT_INSIDE;
+    cvt.rn.f32.u32  %f27, %r10;
+    add.rn.f32      %f27, %f27, 0f3F000000;
+    mul.rn.f32      %f27, %f27, 0f40000000;
+    cvt.rn.f32.u32  %f28, %r2;
+    div.rn.f32      %f27, %f27, %f28;
+    sub.rn.f32      %f27, %f27, 0f3F800000;
+    cvt.rn.f32.u32  %f29, %r13;
+    add.rn.f32      %f29, %f29, 0f3F000000;
+    mul.rn.f32      %f29, %f29, 0f40000000;
+    cvt.rn.f32.u32  %f28, %r3;
+    div.rn.f32      %f29, %f29, %f28;
+    sub.rn.f32      %f29, %f29, 0f3F800000;
+    mul.rn.f32      %f27, %f27, %f27;
+    mul.rn.f32      %f29, %f29, %f29;
+    add.rn.f32      %f27, %f27, %f29;
+    setp.gt.f32     %p4, %f27, 0f3F800000;
+    @%p4 bra        PAINT_DONE;
+PAINT_INSIDE:
 
     // The sample: y * pitch + x * channels bytes into the plane.
     mul.wide.u32    %rd3, %r13, %r1;

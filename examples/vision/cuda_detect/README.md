@@ -17,7 +17,9 @@ the right way up, and recorded saying it is turned, as the file does.
 
 `--hide person=blur` hides a class in the recording instead of boxing it:
 `mosaic`, `blur` or `fill` (black), a mosaic where none is said, and once
-for each class to hide, by the name the model gives it. On the people clip
+for each class to hide, by the name the model gives it. `,ellipse` after it
+— `--hide face=mosaic,ellipse` — hides the ellipse inside each box rather
+than the whole box. On the people clip
 below, YOLO11n records at about 420 pictures a second boxing everything, 395
 hiding people under a mosaic or a blur, and 420 filling them. What is hidden
 is what the detector finds: someone walking in under a hat, seen from
@@ -37,7 +39,7 @@ linker finds them, and running where the loader does — here both through
 ```sh
 LD_LIBRARY_PATH=/path/to/cuda13-cudnn9-tensorrt10/lib \
   cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-    [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
+    [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
 ```
 
 On Windows building needs none of them, and running needs the directories

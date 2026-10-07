@@ -300,10 +300,10 @@ pub use vision::UseTensorRtPolicy;
 pub use vision::{
     Analytics, AnalyticsOptions, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassId, ClassRule,
     Classification, Crossing, CutDetectorOptions, CutDetectorOptionsError, Detection,
-    DetectionOverlayOptions, DetectionOverlayOptionsError, Detections, Hiding, LabelStyle, Line,
-    LineCount, ObjectAnalytics, ObjectAnalyticsError, ObjectTracker, OverlayParts, RedactStyle,
-    SceneCut, StreamAnalyticsOptions, SwCutDetector, SwCutDetectorError, SwDetectionOverlay,
-    SwDetectionOverlayError, TrackerOptions, Treatment, Zone, ZoneCount,
+    DetectionOverlayOptions, DetectionOverlayOptionsError, Detections, HideShape, Hiding,
+    LabelStyle, Line, LineCount, ObjectAnalytics, ObjectAnalyticsError, ObjectTracker,
+    OverlayParts, RedactStyle, SceneCut, StreamAnalyticsOptions, SwCutDetector, SwCutDetectorError,
+    SwDetectionOverlay, SwDetectionOverlayError, TrackerOptions, Treatment, Zone, ZoneCount,
 };
 pub use vision::{
     BatchSlot, StreamDemuxHandle, StreamId, StreamMux, StreamMuxError, StreamMuxHandle,

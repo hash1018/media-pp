@@ -216,13 +216,45 @@ pub struct Hiding {
     /// every side, which a box drawn a little tight — or a face moving
     /// between two detections — would otherwise leave showing. 0 or more.
     pub margin: f32,
+    /// What of the grown box is covered: all of it, or the ellipse inside
+    /// it, which hides a face as well with less of the picture around it.
+    pub shape: HideShape,
 }
 
 impl Hiding {
-    /// `style`, with a tenth's margin.
+    /// `style`, with a tenth's margin, the whole box.
     pub fn new(style: RedactStyle) -> Self {
-        Self { style, margin: 0.1 }
+        Self {
+            style,
+            margin: 0.1,
+            shape: HideShape::Rectangle,
+        }
     }
+}
+
+/// What of a box a [`Hiding`] covers.
+///
+/// An ellipse's edge is hard: a pixel — or, where the picture's colour is
+/// stored per 2x2 block, a block — is covered where its centre is inside
+/// the ellipse the box is drawn round, and left as it was where not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HideShape {
+    /// The whole box.
+    #[default]
+    Rectangle,
+    /// The ellipse inside the box, touching its four sides.
+    Ellipse,
+}
+
+/// Whether the centre of sample `(x, y)` of a `width` by `height` plane is
+/// inside the ellipse that touches its four sides — computed in this
+/// order, each step rounded as `f32` is, as the CUDA kernel `cell_paint`
+/// computes it, so that the two cover the same samples. A plane of colour
+/// stored per 2x2 block, half the size, so asks of each block's centre.
+pub(crate) fn inside_ellipse(x: u32, y: u32, width: u32, height: u32) -> bool {
+    let dx = (x as f32 + 0.5) * 2.0 / width as f32 - 1.0;
+    let dy = (y as f32 + 0.5) * 2.0 / height as f32 - 1.0;
+    dx * dx + dy * dy <= 1.0
 }
 
 /// How a [`Hiding`] covers a box.
@@ -454,16 +486,29 @@ impl DetectionOverlayOptions {
         self.treatments().any(|treatment| treatment.hide.is_some())
     }
 
-    /// Whether any treatment hides by cells — a mosaic or a blur.
+    /// Whether any treatment hides by painting cells: a mosaic or a blur,
+    /// or a fill cut to an ellipse, which is painted as one cell its
+    /// colour.
     #[cfg(feature = "cuda")]
     pub(crate) fn cuts_cells(&self) -> bool {
         self.treatments().any(|treatment| {
             treatment.hide.is_some_and(|hiding| {
-                matches!(
-                    hiding.style,
-                    RedactStyle::Mosaic { .. } | RedactStyle::Blur { .. }
-                )
+                hiding.shape == HideShape::Ellipse
+                    || matches!(
+                        hiding.style,
+                        RedactStyle::Mosaic { .. } | RedactStyle::Blur { .. }
+                    )
             })
+        })
+    }
+
+    /// Whether any treatment hides an ellipse.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub(crate) fn hides_ellipses(&self) -> bool {
+        self.treatments().any(|treatment| {
+            treatment
+                .hide
+                .is_some_and(|hiding| hiding.shape == HideShape::Ellipse)
         })
     }
 
@@ -901,7 +946,8 @@ pub(crate) struct Mark {
     pub(crate) mask: Option<MaskKey>,
 }
 
-/// One box to hide, in pixels of the picture.
+/// One box to hide, in pixels of the picture: all of `rect`, or with
+/// `ellipse` the samples [`inside_ellipse`] of it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Hide {
     /// `rect` cut into `cells` — across, down — each painted the mean of
@@ -910,9 +956,14 @@ pub(crate) enum Hide {
         rect: Rect,
         cells: (u32, u32),
         smooth: bool,
+        ellipse: bool,
     },
     /// `rect` filled with one colour.
-    Fill { rect: Rect, color: Color },
+    Fill {
+        rect: Rect,
+        color: Color,
+        ellipse: bool,
+    },
 }
 
 /// What `options` hide of `detections` on a picture `canvas` describes:
@@ -939,8 +990,15 @@ pub(crate) fn hides(
                 detection.height * (1.0 + 2.0 * margin),
             );
             let rect = canvas.place(&grown)?;
+            let ellipse = hiding.shape == HideShape::Ellipse;
             let (cells, min_cell, smooth) = match hiding.style {
-                RedactStyle::Fill(color) => return Some(Hide::Fill { rect, color }),
+                RedactStyle::Fill(color) => {
+                    return Some(Hide::Fill {
+                        rect,
+                        color,
+                        ellipse,
+                    });
+                }
                 RedactStyle::Mosaic { cells, min_cell } => (cells, min_cell, false),
                 RedactStyle::Blur { cells, min_cell } => (cells, min_cell, true),
             };
@@ -954,6 +1012,7 @@ pub(crate) fn hides(
                 rect,
                 cells: (along(rect.width), along(rect.height)),
                 smooth,
+                ellipse,
             })
         })
         .collect()
