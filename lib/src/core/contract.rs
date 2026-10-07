@@ -443,6 +443,8 @@ impl PixelLayoutSet {
     pub const YUV420P: Self = Self::of(PixelLayout::Yuv420p);
     /// RGB24 alone.
     pub const RGB24: Self = Self::of(PixelLayout::Rgb24);
+    /// P010 alone.
+    pub const P010: Self = Self::of(PixelLayout::P010);
     /// A format with no layout of its own, alone — a producer's to state,
     /// not a consumer's; see [`PixelLayout`].
     pub const OTHER: Self = Self::of(PixelLayout::Other);

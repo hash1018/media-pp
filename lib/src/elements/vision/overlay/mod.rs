@@ -480,8 +480,16 @@ impl DetectionOverlayOptions {
         Ok(())
     }
 
+    /// Whether anything is drawn rather than hidden: a box, a label, a zone
+    /// or a line. What draws nothing takes P010 pictures, hiding in them.
+    pub(crate) fn draws_any(&self) -> bool {
+        self.parts.zones
+            || self.parts.lines
+            || self.treatments().any(|treatment| treatment.draw.is_some())
+    }
+
     /// Whether any treatment hides.
-    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[cfg(any(feature = "cuda", all(target_os = "macos", feature = "metal")))]
     pub(crate) fn hides_any(&self) -> bool {
         self.treatments().any(|treatment| treatment.hide.is_some())
     }
@@ -799,6 +807,66 @@ pub(crate) fn label_text(
 
 /// BT.709 limited-range Y'CbCr for an sRGB colour — what a YUV picture
 /// stores for it.
+/// `color`, an SDR colour, as the 10-bit limited-range Y'CbCr of a picture
+/// whose transfer is `transfer` — Y', Cb, Cr, each a whole number. In an
+/// HDR picture, HLG or PQ, it is put at BT.2408's reference white, as SDR
+/// graphics are put in HDR video: white is HLG's 75%, or PQ's 203 nits, in
+/// BT.2020's primaries and matrix. In any other it is
+/// [`bt709_limited`]'s, at ten bits. Black is black either way.
+pub(crate) fn ten_bit(
+    color: Color,
+    transfer: ffmpeg_next::color::TransferCharacteristic,
+) -> [f32; 3] {
+    use ffmpeg_next::color::TransferCharacteristic;
+    let encode: fn(f64) -> f64 = match transfer {
+        TransferCharacteristic::ARIB_STD_B67 => |light| {
+            // HLG: scene light, the display's light without its system
+            // gamma of 1.2, scaled so that white is 75%.
+            const A: f64 = 0.178_832_77;
+            const B: f64 = 0.284_668_92;
+            const C: f64 = 0.559_910_73;
+            let oetf = |e: f64| {
+                if e <= 1.0 / 12.0 {
+                    (3.0 * e).sqrt()
+                } else {
+                    A * (12.0 * e - B).ln() + C
+                }
+            };
+            let white = (((0.75 - C) / A).exp() + B) / 12.0;
+            oetf(light.powf(1.0 / 1.2) * white)
+        },
+        TransferCharacteristic::SMPTE2084 => |light| {
+            // PQ: white at 203 of its 10,000 nits.
+            const M1: f64 = 2610.0 / 16384.0;
+            const M2: f64 = 2523.0 / 4096.0 * 128.0;
+            const C1: f64 = 3424.0 / 4096.0;
+            const C2: f64 = 2413.0 / 4096.0 * 32.0;
+            const C3: f64 = 2392.0 / 4096.0 * 32.0;
+            let y = (light * 203.0 / 10_000.0).powf(M1);
+            ((C1 + C2 * y) / (1.0 + C3 * y)).powf(M2)
+        },
+        _ => {
+            let (y, cb, cr) = bt709_limited(color);
+            return [y, cb, cr].map(|value| f32::from(value) * 4.0);
+        }
+    };
+    // BT.709's display light, in BT.2020's primaries.
+    let linear = |value: u8| (f64::from(value) / 255.0).powf(2.4);
+    let (r, g, b) = (linear(color.red), linear(color.green), linear(color.blue));
+    let (r, g, b) = (
+        encode(0.6274 * r + 0.3293 * g + 0.0433 * b),
+        encode(0.0691 * r + 0.9195 * g + 0.0114 * b),
+        encode(0.0164 * r + 0.0880 * g + 0.8956 * b),
+    );
+    let y = 0.2627 * r + 0.6780 * g + 0.0593 * b;
+    let code = |value: f64| value.round().clamp(0.0, 1023.0) as f32;
+    [
+        code(64.0 + 876.0 * y),
+        code(512.0 + 896.0 * (b - y) / 1.8814),
+        code(512.0 + 896.0 * (r - y) / 1.4746),
+    ]
+}
+
 pub(crate) fn bt709_limited(color: Color) -> (u8, u8, u8) {
     let (r, g, b) = (
         f32::from(color.red) / 255.0,
@@ -1978,6 +2046,39 @@ mod tests {
         );
         assert_eq!(text_color(Color::new(255, 196, 0)), Color::BLACK);
         assert_eq!(text_color(Color::new(41, 121, 255)), Color::WHITE);
+    }
+
+    /// An SDR colour in a ten-bit picture: white at HLG's 75%, or PQ's 203
+    /// nits; black at ten-bit black; and in an SDR picture, BT.709's eight
+    /// bits four times over.
+    #[test]
+    fn colours_go_into_ten_bits_at_reference_white() {
+        use ffmpeg_next::color::TransferCharacteristic as Transfer;
+        assert_eq!(
+            ten_bit(Color::WHITE, Transfer::ARIB_STD_B67),
+            [721.0, 512.0, 512.0]
+        );
+        assert_eq!(
+            ten_bit(Color::BLACK, Transfer::ARIB_STD_B67),
+            [64.0, 512.0, 512.0]
+        );
+        assert_eq!(
+            ten_bit(Color::BLACK, Transfer::SMPTE2084),
+            [64.0, 512.0, 512.0]
+        );
+        // PQ's 203 nits is 58% of its signal.
+        let [y, cb, cr] = ten_bit(Color::WHITE, Transfer::SMPTE2084);
+        assert!(
+            (570.0..=575.0).contains(&y) && cb == 512.0 && cr == 512.0,
+            "{y}"
+        );
+        assert_eq!(
+            ten_bit(Color::WHITE, Transfer::BT709),
+            [940.0, 512.0, 512.0]
+        );
+        // A colour stays the colour it was: red is red.
+        let [_, cb, cr] = ten_bit(Color::new(255, 0, 0), Transfer::ARIB_STD_B67);
+        assert!(cr > 600.0 && cb < 512.0, "{cb} {cr}");
     }
 
     #[test]

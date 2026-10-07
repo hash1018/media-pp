@@ -33,7 +33,7 @@ use crate::{
 
 use super::super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, bt709_limited, hides, marks_turned, rasterize,
+    Rect, bt709_limited, hides, marks_turned, rasterize, ten_bit,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
@@ -140,6 +140,7 @@ struct Overlaying {
     /// size of the pictures arriving — see `ForSize`.
     nv12_frames: ForSize<AvBufferRef>,
     bgra_frames: ForSize<AvBufferRef>,
+    p010_frames: ForSize<AvBufferRef>,
     /// Reuses only the CPU-side `AVFrame` wrapper; each surface comes from
     /// a frames pool.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -177,7 +178,9 @@ impl CudaDetectionOverlay {
         let driver = CudaDriver::retain_primary()?;
         // Made now, where the style needs them, so that a driver that cannot
         // JIT them refuses the element rather than its first picture.
-        let cells = if options.cuts_cells() {
+        // A P010 picture's fills are painted as cells too: what draws
+        // nothing takes P010.
+        let cells = if options.cuts_cells() || (!options.draws_any() && options.hides_any()) {
             Some((driver.redact_kernels()?, driver.cell_means(4 * 64)?))
         } else {
             None
@@ -209,6 +212,7 @@ impl CudaDetectionOverlay {
             device_ctx,
             nv12_frames: ForSize::new(),
             bgra_frames: ForSize::new(),
+            p010_frames: ForSize::new(),
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         })))
     }
@@ -219,6 +223,9 @@ impl CudaDetectionOverlay {
 enum Surface {
     Nv12(Nv12Surface),
     Bgra(BgraSurface),
+    /// Laid out as NV12, two bytes a sample, and the transfer its colours
+    /// are in.
+    P010(Nv12Surface, ffmpeg::color::TransferCharacteristic),
 }
 
 /// The mask `key` names, rasterized in `font` and uploaded by `driver`,
@@ -260,7 +267,8 @@ impl Overlaying {
         let (device, pp_log) = (&self.hw_device_ctx, &self.pp_log);
         let pool = match format {
             CudaFrameFormat::Nv12 => &mut self.nv12_frames,
-            _ => &mut self.bgra_frames,
+            CudaFrameFormat::Bgra => &mut self.bgra_frames,
+            CudaFrameFormat::P010 => &mut self.p010_frames,
         };
         let frames_ctx = pool
             .try_get(width, height, |width, height| {
@@ -313,6 +321,10 @@ impl Overlaying {
                 self.driver
                     .fill_bgra(at, rect.width, rect.height, color, 255)
             }
+            // Painted as one cell its colour, as no 8-bit fill can.
+            Surface::P010(..) => Err(CudaDriverError::KernelRejected(
+                "a P010 picture is filled as a cell".into(),
+            )),
         }
     }
 
@@ -346,6 +358,7 @@ impl Overlaying {
                     height: rect.height,
                     channels: 1,
                     cells,
+                    wide: false,
                 },
                 CellPlane {
                     plane: nv12.chroma + (y / 2) * nv12.chroma_pitch as u64 + x,
@@ -354,6 +367,7 @@ impl Overlaying {
                     height: rect.height / 2,
                     channels: 2,
                     cells,
+                    wide: false,
                 },
             ],
             Surface::Bgra(bgra) => vec![CellPlane {
@@ -363,7 +377,30 @@ impl Overlaying {
                 height: rect.height,
                 channels: 4,
                 cells,
+                wide: false,
             }],
+            // Two bytes a sample: `x` samples are `2x` bytes in, luma and
+            // chroma pairs alike.
+            Surface::P010(p010, _) => vec![
+                CellPlane {
+                    plane: p010.luma + y * p010.luma_pitch as u64 + 2 * x,
+                    pitch: p010.luma_pitch,
+                    width: rect.width,
+                    height: rect.height,
+                    channels: 1,
+                    cells,
+                    wide: true,
+                },
+                CellPlane {
+                    plane: p010.chroma + (y / 2) * p010.chroma_pitch as u64 + 2 * x,
+                    pitch: p010.chroma_pitch,
+                    width: rect.width / 2,
+                    height: rect.height / 2,
+                    channels: 2,
+                    cells,
+                    wide: true,
+                },
+            ],
         };
         // A fill's colour, plane by plane, as the cell's means.
         let (luma, cb, cr) = fill.map_or((0, 0, 0), bt709_limited);
@@ -377,12 +414,26 @@ impl Overlaying {
                     .map(f32::from)
                     .to_vec()
             })],
+            Surface::P010(_, transfer) => {
+                let [luma, cb, cr] = fill.map_or([0.0; 3], |color| ten_bit(color, transfer));
+                vec![fill.map(|_| vec![luma]), fill.map(|_| vec![cb, cr])]
+            }
         };
         for (plane, colour) in planes.into_iter().zip(colours) {
             self.driver
                 .hide_cells(kernels, means, plane, (smooth, ellipse), colour.as_deref())?;
         }
         Ok(())
+    }
+
+    /// The layouts it takes: P010 too where it draws nothing, hiding alone
+    /// — what NVDEC decodes HDR to.
+    fn surfaces(&self) -> CudaSurfaces {
+        if self.options.draws_any() {
+            CudaSurfaces::NV12_OR_BGRA
+        } else {
+            CudaSurfaces::NV12_BGRA_OR_P010
+        }
     }
 
     /// A copy of `source` with `detections` and `analytics` drawn on it.
@@ -397,15 +448,18 @@ impl Overlaying {
             source,
             ElementType::CudaDetectionOverlay,
             self.device_ctx,
-            CudaSurfaces::NV12_OR_BGRA,
+            self.surfaces(),
         )?
         .layout;
         let (width, height) = (source.width(), source.height());
-        let nv12 = layout == ffmpeg::format::Pixel::NV12;
+        let p010 = layout == ffmpeg::format::Pixel::P010LE;
+        let nv12 = layout == ffmpeg::format::Pixel::NV12 || p010;
         if nv12 && (width % 2 == 1 || height % 2 == 1) {
             return Err(CudaDetectionOverlayError::OddNv12 { width, height });
         }
-        let format = if nv12 {
+        let format = if p010 {
+            CudaFrameFormat::P010
+        } else if nv12 {
             CudaFrameFormat::Nv12
         } else {
             CudaFrameFormat::Bgra
@@ -425,11 +479,16 @@ impl Overlaying {
                     source_y: 0,
                     destination_x: 0,
                     destination_y: 0,
-                    width,
+                    // A P010 row is two bytes a sample.
+                    width: if p010 { 2 * width } else { width },
                     height,
                 },
             )?;
-            Surface::Nv12(to)
+            if p010 {
+                Surface::P010(to, source.color_transfer_characteristic())
+            } else {
+                Surface::Nv12(to)
+            }
         } else {
             let from =
                 BgraSurface::from_frame(source).ok_or(CudaDetectionOverlayError::MissingSurface)?;
@@ -477,12 +536,12 @@ impl Overlaying {
                         rect,
                         color,
                         ellipse: false,
-                    } => self.fill(surface, rect, color)?,
+                    } if !p010 => self.fill(surface, rect, color)?,
                     Hide::Fill {
                         rect,
                         color,
-                        ellipse: true,
-                    } => self.hide_cells(surface, rect, ((1, 1), false, true), Some(color))?,
+                        ellipse,
+                    } => self.hide_cells(surface, rect, ((1, 1), false, ellipse), Some(color))?,
                     Hide::Cells {
                         rect,
                         cells,
@@ -529,6 +588,13 @@ impl Overlaying {
                     mark.color,
                     255,
                 )?,
+                // Taken only where nothing is drawn: see `surfaces`.
+                Surface::P010(..) => {
+                    return Err(CudaDriverError::KernelRejected(
+                        "nothing is drawn on a P010 picture".into(),
+                    )
+                    .into());
+                }
             }
         }
         // The copies and fills run on this driver's context while whatever
@@ -567,9 +633,13 @@ impl Element for Overlaying {
 impl Filter for Overlaying {
     /// Device-resident frames; which of the two layouts is a runtime value.
     fn input_contract(&self) -> InputContract {
+        let layouts = if self.options.draws_any() {
+            PixelLayoutSet::NV12_OR_BGRA
+        } else {
+            PixelLayoutSet::GPU_SCALABLE
+        };
         InputContract::Fixed(
-            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda).with_layouts(layouts),
         )
     }
 
@@ -873,6 +943,7 @@ mod tests {
         let (width, height) = (frame.width() as usize, frame.height() as usize);
         let rows: Vec<(usize, usize)> = match frame.format() {
             ffmpeg::format::Pixel::NV12 => vec![(height, width), (height / 2, width)],
+            ffmpeg::format::Pixel::P010LE => vec![(height, width * 2), (height / 2, width * 2)],
             _ => vec![(height, width * 4)],
         };
         rows.into_iter()
@@ -921,6 +992,7 @@ mod tests {
         for (format, pixel) in [
             (CudaFrameFormat::Nv12, ffmpeg::format::Pixel::NV12),
             (CudaFrameFormat::Bgra, ffmpeg::format::Pixel::BGRA),
+            (CudaFrameFormat::P010, ffmpeg::format::Pixel::P010LE),
         ] {
             for (style, shape) in styles.into_iter().flat_map(|style| {
                 [HideShape::Rectangle, HideShape::Ellipse].map(|shape| (style, shape))
@@ -935,7 +1007,13 @@ mod tests {
                     },
                     ..DetectionOverlayOptions::default()
                 };
-                let picture = noise(pixel);
+                let mut picture = noise(pixel);
+                // An iPhone's HDR, whose fills are put at HLG's white.
+                if pixel == ffmpeg::format::Pixel::P010LE {
+                    picture.set_color_transfer_characteristic(
+                        ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+                    );
+                }
 
                 let mut cpu = crate::elements::SwDetectionOverlay::new("cpu", options.clone())
                     .expect("opens");

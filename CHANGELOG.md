@@ -216,6 +216,20 @@ compile error with no explanation.
 
 ### Added
 
+- **An iPhone's HDR goes through in ten bits.** `CudaFrameFormat::P010` is
+  what NVDEC decodes 10-bit video to. `CudaEncoder` takes it and encodes
+  HEVC Main 10 — `with_color` saying BT.2020 and HLG or PQ, as
+  `StreamInfo::color` reads them — and refuses H.264, which NVENC has no
+  ten bits of, with `TenBitCodec`. `CudaUpload`, `CudaDownload` and
+  `CudaScaler` take it; `CudaConverter` refuses to make it
+  (`UnsupportedOutput`) and `CudaVideoCompositor` to compose on it
+  (`UnsupportedCanvas`). The detection overlays hide in a P010 picture —
+  mosaic, blur and fill, box or ellipse, in its ten bits, the CPU and CUDA
+  ones writing the same bytes — where they draw nothing; a fill's SDR
+  colour is put at BT.2408's reference white, HLG's 75% or PQ's 203 nits.
+  An iPhone's Dolby Vision metadata does not survive re-encoding: what
+  comes out is its HLG.
+
 - **Where each shot of an edited video begins.** `SwCutDetector` and
   `CudaCutDetector` hand each picture on, the first of each shot after the
   stream's first carrying a `SceneCut`; an `ObjectTracker` starts over on

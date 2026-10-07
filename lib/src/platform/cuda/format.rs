@@ -23,12 +23,23 @@ use ffmpeg_next::{self as ffmpeg, ffi};
 /// the GPU path *cannot* do is convert between them:
 /// [`crate::elements::CudaScaler`]'s `scale_cuda` has no RGB-to-YUV kernel.
 /// Pick the format the source already produces and keep it to the encoder.
+///
+/// `P010` is what NVDEC decodes a 10-bit stream to — an iPhone's HDR, say —
+/// and what NVENC encodes 10-bit HEVC from, so a 10-bit picture can go
+/// through untouched: [`crate::elements::CudaEncoder`] and
+/// [`crate::elements::CudaUpload`], [`crate::elements::CudaDownload`] and
+/// [`crate::elements::CudaScaler`] take it; an element that makes a picture
+/// of its own in 8 bits — a compositor's canvas, a converter's output —
+/// refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaFrameFormat {
     /// 8-bit 4:2:0, luma plane plus interleaved chroma.
     Nv12,
     /// 8-bit packed BGRA. The alpha byte is carried but ignored by NVENC.
     Bgra,
+    /// 10-bit 4:2:0 as NV12 lays it out, each sample in the top ten bits
+    /// of two bytes, little-endian.
+    P010,
 }
 
 impl CudaFrameFormat {
@@ -37,6 +48,7 @@ impl CudaFrameFormat {
         match self {
             Self::Nv12 => ffi::AVPixelFormat::AV_PIX_FMT_NV12,
             Self::Bgra => ffi::AVPixelFormat::AV_PIX_FMT_BGRA,
+            Self::P010 => ffi::AVPixelFormat::AV_PIX_FMT_P010LE,
         }
     }
 
@@ -46,6 +58,7 @@ impl CudaFrameFormat {
         match self {
             Self::Nv12 => ffmpeg::format::Pixel::NV12,
             Self::Bgra => ffmpeg::format::Pixel::BGRA,
+            Self::P010 => ffmpeg::format::Pixel::P010LE,
         }
     }
 
@@ -55,6 +68,7 @@ impl CudaFrameFormat {
         match self {
             Self::Nv12 => crate::contract::PixelLayoutSet::NV12,
             Self::Bgra => crate::contract::PixelLayoutSet::BGRA,
+            Self::P010 => crate::contract::PixelLayoutSet::P010,
         }
     }
 
@@ -67,6 +81,7 @@ impl CudaFrameFormat {
         match format {
             ffi::AVPixelFormat::AV_PIX_FMT_NV12 => Some(Self::Nv12),
             ffi::AVPixelFormat::AV_PIX_FMT_BGRA => Some(Self::Bgra),
+            ffi::AVPixelFormat::AV_PIX_FMT_P010LE => Some(Self::P010),
             _ => None,
         }
     }

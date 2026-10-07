@@ -18,7 +18,9 @@ pub struct CudaSurfaces(&'static [Pixel]);
 impl CudaSurfaces {
     pub(crate) const NV12: Self = Self(&[Pixel::NV12]);
     pub(crate) const BGRA: Self = Self(&[Pixel::BGRA]);
+    pub(crate) const P010: Self = Self(&[Pixel::P010LE]);
     pub(crate) const NV12_OR_BGRA: Self = Self(&[Pixel::NV12, Pixel::BGRA]);
+    pub(crate) const NV12_BGRA_OR_P010: Self = Self(&[Pixel::NV12, Pixel::BGRA, Pixel::P010LE]);
     pub(crate) const NV12_OR_P010: Self = Self(&[Pixel::NV12, Pixel::P010LE]);
     /// What `scale_cuda` resizes: both [`CudaFrameFormat`]s, and the P010 a
     /// 10-bit decode arrives as.
@@ -29,6 +31,7 @@ impl CudaSurfaces {
         match format {
             CudaFrameFormat::Nv12 => Self::NV12,
             CudaFrameFormat::Bgra => Self::BGRA,
+            CudaFrameFormat::P010 => Self::P010,
         }
     }
 

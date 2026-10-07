@@ -384,6 +384,7 @@ impl Filter for Scaling {
                 None => crate::contract::PixelLayoutSet::GPU_SCALABLE,
                 Some(CudaFrameFormat::Nv12) => crate::contract::PixelLayoutSet::YUV420,
                 Some(CudaFrameFormat::Bgra) => crate::contract::PixelLayoutSet::BGRA,
+                Some(CudaFrameFormat::P010) => crate::contract::PixelLayoutSet::YUV420,
             }),
         )
     }

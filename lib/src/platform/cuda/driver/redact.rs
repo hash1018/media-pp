@@ -20,6 +20,9 @@ pub(crate) struct RedactKernels {
     module: CUmodule,
     means: CUfunction,
     paint: CUfunction,
+    /// The same for two-byte samples, P010's.
+    means16: CUfunction,
+    paint16: CUfunction,
 }
 
 // SAFETY: a module and two function handles in a context that is pushed
@@ -74,8 +77,9 @@ impl CellMeans {
 }
 
 /// One plane of a box to hide: `width` by `height` samples of `channels`
-/// bytes each from `plane`, rows `pitch` bytes apart, cut into `cells` —
-/// across, down.
+/// channels each from `plane`, rows `pitch` bytes apart, cut into `cells` —
+/// across, down. A channel is a byte, or with `wide` two, ten bits at the
+/// top, as P010 lays them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CellPlane {
     pub(crate) plane: CUdeviceptr,
@@ -84,6 +88,14 @@ pub(crate) struct CellPlane {
     pub(crate) height: u32,
     pub(crate) channels: u32,
     pub(crate) cells: (u32, u32),
+    pub(crate) wide: bool,
+}
+
+impl CellPlane {
+    /// The bytes a row of its samples takes.
+    fn row_bytes(&self) -> usize {
+        self.width as usize * self.channels as usize * if self.wide { 2 } else { 1 }
+    }
 }
 
 impl CudaDriver {
@@ -92,13 +104,19 @@ impl CudaDriver {
         self.with_context(|| {
             // SAFETY: the context is current inside `with_context`, which is
             // `load_module`'s whole contract.
-            let (module, [means, paint]) =
-                unsafe { load_module(REDACT_PTX, ["cell_means", "cell_paint"])? };
+            let (module, [means, paint, means16, paint16]) = unsafe {
+                load_module(
+                    REDACT_PTX,
+                    ["cell_means", "cell_paint", "cell_means16", "cell_paint16"],
+                )?
+            };
             Ok(RedactKernels {
                 ctx: self.ctx,
                 module,
                 means,
                 paint,
+                means16,
+                paint16,
             })
         })
     }
@@ -141,7 +159,7 @@ impl CudaDriver {
             || cells_y > plane.height
             || !(1..=4).contains(&plane.channels)
             || offset + cells * plane.channels as usize > means.floats
-            || plane.pitch < plane.width as usize * plane.channels as usize
+            || plane.pitch < plane.row_bytes()
             || plane.pitch > u32::MAX as usize
         {
             return Err(CudaDriverError::KernelRejected(format!(
@@ -174,7 +192,11 @@ impl CudaDriver {
             // current.
             unsafe {
                 launch(
-                    kernels.means,
+                    if plane.wide {
+                        kernels.means16
+                    } else {
+                        kernels.means
+                    },
                     ((cells as u32).div_ceil(256), 1),
                     16,
                     &mut params,
@@ -235,7 +257,7 @@ impl CudaDriver {
             || cells_y > plane.height
             || !(1..=4).contains(&plane.channels)
             || cells * plane.channels as usize > means.floats
-            || plane.pitch < plane.width as usize * plane.channels as usize
+            || plane.pitch < plane.row_bytes()
             || plane.pitch > u32::MAX as usize
             || fill.is_some_and(|values| values.len() != cells * plane.channels as usize)
         {
@@ -286,7 +308,11 @@ impl CudaDriver {
                 // is current.
                 None => unsafe {
                     launch(
-                        kernels.means,
+                        if plane.wide {
+                            kernels.means16
+                        } else {
+                            kernels.means
+                        },
                         ((cells as u32).div_ceil(256), 1),
                         16,
                         &mut params,
@@ -300,7 +326,11 @@ impl CudaDriver {
             // plane, each writing its own.
             unsafe {
                 launch(
-                    kernels.paint,
+                    if plane.wide {
+                        kernels.paint16
+                    } else {
+                        kernels.paint
+                    },
                     (width.div_ceil(16), height.div_ceil(16)),
                     16,
                     &mut params,

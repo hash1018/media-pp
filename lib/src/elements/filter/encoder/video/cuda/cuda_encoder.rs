@@ -95,6 +95,10 @@ pub enum CudaEncoderError {
     #[error("encoder `{0}` not found in this ffmpeg build")]
     CodecNotFound(&'static str),
 
+    /// 10-bit pictures for a codec NVENC encodes in 8 bits only: H.264.
+    #[error("NVENC encodes 10-bit pictures as HEVC only, not {0:?}")]
+    TenBitCodec(CudaCodec),
+
     /// FFmpeg rejected encoder or hardware-context processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
@@ -250,6 +254,10 @@ impl CudaEncoder {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaEncoder, &name, None);
 
+        // NVENC has no 10-bit H.264; HEVC is Main 10 from P010 by itself.
+        if options.input_format == CudaFrameFormat::P010 && options.codec != CudaCodec::H265 {
+            return Err(CudaEncoderError::TenBitCodec(options.codec));
+        }
         let encoder_name = options.codec.encoder_name();
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
             .ok_or(CudaEncoderError::CodecNotFound(encoder_name))?;
@@ -598,6 +606,109 @@ mod tests {
             );
             assert!(packet.duration() > 0, "packet has no duration");
         }
+    }
+
+    /// A P010 picture — 10 bits a sample, as an iPhone's HDR decodes to —
+    /// is encoded as HEVC Main 10, its BT.2020 and HLG said in the stream,
+    /// and comes back 10-bit; H.264, which NVENC has no 10 bits of, is
+    /// refused when the encoder is made.
+    #[test]
+    fn ten_bit_pictures_are_encoded_as_hevc_main_10() {
+        use crate::color::ColorDescription;
+        use crate::elements::FileMuxer;
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        let ten = |codec| CudaEncoderOptions {
+            codec,
+            input_format: CudaFrameFormat::P010,
+            ..options(width, height)
+        };
+        assert!(matches!(
+            CudaEncoder::new("encoder", &device, ten(CudaCodec::H264)),
+            Err(CudaEncoderError::TenBitCodec(CudaCodec::H264))
+        ));
+        let hlg = ColorDescription {
+            space: ffmpeg::color::Space::BT2020NCL,
+            range: ffmpeg::color::Range::MPEG,
+            primaries: ffmpeg::color::Primaries::BT2020,
+            transfer: ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+        };
+        let mut encoder =
+            match CudaEncoder::with_color("encoder", &device, ten(CudaCodec::H265), hlg) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    eprintln!("skipping: NVENC unavailable on this machine ({error})");
+                    return;
+                }
+            };
+        let path = std::env::temp_dir().join("media-pp-main10.mp4");
+        let mut muxer = FileMuxer::create(&path).expect("create");
+        let track = muxer.add_stream("video", &encoder).expect("add");
+        let sink = muxer.open().expect("header").take(track).expect("track");
+        encoder.src_pads()[0].link(sink.into_raw());
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::P010);
+        let uploaded = Arc::new(Mutex::new(Vec::new()));
+        upload.src_pads()[0].link(Box::new(CapturingSink {
+            received: uploaded.clone(),
+            pp_log: element_pp_log(ElementType::Other, "uploaded", None),
+        }));
+        for index in 0..10i64 {
+            let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::P010LE, width, height);
+            for plane in 0..2 {
+                let stride = frame.stride(plane);
+                for (n, sample) in frame
+                    .data_mut(plane)
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .enumerate()
+                {
+                    let x = (n * 2 % stride) as i64;
+                    let value = (((x + index * 8) % 1024) as u16) << 6;
+                    sample.copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            frame.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+            upload
+                .consume(MediaBuffer::video(frame))
+                .expect("upload failed");
+            let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
+            encoder.consume(frame).expect("encode failed");
+        }
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos failed");
+        drop(encoder);
+        let input = ffmpeg::format::input(&path).expect("reopen");
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .expect("video");
+        // SAFETY: plain fields of the stream's own parameters.
+        let (profile, format, primaries, transfer) = unsafe {
+            let raw = stream.parameters().as_ptr();
+            (
+                (*raw).profile,
+                (*raw).format,
+                (*raw).color_primaries,
+                (*raw).color_trc,
+            )
+        };
+        assert_eq!(profile, ffi::AV_PROFILE_HEVC_MAIN_10, "Main 10");
+        assert_eq!(
+            format,
+            ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32,
+            "10 bits"
+        );
+        assert_eq!(primaries, ffi::AVColorPrimaries::AVCOL_PRI_BT2020);
+        assert_eq!(
+            transfer,
+            ffi::AVColorTransferCharacteristic::AVCOL_TRC_ARIB_STD_B67
+        );
+        drop(input);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// HEVC from NVENC goes into an MP4 as `hvc1`, which an iPhone plays,

@@ -147,8 +147,8 @@ impl Detecting {
         let surface = Nv12Surface::from_frame(frame).ok_or(CudaCutDetectorError::MissingSurface)?;
         let (width, height) = (frame.width(), frame.height());
         let (cells, chroma_cells) = Thumbnail::cells_of(width, height);
-        // Bytes a luma sample and a chroma pair take; P010's are read by
-        // their high bytes.
+        // Bytes a luma sample and a chroma pair take; P010's are read byte
+        // by byte, as channels, its high bytes kept.
         let (luma_bytes, chroma_bytes) = if layout == Pixel::P010LE {
             (2, 4)
         } else {
@@ -167,6 +167,7 @@ impl Detecting {
                 height,
                 channels: luma_bytes,
                 cells,
+                wide: false,
             },
         )?;
         self.driver.measure_cells(
@@ -180,6 +181,7 @@ impl Detecting {
                 height: height.div_ceil(2),
                 channels: chroma_bytes,
                 cells: chroma_cells,
+                wide: false,
             },
         )?;
         let read = &mut self.read[..luma_floats + chroma_floats];

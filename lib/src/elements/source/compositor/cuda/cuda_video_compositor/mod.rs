@@ -101,6 +101,11 @@ pub enum CudaVideoCompositorError {
     #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
     InvalidFrameRate(ffmpeg::Rational),
 
+    /// A canvas of a format it does not compose on: P010, its layers and
+    /// fills being 8-bit.
+    #[error("CudaVideoCompositor composes on NV12 or BGRA, not {0:?}")]
+    UnsupportedCanvas(CudaFrameFormat),
+
     /// A layer destination rectangle is zero-sized or exceeds the safety limit.
     #[error(
         "invalid layer dimensions {width}x{height}; each dimension must be 1..={MAX_DIMENSION}"
@@ -1940,6 +1945,9 @@ fn validate_output_options(
         return Err(CudaVideoCompositorError::InvalidFrameRate(
             options.frame_rate,
         ));
+    }
+    if format == CudaFrameFormat::P010 {
+        return Err(CudaVideoCompositorError::UnsupportedCanvas(format));
     }
     // NV12 has nowhere to keep it. Refused rather than quietly made opaque:
     // a caller asking for a background to lay over something else would

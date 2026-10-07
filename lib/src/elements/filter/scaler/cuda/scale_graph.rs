@@ -394,6 +394,7 @@ impl CudaScaleGraph {
             None => "",
             Some(CudaFrameFormat::Nv12) => ":format=nv12",
             Some(CudaFrameFormat::Bgra) => ":format=bgra",
+            Some(CudaFrameFormat::P010) => ":format=p010le",
         };
 
         // One `scale_cuda`, unless this is the size that filter gets wrong —

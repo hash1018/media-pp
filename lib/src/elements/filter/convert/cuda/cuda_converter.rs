@@ -49,6 +49,10 @@ pub enum CudaConverterError {
         /// Odd output height in pixels.
         height: u32,
     },
+    /// Asked to produce a format it does not make: P010, which nothing
+    /// converts 8-bit pictures to.
+    #[error("CudaConverter makes NV12 or BGRA, not {0:?}")]
+    UnsupportedOutput(CudaFrameFormat),
     /// A CUDA frame contains no usable device-memory plane.
 
     #[error("a surface arrived with no device pointer")]
@@ -140,7 +144,7 @@ struct Converting {
     hw_frames_ctx: ForSize<AvBufferRef>,
     /// Which way round this one converts, named by what it produces. The
     /// other format is the input, there being two.
-    output: CudaFrameFormat,
+    output: Produces,
     /// The device context incoming frames must belong to, compared by
     /// pointer — a surface from another device would be read against the
     /// wrong context.
@@ -169,6 +173,11 @@ impl CudaConverter {
     ) -> std::result::Result<Self, CudaConverterError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaConverter, &name, None);
+        let output = match output {
+            CudaFrameFormat::Nv12 => Produces::Nv12,
+            CudaFrameFormat::Bgra => Produces::Bgra,
+            CudaFrameFormat::P010 => return Err(CudaConverterError::UnsupportedOutput(output)),
+        };
 
         let driver = CudaDriver::retain_primary()?;
         let hw_device_ctx = device.retain();
@@ -182,8 +191,9 @@ impl CudaConverter {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
             pp_log: &pp_log,
-            "opened: {:?} -> {output:?}",
-            input_of(output)
+            "opened: {:?} -> {:?}",
+            output.input(),
+            output.format()
         );
         Ok(Self(FilterStage::new(Converting {
             name,
@@ -209,8 +219,8 @@ impl Converting {
     ) -> std::result::Result<bool, CudaConverterError> {
         // P010 only on the way to BGRA, and only as HDR — see `convert`.
         let accepts = match self.output {
-            CudaFrameFormat::Nv12 => CudaSurfaces::BGRA,
-            CudaFrameFormat::Bgra => CudaSurfaces::NV12_OR_P010,
+            Produces::Nv12 => CudaSurfaces::BGRA,
+            Produces::Bgra => CudaSurfaces::NV12_OR_P010,
         };
         let surface = frame::validate(frame, ElementType::CudaConverter, self.device_ctx, accepts)?;
         // Chroma is 2x2 subsampled whichever way this runs, so an odd
@@ -231,7 +241,7 @@ impl Converting {
         let wide = self
             .validate(source)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
-        let tone_map = if self.output == CudaFrameFormat::Bgra {
+        let tone_map = if self.output == Produces::Bgra {
             crate::tone_map::ToneMap::of_frame(source)
         } else {
             None
@@ -248,7 +258,7 @@ impl Converting {
         }
 
         let (width, height) = (source.width(), source.height());
-        let (device, output, pp_log) = (&self.hw_device_ctx, self.output, &self.pp_log);
+        let (device, output, pp_log) = (&self.hw_device_ctx, self.output.format(), &self.pp_log);
         let frames_ctx = self
             .hw_frames_ctx
             .try_get(width, height, |width, height| {
@@ -281,14 +291,14 @@ impl Converting {
 
         (|| -> std::result::Result<(), CudaConverterError> {
             match self.output {
-                CudaFrameFormat::Nv12 => self.driver.bgra_to_nv12(
+                Produces::Nv12 => self.driver.bgra_to_nv12(
                     BgraSurface::from_frame(source).ok_or(CudaConverterError::MissingSurface)?,
                     Nv12Surface::from_frame(&destination)
                         .ok_or(CudaConverterError::MissingSurface)?,
                     width,
                     height,
                 )?,
-                CudaFrameFormat::Bgra => {
+                Produces::Bgra => {
                     let source_surface = Nv12Surface::from_frame(source)
                         .ok_or(CudaConverterError::MissingSurface)?;
                     let destination_surface = BgraSurface::from_frame(&destination)
@@ -339,14 +349,14 @@ impl Converting {
         // on the fly. The RGB pair is what `DxgiCaptureSource` puts on its
         // own BGRA frames.
         let (space, range) = match self.output {
-            CudaFrameFormat::Nv12 => (ffmpeg::color::Space::BT709, ffmpeg::color::Range::MPEG),
-            CudaFrameFormat::Bgra => (ffmpeg::color::Space::RGB, ffmpeg::color::Range::JPEG),
+            Produces::Nv12 => (ffmpeg::color::Space::BT709, ffmpeg::color::Range::MPEG),
+            Produces::Bgra => (ffmpeg::color::Space::RGB, ffmpeg::color::Range::JPEG),
         };
         destination.set_color_space(space);
         destination.set_color_range(range);
         // BT.2020 was brought into BT.709's primaries on the way to RGB, and
         // HDR into SDR.
-        if self.output == CudaFrameFormat::Bgra && crate::color::is_bt2020(source.color_space()) {
+        if self.output == Produces::Bgra && crate::color::is_bt2020(source.color_space()) {
             destination.set_color_primaries(ffmpeg::color::Primaries::BT709);
         }
         if tone_map.is_some() {
@@ -358,12 +368,29 @@ impl Converting {
     }
 }
 
-/// What a converter producing `output` takes, there being two formats and no
-/// converter that produces what it was given.
-fn input_of(output: CudaFrameFormat) -> CudaFrameFormat {
-    match output {
-        CudaFrameFormat::Nv12 => CudaFrameFormat::Bgra,
-        CudaFrameFormat::Bgra => CudaFrameFormat::Nv12,
+/// Which way round a converter converts, named by what it produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Produces {
+    Nv12,
+    Bgra,
+}
+
+impl Produces {
+    /// The format it produces.
+    fn format(self) -> CudaFrameFormat {
+        match self {
+            Self::Nv12 => CudaFrameFormat::Nv12,
+            Self::Bgra => CudaFrameFormat::Bgra,
+        }
+    }
+
+    /// What it takes, there being no converter that produces what it was
+    /// given — NV12 standing for P010 too, on the way to BGRA.
+    fn input(self) -> CudaFrameFormat {
+        match self {
+            Self::Nv12 => CudaFrameFormat::Bgra,
+            Self::Bgra => CudaFrameFormat::Nv12,
+        }
     }
 }
 
@@ -410,8 +437,8 @@ impl Filter for Converting {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda).with_layouts(match self
                 .output
             {
-                CudaFrameFormat::Nv12 => crate::contract::PixelLayoutSet::BGRA,
-                CudaFrameFormat::Bgra => crate::contract::PixelLayoutSet::YUV420,
+                Produces::Nv12 => crate::contract::PixelLayoutSet::BGRA,
+                Produces::Bgra => crate::contract::PixelLayoutSet::YUV420,
             }),
         )
     }
@@ -439,7 +466,7 @@ impl Filter for Converting {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                .with_layouts(self.output.layouts()),
+                .with_layouts(self.output.format().layouts()),
         )
     }
 }

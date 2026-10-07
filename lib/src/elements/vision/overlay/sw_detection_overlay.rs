@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
     Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, bt709_limited, cell_edge, hides, inside_ellipse, marks_turned, rasterize,
+    Rect, bt709_limited, cell_edge, hides, inside_ellipse, marks_turned, rasterize, ten_bit,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, TextMask, load_font};
@@ -45,7 +45,9 @@ pub enum SwDetectionOverlayError {
     #[error("SwDetectionOverlay only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
     /// A picture in a format it does not draw on.
-    #[error("SwDetectionOverlay draws on NV12, YUV 4:2:0, RGB24 or BGRA, not {0:?}")]
+    #[error(
+        "SwDetectionOverlay draws on NV12, YUV 4:2:0, RGB24 or BGRA, and hides in P010 where it draws nothing, not {0:?}"
+    )]
     UnsupportedFormat(Pixel),
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
@@ -151,6 +153,9 @@ enum Planes {
     Nv12,
     /// Luma, then Cb, then Cr, each per 2x2 block.
     Yuv420p,
+    /// As NV12, two bytes a sample, ten bits at the top: hidden in, never
+    /// drawn on.
+    P010,
 }
 
 impl Planes {
@@ -172,6 +177,7 @@ impl Planes {
             },
             Pixel::NV12 => Self::Nv12,
             Pixel::YUV420P => Self::Yuv420p,
+            Pixel::P010LE => Self::P010,
             _ => return None,
         })
     }
@@ -179,7 +185,7 @@ impl Planes {
     fn block(self) -> u32 {
         match self {
             Self::Packed { .. } => 1,
-            Self::Nv12 | Self::Yuv420p => 2,
+            Self::Nv12 | Self::Yuv420p | Self::P010 => 2,
         }
     }
 }
@@ -275,13 +281,17 @@ fn paint(
                 }
             }
         }
+        // Nothing is drawn on P010, and its fills are painted as cells: see
+        // `Overlaying::draw`.
+        Planes::P010 => {}
     }
 }
 
-/// One plane of a box to hide: `size` samples of `channels` bytes each
+/// One plane of a box to hide: `size` samples of `channels` channels each
 /// from byte `offset` of a plane, rows `stride` apart, cut into `cells`
 /// across and down — and, with `ellipse`, only the samples
-/// [`inside_ellipse`] of it painted.
+/// [`inside_ellipse`] of it painted. A channel is a byte, or with `wide`
+/// two, ten bits at the top, as P010 lays them.
 #[derive(Clone, Copy)]
 struct CellPlane {
     stride: usize,
@@ -291,6 +301,7 @@ struct CellPlane {
     cells: (u32, u32),
     smooth: bool,
     ellipse: bool,
+    wide: bool,
 }
 
 /// Paints each cell of a plane its mean — or with `smooth` its mean blended
@@ -308,8 +319,27 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
         cells: (across, down),
         smooth,
         ellipse,
+        wide,
     } = plane;
-    let at = |x: u32, y: u32| offset + y as usize * stride + x as usize * channels;
+    let bytes = if wide { 2 } else { 1 };
+    let at = |x: u32, y: u32| offset + y as usize * stride + x as usize * channels * bytes;
+    // A channel's value: its byte, or its two bytes' top ten bits.
+    let read = |data: &[u8], at: usize, channel: usize| {
+        if wide {
+            f32::from(u16::from_le_bytes([data[at + 2 * channel], data[at + 2 * channel + 1]]) >> 6)
+        } else {
+            f32::from(data[at + channel])
+        }
+    };
+    let write = |data: &mut [u8], at: usize, channel: usize, value: f32| {
+        let value = value.round_ties_even();
+        if wide {
+            let sample = (value as u16) << 6;
+            data[at + 2 * channel..at + 2 * channel + 2].copy_from_slice(&sample.to_le_bytes());
+        } else {
+            data[at + channel] = value as u8;
+        }
+    };
     let means = match fill {
         Some(values) => values.to_vec(),
         None => {
@@ -324,9 +354,9 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
                     let mut sums = [0.0f32; 4];
                     for y in y0..y1 {
                         for x in x0..x1 {
-                            let sample = &data[at(x, y)..][..channels];
-                            for (sum, &byte) in sums.iter_mut().zip(sample) {
-                                *sum += f32::from(byte);
+                            let sample = at(x, y);
+                            for (channel, sum) in sums.iter_mut().enumerate().take(channels) {
+                                *sum += read(data, sample, channel);
                             }
                         }
                     }
@@ -350,7 +380,6 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
         let first = at.floor() as u32;
         (first, (first + 1).min(cells - 1), at - first as f32)
     };
-    let byte = |value: f32| value.round_ties_even() as u8;
     for y in 0..height {
         for x in 0..width {
             if ellipse && !inside_ellipse(x, y, width, height) {
@@ -368,14 +397,14 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
                     let (m10, m11) = (mean(r1, c0, channel), mean(r1, c1, channel));
                     let top = m00 + (m01 - m00) * t;
                     let bottom = m10 + (m11 - m10) * t;
-                    data[sample + channel] = byte(top + (bottom - top) * s);
+                    write(data, sample, channel, top + (bottom - top) * s);
                 }
             } else {
                 let cx = ((x + 1) * across - 1) / width;
                 let cy = ((y + 1) * down - 1) / height;
                 let first = (cy * across + cx) as usize * channels;
                 for channel in 0..channels {
-                    data[sample + channel] = byte(means[first + channel]);
+                    write(data, sample, channel, means[first + channel]);
                 }
             }
         }
@@ -404,7 +433,9 @@ fn hide_cells(
         cells,
         smooth,
         ellipse,
+        wide: false,
     };
+    let transfer = frame.color_transfer_characteristic();
     let (luma, cb, cr) = fill.map_or((0, 0, 0), bt709_limited);
     let values = |bytes: &[u8]| {
         bytes
@@ -452,6 +483,29 @@ fn hide_cells(
                 frame.data_mut(1),
                 plane(stride, (y / 2) * stride + x, half, 2),
                 chroma.as_deref(),
+            );
+        }
+        Planes::P010 => {
+            // Two bytes a sample: `x` samples are `2x` bytes in, luma and
+            // chroma pairs alike.
+            let [luma, cb, cr] = fill.map_or([0.0; 3], |color| ten_bit(color, transfer));
+            let stride = frame.stride(0);
+            hide_plane(
+                frame.data_mut(0),
+                CellPlane {
+                    wide: true,
+                    ..plane(stride, y * stride + 2 * x, size, 1)
+                },
+                fill.map(|_| [luma]).as_ref().map(|values| &values[..]),
+            );
+            let stride = frame.stride(1);
+            hide_plane(
+                frame.data_mut(1),
+                CellPlane {
+                    wide: true,
+                    ..plane(stride, (y / 2) * stride + 2 * x, half, 2)
+                },
+                fill.map(|_| [cb, cr]).as_ref().map(|values| &values[..]),
             );
         }
         Planes::Yuv420p => {
@@ -503,6 +557,7 @@ impl Overlaying {
         analytics: Option<&Analytics>,
     ) -> std::result::Result<ffmpeg::frame::Video, SwDetectionOverlayError> {
         let planes = Planes::of(frame.format())
+            .filter(|planes| !matches!(planes, Planes::P010) || !self.options.draws_any())
             .ok_or(SwDetectionOverlayError::UnsupportedFormat(frame.format()))?;
         let canvas = Canvas {
             width: frame.width(),
@@ -536,12 +591,20 @@ impl Overlaying {
                         rect,
                         color,
                         ellipse: false,
-                    } => paint(&mut copy, planes, rect, color, None),
+                    } if !matches!(planes, Planes::P010) => {
+                        paint(&mut copy, planes, rect, color, None)
+                    }
                     Hide::Fill {
                         rect,
                         color,
-                        ellipse: true,
-                    } => hide_cells(&mut copy, planes, rect, ((1, 1), false, true), Some(color)),
+                        ellipse,
+                    } => hide_cells(
+                        &mut copy,
+                        planes,
+                        rect,
+                        ((1, 1), false, ellipse),
+                        Some(color),
+                    ),
                     Hide::Cells {
                         rect,
                         cells,
@@ -1246,6 +1309,67 @@ mod tests {
             assert!(super::super::inside_ellipse(12, 6, 24, 12));
             assert!(!super::super::inside_ellipse(0, 0, 24, 12));
         }
+    }
+
+    /// In a P010 picture — ten bits at the top of two bytes — a mosaic paints
+    /// each cell the mean of its ten-bit values, the six bits below left
+    /// naught, and a fill puts black at ten-bit black; a picture of it is
+    /// refused where anything would be drawn.
+    #[test]
+    fn a_p010_picture_is_hidden_in_ten_bits() {
+        let mut frame = ffmpeg::frame::Video::new(Pixel::P010LE, 48, 24);
+        for plane in 0..2 {
+            let stride = frame.stride(plane);
+            let rows = if plane == 0 { 24 } else { 12 };
+            for y in 0..rows {
+                for x in 0..48 {
+                    // Luma 100 or 700 in stripes, chroma 512; each with
+                    // low bits set, which a mean must not read.
+                    let value: u16 = if plane == 0 && x % 2 == 1 {
+                        700
+                    } else if plane == 0 {
+                        100
+                    } else {
+                        512
+                    };
+                    let sample = (value << 6) | 0b10_1010;
+                    frame.data_mut(plane)[y * stride + x * 2..][..2]
+                        .copy_from_slice(&sample.to_le_bytes());
+                }
+            }
+        }
+        let input = carrying(frame, face());
+        let read = |buf: &MediaBuffer, x: usize, y: usize| {
+            let MediaBuffer::Video(frame) = buf else {
+                panic!("a picture");
+            };
+            u16::from_le_bytes([
+                frame.data(0)[y * frame.stride(0) + x * 2],
+                frame.data(0)[y * frame.stride(0) + x * 2 + 1],
+            ])
+        };
+        let mosaic = hidden(RedactStyle::mosaic(), &input);
+        // The box from (12, 6) to (36, 18): every sample the stripes' mean,
+        // 400, in its top ten bits.
+        for y in 6..18 {
+            for x in 12..36 {
+                assert_eq!(read(&mosaic, x, y), 400 << 6, "({x}, {y})");
+            }
+        }
+        assert_eq!(
+            read(&mosaic, 0, 0),
+            (100 << 6) | 0b10_1010,
+            "outside, as it was"
+        );
+        let filled = hidden(RedactStyle::Fill(Color::BLACK), &input);
+        assert_eq!(read(&filled, 20, 10), 64 << 6, "ten-bit black");
+        let drawing =
+            SwDetectionOverlay::new("overlay", DetectionOverlayOptions::default()).unwrap();
+        let mut drawing = drawing;
+        assert!(
+            drawing.consume(input.clone()).is_err(),
+            "boxes are not drawn on P010"
+        );
     }
 
     /// The cells follow the box: its shorter side cut into `cells`, but
