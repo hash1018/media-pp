@@ -1253,6 +1253,15 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`VideoToolboxEncoder` with B-frames writes an MP4.** VideoToolbox's
+  H.264 reorders pictures two deep, even where one B-frame is allowed, and
+  FFmpeg's `h264_videotoolbox` dates them one deep: a packet then decoded
+  after it was shown, and `FileMuxer` failed with `Invalid argument`. With
+  `max_b_frames` above 0 the encoder now dates each packet itself, the
+  earliest presentation time come out four packets before; on H.264 and
+  HEVC with one and two B-frames every picture comes back out of the file,
+  in order.
+
 - **HEVC in MP4 and MOV plays on Apple devices.** `FileMuxer` writes an
   HEVC track as `hvc1` — its parameter sets in the sample entry, as an
   encoder of this crate puts them out of band — where FFmpeg wrote `hev1`,

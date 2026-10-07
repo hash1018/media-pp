@@ -1,9 +1,11 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 
 use crate::color::ColorDescription;
 use crate::{
@@ -66,7 +68,9 @@ pub struct VideoToolboxEncoderOptions {
     pub gop_size: u32,
     /// How many consecutive B-frames the encoder may insert, or `None` to
     /// leave its own default — see
-    /// [`crate::elements::SwEncoderOptions::max_b_frames`].
+    /// [`crate::elements::SwEncoderOptions::max_b_frames`]. With any, the
+    /// packets' decode timestamps are this encoder's own, as VideoToolbox
+    /// reorders H.264 deeper than FFmpeg dates it.
     pub max_b_frames: Option<u32>,
 }
 
@@ -189,6 +193,52 @@ struct Encoding {
     /// Nominal frame duration in `time_base` ticks, which the encoder
     /// leaves at zero.
     packet_duration: i64,
+    /// Where B-frames are allowed, the decode timestamps this writes in
+    /// place of FFmpeg's: see [`Dating`].
+    dating: Option<Dating>,
+}
+
+/// How far VideoToolbox may move a picture from where it was handed in,
+/// which the decode timestamps [`Dating`] writes allow for. Its H.264 and
+/// HEVC sessions were seen to move a picture two places at most, whatever
+/// the B-frames allowed; room is left above that.
+const REORDER: usize = 4;
+
+/// Decode timestamps for packets that come out reordered. FFmpeg's
+/// VideoToolbox encoders date each packet one picture behind its
+/// presentation for H.264 — two for HEVC — but VideoToolbox's H.264 reorders
+/// two deep even where one B-frame is allowed, and a packet then decodes
+/// after it is shown (`pts < dts`), which a muxer refuses.
+///
+/// So the `n`th packet is dated the `n - REORDER`th earliest presentation
+/// time of those come out so far — at or before its own wherever no picture
+/// moves more than [`REORDER`] places, and later than the one before it —
+/// and the first [`REORDER`] packets a picture apart before the first's.
+#[derive(Debug, Default)]
+struct Dating {
+    /// The presentation times come out and not yet given as a decode time.
+    waiting: BinaryHeap<Reverse<i64>>,
+    /// How many packets have been dated.
+    dated: usize,
+    /// The first packet's presentation time: a key picture, shown first.
+    first: Option<i64>,
+}
+
+impl Dating {
+    /// The decode time of the next packet, presented at `pts`, a picture
+    /// `duration` long.
+    fn next(&mut self, pts: i64, duration: i64) -> i64 {
+        self.waiting.push(Reverse(pts));
+        let first = *self.first.get_or_insert(pts);
+        let n = self.dated;
+        self.dated += 1;
+        if n < REORDER {
+            first - (REORDER - n) as i64 * duration.max(1)
+        } else {
+            let Reverse(earliest) = self.waiting.pop().expect("REORDER + 1 waiting");
+            earliest
+        }
+    }
 }
 
 // SAFETY: the frames context is a heap-allocated FFmpeg buffer with no thread
@@ -346,6 +396,10 @@ impl VideoToolboxEncoder {
             width: options.width,
             height: options.height,
             packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
+            dating: options
+                .max_b_frames
+                .is_some_and(|frames| frames > 0)
+                .then(Dating::default),
         })))
     }
 
@@ -419,6 +473,16 @@ impl Encoding {
                     packet.set_time_base(shared::TIME_BASE);
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
+                    }
+                    if let (Some(dating), Some(pts)) = (&mut self.dating, packet.pts()) {
+                        let dts = dating.next(pts, self.packet_duration);
+                        if dts > pts {
+                            pp_warn!(
+                                self,
+                                "a picture moved more than {REORDER} places: dated {dts} after its {pts}"
+                            );
+                        }
+                        packet.set_dts(Some(dts));
                     }
                     out.push(MediaBuffer::Packet(Arc::new(packet).into()));
                     packet = ffmpeg::Packet::empty();
@@ -980,5 +1044,90 @@ mod tests {
             pool.describe(&foreign),
             Err(VideoToolboxFramePoolError::ForeignPicture)
         ));
+    }
+
+    /// With B-frames allowed, the packets go into an MP4, which refuses one
+    /// decoded after it is shown, and every picture comes back out of it in
+    /// order — H.264 and HEVC alike, though VideoToolbox reorders H.264
+    /// deeper than FFmpeg dates it.
+    #[test]
+    fn b_frames_are_dated_as_a_muxer_takes_them() {
+        use crate::elements::FileMuxer;
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        for codec in [VideoToolboxCodec::H264, VideoToolboxCodec::H265] {
+            for b_frames in [1, 2] {
+                let Ok(mut encoder) = VideoToolboxEncoder::new(
+                    "encoder",
+                    &device,
+                    VideoToolboxEncoderOptions {
+                        max_b_frames: Some(b_frames),
+                        ..options(codec, width, height)
+                    },
+                ) else {
+                    eprintln!("skipping: no {codec:?} encoder here");
+                    continue;
+                };
+                let path = std::env::temp_dir()
+                    .join(format!("media-pp-vt-b-frames-{codec:?}-{b_frames}.mp4"));
+                let mut muxer = FileMuxer::create(&path).expect("create");
+                let track = muxer.add_stream("video", &encoder).expect("add");
+                let sink = muxer.open().expect("header").take(track).expect("track");
+                encoder.src_pads()[0].link(sink.into_raw());
+                let mut upload = VideoToolboxUpload::new("upload", &device);
+                let uploaded = capture(&mut upload);
+                let frames = 30;
+                for index in 0..frames {
+                    upload
+                        .consume(MediaBuffer::video(ramp(width, height, index)))
+                        .unwrap();
+                    let frame = uploaded.lock().unwrap().remove(0);
+                    encoder.consume(frame).expect("encoded and written");
+                }
+                crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
+                    .expect("the file finished");
+                drop(encoder);
+
+                let mut input = ffmpeg::format::input(&path).expect("reopen");
+                let parameters = input
+                    .streams()
+                    .best(ffmpeg::media::Type::Video)
+                    .expect("video")
+                    .parameters();
+                let mut decoder = ffmpeg::codec::context::Context::from_parameters(parameters)
+                    .and_then(|context| context.decoder().video())
+                    .expect("a decoder");
+                let (mut times, mut shown) = (Vec::new(), Vec::new());
+                let mut picture = ffmpeg::frame::Video::empty();
+                for (_, packet) in input.packets() {
+                    times.push((packet.pts(), packet.dts()));
+                    decoder.send_packet(&packet).expect("decodes");
+                    while decoder.receive_frame(&mut picture).is_ok() {
+                        shown.push(picture.pts());
+                    }
+                }
+                decoder.send_eof().expect("drains");
+                while decoder.receive_frame(&mut picture).is_ok() {
+                    shown.push(picture.pts());
+                }
+                assert!(
+                    times.iter().any(|(pts, dts)| pts != dts),
+                    "{codec:?} b={b_frames}: reordered at all: {times:?}"
+                );
+                assert_eq!(
+                    shown.len(),
+                    frames as usize,
+                    "{codec:?} b={b_frames}: {shown:?}"
+                );
+                assert!(
+                    shown.windows(2).all(|pair| pair[0] < pair[1]),
+                    "{codec:?} b={b_frames}: {shown:?}"
+                );
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }
