@@ -9,7 +9,7 @@ pub use self::ort::UseTensorRtPolicy;
 pub use self::ort::{
     Alignment, ChannelOrder, DetectorDecoder, DetectorModel, InputScale, ModelBox, ModelInput,
     ModelOutput, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtEmbedderOptions,
-    OrtError, SwOrtClassifier, SwOrtDetector, SwOrtEmbedder, non_max_suppression,
+    OrtError, SwOrtClassifier, SwOrtDetector, SwOrtEmbedder, Tiles, non_max_suppression,
 };
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use self::ort::{

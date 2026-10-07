@@ -21,7 +21,7 @@ use crate::elements::Detections;
 
 use super::{
     DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorError,
-    OrtDetectorOptions, decode_batch, labels, model_input,
+    OrtDetectorOptions, decode_batch, labels, looks, merge_looks, model_input,
 };
 use crate::orientation::{Orientation, Orientations};
 
@@ -62,7 +62,9 @@ struct Detecting {
     decoder: Arc<dyn DetectorDecoder>,
     /// Which pictures it looks at.
     interval: Interval,
-    fitting: Option<Fitting>,
+    /// A conversion for each shape of picture lately fitted — the whole
+    /// picture's and its tiles'.
+    fitting: Vec<Fitting>,
     /// How each picture is turned to be shown.
     orientations: Orientations,
     /// The model's input, kept from one picture to the next.
@@ -97,6 +99,9 @@ impl SwOrtDetector {
         model_path: impl AsRef<Path>,
         options: OrtDetectorOptions,
     ) -> Result<Self> {
+        if let Some(tiles) = &options.tiles {
+            tiles.check()?;
+        }
         let path = model_path.as_ref().display().to_string();
         let session = Session::builder()
             .map_err(OrtDetectorError::from)?
@@ -133,7 +138,7 @@ impl SwOrtDetector {
             options,
             labels,
             model,
-            fitting: None,
+            fitting: Vec::new(),
             orientations: Orientations::default(),
             input: Array4::zeros((1, 3, model.1 as usize, model.0 as usize)),
             interval,
@@ -153,10 +158,23 @@ impl Detecting {
             frame.color_range(),
         );
         let orientation = self.orientations.of(frame, &self.pp_log);
-        let fitting = match &mut self.fitting {
-            Some(fitting) if fitting.from == from && fitting.orientation == orientation => fitting,
-            slot => slot.insert(fitting(from, orientation, self.model)?),
+        let known = self
+            .fitting
+            .iter()
+            .position(|fitting| fitting.from == from && fitting.orientation == orientation);
+        let at = match known {
+            Some(at) => at,
+            None => {
+                // The whole picture and its tiles are two shapes, a tile at an
+                // edge perhaps a third: a few are kept.
+                if self.fitting.len() == 4 {
+                    self.fitting.remove(0);
+                }
+                self.fitting.push(fitting(from, orientation, self.model)?);
+                self.fitting.len() - 1
+            }
         };
+        let fitting = &mut self.fitting[at];
         fitting
             .context
             .run(frame, &mut fitting.scaled)
@@ -206,9 +224,34 @@ impl Detecting {
         Ok(letterbox)
     }
 
-    /// Looks at `frame`, and says what it found.
+    /// Looks at `frame` — whole, then in each tile — and says what it found.
     fn detect(&mut self, frame: &ffmpeg::frame::Video) -> Result<Detections> {
-        let letterbox = self.fit(frame)?;
+        let orientation = self.orientations.of(frame, &self.pp_log);
+        let looks = looks(
+            (frame.width(), frame.height()),
+            self.model,
+            orientation,
+            self.options.tiles.as_ref(),
+        );
+        let mut found = Vec::with_capacity(looks.len());
+        for look in &looks {
+            if look.crop == (0, 0, frame.width(), frame.height()) {
+                self.fit(frame)?;
+            } else {
+                self.fit(&cropped(frame, look.crop)?)?;
+            }
+            found.push(self.run(look)?);
+        }
+        Ok(Detections::new(
+            Arc::clone(&self.name),
+            Arc::clone(&self.labels),
+            merge_looks(found, self.options.iou_threshold),
+        ))
+    }
+
+    /// Runs the model on what is fitted into its input, `letterbox` saying
+    /// how, and says what it found.
+    fn run(&mut self, letterbox: &Letterbox) -> Result<Vec<crate::elements::Detection>> {
         let outputs = self
             .session
             .run(inputs![
@@ -229,21 +272,40 @@ impl Detecting {
             .iter()
             .map(|(name, shape, data)| ModelOutput { name, shape, data })
             .collect();
-        let found = decode_batch(
+        Ok(decode_batch(
             &*self.decoder,
             &outputs,
-            &[letterbox],
+            std::slice::from_ref(letterbox),
             self.model,
             &self.options,
         )?
         .pop()
-        .unwrap_or_default();
-        Ok(Detections::new(
-            Arc::clone(&self.name),
-            Arc::clone(&self.labels),
-            found,
-        ))
+        .unwrap_or_default())
     }
+}
+
+/// `crop` of `frame` — left, top, width, height, on even pixels — as a
+/// picture of its own, sharing its buffers.
+fn cropped(
+    frame: &ffmpeg::frame::Video,
+    (left, top, width, height): (u32, u32, u32, u32),
+) -> std::result::Result<ffmpeg::frame::Video, OrtDetectorError> {
+    let mut tile = frame.clone();
+    // SAFETY: `tile` owns its own `AVFrame`, a new reference to `frame`'s
+    // buffers; the crop fields are plain integers inside the picture, which
+    // `av_frame_apply_cropping` turns into its data pointers and size.
+    let status = unsafe {
+        let raw = tile.as_mut_ptr();
+        (*raw).crop_left = left as usize;
+        (*raw).crop_top = top as usize;
+        (*raw).crop_right = (frame.width() - left - width) as usize;
+        (*raw).crop_bottom = (frame.height() - top - height) as usize;
+        ffmpeg::ffi::av_frame_apply_cropping(raw, ffmpeg::ffi::AV_FRAME_CROP_UNALIGNED as i32)
+    };
+    if status < 0 {
+        return Err(OrtDetectorError::Convert(ffmpeg::Error::from(status)));
+    }
+    Ok(tile)
 }
 
 /// A conversion of pictures shaped `from`, shown turned as `orientation`

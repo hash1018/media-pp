@@ -45,10 +45,10 @@ pub use metal::{
     MetalOrtEmbedder,
 };
 pub use model::{
-    ChannelOrder, DetectorDecoder, DetectorModel, ModelBox, ModelInput, ModelOutput,
+    ChannelOrder, DetectorDecoder, DetectorModel, ModelBox, ModelInput, ModelOutput, Tiles,
     non_max_suppression,
 };
-use model::{Letterbox, decode_batch};
+use model::{Letterbox, decode_batch, looks, merge_looks};
 pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
 pub use sw_ort_embedder::SwOrtEmbedder;
@@ -104,6 +104,11 @@ pub struct OrtDetectorOptions {
     /// puts where it expects the objects to be on it instead: DeepStream's
     /// `interval`, for a model too slow to look at every picture.
     pub interval: u32,
+    /// Whether each picture looked at is looked at in tiles as well as
+    /// whole, and which: `None`, the default, looks at it whole alone.
+    /// Tiles find small faces and objects the whole picture shrunk to the
+    /// model's input loses, at a run of the model for each.
+    pub tiles: Option<Tiles>,
 }
 
 impl Default for OrtDetectorOptions {
@@ -116,6 +121,7 @@ impl Default for OrtDetectorOptions {
             iou_threshold: 0.45,
             labels: None,
             interval: 0,
+            tiles: None,
         }
     }
 }
@@ -244,6 +250,10 @@ pub enum OrtError {
     /// The model's input or output is not a shape this reads.
     #[error("unsupported model: {0}")]
     UnsupportedModel(String),
+    /// Tiles that cannot cut a picture: none across or down, or an overlap
+    /// outside 0 to 0.9.
+    #[error("tiles cannot cut a picture: {0:?}")]
+    InvalidTiles(Tiles),
     /// Not a decoded picture this detector reads.
     #[error("{detector} takes {wanted}, got {got}")]
     UnsupportedBuffer {

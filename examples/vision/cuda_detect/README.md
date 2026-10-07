@@ -34,7 +34,10 @@ The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
 and YOLO26 — or with `--retinaface` a RetinaFace export (biubug6's
 `Pytorch_Retinaface`, MobileNet or ResNet), whose faces are labelled `face`
 and carry five points each: `--retinaface --out faces.mp4 --hide
-face=mosaic,ellipse` hides every face. The first run builds a TensorRT engine for the model and this GPU,
+face=mosaic,ellipse` hides every face. With `--tiles` each picture is looked
+at in six overlapping tiles as well as whole, the seven run as one batch where
+the model's batch is open: small, distant faces are found that the whole
+picture shrunk to the model loses. The first run builds a TensorRT engine for the model and this GPU,
 which takes minutes; later runs load it from `~/.cache/media-pp/tensorrt`
 (`%LOCALAPPDATA%\media-pp\tensorrt` on Windows) in under a second.
 
@@ -46,7 +49,7 @@ linker finds them, and running where the loader does — here both through
 ```sh
 LD_LIBRARY_PATH=/path/to/cuda13-cudnn9-tensorrt10/lib \
   cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-    [--retinaface] [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] \
+    [--retinaface] [--tiles] [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] \
     [--pictures N]
 ```
 

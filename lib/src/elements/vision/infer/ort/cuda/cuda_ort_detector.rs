@@ -38,7 +38,7 @@ use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
     DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorError,
-    OrtDetectorOptions, decode_batch, decode_best, labels, model_input,
+    OrtDetectorOptions, decode_batch, decode_best, labels, looks, merge_looks, model_input,
 };
 use super::runtime::{self, CudaRuntime};
 use crate::orientation::Orientations;
@@ -268,6 +268,9 @@ impl CudaOrtDetector {
         if options.max_batch == 0 {
             return Err(OrtDetectorError::ZeroMaxBatch.into());
         }
+        if let Some(tiles) = &options.detector.tiles {
+            tiles.check()?;
+        }
 
         let linked = runtime::Linked::ask();
         let runtime = runtime::runtime(&linked);
@@ -447,11 +450,11 @@ impl CudaOrtDetector {
     }
 }
 
-/// A picture of the batch under way: how it was fitted into the tensor,
-/// where it is looked at, or `None` where it is let by.
+/// A picture of the batch under way, and each way it is looked at — whole,
+/// then each tile — or none, where it is let by.
 struct Held {
     buf: MediaBuffer,
-    letterbox: Option<Letterbox>,
+    looks: Vec<Letterbox>,
 }
 
 /// The first of `host`, made if there is none.
@@ -499,59 +502,100 @@ fn batch_input(model: &Path) -> std::result::Result<Option<BatchInput>, OrtDetec
 }
 
 impl Detecting {
-    /// Fits `frame` into the `slot`th input of the device tensor and says
-    /// how it was fitted. The kernel is launched, not waited for: the run
-    /// waits once for every picture of its batch.
-    fn fit(
+    /// Whether `frame` is a picture this detector can look at, and if so
+    /// every way it does — checked as it comes, so that a picture it cannot
+    /// read fails alone rather than with the batch it would have joined.
+    fn looks(
         &mut self,
         frame: &ffmpeg::frame::Video,
-        slot: usize,
-    ) -> std::result::Result<Letterbox, OrtDetectorError> {
+    ) -> std::result::Result<Vec<Letterbox>, OrtDetectorError> {
         let surface = frame::validate(
             frame,
             ElementType::CudaOrtDetector,
             self.device_ctx,
             CudaSurfaces::NV12_BGRA_OR_P010,
         )?;
-        let size = (frame.width(), frame.height());
+        if surface.layout == ffmpeg::format::Pixel::P010LE {
+            super::SdrCopy::check(frame, ElementType::CudaOrtDetector)?;
+        }
         let orientation = self.orientations.of(frame, &self.pp_log);
-        let letterbox = Letterbox::shown(size, self.model, orientation);
+        Ok(looks(
+            (frame.width(), frame.height()),
+            self.model,
+            orientation,
+            self.options.tiles.as_ref(),
+        ))
+    }
+
+    /// Fits what `letterbox` says of `frame` — the whole of it or a tile —
+    /// into the `slot`th input of the device tensor. `sdr` is the picture's
+    /// SDR copy where it is HDR. The kernel is launched, not waited for: the
+    /// run waits once for every input of its batch.
+    fn fit(
+        &self,
+        frame: &ffmpeg::frame::Video,
+        sdr: Option<BgraSurface>,
+        letterbox: &Letterbox,
+        slot: usize,
+    ) -> std::result::Result<(), OrtDetectorError> {
         let fit = Fit {
             model: self.model,
             offset: letterbox.offset,
             scaled: letterbox.scaled,
-            orientation,
+            orientation: letterbox.orientation,
         };
-        if surface.layout == ffmpeg::format::Pixel::NV12 {
-            let source = Nv12Surface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?;
-            self.driver.fit_nv12(
-                &self.kernels,
-                &self.tensor,
-                slot,
-                fit,
-                source,
-                size,
-                &YuvToBgra::of_frame(frame),
-            )?;
-        } else {
-            let source = if surface.layout == ffmpeg::format::Pixel::P010LE {
-                self.sdr
-                    .of(&self.driver, frame, ElementType::CudaOrtDetector)?
-            } else {
-                BgraSurface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?
-            };
-            self.driver
-                .fit_bgra(&self.kernels, &self.tensor, slot, fit, source, size)?;
+        let (left, top, width, height) = letterbox.crop;
+        let (x, y) = (u64::from(left), u64::from(top));
+        match sdr {
+            None if crate::platform::cuda::frame::surface_layout(frame)
+                == Some(ffmpeg::format::Pixel::NV12) =>
+            {
+                // On whole 2x2 blocks — as tiles are cut — so that the chroma
+                // the crop starts on is the luma's.
+                let whole =
+                    Nv12Surface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?;
+                let crop = Nv12Surface {
+                    luma: whole.luma + y * whole.luma_pitch as u64 + x,
+                    chroma: whole.chroma + (y / 2) * whole.chroma_pitch as u64 + x,
+                    ..whole
+                };
+                self.driver.fit_nv12(
+                    &self.kernels,
+                    &self.tensor,
+                    slot,
+                    fit,
+                    crop,
+                    (width, height),
+                    &YuvToBgra::of_frame(frame),
+                )?;
+            }
+            _ => {
+                let whole = match sdr {
+                    Some(sdr) => sdr,
+                    None => {
+                        BgraSurface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?
+                    }
+                };
+                let crop = BgraSurface {
+                    pixels: whole.pixels + y * whole.pitch as u64 + x * 4,
+                    ..whole
+                };
+                self.driver.fit_bgra(
+                    &self.kernels,
+                    &self.tensor,
+                    slot,
+                    fit,
+                    crop,
+                    (width, height),
+                )?;
+            }
         }
-        Ok(letterbox)
+        Ok(())
     }
 
-    /// How many of the held pictures are fitted into the tensor.
-    fn fitted(&self) -> usize {
-        self.held
-            .iter()
-            .filter(|held| held.letterbox.is_some())
-            .count()
+    /// How many inputs the held pictures are looked at in.
+    fn looked(&self) -> usize {
+        self.held.iter().map(|held| held.looks.len()).sum()
     }
 
     /// Runs the model on the pictures fitted into the first `letterboxes`
@@ -672,29 +716,62 @@ impl Detecting {
         )
     }
 
-    /// Runs the model on what is held, and hands every held picture on in
-    /// the order it came — those looked at carrying what was found in them.
-    /// Where the run fails, the pictures it was for go with it.
+    /// Runs the model on what is held — `max_batch` inputs a run, a
+    /// picture's tiles beside it — and hands every held picture on in the
+    /// order it came, those looked at carrying what was found in them, the
+    /// tiles' merged with the whole picture's. Where a run fails, the
+    /// pictures it was for go with it.
     fn run_held(&mut self, out: &mut Output) -> std::result::Result<(), OrtDetectorError> {
         let held = std::mem::take(&mut self.held);
-        let letterboxes: Vec<Letterbox> = held.iter().filter_map(|held| held.letterbox).collect();
-        let mut found = if letterboxes.is_empty() {
-            Vec::new()
-        } else {
-            self.detect(&letterboxes)?
-        }
-        .into_iter();
-        for Held { buf, letterbox } in held {
-            let items = letterbox.and_then(|_| found.next());
-            match items {
-                Some(items) => {
-                    let detections =
-                        Detections::new(Arc::clone(&self.name), Arc::clone(&self.labels), items);
-                    out.push(detections.attach_to(buf));
-                }
-                // Let by unlooked-at, carrying nothing, which says so.
-                None => out.push(buf),
+        // Every input, by the picture it is of.
+        let inputs: Vec<(usize, Letterbox)> = held
+            .iter()
+            .enumerate()
+            .flat_map(|(picture, held)| held.looks.iter().map(move |look| (picture, *look)))
+            .collect();
+        let mut found: Vec<Vec<Detection>> = Vec::with_capacity(inputs.len());
+        for run in inputs.chunks(self.max_batch) {
+            // An HDR picture's SDR copy, made once for all its inputs of the
+            // run; the copy of the next is launched after them on the same
+            // stream, so they read this one.
+            let mut sdr: Option<(usize, BgraSurface)> = None;
+            for (slot, (picture, letterbox)) in run.iter().enumerate() {
+                let MediaBuffer::Video(frame) = &held[*picture].buf else {
+                    unreachable!("only pictures are held");
+                };
+                let copy = if crate::platform::cuda::frame::surface_layout(frame)
+                    == Some(ffmpeg::format::Pixel::P010LE)
+                {
+                    match sdr {
+                        Some((of, copy)) if of == *picture => Some(copy),
+                        _ => {
+                            let copy =
+                                self.sdr
+                                    .of(&self.driver, frame, ElementType::CudaOrtDetector)?;
+                            sdr = Some((*picture, copy));
+                            Some(copy)
+                        }
+                    }
+                } else {
+                    None
+                };
+                self.fit(frame, copy, letterbox, slot)?;
             }
+            let letterboxes: Vec<Letterbox> = run.iter().map(|(_, look)| *look).collect();
+            found.extend(self.detect(&letterboxes)?);
+        }
+        let mut found = found.into_iter();
+        for Held { buf, looks } in held {
+            if looks.is_empty() {
+                // Let by unlooked-at, carrying nothing, which says so.
+                out.push(buf);
+                continue;
+            }
+            let each: Vec<Vec<Detection>> = found.by_ref().take(looks.len()).collect();
+            let items = merge_looks(each, self.options.iou_threshold);
+            let detections =
+                Detections::new(Arc::clone(&self.name), Arc::clone(&self.labels), items);
+            out.push(detections.attach_to(buf));
         }
         Ok(())
     }
@@ -777,9 +854,9 @@ impl Filter for Detecting {
         }
         let last = slot.is_none_or(|slot| slot.is_last());
 
-        let letterbox = if self.interval.look(&buf) {
-            match self.fit(frame, self.fitted()) {
-                Ok(letterbox) => Some(letterbox),
+        let looks = if self.interval.look(&buf) {
+            match self.looks(frame) {
+                Ok(looks) => looks,
                 // This picture alone failed. Where nothing else is to go on
                 // from this call, the failure is this call's; where the
                 // batch it closes is, the batch goes on and the failure is
@@ -792,12 +869,12 @@ impl Filter for Detecting {
                 }
             }
         } else {
-            None
+            Vec::new()
         };
-        self.held.push(Held { buf, letterbox });
+        self.held.push(Held { buf, looks });
         // A full tensor is run at once: what it holds need not wait for the
         // rest of a batch larger than it.
-        if last || self.fitted() == self.max_batch {
+        if last || self.looked() >= self.max_batch {
             self.run_held(out)?;
         }
         Ok(())
@@ -1016,6 +1093,108 @@ mod tests {
                     "{format:?}: {wanted:?} found at IoU {best} only"
                 );
             }
+        }
+    }
+
+    /// Looking in tiles as well as whole, the GPU finds what the CPU finds,
+    /// and the same whether a picture's seven inputs are run one at a time
+    /// or split across runs of four; and never fewer than the whole picture
+    /// alone. Needs a model and a video, as above.
+    #[test]
+    fn tiles_find_on_the_gpu_what_they_find_on_the_cpu() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Ok(device) = CudaDevice::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        if let CudaRuntime::Unavailable { cuda } = CudaOrtDetector::runtime() {
+            eprintln!("skipping: the CUDA runtime cannot be used ({cuda})");
+            return;
+        }
+        let Some(&n) = crate::test_support::pictures_with_objects(&model, &video, 1).first() else {
+            eprintln!("skipping: nothing in {video} that the CPU is sure of");
+            return;
+        };
+        let tiled = OrtDetectorOptions {
+            tiles: Some(crate::elements::Tiles::default()),
+            ..OrtDetectorOptions::default()
+        };
+        let picture = || {
+            MediaBuffer::video(crate::test_support::nth_picture(
+                &video,
+                n,
+                ffmpeg::format::Pixel::NV12,
+            ))
+        };
+        let mut whole =
+            SwOrtDetector::new("whole", &model, OrtDetectorOptions::default()).expect("loads");
+        let mut cpu = SwOrtDetector::new("cpu", &model, tiled.clone()).expect("loads");
+        let alone = found(&mut whole, picture());
+        let expected = found(&mut cpu, picture());
+        assert!(
+            expected.items.len() >= alone.items.len(),
+            "tiles found {} where the whole picture found {}",
+            expected.items.len(),
+            alone.items.len()
+        );
+
+        let on_gpu = |max_batch: usize| {
+            // Without TensorRT these are every field there is.
+            #[cfg_attr(
+                not(feature = "ort-tensorrt"),
+                allow(unused_mut, clippy::needless_update)
+            )]
+            let mut options = CudaOrtDetectorOptions {
+                detector: tiled.clone(),
+                max_batch,
+                ..CudaOrtDetectorOptions::default()
+            };
+            #[cfg(feature = "ort-tensorrt")]
+            {
+                options.tensorrt = UseTensorRtPolicy::Off;
+            }
+            let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+            let uploaded = capture(&mut upload);
+            upload.consume(picture()).expect("uploads");
+            let buf = uploaded.lock().unwrap().remove(0);
+            let mut gpu =
+                CudaOrtDetector::new("gpu", &device, &model, options).expect("loads on CUDA");
+            found(&mut gpu, buf)
+        };
+        let one_at_a_time = on_gpu(1);
+        let in_fours = on_gpu(4);
+        // The same boxes, perhaps in another order where two scores differ in
+        // their last digits between batches.
+        assert_eq!(one_at_a_time.items.len(), in_fours.items.len());
+        for a in &one_at_a_time.items {
+            let b = in_fours
+                .items
+                .iter()
+                .max_by(|x, y| iou(x, a).total_cmp(&iou(y, a)))
+                .expect("as many");
+            assert!(
+                iou(a, b) > 0.99 && (a.score - b.score).abs() < 1e-3,
+                "{a:?} against {b:?}"
+            );
+        }
+        // The same objects as the CPU's. A small one the whole picture finds
+        // near the threshold is boxed by the whole picture on one and by a
+        // tile on the other — the two fit pictures by other filters — and
+        // two boxes of one small face overlap by half or so.
+        for wanted in expected.items.iter().filter(|found| found.score > 0.5) {
+            let best = one_at_a_time
+                .items
+                .iter()
+                .filter(|found| found.class_id == wanted.class_id)
+                .map(|found| iou(found, wanted))
+                .fold(0.0, f32::max);
+            assert!(best > 0.4, "{wanted:?} found at IoU {best} only");
         }
     }
 

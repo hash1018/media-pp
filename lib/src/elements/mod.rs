@@ -301,7 +301,7 @@ pub use vision::UseTensorRtPolicy;
 pub use vision::{
     Alignment, ChannelOrder, DetectorDecoder, DetectorModel, InputScale, ModelBox, ModelInput,
     ModelOutput, OrtClassifierOptions, OrtDetectorError, OrtDetectorOptions, OrtEmbedderOptions,
-    OrtError, SwOrtClassifier, SwOrtDetector, SwOrtEmbedder, non_max_suppression,
+    OrtError, SwOrtClassifier, SwOrtDetector, SwOrtEmbedder, Tiles, non_max_suppression,
 };
 pub use vision::{
     Analytics, AnalyticsOptions, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassId, ClassRule,

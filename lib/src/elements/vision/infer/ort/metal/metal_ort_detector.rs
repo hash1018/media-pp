@@ -22,7 +22,7 @@ use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
     DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorOptions, OrtError,
-    decode_batch, decode_best, labels, model_input,
+    decode_batch, decode_best, labels, looks, merge_looks, model_input,
 };
 use super::best_class::BestClass;
 use super::fitting::{Cut, Fitting, Picture};
@@ -155,6 +155,9 @@ impl MetalOrtDetector {
         if options.max_batch == 0 {
             return Err(OrtError::ZeroMaxBatch.into());
         }
+        if let Some(tiles) = &options.detector.tiles {
+            tiles.check()?;
+        }
 
         // Read on the CPU first, which compiles nothing: whether the model
         // leaves its batch open, and by what name, to fix it for Core ML —
@@ -273,19 +276,19 @@ enum Batch {
 }
 
 /// A picture of the batch under way, and where it is looked at, the
-/// picture to fit and how it is to be fitted — or `None` where it is let
-/// by.
+/// picture to fit and each way it is fitted — whole, then each tile — or
+/// `None` where it is let by.
 struct Held {
     buf: MediaBuffer,
-    look: Option<(Picture, Letterbox)>,
+    look: Option<(Picture, Vec<Letterbox>)>,
 }
 
-/// How the whole of `picture` is fitted into input `slot` as Ultralytics
-/// trains on — turned the way it is shown, scaled to fit, proportions
-/// kept, grey around it.
-fn whole(picture: &Picture, letterbox: &Letterbox, slot: usize) -> Cut {
+/// How what `letterbox` says of `picture` — the whole of it or a tile — is
+/// fitted into input `slot` as Ultralytics trains on: turned the way it is
+/// shown, scaled to fit, proportions kept, grey around it.
+fn cut(letterbox: &Letterbox, slot: usize) -> Cut {
     Cut {
-        crop: (0, 0, picture.size.0, picture.size.1),
+        crop: letterbox.crop,
         orientation: letterbox.orientation,
         offset: letterbox.offset,
         scaled: letterbox.scaled,
@@ -302,11 +305,7 @@ fn fit_whole(
 ) -> std::result::Result<Letterbox, OrtError> {
     let picture = Picture::of(frame)?;
     let letterbox = Letterbox::new(picture.size, fitting.model);
-    fitting.fit(
-        &picture,
-        &[whole(&picture, &letterbox, 0)],
-        ([1.0; 3], [0.0; 3]),
-    )?;
+    fitting.fit(&picture, &[cut(&letterbox, 0)], ([1.0; 3], [0.0; 3]))?;
     Ok(letterbox)
 }
 
@@ -315,16 +314,25 @@ impl Detecting {
     fn look(
         &mut self,
         frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<(Picture, Letterbox), OrtError> {
+    ) -> std::result::Result<(Picture, Vec<Letterbox>), OrtError> {
         let picture = self.fitting.picture(frame)?;
         let orientation = self.orientations.of(frame, &self.pp_log);
-        let letterbox = Letterbox::shown(picture.size, self.fitting.model, orientation);
-        Ok((picture, letterbox))
+        let looks = looks(
+            picture.size,
+            self.fitting.model,
+            orientation,
+            self.options.tiles.as_ref(),
+        );
+        Ok((picture, looks))
     }
 
-    /// How many of the held pictures are looked at.
+    /// How many inputs the held pictures are looked at in.
     fn looked_at(&self) -> usize {
-        self.held.iter().filter(|held| held.look.is_some()).count()
+        self.held
+            .iter()
+            .filter_map(|held| held.look.as_ref())
+            .map(|(_, looks)| looks.len())
+            .sum()
     }
 
     /// Fits `looks` into the first inputs in one pass, runs the model on
@@ -336,7 +344,7 @@ impl Detecting {
         let cuts: Vec<[Cut; 1]> = looks
             .iter()
             .enumerate()
-            .map(|(slot, (picture, letterbox))| [whole(picture, letterbox, slot)])
+            .map(|(slot, (_, letterbox))| [cut(letterbox, slot)])
             .collect();
         let pictures: Vec<(&Picture, &[Cut])> = looks
             .iter()
@@ -402,18 +410,20 @@ impl Detecting {
         let looks: Vec<(&Picture, Letterbox)> = held
             .iter()
             .filter_map(|held| held.look.as_ref())
-            .map(|(picture, letterbox)| (picture, *letterbox))
+            .flat_map(|(picture, looks)| looks.iter().map(move |look| (picture, *look)))
             .collect();
-        let mut found = if looks.is_empty() {
-            Vec::new()
-        } else {
-            self.detect(&looks)?
+        // `max_batch` inputs a run, a picture's tiles beside it.
+        let mut found = Vec::with_capacity(looks.len());
+        for run in looks.chunks(self.max_batch) {
+            found.extend(self.detect(run)?);
         }
-        .into_iter();
+        let mut found = found.into_iter();
         drop(looks);
         for Held { buf, look } in held {
-            match look.and_then(|_| found.next()) {
-                Some(items) => {
+            match look {
+                Some((_, looks)) => {
+                    let each: Vec<Vec<Detection>> = found.by_ref().take(looks.len()).collect();
+                    let items = merge_looks(each, self.options.iou_threshold);
                     let detections =
                         Detections::new(Arc::clone(&self.name), Arc::clone(&self.labels), items);
                     out.push(detections.attach_to(buf));
@@ -522,7 +532,7 @@ impl Filter for Detecting {
         self.held.push(Held { buf, look });
         // A full batch is run at once: what it holds need not wait for the
         // rest of a mux's batch larger than it.
-        if last || self.looked_at() == self.max_batch {
+        if last || self.looked_at() >= self.max_batch {
             self.run_held(out)?;
         }
         Ok(())
@@ -642,7 +652,7 @@ mod tests {
         let cuts: Vec<[Cut; 1]> = pictures
             .iter()
             .enumerate()
-            .map(|(slot, picture)| [whole(picture, &Letterbox::new(picture.size, model), slot)])
+            .map(|(slot, picture)| [cut(&Letterbox::new(picture.size, model), slot)])
             .collect();
         let each: Vec<(&Picture, &[Cut])> = pictures
             .iter()

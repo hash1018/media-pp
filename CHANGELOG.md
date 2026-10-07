@@ -232,6 +232,20 @@ compile error with no explanation.
 
 ### Added
 
+- **Detectors look in tiles.** `OrtDetectorOptions::tiles: Some(Tiles)`
+  looks at each picture in overlapping tiles — three across and two down a
+  wide one by default, two across and three down a tall one, a quarter
+  overlapping — as well as whole, each fitted to the model as a picture of
+  its own, on the CPU, CUDA and Metal. A face found both whole and in a
+  tile keeps the whole picture's box with the higher score, since a tile
+  can cut a large face in two; what only tiles found is kept. The tiles
+  run as a batch beside their picture, `max_batch` inputs a run. On eleven
+  public videos RetinaFace ResNet50 missed 19% of 976 faces looking in
+  tiles where it missed 46% without, and found more than half of those
+  under 24 pixels where it found none. On an RTX 3050 through TensorRT,
+  YOLO11n-face ran 112 pictures a second with tiles and `max_batch` 7
+  against 362 without; `cuda_detect --tiles`.
+
 - **Embedders: what a detector found, made into vectors.** `SwOrtEmbedder`
   and `CudaOrtEmbedder` run an embedding model on each object and put its
   vector, of length 1, in the object's `Detection::embeddings` — vectors

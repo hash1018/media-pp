@@ -24,7 +24,11 @@
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26 — or with `--retinaface` a RetinaFace export, whose
 //! faces are labelled `face` and carry five points each: `--retinaface
-//! --hide face=mosaic,ellipse` hides every face. The first run builds a TensorRT engine for the model
+//! --hide face=mosaic,ellipse` hides every face. With `--tiles` each
+//! picture is looked at in six overlapping tiles as well as whole, the
+//! seven run as one batch where the model's batch is open: small, distant
+//! faces are found that the whole picture shrunk to the model loses. The
+//! first run builds a TensorRT engine for the model
 //! and this GPU, which takes minutes; later runs load it from the cache in
 //! under a second. Built with `ort-tensorrt`, which links CUDA 13, cuDNN 9
 //! and TensorRT 10 into it: on Linux building and running need them where
@@ -33,7 +37,7 @@
 //! `PATH`.
 //!
 //!     cargo run --release -p cuda_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--retinaface] [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] \
+//!         [--retinaface] [--tiles] [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] \
 //!         [--pictures N]
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -68,7 +72,7 @@ mod example {
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtDetector, CudaOrtDetectorOptions, DetectionOverlayOptions, Detections,
             DetectorModel, FileDemuxer, FileMuxer, HideShape, Hiding, LabelStyle,
-            OrtDetectorOptions, RedactStyle, TrackFormat, Treatment,
+            OrtDetectorOptions, RedactStyle, Tiles, TrackFormat, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -90,6 +94,8 @@ mod example {
         pictures: usize,
         /// The model is a RetinaFace face detector, not YOLO.
         retinaface: bool,
+        /// Look in tiles as well as whole.
+        tiles: bool,
     }
 
     /// `CLASS[=mosaic|blur|fill][,ellipse]` from `--hide`: that class's
@@ -127,7 +133,7 @@ mod example {
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
-                "usage: cuda_detect <model.onnx> <video.mp4> [--retinaface] \
+                "usage: cuda_detect <model.onnx> <video.mp4> [--retinaface] [--tiles] \
                  [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]"
             );
             std::process::exit(1);
@@ -136,11 +142,13 @@ mod example {
         let (mut out, mut pictures) = (None, usize::MAX);
         let mut hide = Vec::new();
         let mut retinaface = false;
+        let mut tiles = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = Some(args.next().unwrap_or_else(|| usage())),
                 "--retinaface" => retinaface = true,
+                "--tiles" => tiles = true,
                 "--hide" => hide.push(
                     args.next()
                         .as_deref()
@@ -167,6 +175,7 @@ mod example {
             hide,
             pictures,
             retinaface,
+            tiles,
         }
     }
 
@@ -184,6 +193,7 @@ mod example {
             hide,
             pictures: limit,
             retinaface,
+            tiles,
         } = args();
 
         let device = CudaDevice::new()?;
@@ -199,8 +209,11 @@ mod example {
                     } else {
                         DetectorModel::Yolo
                     },
+                    tiles: tiles.then(Tiles::default),
                     ..OrtDetectorOptions::default()
                 },
+                // A picture and its six tiles, one run.
+                max_batch: if tiles { 7 } else { 1 },
                 ..CudaOrtDetectorOptions::default()
             },
         )?;

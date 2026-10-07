@@ -31,6 +31,26 @@ struct SdrCopy {
 }
 
 impl SdrCopy {
+    /// Whether `frame`, a P010 picture, can be brought to SDR: whether it
+    /// is tagged HLG or PQ.
+    fn check(frame: &ffmpeg::frame::Video, element: ElementType) -> Result<(), SdrCopyError> {
+        Self::tone_map(frame, element).map(|_| ())
+    }
+
+    /// How `frame`, a P010 picture, is brought to SDR.
+    fn tone_map(
+        frame: &ffmpeg::frame::Video,
+        element: ElementType,
+    ) -> Result<crate::tone_map::ToneMap, SdrCopyError> {
+        crate::tone_map::ToneMap::of_frame(frame).ok_or(SdrCopyError::Frame(
+            CudaFrameError::UnsupportedSurfaceFormat {
+                element,
+                accepts: CudaSurfaces::NV12_OR_BGRA,
+                actual: ffmpeg::format::Pixel::P010LE,
+            },
+        ))
+    }
+
     /// `frame`, a P010 picture of this element's device, in SDR BGRA, the
     /// conversion launched and not waited for — a fitting launched after
     /// it on the same stream reads it once it is written.
@@ -45,13 +65,7 @@ impl SdrCopy {
         frame: &ffmpeg::frame::Video,
         element: ElementType,
     ) -> Result<BgraSurface, SdrCopyError> {
-        let tone_map = crate::tone_map::ToneMap::of_frame(frame).ok_or(SdrCopyError::Frame(
-            CudaFrameError::UnsupportedSurfaceFormat {
-                element,
-                accepts: CudaSurfaces::NV12_OR_BGRA,
-                actual: ffmpeg::format::Pixel::P010LE,
-            },
-        ))?;
+        let tone_map = Self::tone_map(frame, element)?;
         let (width, height) = (frame.width(), frame.height());
         let scratch = match self.scratch.take() {
             Some(scratch) if (scratch.width, scratch.height) == (width, height) => scratch,

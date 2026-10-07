@@ -58,7 +58,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   filters that put what a YOLO model, a RetinaFace face detector — whose
   faces carry their eyes, nose and mouth as landmarks — or a model of the
   application's own, read by its `DetectorDecoder`, finds on each picture
-  as `Detections` metadata; `SwOrtClassifier`, `CudaOrtClassifier` and
+  as `Detections` metadata, in overlapping tiles too where small ones must
+  be found (`Tiles`); `SwOrtClassifier`, `CudaOrtClassifier` and
   `MetalOrtClassifier`, which name each object found with a second model;
   `SwOrtEmbedder`, `CudaOrtEmbedder` and `MetalOrtEmbedder`, which make
   each object found a vector — a face straightened by its five points, or
