@@ -59,11 +59,16 @@ whatever the model says, so an export that lost its class names still has
 them. Or with `--retinaface` it is a RetinaFace export (biubug6's
 `Pytorch_Retinaface`, MobileNet or ResNet), whose faces are labelled `face`
 and carry five points each: `--retinaface --out faces.mp4 --hide
-face=mosaic,ellipse` hides every face. It is built with `ort-coreml`, on an Apple silicon Mac.
+face=mosaic,ellipse` hides every face. With `--tiles` each picture is looked
+at in six overlapping tiles as well as whole, the seven run as one batch:
+small, distant faces are found that the whole picture shrunk to the model
+loses — on the 1080p people clip RetinaFace MobileNet 0.25 found 38 faces
+where it found 7 whole — at 42 pictures a second with YOLO11n on an M5
+against 210. It is built with `ort-coreml`, on an Apple silicon Mac.
 
 ```sh
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-  [--retinaface] [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
+  [--retinaface] [--tiles] [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
   [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
   [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
 ```

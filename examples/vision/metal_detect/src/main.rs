@@ -56,11 +56,14 @@
 //! COCO's 80 classes, whatever the model says. Or with `--retinaface` it
 //! is a RetinaFace export, whose faces are labelled `face` and carry five
 //! points each: `--retinaface --out faces.mp4 --hide face=mosaic,ellipse`
-//! hides every face. Built with `ort-coreml`, on an Apple silicon Mac.
+//! hides every face. With `--tiles` each picture is looked at in six
+//! overlapping tiles as well as whole: small, distant faces are found that
+//! the whole picture shrunk to the model loses. Built with `ort-coreml`, on
+//! an Apple silicon Mac.
 //! `--pictures` stops it after about that many.
 //!
 //!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--retinaface] [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
+//!         [--retinaface] [--tiles] [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
 //!         [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
 //!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
 
@@ -96,7 +99,7 @@ mod example {
             HideShape, Hiding, InputScale, LabelStyle, Line, LineCount, MetalDetectionOverlay,
             MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions, ObjectAnalytics,
             ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, OverlayParts, RedactStyle,
-            TrackFormat, TrackerOptions, Treatment, VideoToolboxCodec, VideoToolboxDecoder,
+            Tiles, TrackFormat, TrackerOptions, Treatment, VideoToolboxCodec, VideoToolboxDecoder,
             VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
             VideoToolboxFrameFormat,
         },
@@ -131,6 +134,8 @@ mod example {
         pictures: usize,
         /// The model is a RetinaFace face detector, not YOLO.
         retinaface: bool,
+        /// Look in tiles as well as whole.
+        tiles: bool,
     }
 
     /// `CLASS[=mosaic|blur|fill][,ellipse]` from `--hide`: that class's
@@ -168,7 +173,7 @@ mod example {
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
-                "usage: metal_detect <model.onnx> <video.mp4> [--retinaface] [--track] [--interval N] \
+                "usage: metal_detect <model.onnx> <video.mp4> [--retinaface] [--tiles] [--track] [--interval N] \
                  [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
                  [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
                  [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]"
@@ -182,12 +187,14 @@ mod example {
         let mut hide = Vec::new();
         let mut visual = false;
         let mut retinaface = false;
+        let mut tiles = false;
         let (mut classifier, mut classifier_labels, mut classify) = (None, None, None);
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--track" => track = true,
                 "--retinaface" => retinaface = true,
+                "--tiles" => tiles = true,
                 "--visual" => {
                     track = true;
                     visual = true;
@@ -272,6 +279,7 @@ mod example {
             hide,
             pictures,
             retinaface,
+            tiles,
         }
     }
 
@@ -297,6 +305,7 @@ mod example {
             hide,
             pictures: limit,
             retinaface,
+            tiles,
         } = args();
         // A second model on what was found, if asked for: an ImageNet
         // classifier, as the public ones are, on the classes asked for.
@@ -347,6 +356,7 @@ mod example {
                         DetectorModel::Yolo
                     },
                     labels: (!retinaface).then(|| COCO_CLASS_LABELS.map(String::from).to_vec()),
+                    tiles: tiles.then(Tiles::default),
                     // The tracker matches unconfident detections too, so it
                     // is handed them.
                     conf_threshold: if track {
@@ -357,6 +367,8 @@ mod example {
                     interval,
                     ..OrtDetectorOptions::default()
                 },
+                // A picture and its six tiles, one run.
+                max_batch: if tiles { 7 } else { 1 },
                 ..MetalOrtDetectorOptions::default()
             },
         )?;

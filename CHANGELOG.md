@@ -244,7 +244,10 @@ compile error with no explanation.
   tiles where it missed 46% without, and found more than half of those
   under 24 pixels where it found none. On an RTX 3050 through TensorRT,
   YOLO11n-face ran 112 pictures a second with tiles and `max_batch` 7
-  against 362 without; `cuda_detect --tiles`.
+  against 362 without; `cuda_detect --tiles`. On an M5 through Core ML,
+  YOLO11n ran 42 pictures a second with tiles and `max_batch` 7, 34 with
+  `max_batch` 1, against 210 without, and the tiles find through Core ML
+  where they find on the CPU; `metal_detect --tiles`.
 
 - **Embedders: what a detector found, made into vectors.** `SwOrtEmbedder`
   and `CudaOrtEmbedder` run an embedding model on each object and put its

@@ -1043,4 +1043,76 @@ mod tests {
             }
         }
     }
+
+    /// Looking in tiles as well as whole, Core ML finds what the CPU finds,
+    /// and the same whether a picture's seven inputs are run one at a time
+    /// or split across runs of four; and never fewer than the whole picture
+    /// alone. Needs a model and a video, as the CUDA detector's test does.
+    #[test]
+    fn tiles_find_through_core_ml_what_they_find_on_the_cpu() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let Some(&n) = crate::test_support::pictures_with_objects(&model, &video, 1).first() else {
+            eprintln!("skipping: nothing in {video} that the CPU is sure of");
+            return;
+        };
+        let tiled = OrtDetectorOptions {
+            tiles: Some(crate::elements::Tiles::default()),
+            ..OrtDetectorOptions::default()
+        };
+        let picture = || nth_picture(&video, n, ffmpeg::format::Pixel::NV12);
+        let mut whole =
+            SwOrtDetector::new("whole", &model, OrtDetectorOptions::default()).expect("loads");
+        let mut cpu = SwOrtDetector::new("cpu", &model, tiled.clone()).expect("loads");
+        let alone = found(&mut whole, MediaBuffer::video(picture()));
+        let expected = found(&mut cpu, MediaBuffer::video(picture()));
+        assert!(expected.items.len() >= alone.items.len());
+
+        let on_gpu = |max_batch: usize| {
+            let options = MetalOrtDetectorOptions {
+                detector: tiled.clone(),
+                max_batch,
+                ..MetalOrtDetectorOptions::default()
+            };
+            let mut gpu = MetalOrtDetector::new("gpu", &model, options).expect("loads on Core ML");
+            found(&mut gpu, upload(&device, picture()))
+        };
+        let one_at_a_time = on_gpu(1);
+        let in_fours = on_gpu(4);
+        assert_eq!(one_at_a_time.items.len(), in_fours.items.len());
+        for a in &one_at_a_time.items {
+            let b = in_fours
+                .items
+                .iter()
+                .max_by(|x, y| iou(x, a).total_cmp(&iou(y, a)))
+                .expect("as many");
+            assert!(
+                iou(a, b) > 0.99 && (a.score - b.score).abs() < 1e-2,
+                "{a:?} against {b:?}"
+            );
+        }
+        eprintln!(
+            "whole {}, cpu tiles {}, core ml tiles {}",
+            alone.items.len(),
+            expected.items.len(),
+            one_at_a_time.items.len()
+        );
+        for wanted in expected.items.iter().filter(|found| found.score > 0.5) {
+            let best = one_at_a_time
+                .items
+                .iter()
+                .filter(|found| found.class_id == wanted.class_id)
+                .map(|found| iou(found, wanted))
+                .fold(0.0, f32::max);
+            assert!(best > 0.4, "{wanted:?} found at IoU {best} only");
+        }
+    }
 }
