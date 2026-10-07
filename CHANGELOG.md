@@ -227,8 +227,17 @@ compile error with no explanation.
   mosaic, blur and fill, box or ellipse, in its ten bits, the CPU and CUDA
   ones writing the same bytes — where they draw nothing; a fill's SDR
   colour is put at BT.2408's reference white, HLG's 75% or PQ's 203 nits.
-  An iPhone's Dolby Vision metadata does not survive re-encoding: what
-  comes out is its HLG.
+  `CudaOrtDetector` and `CudaOrtClassifier` take an HLG or PQ P010
+  picture and hand the model an SDR copy of it, tone-mapped as
+  `CudaConverter` maps it: on an HLG and a PQ version of the people clip
+  YOLO11n found the SDR clip's boxes again, at an IoU of 0.99. What they
+  find goes on the ten-bit picture. `StreamInfo::pixel_format` says what
+  a stream decodes to, and `cuda_detect` records a 10-bit file in ten
+  bits, in its own colours, hiding what `--hide` says.
+
+  What does not survive re-encoding: an iPhone's Dolby Vision metadata —
+  what comes out is its HLG — and a PQ file's mastering display and
+  light levels, which NVENC does not write.
 
 - **Where each shot of an edited video begins.** `SwCutDetector` and
   `CudaCutDetector` hand each picture on, the first of each shot after the

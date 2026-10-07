@@ -95,6 +95,9 @@ struct Classifying {
     memory: Memory,
     tensor: CudaTensor,
     kernels: FitKernels,
+    /// Where an HDR picture is brought to SDR for the model; before the
+    /// driver, whose context it is freed in.
+    sdr: super::SdrCopy,
     driver: CudaDriver,
     device_memory: MemoryInfo<'static>,
     /// The device context incoming frames must belong to, compared by
@@ -241,6 +244,7 @@ impl CudaOrtClassifier {
             memory: Memory::default(),
             tensor,
             kernels,
+            sdr: super::SdrCopy::default(),
             driver,
             device_memory,
             device_ctx,
@@ -256,7 +260,7 @@ impl Classifying {
     fn cut(
         &self,
         frame: &ffmpeg::frame::Video,
-        nv12: bool,
+        sdr: Option<BgraSurface>,
         (left, top, width, height): Crop,
         orientation: Orientation,
         slot: usize,
@@ -267,7 +271,7 @@ impl Classifying {
             scaled: self.input.size,
             orientation,
         };
-        if nv12 {
+        if sdr.is_none() && frame_is_nv12(frame) {
             // On whole 2x2 blocks, so that the chroma the crop starts on is
             // the luma's.
             let (left, top) = (left & !1, top & !1);
@@ -289,7 +293,10 @@ impl Classifying {
                 &YuvToBgra::of_frame(frame),
             )?;
         } else {
-            let whole = BgraSurface::from_frame(frame).ok_or(OrtError::MissingSurface)?;
+            let whole = match sdr {
+                Some(sdr) => sdr,
+                None => BgraSurface::from_frame(frame).ok_or(OrtError::MissingSurface)?,
+            };
             let crop = BgraSurface {
                 pixels: whole.pixels + u64::from(top) * whole.pitch as u64 + u64::from(left) * 4,
                 ..whole
@@ -316,16 +323,25 @@ impl Classifying {
             frame,
             ElementType::CudaOrtClassifier,
             self.device_ctx,
-            CudaSurfaces::NV12_OR_BGRA,
+            CudaSurfaces::NV12_BGRA_OR_P010,
         )?;
-        let nv12 = surface.layout == ffmpeg::format::Pixel::NV12;
+        // An HDR picture is cut from its SDR copy, made once for all its
+        // objects.
+        let sdr = if surface.layout == ffmpeg::format::Pixel::P010LE {
+            Some(
+                self.sdr
+                    .of(&self.driver, frame, ElementType::CudaOrtClassifier)?,
+            )
+        } else {
+            None
+        };
         let (width, height) = self.input.size;
         let (scale, bias) = self.options.input.affine();
         let orientation = self.orientations.of(frame, &self.pp_log);
         let mut answers = Vec::with_capacity(crops.len());
         for group in crops.chunks(self.capacity) {
             for (slot, crop) in group.iter().enumerate() {
-                self.cut(frame, nv12, *crop, orientation, slot)?;
+                self.cut(frame, sdr, *crop, orientation, slot)?;
             }
             // A model of fixed batch is handed exactly that many; one of
             // open batch, as many as there are.
@@ -393,7 +409,7 @@ impl Filter for Classifying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+                .with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
         )
     }
 
@@ -449,6 +465,11 @@ impl Filter for Classifying {
     fn reset(&mut self) {
         self.memory.clear();
     }
+}
+
+/// Whether `frame`'s surface is NV12 — its own, validated before.
+fn frame_is_nv12(frame: &ffmpeg::frame::Video) -> bool {
+    crate::platform::cuda::frame::surface_layout(frame) == Some(ffmpeg::format::Pixel::NV12)
 }
 
 #[cfg(test)]

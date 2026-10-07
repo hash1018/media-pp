@@ -12,6 +12,10 @@ Queue -> CudaEncoder -> FileMuxer`. The overlay draws on copies, so the
 printing branch beside it is handed the pictures as they were. Labels are
 drawn where DejaVu Sans is found.
 
+A 10-bit file — an iPhone's HDR — is decoded to P010, looked at through an
+SDR copy, and recorded as it came: HEVC Main 10, BT.2020 and HLG or PQ,
+`hvc1`. Nothing is drawn on it; `--hide` still hides in its ten bits.
+
 A phone's portrait recording, stored on its side, is looked at and labelled
 the right way up, and recorded saying it is turned, as the file does.
 

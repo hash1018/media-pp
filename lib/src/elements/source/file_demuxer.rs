@@ -149,6 +149,24 @@ impl StreamInfo {
         }
     }
 
+    /// What a video stream's pictures are in, decoded in software — 4:2:0
+    /// at eight bits or ten, say — as its parameters say. A hardware
+    /// decoder puts the same in its own layout: a 10-bit stream is P010 out
+    /// of NVDEC, which [`crate::contract::PixelLayoutSet::decoded_from`]
+    /// says. `None` for sound, and for a video stream that does not say.
+    pub fn pixel_format(&self) -> Option<ffmpeg::format::Pixel> {
+        // SAFETY: a plain field of parameters this value owns.
+        let format = unsafe { (*self.parameters.as_ptr()).format };
+        let known = 0..ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NB as i32;
+        if self.kind != ffmpeg::media::Type::Video || !known.contains(&format) {
+            return None;
+        }
+        // SAFETY: every value from naught to `AV_PIX_FMT_NB` names one of
+        // FFmpeg's pixel formats, which the enum has a variant for each of.
+        let format = unsafe { std::mem::transmute::<i32, ffmpeg::ffi::AVPixelFormat>(format) };
+        Some(format.into())
+    }
+
     /// A video stream's picture size, width then height, as its parameters
     /// say — what an encoder re-encoding it is opened at. `None` for sound,
     /// and for a video stream that does not say.
@@ -1265,6 +1283,21 @@ mod tests {
     }
 
     use super::*;
+
+    /// A video stream says what its pictures decode to in software; a
+    /// sound stream says nothing.
+    #[test]
+    fn a_video_stream_says_its_pixel_format() {
+        let Some(video) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let (demuxer, _) = FileDemuxer::open("demux", &video).expect("opens");
+        let picture = demuxer.best(ffmpeg::media::Type::Video).expect("video");
+        assert_eq!(picture.pixel_format(), Some(ffmpeg::format::Pixel::YUV420P));
+        if let Ok(sound) = demuxer.best(ffmpeg::media::Type::Audio) {
+            assert_eq!(sound.pixel_format(), None);
+        }
+    }
     use crate::control;
     use crate::element::{RawSource, SrcPads};
     use crate::test_support::try_test_video;

@@ -216,6 +216,9 @@ struct Detecting {
     /// What is copied down of each run's output.
     host: Vec<f32>,
     kernels: FitKernels,
+    /// Where an HDR picture is brought to SDR for the model; before the
+    /// driver, whose context it is freed in.
+    sdr: super::SdrCopy,
     driver: CudaDriver,
     memory: MemoryInfo<'static>,
     /// The device context incoming frames must belong to, compared by
@@ -413,6 +416,7 @@ impl CudaOrtDetector {
             model,
             tensor,
             kernels,
+            sdr: super::SdrCopy::default(),
             driver,
             memory,
             device_ctx,
@@ -486,7 +490,7 @@ impl Detecting {
             frame,
             ElementType::CudaOrtDetector,
             self.device_ctx,
-            CudaSurfaces::NV12_OR_BGRA,
+            CudaSurfaces::NV12_BGRA_OR_P010,
         )?;
         let size = (frame.width(), frame.height());
         let orientation = self.orientations.of(frame, &self.pp_log);
@@ -509,7 +513,12 @@ impl Detecting {
                 &YuvToBgra::of_frame(frame),
             )?;
         } else {
-            let source = BgraSurface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?;
+            let source = if surface.layout == ffmpeg::format::Pixel::P010LE {
+                self.sdr
+                    .of(&self.driver, frame, ElementType::CudaOrtDetector)?
+            } else {
+                BgraSurface::from_frame(frame).ok_or(OrtDetectorError::MissingSurface)?
+            };
             self.driver
                 .fit_bgra(&self.kernels, &self.tensor, slot, fit, source, size)?;
         }

@@ -73,6 +73,12 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 
+A 10-bit file — an iPhone's HDR — stays ten bits on CUDA: `CudaDecoder`
+hands on P010, the detectors and classifiers look at an SDR copy of each
+picture, the overlays hide in its ten bits (drawing nothing), and
+`CudaEncoder` encodes HEVC Main 10 in the file's own colours
+(`with_color(stream.color())`), which `FileMuxer` writes as `hvc1`.
+
 A phone's portrait recording is stored on its side, with a display matrix
 saying to turn it. Every decoder hands that on with each picture
 (`Orientation::of`), and the demuxer says it of the stream

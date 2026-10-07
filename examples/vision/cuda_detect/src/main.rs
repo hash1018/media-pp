@@ -13,6 +13,10 @@
 //! where none is said, the ellipse inside each box with `,ellipse` after
 //! it — and may be given once for each class.
 //!
+//! A 10-bit file — an iPhone's HDR — is decoded to P010, looked at through
+//! an SDR copy, and recorded as it came: HEVC Main 10 in its own colours.
+//! Nothing is drawn on it; `--hide` still hides in its ten bits.
+//!
 //! A phone's portrait recording, stored on its side, is looked at and
 //! labelled the right way up, and recorded saying it is turned, as the
 //! file does.
@@ -55,6 +59,7 @@ mod example {
         buffer::MediaBuffer,
         bus::BusEvent,
         color::Color,
+        contract::PixelLayoutSet,
         elements::{
             AppSink, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
@@ -223,6 +228,13 @@ mod example {
             Ok(())
         });
 
+        // A 10-bit file — an iPhone's HDR — is decoded to P010 and recorded
+        // as it came, HEVC Main 10 in its own colours; nothing is drawn on
+        // it, only hidden.
+        let ten_bit = stream
+            .pixel_format()
+            .is_some_and(|format| PixelLayoutSet::decoded_from(format) == PixelLayoutSet::P010);
+
         // The recording, if asked for: an overlay, and NVENC at the file's
         // own size and rate.
         let recording = match &out {
@@ -231,35 +243,53 @@ mod example {
                 if font.is_none() {
                     println!("no font found: boxes without labels");
                 }
+                let others = if ten_bit {
+                    println!(
+                        "a 10-bit file: recorded in 10 bits, hiding what --hide says, boxing nothing"
+                    );
+                    Treatment::none()
+                } else {
+                    Treatment::boxes(BoxStyle {
+                        line_width: 4,
+                        label: font.is_some().then(|| LabelStyle::new(22.0)),
+                        ..BoxStyle::default()
+                    })
+                };
                 let overlay = CudaDetectionOverlay::new(
                     "overlay",
                     &device,
                     DetectionOverlayOptions {
-                        others: Treatment::boxes(BoxStyle {
-                            line_width: 4,
-                            label: font.is_some().then(|| LabelStyle::new(22.0)),
-                            ..BoxStyle::default()
-                        }),
+                        others,
                         rules: hide,
                         font,
                         ..DetectionOverlayOptions::default()
                     },
                 )?;
                 let (width, height) = stream.size().expect("a video stream says its size");
-                let encoder = CudaEncoder::new(
-                    "encoder",
-                    &device,
-                    CudaEncoderOptions {
-                        codec: CudaCodec::H264,
-                        input_format: CudaFrameFormat::Nv12,
-                        width,
-                        height,
-                        frame_rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
-                        bit_rate: 8_000_000,
-                        gop_size: 60,
-                        max_b_frames: None,
+                let options = CudaEncoderOptions {
+                    codec: if ten_bit {
+                        CudaCodec::H265
+                    } else {
+                        CudaCodec::H264
                     },
-                )?;
+                    input_format: if ten_bit {
+                        CudaFrameFormat::P010
+                    } else {
+                        CudaFrameFormat::Nv12
+                    },
+                    width,
+                    height,
+                    frame_rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
+                    bit_rate: 8_000_000,
+                    gop_size: 60,
+                    max_b_frames: None,
+                };
+                // The file's own colours said in the stream: a 10-bit one's
+                // BT.2020 and HLG or PQ above all.
+                let encoder = match stream.color() {
+                    Some(color) => CudaEncoder::with_color("encoder", &device, options, color)?,
+                    None => CudaEncoder::new("encoder", &device, options)?,
+                };
                 let mut muxer = FileMuxer::create(path)?;
                 let track = muxer.add_stream(
                     "video",
