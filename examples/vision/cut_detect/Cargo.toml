@@ -5,9 +5,13 @@ edition = "2024"
 publish = false
 
 # The same program everywhere; on Linux and Windows `--cuda` decodes on an
-# NVIDIA GPU and finds the cuts there.
+# NVIDIA GPU and finds the cuts there, and on macOS `--metal` with
+# VideoToolbox and Metal.
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 media-pp = { path = "../../../lib", features = ["cuda"] }
 
-[target.'cfg(not(any(target_os = "linux", target_os = "windows")))'.dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["videotoolbox", "metal"] }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))'.dependencies]
 media-pp = { path = "../../../lib" }

@@ -330,4 +330,6 @@ pub use vision::{
     LibraryVersion, RuntimeShortfall,
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
-pub use vision::{MetalDetectionOverlay, MetalDetectionOverlayError};
+pub use vision::{
+    MetalCutDetector, MetalCutDetectorError, MetalDetectionOverlay, MetalDetectionOverlayError,
+};

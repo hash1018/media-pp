@@ -305,6 +305,10 @@ compile error with no explanation.
   films the defaults found 220 and called 14 that were none, where ffmpeg's
   `scdet` at its best found 191 for 18
   (`docs/benchmarks/vision/cuts.md`). `cut_detect` prints a file's cuts.
+  `MetalCutDetector` does the same on VideoToolbox pictures, NV12 or P010,
+  averaging the cells with the Metal overlay's mosaic kernel into memory
+  the CPU reads: the CPU's thumbnail float for float, and the same cuts at
+  the same scores (`cut_detect --metal`).
 
 - **A phone's portrait recording is analysed the right way up, and stays
   turned when re-encoded.** `media_pp::orientation::Orientation` is which

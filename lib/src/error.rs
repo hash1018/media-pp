@@ -860,6 +860,11 @@ pub enum Error {
     #[error(transparent)]
     CudaCutDetectorError(#[from] crate::elements::CudaCutDetectorError),
 
+    /// Finding cuts in VideoToolbox pictures failed.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[error(transparent)]
+    MetalCutDetectorError(#[from] crate::elements::MetalCutDetectorError),
+
     /// Drawing detections onto a CUDA picture failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]

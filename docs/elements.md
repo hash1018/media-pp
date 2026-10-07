@@ -66,9 +66,9 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `ObjectTracker`, which numbers each
   object across pictures and fills in the pictures a detector let by;
   `ObjectAnalytics`, which counts the objects in zones of the picture and
-  across lines; `SwCutDetector` and `CudaCutDetector`, which mark the first
-  picture of each shot of an edited video with a `SceneCut`, where a
-  tracker starts over; `StreamMux`, which gathers a picture of each of several
+  across lines; `SwCutDetector`, `CudaCutDetector` and `MetalCutDetector`,
+  which mark the first picture of each shot of an edited video with a
+  `SceneCut`, where a tracker starts over; `StreamMux`, which gathers a picture of each of several
   streams into a batch for a model to take at once, and the demux its
   handle makes, which splits the streams out again; `SwDetectionOverlay`,
   `CudaDetectionOverlay` and `MetalDetectionOverlay`, which draw those boxes

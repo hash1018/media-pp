@@ -44,6 +44,8 @@ pub use batch::{
 #[cfg(feature = "cuda")]
 pub use cut::{CudaCutDetector, CudaCutDetectorError};
 pub use cut::{CutDetectorOptions, CutDetectorOptionsError, SwCutDetector, SwCutDetectorError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use cut::{MetalCutDetector, MetalCutDetectorError};
 #[cfg(feature = "ort")]
 pub use infer::*;
 pub use meta::{

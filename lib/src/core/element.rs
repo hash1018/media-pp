@@ -314,6 +314,9 @@ pub enum ElementType {
     SwCutDetector,
     /// The same on CUDA pictures.
     CudaCutDetector,
+    /// Finds where one shot ends and the next begins, in VideoToolbox
+    /// pictures.
+    MetalCutDetector,
     /// Numbers a detector's objects across pictures, and fills in the
     /// pictures it let by.
     ObjectTracker,

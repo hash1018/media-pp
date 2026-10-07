@@ -16,11 +16,18 @@ GPU and the cuts found there, the pictures never leaving it:
 FileDemuxer -> CudaDecoder -> Queue -> CudaCutDetector -> AppSink
 ```
 
-Both find the same cuts in the same file, since both make the same
+With `--metal`, on macOS, VideoToolbox decodes and Metal finds the cuts on
+the GPU:
+
+```text
+FileDemuxer -> VideoToolboxDecoder -> Queue -> MetalCutDetector -> AppSink
+```
+
+All three find the same cuts in the same file, since all make the same
 thumbnail of each picture. How well they find them is in the
 [cut detection benchmark](../../../docs/benchmarks/vision/cuts.md), which
 scores this example's output.
 
 ```sh
-cargo run --release -p cut_detect -- path/to/video.mp4 [--cuda]
+cargo run --release -p cut_detect -- path/to/video.mp4 [--cuda | --metal]
 ```

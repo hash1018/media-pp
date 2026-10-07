@@ -9,7 +9,11 @@
 //! find the same cuts in the same file, since both make the same thumbnail
 //! of each picture.
 //!
-//!     cargo run --release -p cut_detect -- path/to/video.mp4 [--cuda]
+//! With `--metal`, on macOS, VideoToolbox decodes and the cuts are found on
+//! the GPU by Metal, likewise the same cuts: `FileDemuxer ->
+//! VideoToolboxDecoder -> Queue -> MetalCutDetector -> AppSink`.
+//!
+//!     cargo run --release -p cut_detect -- path/to/video.mp4 [--cuda | --metal]
 
 fn main() -> impl std::process::Termination {
     example::run()
@@ -33,18 +37,20 @@ mod example {
     struct Args {
         video: String,
         cuda: bool,
+        metal: bool,
     }
 
     fn args() -> Args {
         let usage = || -> ! {
-            eprintln!("usage: cut_detect <video.mp4> [--cuda]");
+            eprintln!("usage: cut_detect <video.mp4> [--cuda | --metal]");
             std::process::exit(1);
         };
         let mut video = None;
-        let mut cuda = false;
+        let (mut cuda, mut metal) = (false, false);
         for arg in std::env::args().skip(1) {
             match arg.as_str() {
                 "--cuda" => cuda = true,
+                "--metal" => metal = true,
                 _ if video.is_none() && !arg.starts_with("--") => video = Some(arg),
                 _ => usage(),
             }
@@ -53,9 +59,17 @@ mod example {
             eprintln!("--cuda takes an NVIDIA GPU, on Linux or Windows");
             std::process::exit(1);
         }
+        if metal && !cfg!(target_os = "macos") {
+            eprintln!("--metal takes a Mac");
+            std::process::exit(1);
+        }
+        if cuda && metal {
+            usage();
+        }
         Args {
             video: video.unwrap_or_else(|| usage()),
             cuda,
+            metal,
         }
     }
 
@@ -66,7 +80,7 @@ mod example {
             media_pp::log::Level::Trace,
             7,
         )?;
-        let Args { video, cuda } = args();
+        let Args { video, cuda, metal } = args();
 
         let (source, _) = FileDemuxer::open("demux", &video)?;
         let stream = source.best(media::Type::Video)?;
@@ -116,6 +130,21 @@ mod example {
                         .to(sink)?
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                unreachable!("refused in args()")
+            } else if metal {
+                #[cfg(target_os = "macos")]
+                {
+                    use media_pp::elements::{
+                        MetalCutDetector, VideoToolboxDecoder, VideoToolboxDevice,
+                    };
+                    let device = VideoToolboxDevice::new()?;
+                    ctx.branch()
+                        .pipe(VideoToolboxDecoder::new("decoder", params, &device)?)
+                        .queue("pictures", 8)
+                        .pipe(MetalCutDetector::new("cuts", options)?)
+                        .to(sink)?
+                }
+                #[cfg(not(target_os = "macos"))]
                 unreachable!("refused in args()")
             } else {
                 ctx.branch()

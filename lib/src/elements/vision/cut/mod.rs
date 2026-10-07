@@ -23,6 +23,8 @@
 
 #[cfg(feature = "cuda")]
 mod cuda_cut_detector;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+mod metal_cut_detector;
 mod sw_cut_detector;
 
 use std::collections::VecDeque;
@@ -37,6 +39,8 @@ use crate::transform::Output;
 
 #[cfg(feature = "cuda")]
 pub use cuda_cut_detector::{CudaCutDetector, CudaCutDetectorError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub use metal_cut_detector::{MetalCutDetector, MetalCutDetectorError};
 pub use sw_cut_detector::{SwCutDetector, SwCutDetectorError};
 
 /// The cells a thumbnail's luma is averaged in, across and down; its
