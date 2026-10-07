@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::{path::Path, sync::Arc};
 
 use ffmpeg_next::{self as ffmpeg, ffi};
-use ndarray::{ArrayViewD, IxDyn};
 #[cfg(feature = "ort-tensorrt")]
 use ort::ep::TensorRT;
 use ort::{
@@ -38,8 +37,8 @@ use crate::{
 use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
-    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode_batch, decode_best, labels,
-    model_input,
+    DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorError,
+    OrtDetectorOptions, decode_batch, decode_best, labels, model_input,
 };
 use super::runtime::{self, CudaRuntime};
 use crate::orientation::Orientations;
@@ -150,7 +149,8 @@ impl Default for CudaOrtDetectorOptions {
     }
 }
 
-/// Runs a YOLO detector on each CUDA picture and hands the picture on
+/// Runs a detector — YOLO, or the kind [`OrtDetectorOptions::model`] says
+/// — on each CUDA picture and hands the picture on
 /// unchanged, carrying the [`Detections`] found in it — what
 /// [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU, with the
 /// picture never leaving the GPU: a kernel fits it into the model's input
@@ -193,15 +193,19 @@ struct Detecting {
     options: OrtDetectorOptions,
     labels: Arc<[Arc<str>]>,
     model: (u32, u32),
+    /// The values the model wants.
+    values: ModelInput,
+    /// What reads its output.
+    decoder: Arc<dyn DetectorDecoder>,
     /// Which pictures it looks at.
     interval: Interval,
     /// How each picture is turned to be shown.
     orientations: Orientations,
+    /// The model's input and outputs, which a run binds by name.
+    input_name: String,
+    output_names: Vec<String>,
     /// How many pictures the tensor holds, and the model is run on at
     /// once.
-    /// The model's input and output, which a run binds by name.
-    input_name: String,
-    output_name: String,
     max_batch: usize,
     /// The pictures of the batch under way, in the order they came, each
     /// looked at fitted into the next slot of the tensor.
@@ -213,8 +217,8 @@ struct Detecting {
     /// Each box's best class, found on the GPU, made at the first
     /// `[batch, 4 + classes, boxes]` output.
     best: Option<CudaTensor>,
-    /// What is copied down of each run's output.
-    host: Vec<f32>,
+    /// What is copied down of each run's outputs, one for each.
+    host: Vec<Vec<f32>>,
     kernels: FitKernels,
     /// Where an HDR picture is brought to SDR for the model; before the
     /// driver, whose context it is freed in.
@@ -355,12 +359,16 @@ impl CudaOrtDetector {
 
         let model = model_input(&session)?;
         let input_name = session.inputs()[0].name().to_owned();
-        let output_name = session
+        let output_names: Vec<String> = session
             .outputs()
-            .first()
-            .ok_or_else(|| OrtDetectorError::UnsupportedModel("the model has no output".into()))?
-            .name()
-            .to_owned();
+            .iter()
+            .map(|output| output.name().to_owned())
+            .collect();
+        if output_names.is_empty() {
+            return Err(
+                OrtDetectorError::UnsupportedModel("the model has no output".into()).into(),
+            );
+        }
         let labels = labels(options.detector.labels.as_deref(), &session);
         let driver = CudaDriver::retain_primary().map_err(OrtDetectorError::from)?;
         let kernels = driver.fit_kernels().map_err(OrtDetectorError::from)?;
@@ -411,6 +419,8 @@ impl CudaOrtDetector {
             name,
             pp_log,
             session,
+            values: options.detector.model.input(),
+            decoder: options.detector.model.decoder(),
             options: options.detector,
             labels,
             model,
@@ -427,7 +437,7 @@ impl CudaOrtDetector {
             held: Vec::new(),
             context: None,
             input_name,
-            output_name,
+            output_names,
             best: None,
             host: Vec::new(),
         })))
@@ -439,6 +449,14 @@ impl CudaOrtDetector {
 struct Held {
     buf: MediaBuffer,
     letterbox: Option<Letterbox>,
+}
+
+/// The first of `host`, made if there is none.
+fn first_host(host: &mut Vec<Vec<f32>>) -> &mut Vec<f32> {
+    if host.is_empty() {
+        host.push(Vec::new());
+    }
+    &mut host[0]
 }
 
 /// Whether `session`'s first input leaves its batch open, so that the model
@@ -539,11 +557,26 @@ impl Detecting {
         &mut self,
         letterboxes: &[Letterbox],
     ) -> std::result::Result<Vec<Vec<Detection>>, OrtDetectorError> {
+        let pictures = letterboxes.len();
+        // The model's own values, where they are not those fitted.
+        if self.values.order == super::super::ChannelOrder::Bgr {
+            self.driver
+                .swap_planes(&self.kernels, &self.tensor, self.model, pictures)?;
+        }
+        if !self.values.is_unscaled() {
+            self.driver.scale_planes(
+                &self.kernels,
+                &self.tensor,
+                self.model,
+                pictures,
+                self.values.scale,
+                self.values.bias,
+            )?;
+        }
         // The kernels ran on this driver's context; the model reads the
         // tensor on ONNX Runtime's own stream. Waiting here is what puts
         // every fitted picture before the read.
         self.driver.synchronize()?;
-        let pictures = letterboxes.len();
         let shape = Shape::new([
             pictures as i64,
             3,
@@ -567,58 +600,73 @@ impl Detecting {
                 shape,
             )?
         };
-        // The output is left where the model wrote it, on the GPU. Copied
-        // down whole, YOLO11's for a batch of eight is 22 MB, which took
-        // about a third of the run, and finding each box's best class in it
-        // was most of the CPU's work; both are done there instead, and six
-        // floats a box come down.
+        // The outputs are left where the model wrote them, on the GPU. A
+        // YOLO model's, copied down whole, is 22 MB for a batch of eight of
+        // YOLO11, which took about a third of the run, and finding each
+        // box's best class in it was most of the CPU's work; both are done
+        // there instead, and six floats a box come down.
         let mut binding = self.session.create_binding()?;
         binding.bind_input(&self.input_name, &input)?;
-        binding.bind_output_to_device(&self.output_name, &self.memory)?;
+        for name in &self.output_names {
+            binding.bind_output_to_device(name, &self.memory)?;
+        }
         let outputs = self.session.run_binding(&binding)?;
         binding.synchronize_outputs()?;
-        let output = outputs[0].downcast_ref::<DynTensorValueType>()?;
-        let shape: Vec<usize> = output
-            .shape()
-            .iter()
-            .map(|&side| side.max(0) as usize)
-            .collect();
-        let pointer = output.data_ptr() as CUdeviceptr;
-        match *shape.as_slice() {
-            // `[batch, 4 + classes, boxes]`.
-            [batch, rows, boxes] if batch == pictures && boxes != 6 && rows > 4 => {
-                let room = self.max_batch * boxes * 6;
-                let best = match &mut self.best {
-                    Some(best) if best.floats() >= room => best,
-                    slot => slot.insert(self.driver.buffer(room)?),
-                };
-                // SAFETY: `pointer` is the run's output on this device, of
-                // `shape`'s floats, written by a run that has finished —
-                // `synchronize_outputs` — and kept by `outputs` until the
-                // copy down below has returned.
-                unsafe {
-                    self.driver.best_class(
-                        &self.kernels,
-                        pointer,
-                        best,
-                        (pictures, rows, boxes),
-                    )?;
-                }
-                self.host.resize(pictures * boxes * 6, 0.0);
-                self.driver.download(best, &mut self.host)?;
-                Ok(decode_best(&self.host, boxes, letterboxes, &self.options))
-            }
-            // `[batch, boxes, 6]`, a few hundred boxes a picture, copied down
-            // as it is — or a shape the reading refuses.
-            _ => {
-                self.host.resize(shape.iter().product(), 0.0);
-                // SAFETY: as above, `shape`'s floats on this device.
-                unsafe { self.driver.download_from(pointer, &mut self.host)? };
-                let output = ArrayViewD::from_shape(IxDyn(&shape), &self.host)
-                    .map_err(|error| OrtDetectorError::UnsupportedModel(error.to_string()))?;
-                decode_batch(output, letterboxes, &self.options)
-            }
+        let mut found = Vec::with_capacity(outputs.len());
+        for (name, output) in outputs.iter() {
+            let output = output.downcast_ref::<DynTensorValueType>()?;
+            let shape: Vec<usize> = output
+                .shape()
+                .iter()
+                .map(|&side| side.max(0) as usize)
+                .collect();
+            found.push((name, shape, output.data_ptr() as CUdeviceptr));
         }
+        if let (true, [(_, shape, pointer), ..]) = (self.options.model.is_yolo(), found.as_slice())
+            // `[batch, 4 + classes, boxes]`.
+            && let [batch, rows, boxes] = *shape.as_slice()
+            && batch == pictures
+            && boxes != 6
+            && rows > 4
+        {
+            let room = self.max_batch * boxes * 6;
+            let best = match &mut self.best {
+                Some(best) if best.floats() >= room => best,
+                slot => slot.insert(self.driver.buffer(room)?),
+            };
+            // SAFETY: `pointer` is the run's output on this device, of
+            // `shape`'s floats, written by a run that has finished —
+            // `synchronize_outputs` — and kept by `outputs` until the copy
+            // down below has returned.
+            unsafe {
+                self.driver
+                    .best_class(&self.kernels, *pointer, best, (pictures, rows, boxes))?;
+            }
+            let host = first_host(&mut self.host);
+            host.resize(pictures * boxes * 6, 0.0);
+            self.driver.download(best, host)?;
+            return Ok(decode_best(host, boxes, letterboxes, &self.options));
+        }
+        // Any other output — YOLO's `[batch, boxes, 6]`, a few hundred boxes
+        // a picture, or another kind's — copied down as it is, every one.
+        self.host.resize_with(found.len(), Vec::new);
+        for ((_, shape, pointer), host) in found.iter().zip(&mut self.host) {
+            host.resize(shape.iter().product(), 0.0);
+            // SAFETY: as above, `shape`'s floats on this device.
+            unsafe { self.driver.download_from(*pointer, host)? };
+        }
+        let outputs: Vec<ModelOutput<'_>> = found
+            .iter()
+            .zip(&self.host)
+            .map(|((name, shape, _), data)| ModelOutput { name, shape, data })
+            .collect();
+        decode_batch(
+            &*self.decoder,
+            &outputs,
+            letterboxes,
+            self.model,
+            &self.options,
+        )
     }
 
     /// Runs the model on what is held, and hands every held picture on in

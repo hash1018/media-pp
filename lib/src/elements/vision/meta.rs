@@ -51,6 +51,12 @@ pub struct Detection {
     /// a car's make or a shirt's colour: DeepStream's secondary inference.
     /// One per classifier that had something to say, in the order they ran.
     pub classes: Vec<Classification>,
+    /// Points the detector found on the object — a face's eyes, nose and
+    /// the corners of its mouth — each `(x, y)` as fractions of the picture
+    /// as stored, like the box, in the model's own order. None for a model
+    /// that finds none, and on a box a tracker put where it expects the
+    /// object to be.
+    pub landmarks: Vec<(f32, f32)>,
 }
 
 /// What a classifier said of an object a detector found.
@@ -103,6 +109,7 @@ impl Detection {
             height,
             track_id: None,
             classes: Vec::new(),
+            landmarks: Vec::new(),
         }
     }
 }

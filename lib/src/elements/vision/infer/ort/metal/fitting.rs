@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::super::OrtError;
+use super::super::{ChannelOrder, ModelInput, OrtError};
 use crate::orientation::Orientation;
 
 const SHADER: &str = include_str!("../../../../../shaders/metal/fit.metal");
@@ -136,13 +136,19 @@ impl Fitting {
         &mut self,
         picture: &Picture,
         cuts: &[Cut],
-        affine: ([f32; 3], [f32; 3]),
+        (scale, bias): ([f32; 3], [f32; 3]),
     ) -> Result<(), OrtError> {
-        self.fit_each(&[(picture, cuts)], affine)
+        let values = ModelInput {
+            scale,
+            bias,
+            ..ModelInput::default()
+        };
+        self.fit_each(&[(picture, cuts)], values)
     }
 
     /// [`Self::fit`] for several pictures, each with its own cuts, in one
-    /// pass.
+    /// pass, into the values a model wants — its planes in its own order,
+    /// each then times its scale plus its bias.
     ///
     /// # Panics
     ///
@@ -150,8 +156,9 @@ impl Fitting {
     pub(super) fn fit_each(
         &mut self,
         pictures: &[(&Picture, &[Cut])],
-        (scale, bias): ([f32; 3], [f32; 3]),
+        values: ModelInput,
     ) -> Result<(), OrtError> {
+        let ModelInput { scale, bias, order } = values;
         let read = MTLTextureUsage::ShaderRead;
         // Every picture's planes, held until the pass has finished reading
         // them.
@@ -212,7 +219,7 @@ impl Fitting {
                     left,
                     top,
                     cut.slot as u32,
-                    0,
+                    u32::from(order == ChannelOrder::Bgr),
                 ]
                 .iter()
                 .flat_map(|word| word.to_ne_bytes())

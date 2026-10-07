@@ -2117,6 +2117,54 @@ SCALE_DONE:
     ret;
 }
 
+// Each pixel of `total`, in pictures of three planes of `plane` floats,
+// has its first and third planes' values swapped: R G B made B G R. A
+// thread per pixel, a 16 by 16 block read as 256 in a row, as above.
+.visible .entry swap_planes(
+    .param .u64 data,
+    .param .u32 plane,
+    .param .u32 total
+)
+{
+    .reg .pred  %p<2>;
+    .reg .b32   %r<12>;
+    .reg .f32   %f<3>;
+    .reg .b64   %rd<6>;
+
+    ld.param.u64    %rd1, [data];
+    ld.param.u32    %r1, [plane];
+    ld.param.u32    %r2, [total];
+
+    mov.u32         %r3, %ctaid.x;
+    mov.u32         %r4, %tid.y;
+    mov.u32         %r5, %tid.x;
+    shl.b32         %r6, %r3, 8;
+    shl.b32         %r7, %r4, 4;
+    add.s32         %r8, %r6, %r7;
+    add.s32         %r9, %r8, %r5;
+
+    setp.ge.u32     %p1, %r9, %r2;
+    @%p1 bra        SWAP_DONE;
+
+    // The pixel's first plane: its picture's three planes in, and its
+    // place in the plane; its third two planes on.
+    div.u32         %r10, %r9, %r1;
+    rem.u32         %r11, %r9, %r1;
+    mul.lo.s32      %r10, %r10, 3;
+    mad.lo.s32      %r10, %r10, %r1, %r11;
+    mul.wide.u32    %rd2, %r10, 4;
+    add.s64         %rd3, %rd1, %rd2;
+    mul.wide.u32    %rd4, %r1, 8;
+    add.s64         %rd5, %rd3, %rd4;
+    ld.global.f32   %f1, [%rd3];
+    ld.global.f32   %f2, [%rd5];
+    st.global.f32   [%rd3], %f2;
+    st.global.f32   [%rd5], %f1;
+
+SWAP_DONE:
+    ret;
+}
+
 .visible .entry best_class(
     .param .u64 src,
     .param .u64 dst,

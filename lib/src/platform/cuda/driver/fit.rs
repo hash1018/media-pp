@@ -5,6 +5,8 @@
 
 use std::ffi::c_void;
 
+#[cfg(test)]
+use super::cuMemcpyHtoD_v2;
 use super::ptx::FIT_PTX;
 use super::{
     BgraSurface, CUcontext, CUdeviceptr, CUfunction, CUmodule, CudaDriver, CudaDriverError,
@@ -22,6 +24,7 @@ pub(crate) struct FitKernels {
     nv12: CUfunction,
     bgra: CUfunction,
     scale: CUfunction,
+    swap: CUfunction,
     best: CUfunction,
 }
 
@@ -110,10 +113,16 @@ impl CudaDriver {
         self.with_context(|| {
             // SAFETY: the context is current inside `with_context`, which is
             // `load_module`'s whole contract.
-            let (module, [nv12, bgra, scale, best]) = unsafe {
+            let (module, [nv12, bgra, scale, swap, best]) = unsafe {
                 load_module(
                     FIT_PTX,
-                    ["fit_nv12", "fit_bgra", "scale_planes", "best_class"],
+                    [
+                        "fit_nv12",
+                        "fit_bgra",
+                        "scale_planes",
+                        "swap_planes",
+                        "best_class",
+                    ],
                 )?
             };
             Ok(FitKernels {
@@ -122,6 +131,7 @@ impl CudaDriver {
                 nv12,
                 bgra,
                 scale,
+                swap,
                 best,
             })
         })
@@ -317,6 +327,66 @@ impl CudaDriver {
             // first `total` floats of `tensor`, which the check above holds it
             // to, and the context is current inside `with_context`.
             unsafe { launch(kernels.scale, (total.div_ceil(256), 1), 16, &mut params) }
+        })
+    }
+
+    /// Swaps the first and third planes of each of the first `pictures`
+    /// inputs of a `width` by `height` model in `tensor`: R G B made B G R,
+    /// for a model that reads OpenCV's order — before [`Self::scale_planes`],
+    /// whose channels are then the model's.
+    pub(crate) fn swap_planes(
+        &self,
+        kernels: &FitKernels,
+        tensor: &CudaTensor,
+        (width, height): (u32, u32),
+        pictures: usize,
+    ) -> Result<(), CudaDriverError> {
+        let plane = (width as usize) * (height as usize);
+        let total = plane * pictures;
+        if 3 * total > tensor.floats || 3 * total > u32::MAX as usize {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "{pictures} inputs of {width}x{height} do not fit a tensor of {} floats",
+                tensor.floats
+            )));
+        }
+        let mut data = tensor.pointer;
+        let (mut plane, mut total) = (plane as u32, total as u32);
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> =
+                vec![arg(&mut data), arg(&mut plane), arg(&mut total)];
+            // SAFETY: one pointer per parameter `swap_planes` declares, in
+            // that order, each at a live local; a thread a pixel of the
+            // first `total` of `tensor`'s pictures, reading and writing two
+            // of its three planes, which the check above holds to the
+            // tensor; the context is current inside `with_context`.
+            unsafe { launch(kernels.swap, (total.div_ceil(256), 1), 16, &mut params) }
+        })
+    }
+
+    /// Copies `from` up into the start of `into`.
+    #[cfg(test)]
+    pub(crate) fn upload_floats(
+        &self,
+        from: &[f32],
+        into: &CudaTensor,
+    ) -> Result<(), CudaDriverError> {
+        assert!(
+            from.len() <= into.floats,
+            "{} into {}",
+            from.len(),
+            into.floats
+        );
+        // SAFETY: the context is current; the copy writes no more than the
+        // tensor holds, checked above.
+        self.with_context(|| unsafe {
+            check(
+                "cuMemcpyHtoD",
+                cuMemcpyHtoD_v2(
+                    into.pointer,
+                    from.as_ptr().cast(),
+                    std::mem::size_of_val(from),
+                ),
+            )
         })
     }
 }

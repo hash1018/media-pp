@@ -12,6 +12,22 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`OrtDetectorOptions` has a `model`, and `Detection` has
+  `landmarks`.** `DetectorModel::Yolo`, the default, is what every
+  detector read before. `DetectorModel::Custom { input, decoder }` runs a
+  model this crate does not read: `ModelInput` says the values it wants —
+  RGB or BGR, each times a scale plus a bias — and the application's own
+  `DetectorDecoder` reads one picture's outputs into `ModelBox`es in pixels
+  of the model's input, which the detector maps back onto the picture, turn
+  and letterbox and all, on the CPU, CUDA and Metal alike;
+  `non_max_suppression` is there for it. A `Detection`'s `landmarks` are
+  the points a model found on the object, as fractions of the picture —
+  none for YOLO.
+
+  | Before | Now |
+  |---|---|
+  | `OrtDetectorOptions { conf_threshold, iou_threshold, labels, interval }` | the same with `model: DetectorModel::Yolo`, or `..OrtDetectorOptions::default()` |
+
 - **`Hiding` has a `shape`.** `HideShape::Rectangle` covers the box as
   before; `HideShape::Ellipse` covers only the ellipse inside it, a pixel —
   or a 2x2 block of NV12 colour — where its centre is inside. The CPU and

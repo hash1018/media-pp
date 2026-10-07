@@ -54,7 +54,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
 - **Analysis**: `SwOrtDetector`, `CudaOrtDetector` and `MetalOrtDetector`,
-  filters that put what a YOLO model finds on each picture as `Detections`
+  filters that put what a YOLO model — or a model of the application's own,
+  read by its `DetectorDecoder` — finds on each picture as `Detections`
   metadata; `SwOrtClassifier`, `CudaOrtClassifier` and
   `MetalOrtClassifier`, which name each object found with a second model; `ObjectTracker`, which numbers each
   object across pictures and fills in the pictures a detector let by;

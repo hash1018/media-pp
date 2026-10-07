@@ -5,7 +5,6 @@
 use crate::orientation::Orientations;
 use std::{path::Path, sync::Arc};
 
-use ndarray::{Axis, Slice};
 use ort::{inputs, session::Session, value::TensorRef, value::ValueType};
 
 use crate::ffmpeg;
@@ -22,8 +21,8 @@ use crate::{
 use crate::elements::{BatchSlot, Detection, Detections};
 
 use super::super::{
-    Interval, Letterbox, OrtDetectorOptions, OrtError, decode_batch, decode_best, labels,
-    model_input,
+    DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorOptions, OrtError,
+    decode_batch, decode_best, labels, model_input,
 };
 use super::best_class::BestClass;
 use super::fitting::{Cut, Fitting, Picture};
@@ -68,7 +67,8 @@ impl Default for MetalOrtDetectorOptions {
     }
 }
 
-/// Runs a YOLO detector on each VideoToolbox picture and hands the picture
+/// Runs a detector — YOLO, or the kind [`OrtDetectorOptions::model`] says
+/// — on each VideoToolbox picture and hands the picture
 /// on unchanged, carrying the [`Detections`] found in it — what
 /// [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU, with the
 /// picture fitted to the model's input by a Metal kernel where it is, and
@@ -112,6 +112,10 @@ struct Detecting {
     session: Session,
     options: OrtDetectorOptions,
     labels: Arc<[Arc<str>]>,
+    /// The values the model wants.
+    values: ModelInput,
+    /// What reads its output.
+    decoder: Arc<dyn DetectorDecoder>,
     /// Which pictures it looks at.
     interval: Interval,
     /// How many pictures the model is run on at once.
@@ -237,6 +241,8 @@ impl MetalOrtDetector {
             name,
             pp_log,
             session,
+            values: options.detector.model.input(),
+            decoder: options.detector.model.decoder(),
             options: options.detector,
             labels,
             interval,
@@ -332,7 +338,7 @@ impl Detecting {
             .zip(&cuts)
             .map(|((picture, _), cut)| (*picture, cut.as_slice()))
             .collect();
-        self.fitting.fit_each(&pictures, ([1.0; 3], [0.0; 3]))?;
+        self.fitting.fit_each(&pictures, self.values)?;
         // A model of fixed batch is handed exactly that many; one of open
         // batch, as many as there are.
         let rows = self.rows.unwrap_or(looks.len());
@@ -341,29 +347,46 @@ impl Detecting {
             TensorRef::from_array_view(([rows, 3, height, width], self.fitting.input(rows)))?;
         let outputs = self.session.run(inputs![input])?;
         let letterboxes: Vec<Letterbox> = looks.iter().map(|(_, letterbox)| *letterbox).collect();
-        let (shape, floats) = outputs[0].try_extract_tensor::<f32>()?;
-        match **shape {
+        if self.options.model.is_yolo() {
+            let (shape, floats) = outputs[0].try_extract_tensor::<f32>()?;
             // `[batch, 4 + classes, boxes]`: each box's best class found on
             // the GPU, of the batch's pictures alone — the inputs past them
             // hold what they held, and what the model found there is no
             // picture's.
-            [batch, rows, boxes] if batch as usize >= looks.len() && boxes != 6 && rows > 4 => {
+            if let [batch, rows, boxes] = **shape
+                && batch as usize >= looks.len()
+                && boxes != 6
+                && rows > 4
+            {
                 let boxes = boxes as usize;
                 let best = self.best.find(floats, looks.len(), rows as usize, boxes)?;
-                Ok(decode_best(best, boxes, &letterboxes, &self.options))
-            }
-            // `[batch, boxes, 6]`, a few hundred boxes a picture, read as it
-            // is — or a shape the reading refuses.
-            _ => {
-                let output = outputs[0].try_extract_array::<f32>()?;
-                let output = if output.ndim() > 0 && output.shape()[0] > looks.len() {
-                    output.slice_axis(Axis(0), Slice::from(0..looks.len()))
-                } else {
-                    output
-                };
-                decode_batch(output, &letterboxes, &self.options)
+                return Ok(decode_best(best, boxes, &letterboxes, &self.options));
             }
         }
+        // Any other output — YOLO's `[batch, boxes, 6]`, a few hundred boxes
+        // a picture, or another kind's — read as it is, every one; past the
+        // batch's pictures, no picture's.
+        let names: Vec<&str> = outputs.iter().map(|(name, _)| name).collect();
+        let tensors = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let (shape, data) = outputs[index].try_extract_tensor::<f32>()?;
+                let shape: Vec<usize> = shape.iter().map(|&side| side.max(0) as usize).collect();
+                Ok((name, shape, data))
+            })
+            .collect::<std::result::Result<Vec<_>, OrtError>>()?;
+        let outputs: Vec<ModelOutput<'_>> = tensors
+            .iter()
+            .map(|(name, shape, data)| ModelOutput { name, shape, data })
+            .collect();
+        decode_batch(
+            &*self.decoder,
+            &outputs,
+            &letterboxes,
+            self.fitting.model,
+            &self.options,
+        )
     }
 
     /// Runs the model on what is held, and hands every held picture on in
@@ -622,7 +645,7 @@ mod tests {
             .map(|(picture, cut)| (picture, cut.as_slice()))
             .collect();
         together
-            .fit_each(&each, ([1.0; 3], [0.0; 3]))
+            .fit_each(&each, ModelInput::default())
             .expect("fits");
         let floats = 3 * (model.0 * model.1) as usize;
         for (slot, buf) in frames.iter().enumerate() {

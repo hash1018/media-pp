@@ -753,6 +753,58 @@ fn a_picture_is_fitted_from_every_pixel_it_is_shrunk_from() {
     }
 }
 
+/// A model reading OpenCV's BGR from 0 to 255 less a mean is handed its
+/// own values: each picture's red and blue planes swapped, and each plane
+/// then scaled by the model's own channel — for a batch of two, and only
+/// the pictures asked for.
+#[cfg(feature = "ort-cuda")]
+#[test]
+fn planes_are_put_in_the_models_order_and_values() {
+    let Some((_device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let driver = CudaDriver::retain_primary().expect("driver");
+    let kernels = driver.fit_kernels().expect("kernels");
+    // Three pictures of 3 by 2 in a tensor of three; two are worked on.
+    let (model, plane) = ((3, 2), 6);
+    let tensor = driver.batch_tensor(3, 2, 3).expect("tensor");
+    let values: Vec<f32> = (0..3 * 3 * plane).map(|v| v as f32 / 100.0).collect();
+    driver.upload_floats(&values, &tensor).expect("up");
+    let (scale, bias) = ([255.0; 3], [-104.0, -117.0, -123.0]);
+    driver
+        .swap_planes(&kernels, &tensor, model, 2)
+        .expect("swapped");
+    driver
+        .scale_planes(&kernels, &tensor, model, 2, scale, bias)
+        .expect("scaled");
+    driver.synchronize().expect("ran");
+    let mut got = vec![0.0; values.len()];
+    driver.download(&tensor, &mut got).expect("down");
+    let mut want = values.clone();
+    for picture in 0..2 {
+        let at = picture * 3 * plane;
+        for pixel in 0..plane {
+            want.swap(at + pixel, at + 2 * plane + pixel);
+        }
+        for channel in 0..3 {
+            for value in &mut want[at + channel * plane..at + (channel + 1) * plane] {
+                *value = *value * scale[channel] + bias[channel];
+            }
+        }
+    }
+    for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-3,
+            "value {index}: {got} against {want}"
+        );
+    }
+    assert_eq!(
+        got[2 * 3 * plane..],
+        values[2 * 3 * plane..],
+        "the third is left"
+    );
+}
+
 /// What the fitting kernels make of a picture of `size` as shown, given
 /// stored so that turned by `orientation` it shows `shown(x, y)` as luma —
 /// and grey chroma — or as BGRA: the red plane of a 16 by 16 input it is

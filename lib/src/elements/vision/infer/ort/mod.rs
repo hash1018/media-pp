@@ -7,8 +7,9 @@
 //! TensorRT, and `MetalOrtDetector` reads VideoToolbox pictures and infers
 //! through Core ML — and a classifier beside each, which looks again at what
 //! a detector found. What they share is here: their options and errors, how a
-//! model's class names are read, and in `yolo` how its output is read and a
-//! picture fitted to its input.
+//! model's class names are read, in `model` the kinds of model a detector
+//! runs and how a picture is fitted to one's input, and in `yolo` how a YOLO
+//! model's output is read.
 
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ mod classify;
 mod cuda;
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 mod metal;
+mod model;
 mod sw_ort_classifier;
 mod sw_ort_detector;
 mod yolo;
@@ -37,21 +39,24 @@ pub use cuda::{
 pub use metal::{
     CoreMlComputeUnits, MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions,
 };
+pub use model::{
+    ChannelOrder, DetectorDecoder, DetectorModel, ModelBox, ModelInput, ModelOutput,
+    non_max_suppression,
+};
+use model::{Letterbox, decode_batch};
 pub use sw_ort_classifier::SwOrtClassifier;
 pub use sw_ort_detector::SwOrtDetector;
 #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
-use yolo::decode_batch;
-#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
 use yolo::decode_best;
-use yolo::{Letterbox, decode};
 
 /// How a detector decides what counts as found, and what it calls it.
 ///
 /// # Models
 ///
-/// A YOLO detector exported to ONNX with one image input, `[1, 3, height,
-/// width]`, RGB scaled to 0–1, and one output in either of the two layouts
-/// Ultralytics exports:
+/// A model of one image input, `[batch, 3, height, width]`, of the kind
+/// [`model`](Self::model) says — by default a YOLO detector exported to
+/// ONNX, its input RGB scaled to 0–1, and one output in either of the two
+/// layouts Ultralytics exports:
 ///
 /// - `[1, 4 + classes, boxes]` — YOLOv8 and YOLO11: a box's centre, width
 ///   and height, then a score per class. Boxes are thresholded and put
@@ -62,15 +67,19 @@ use yolo::{Letterbox, decode};
 /// A picture is fitted to the model's input the way Ultralytics trains it:
 /// scaled to fit inside, keeping its proportions, and the rest filled with
 /// grey (114). The boxes are mapped back, so they describe the picture the
-/// detector was handed, whatever its size.
+/// detector was handed, whatever its size. A model of another kind is
+/// fitted the same way, in the values it wants, and read by its own
+/// decoder — [`DetectorModel`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrtDetectorOptions {
+    /// The kind of model: how its input is filled and its output read.
+    pub model: DetectorModel,
     /// The lowest score a box is kept at.
     pub conf_threshold: f32,
     /// How much two boxes of one class may overlap, as intersection over
-    /// union, before the less confident is dropped as the same object. Used
-    /// only for the `[1, 4 + classes, boxes]` layout; the other suppresses
-    /// duplicates itself.
+    /// union, before the less confident is dropped as the same object. A
+    /// YOLO model uses it only for the `[1, 4 + classes, boxes]` layout; the
+    /// other suppresses duplicates itself.
     pub iou_threshold: f32,
     /// The model's class names, in its class order. `None` reads them from
     /// the model, which an Ultralytics export carries in its `names`
@@ -96,6 +105,7 @@ impl Default for OrtDetectorOptions {
     /// picture looked at.
     fn default() -> Self {
         Self {
+            model: DetectorModel::Yolo,
             conf_threshold: 0.25,
             iou_threshold: 0.45,
             labels: None,

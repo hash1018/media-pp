@@ -20,7 +20,8 @@ use crate::{
 use crate::elements::Detections;
 
 use super::{
-    Interval, Letterbox, OrtDetectorError, OrtDetectorOptions, decode, labels, model_input,
+    DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorError,
+    OrtDetectorOptions, decode_batch, labels, model_input,
 };
 use crate::orientation::{Orientation, Orientations};
 
@@ -28,7 +29,8 @@ use crate::orientation::{Orientation, Orientations};
 /// trains on: 114 of 255.
 const MARGIN: f32 = 114.0 / 255.0;
 
-/// Runs a YOLO detector on each picture on the CPU and hands the picture on
+/// Runs a detector — YOLO, or the kind [`OrtDetectorOptions::model`]
+/// says — on each picture on the CPU and hands the picture on
 /// unchanged, carrying the [`Detections`] found in it — read them
 /// downstream with `buffer.metadata()?.get::<Detections>()`.
 ///
@@ -54,6 +56,10 @@ struct Detecting {
     options: OrtDetectorOptions,
     labels: Arc<[Arc<str>]>,
     model: (u32, u32),
+    /// The values the model wants.
+    values: ModelInput,
+    /// What reads its output.
+    decoder: Arc<dyn DetectorDecoder>,
     /// Which pictures it looks at.
     interval: Interval,
     fitting: Option<Fitting>,
@@ -120,6 +126,8 @@ impl SwOrtDetector {
             name,
             pp_log,
             session,
+            values: options.model.input(),
+            decoder: options.model.decoder(),
             options,
             labels,
             model,
@@ -157,14 +165,24 @@ impl Detecting {
         let (width, height) = (letterbox.scaled.0 as usize, letterbox.scaled.1 as usize);
         let stride = fitting.scaled.stride(0);
         let data = fitting.scaled.data(0);
-        self.input.fill(MARGIN);
+        // Red, green and blue each into its plane of the model's, and each
+        // plane's value made the model's.
+        let planes = self.values.planes();
+        let (scale, bias) = (self.values.scale, self.values.bias);
+        let value = |plane: usize, value: f32| value * scale[plane] + bias[plane];
+        for plane in 0..3 {
+            self.input
+                .index_axis_mut(ndarray::Axis(1), plane)
+                .fill(value(plane, MARGIN));
+        }
         if orientation.is_upright() {
             for y in 0..height {
                 let row = &data[y * stride..y * stride + width * 3];
                 for (x, pixel) in row.as_chunks::<3>().0.iter().enumerate() {
-                    for (channel, value) in pixel.iter().enumerate() {
-                        self.input[[0, channel, offset_y + y, offset_x + x]] =
-                            f32::from(*value) / 255.0;
+                    for (channel, sample) in pixel.iter().enumerate() {
+                        let plane = planes[channel];
+                        self.input[[0, plane, offset_y + y, offset_x + x]] =
+                            value(plane, f32::from(*sample) / 255.0);
                     }
                 }
             }
@@ -176,9 +194,9 @@ impl Detecting {
                 for x in 0..width as i32 {
                     let at = (yx * x + yy * y + y0) as usize * stride
                         + (xx * x + xy * y + x0) as usize * 3;
-                    for channel in 0..3 {
-                        self.input[[0, channel, offset_y + y as usize, offset_x + x as usize]] =
-                            f32::from(data[at + channel]) / 255.0;
+                    for (channel, &plane) in planes.iter().enumerate() {
+                        self.input[[0, plane, offset_y + y as usize, offset_x + x as usize]] =
+                            value(plane, f32::from(data[at + channel]) / 255.0);
                     }
                 }
             }
@@ -195,13 +213,33 @@ impl Detecting {
                 TensorRef::from_array_view(&self.input).map_err(OrtDetectorError::from)?
             ])
             .map_err(OrtDetectorError::from)?;
-        let output = outputs[0]
-            .try_extract_array::<f32>()
-            .map_err(OrtDetectorError::from)?;
+        let names: Vec<&str> = outputs.iter().map(|(name, _)| name).collect();
+        let tensors = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let (shape, data) = outputs[index].try_extract_tensor::<f32>()?;
+                let shape: Vec<usize> = shape.iter().map(|&side| side.max(0) as usize).collect();
+                Ok((name, shape, data))
+            })
+            .collect::<std::result::Result<Vec<_>, OrtDetectorError>>()?;
+        let outputs: Vec<ModelOutput<'_>> = tensors
+            .iter()
+            .map(|(name, shape, data)| ModelOutput { name, shape, data })
+            .collect();
+        let found = decode_batch(
+            &*self.decoder,
+            &outputs,
+            &[letterbox],
+            self.model,
+            &self.options,
+        )?
+        .pop()
+        .unwrap_or_default();
         Ok(Detections::new(
             Arc::clone(&self.name),
             Arc::clone(&self.labels),
-            decode(output, &letterbox, &self.options)?,
+            found,
         ))
     }
 }

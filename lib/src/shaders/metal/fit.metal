@@ -2,8 +2,9 @@
 // a model's input with, the Metal counterpart of `fit_nv12` and `fit_bgra` in
 // `platform::cuda::driver::ptx::FIT_PTX`: each thread one pixel of the
 // model's `width` by `height` input, written to three float planes of input
-// `slot` of buffer 1 — R, then G, then B, each 0 to 1 and then times `scale`
-// plus `bias`, as the model reads them.
+// `slot` of buffer 1 — R, then G, then B, or B, G, R where `slot.y` says
+// so, each 0 to 1 and then times `scale` plus `bias`, as the model reads
+// them.
 //
 // What is fitted is the rectangle of the picture at `origin`, `source` in
 // size — the whole of it for a detector, an object's box for a classifier —
@@ -37,7 +38,8 @@ struct Fit {
     uint2 source;
     // Where that rectangle's top-left corner is in the picture as stored.
     uint2 origin;
-    // x: which input of the buffer, from 0.
+    // x: which input of the buffer, from 0; y: 1 where the model reads its
+    // planes B, G, R.
     uint2 slot;
     // Where a shown pixel (x, y) of the rectangle is stored, from its
     // corner: x from `x_of`, y from `y_of`, each of x, y and 1.
@@ -84,6 +86,9 @@ static uint2 stored(constant Fit &fit, uint x, uint y) {
 static void store(device float *tensor, constant Fit &fit, uint2 id, float3 rgb) {
     uint plane = fit.model.x * fit.model.y;
     uint at = fit.slot.x * 3 * plane + id.y * fit.model.x + id.x;
+    if (fit.slot.y != 0) {
+        rgb = rgb.bgr;
+    }
     rgb = rgb * fit.scale.rgb + fit.bias.rgb;
     tensor[at] = rgb.r;
     tensor[plane + at] = rgb.g;
