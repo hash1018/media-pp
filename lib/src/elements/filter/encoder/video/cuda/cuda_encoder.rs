@@ -600,6 +600,68 @@ mod tests {
         }
     }
 
+    /// HEVC from NVENC goes into an MP4 as `hvc1`, which an iPhone plays,
+    /// not FFmpeg's `hev1`, which it refuses; H.264 keeps its own tag.
+    #[test]
+    fn hevc_goes_into_an_mp4_as_hvc1() {
+        use crate::elements::FileMuxer;
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        for (codec, tag) in [(CudaCodec::H265, *b"hvc1"), (CudaCodec::H264, *b"avc1")] {
+            let mut encoder = match CudaEncoder::new(
+                "encoder",
+                &device,
+                CudaEncoderOptions {
+                    codec,
+                    ..options(width, height)
+                },
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    eprintln!("skipping: NVENC unavailable on this machine ({error})");
+                    return;
+                }
+            };
+            let path = std::env::temp_dir().join(format!("media-pp-{codec:?}-tag.mp4"));
+            let mut muxer = FileMuxer::create(&path).expect("create");
+            let track = muxer.add_stream("video", &encoder).expect("add");
+            let sink = muxer.open().expect("header").take(track).expect("track");
+            encoder.src_pads()[0].link(sink.into_raw());
+            let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+            let uploaded = Arc::new(Mutex::new(Vec::new()));
+            upload.src_pads()[0].link(Box::new(CapturingSink {
+                received: uploaded.clone(),
+                pp_log: element_pp_log(ElementType::Other, "uploaded", None),
+            }));
+            let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+            for index in 0..10 {
+                let mut pooled = pool.get();
+                *pooled = nv12_frame(width, height, index);
+                upload
+                    .consume(MediaBuffer::Video(Arc::new(pooled).into()))
+                    .expect("upload failed");
+                let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
+                encoder.consume(frame).expect("encode failed");
+            }
+            crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
+                .expect("eos failed");
+            drop(encoder);
+            let input = ffmpeg::format::input(&path).expect("reopen");
+            let stream = input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .expect("video");
+            // SAFETY: plain field of the stream's own parameters.
+            let written = unsafe { (*stream.parameters().as_ptr()).codec_tag };
+            assert_eq!(written.to_le_bytes(), tag, "{codec:?}");
+            drop(input);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     /// A CUDA frame that does not say what unit its `pts` is in is refused
     /// by name — the hardware twin of `SwEncoder`'s own test — and nothing
     /// is encoded from it.

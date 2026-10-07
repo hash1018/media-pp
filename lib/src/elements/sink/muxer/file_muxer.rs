@@ -161,6 +161,7 @@ impl FileMuxer {
             parameters,
             time_base,
         } = format.into();
+        let hvc1 = self.hvc1(&parameters);
         let mut stream = self
             .output
             .add_stream(parameters.id())
@@ -168,9 +169,37 @@ impl FileMuxer {
         let pending = PendingStream::new(name, &parameters, time_base);
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
+        if hvc1 {
+            // SAFETY: the stream's own parameters, just set; the tag is a
+            // plain field the muxer reads when it writes the header.
+            unsafe {
+                (*stream.parameters().as_mut_ptr()).codec_tag = u32::from_le_bytes(*b"hvc1");
+            }
+        }
         let track = self.id.track(self.streams.len());
         self.streams.push(pending);
         Ok(track)
+    }
+
+    /// Whether a track of `parameters` goes in as `hvc1`: HEVC, into MP4 or
+    /// MOV, saying no tag of its own, its parameter sets out of band — as
+    /// an encoder of this crate's are. FFmpeg writes `hev1` unless told,
+    /// and an iPhone, QuickTime and every other Apple player refuse to play
+    /// HEVC in MP4 or MOV under it; `hvc1` is the same stream with its
+    /// parameter sets in the sample entry, which every other player plays
+    /// too.
+    fn hvc1(&self, parameters: &ffmpeg::codec::Parameters) -> bool {
+        // SAFETY: plain fields of parameters the caller owns.
+        let (tag, extradata) = unsafe {
+            let raw = parameters.as_ptr();
+            ((*raw).codec_tag, (*raw).extradata_size)
+        };
+        let format = self.output.format();
+        let quicktime = format
+            .name()
+            .split(',')
+            .any(|name| matches!(name, "mp4" | "mov" | "ipod" | "ismv" | "3gp" | "3g2"));
+        parameters.id() == ffmpeg::codec::Id::HEVC && tag == 0 && extradata > 0 && quicktime
     }
 
     /// Writes the container header — every [`FileMuxer::add_stream`] call

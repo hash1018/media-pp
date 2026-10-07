@@ -1124,6 +1124,12 @@ compile error with no explanation.
 
 ### Fixed
 
+- **HEVC in MP4 and MOV plays on Apple devices.** `FileMuxer` writes an
+  HEVC track as `hvc1` — its parameter sets in the sample entry, as an
+  encoder of this crate puts them out of band — where FFmpeg wrote `hev1`,
+  which an iPhone, QuickTime and Safari refuse to play. A track that brings
+  a tag of its own, copied from another file, keeps it.
+
 - **A stream that appears after a file or RTSP session was opened is
   passed over.** `FileDemuxer` and `RtspSource` have an output for each
   stream there was when they opened; MPEG-TS and FLV, which have no header
