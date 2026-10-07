@@ -510,16 +510,6 @@ impl DetectionOverlayOptions {
         })
     }
 
-    /// Whether any treatment hides an ellipse.
-    #[cfg(all(target_os = "macos", feature = "metal"))]
-    pub(crate) fn hides_ellipses(&self) -> bool {
-        self.treatments().any(|treatment| {
-            treatment
-                .hide
-                .is_some_and(|hiding| hiding.shape == HideShape::Ellipse)
-        })
-    }
-
     /// Whether a rule names a class where `detections` carry no names, so
     /// that it matches nothing: worth a warning, once.
     pub(crate) fn names_unmatched(&self, detections: &Detections) -> bool {

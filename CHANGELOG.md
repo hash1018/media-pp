@@ -32,9 +32,9 @@ compile error with no explanation.
   before; `HideShape::Ellipse` covers only the ellipse inside it, a pixel —
   or a 2x2 block of NV12 colour — where its centre is inside. The CPU and
   CUDA overlays cover the same pixels with the same bytes, for a mosaic, a
-  blur and a fill; `MetalDetectionOverlay` refuses an ellipse with
-  `EllipseUnsupported` for now. `cuda_detect` and `cuda_track` take
-  `--hide face=mosaic,ellipse`.
+  blur and a fill, and `MetalDetectionOverlay` the same bytes as the CPU's
+  too. `cuda_detect`, `cuda_track` and `metal_detect` take `--hide
+  face=mosaic,ellipse`.
 
   | Before | Now |
   |---|---|
@@ -264,7 +264,8 @@ compile error with no explanation.
   reference decoding in Python does, in the same places; MobileNet 0.25
   runs about 440 pictures a second on an RTX 3050 through TensorRT, decode
   included. `cuda_detect --retinaface --hide face=mosaic,ellipse` hides
-  every face.
+  every face, and `metal_detect --retinaface` the same on a Mac, where it
+  finds the CPU's faces and points through Core ML.
 
 - **An iPhone's HDR goes through in ten bits.** `CudaFrameFormat::P010` is
   what NVDEC decodes 10-bit video to. `CudaEncoder` takes it and encodes

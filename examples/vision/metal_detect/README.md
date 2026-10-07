@@ -44,7 +44,9 @@ the right way up, and recorded saying it is turned, as the file does.
 
 `--hide person=blur` hides a class in the recording instead of boxing it:
 `mosaic`, `blur` or `fill` (black), a mosaic where none is said, and once
-for each class to hide, by the name the model gives it. On the people clip,
+for each class to hide, by the name the model gives it. `,ellipse` after it
+— `--hide face=mosaic,ellipse` — hides the ellipse inside each box rather
+than the whole box. On the people clip,
 YOLO11n records at the same rate hiding people as boxing them, about 235
 pictures a second on an M5 MacBook Air once both are measured in turns.
 Hide with the detector on every picture, as
@@ -54,13 +56,16 @@ fills in may miss someone only just come in.
 The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or YOLOv10
 and YOLO26 — of the stock weights: the boxes are named with COCO's 80 classes,
 whatever the model says, so an export that lost its class names still has
-them. It is built with `ort-coreml`, on an Apple silicon Mac.
+them. Or with `--retinaface` it is a RetinaFace export (biubug6's
+`Pytorch_Retinaface`, MobileNet or ResNet), whose faces are labelled `face`
+and carry five points each: `--retinaface --out faces.mp4 --hide
+face=mosaic,ellipse` hides every face. It is built with `ort-coreml`, on an Apple silicon Mac.
 
 ```sh
 cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-  [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
+  [--retinaface] [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
   [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
-  [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
+  [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
 ```
 
 The file's video has to be one VideoToolbox decodes to NV12 — 8-bit H.264 or

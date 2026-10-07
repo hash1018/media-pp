@@ -20,7 +20,7 @@ use crate::{
     frame_size::ForSize,
     platform::ffmpeg::AvBufferRef,
     platform::macos::{
-        metal::{Buffer, Kernel, MetalError, MetalGpu, Texture, write_texture},
+        metal::{Buffer, Kernel, MetalError, MetalGpu, Pass, Texture, write_texture},
         pixel_buffer::PixelBuffer,
         videotoolbox::{NotVideoToolbox, create_frames_ctx, sw_format_of},
     },
@@ -77,10 +77,6 @@ pub enum MetalDetectionOverlayError {
     /// The label font is not a TrueType or OpenType font.
     #[error("the label font is not a TrueType or OpenType font")]
     LabelFont,
-    /// A rule hides an ellipse, which this overlay does not cut yet: it
-    /// would hide the whole box.
-    #[error("MetalDetectionOverlay hides whole boxes only, not ellipses")]
-    EllipseUnsupported,
 }
 
 impl From<TextFontError> for MetalDetectionOverlayError {
@@ -189,9 +185,6 @@ impl MetalDetectionOverlay {
     ) -> std::result::Result<Self, MetalDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
         options.check()?;
-        if options.hides_ellipses() {
-            return Err(MetalDetectionOverlayError::EllipseUnsupported);
-        }
         let pp_log = element_pp_log(ElementType::MetalDetectionOverlay, &name, None);
         // Read once at any size: each label is rasterized at its own.
         let font = options
@@ -252,8 +245,14 @@ impl MetalDetectionOverlay {
     }
 }
 
-/// The parameters of one plane's cells, as the redaction shader's `Cells`.
-fn cells(origin: (u32, u32), size: (u32, u32), cells: (u32, u32), smooth: bool) -> Vec<u8> {
+/// The parameters of one plane's cells, as the redaction shader's `Cells`:
+/// blended with `smooth`, cut to the ellipse inside with `ellipse`.
+fn cells(
+    origin: (u32, u32),
+    size: (u32, u32),
+    cells: (u32, u32),
+    (smooth, ellipse): (bool, bool),
+) -> Vec<u8> {
     [
         origin.0,
         origin.1,
@@ -262,7 +261,7 @@ fn cells(origin: (u32, u32), size: (u32, u32), cells: (u32, u32), smooth: bool) 
         cells.0,
         cells.1,
         u32::from(smooth),
-        0,
+        u32::from(ellipse),
     ]
     .iter()
     .flat_map(|word| word.to_ne_bytes())
@@ -299,6 +298,78 @@ fn paint(rect: Rect, colour: [f32; 3], masked: bool) -> Vec<u8> {
 }
 
 impl Overlaying {
+    /// Encodes `rect` of each of `planes` cut into `cells`, each painted its
+    /// mean — blended with `smooth`, only inside the ellipse with
+    /// `ellipse` — the means kept in `self.means` from byte `at` on, which
+    /// it moves past them. With `fill`, a value for each plane, the means
+    /// are not taken: written as the fill's colour, for a fill cut to an
+    /// ellipse. NV12's colour is cut into the same cells at half the size,
+    /// the rectangle being on whole blocks.
+    fn hide_cells(
+        &self,
+        pass: &mut Pass,
+        planes: &[Texture],
+        rect: Rect,
+        (count, smooth, ellipse): ((u32, u32), bool, bool),
+        fill: Option<Vec<[f32; 4]>>,
+        at: &mut usize,
+    ) -> std::result::Result<(), MetalDetectionOverlayError> {
+        let (Some([means_kernel, cells_kernel]), Some(means)) = (&self.cells, &self.means) else {
+            // Made with the options and above for this picture: a picture is
+            // not handed on unhidden.
+            return Err(MetalDetectionOverlayError::Metal(MetalError::Unavailable(
+                "the hiding kernels",
+            )));
+        };
+        let whole = ((rect.x, rect.y), (rect.width, rect.height));
+        let half = ((rect.x / 2, rect.y / 2), (rect.width / 2, rect.height / 2));
+        for (index, (plane, (origin, size))) in planes.iter().zip([whole, half]).enumerate() {
+            let parameters = cells(origin, size, count, (smooth, ellipse));
+            let n = (count.0 * count.1) as usize;
+            match &fill {
+                Some(colours) => {
+                    let value = colours[index];
+                    assert!(*at + size_of::<[f32; 4]>() <= means.length());
+                    // SAFETY: the buffer is shared memory this element owns,
+                    // `at` is inside it — checked above, and sized for every
+                    // hide of the picture — and no pass is reading it: the
+                    // last one finished, and this one is not committed yet.
+                    unsafe {
+                        means
+                            .contents()
+                            .as_ptr()
+                            .cast::<u8>()
+                            .add(*at)
+                            .cast::<[f32; 4]>()
+                            .write_unaligned(value);
+                    }
+                }
+                None => pass.dispatch_groups(
+                    means_kernel,
+                    &[plane],
+                    &[(means, *at)],
+                    Some(&parameters),
+                    (n.div_ceil(64), 1, 1),
+                    (64, 1, 1),
+                ),
+            }
+            pass.dispatch_groups(
+                cells_kernel,
+                &[plane],
+                &[(means, *at)],
+                Some(&parameters),
+                (
+                    (size.0 as usize).div_ceil(8),
+                    (size.1 as usize).div_ceil(8),
+                    1,
+                ),
+                (8, 8, 1),
+            );
+            *at += n * 4 * size_of::<f32>();
+        }
+        Ok(())
+    }
+
     /// The size of the mask `key` names, where it has one to draw,
     /// rasterizing and uploading it where it is not cached yet.
     fn mask(&mut self, key: &MaskKey) -> Option<(u32, u32)> {
@@ -470,6 +541,8 @@ impl Overlaying {
             .iter()
             .map(|hide| match hide {
                 Hide::Cells { cells, .. } => planes_of(*cells),
+                // A fill cut to an ellipse is one cell its colour.
+                Hide::Fill { ellipse: true, .. } => planes_of((1, 1)),
                 Hide::Fill { .. } => 0,
             })
             .sum();
@@ -516,57 +589,50 @@ impl Overlaying {
         let mut at = 0;
         for hide in &hidden {
             match *hide {
-                Hide::Fill { rect, color, .. } => pass.dispatch(
+                Hide::Fill {
+                    rect,
+                    color,
+                    ellipse: false,
+                } => pass.dispatch(
                     paint_kernel,
                     &solid,
                     Some(&paint(rect, colour_of(color, nv12), false)),
                     (rect.width, rect.height),
                 ),
+                Hide::Fill {
+                    rect,
+                    color,
+                    ellipse: true,
+                } => {
+                    let (y, cb, cr) = bt709_limited(color);
+                    let colours = if nv12 {
+                        vec![[y, 0, 0, 0], [cb, cr, 0, 0]]
+                    } else {
+                        vec![[color.blue, color.green, color.red, 255]]
+                    };
+                    let colours = colours.into_iter().map(|values| values.map(f32::from));
+                    self.hide_cells(
+                        &mut pass,
+                        &integers,
+                        rect,
+                        ((1, 1), false, true),
+                        Some(colours.collect()),
+                        &mut at,
+                    )?;
+                }
                 Hide::Cells {
                     rect,
                     cells: count,
                     smooth,
-                    ..
-                } => {
-                    let (Some([means_kernel, cells_kernel]), Some(means)) =
-                        (&self.cells, &self.means)
-                    else {
-                        // Made with the options and above for this picture:
-                        // a picture is not handed on unhidden.
-                        return Err(MetalDetectionOverlayError::Metal(MetalError::Unavailable(
-                            "the hiding kernels",
-                        )));
-                    };
-                    // NV12's colour is cut into the same cells at half the
-                    // size, the rectangle being on whole blocks.
-                    let whole = ((rect.x, rect.y), (rect.width, rect.height));
-                    let half = ((rect.x / 2, rect.y / 2), (rect.width / 2, rect.height / 2));
-                    for (plane, (origin, size)) in integers.iter().zip([whole, half]) {
-                        let parameters = cells(origin, size, count, smooth);
-                        let n = (count.0 * count.1) as usize;
-                        pass.dispatch_groups(
-                            means_kernel,
-                            &[plane],
-                            &[(means, at)],
-                            Some(&parameters),
-                            (n.div_ceil(64), 1, 1),
-                            (64, 1, 1),
-                        );
-                        pass.dispatch_groups(
-                            cells_kernel,
-                            &[plane],
-                            &[(means, at)],
-                            Some(&parameters),
-                            (
-                                (size.0 as usize).div_ceil(8),
-                                (size.1 as usize).div_ceil(8),
-                                1,
-                            ),
-                            (8, 8, 1),
-                        );
-                        at += n * 4 * size_of::<f32>();
-                    }
-                }
+                    ellipse,
+                } => self.hide_cells(
+                    &mut pass,
+                    &integers,
+                    rect,
+                    (count, smooth, ellipse),
+                    None,
+                    &mut at,
+                )?,
             }
         }
         for stroke in &strokes {
@@ -1029,12 +1095,13 @@ mod tests {
     }
 
     /// A mosaic, a blur and a fill on the GPU write the same bytes as the
-    /// CPU's overlay on the same picture, NV12 and BGRA alike — two faces,
-    /// grown by the margin, cut into cells of uneven width, the colour at
-    /// half the size — and a box drawn over a hidden face is drawn over it.
+    /// CPU's overlay on the same picture, NV12 and BGRA alike, of the whole
+    /// box or the ellipse inside it — two faces, grown by the margin, cut
+    /// into cells of uneven width, the colour at half the size — and a box
+    /// drawn over a hidden face is drawn over it.
     #[test]
     fn a_box_is_hidden_on_the_gpu_as_on_the_cpu() {
-        use super::super::super::{Hiding, RedactStyle, Treatment};
+        use super::super::super::{HideShape, Hiding, RedactStyle, Treatment};
         use crate::elements::{Detection, SwDetectionOverlay};
         let Some(device) = try_videotoolbox_device() else {
             return;
@@ -1063,11 +1130,18 @@ mod tests {
             },
             RedactStyle::Fill(Color::new(10, 200, 30)),
         ];
+        let shapes = [HideShape::Rectangle, HideShape::Ellipse];
         for format in FORMATS {
-            for style in styles {
+            for (style, shape) in styles
+                .into_iter()
+                .flat_map(|style| shapes.map(|shape| (style, shape)))
+            {
                 for drawn in [false, true] {
                     let treatment = Treatment {
-                        hide: Some(Hiding::new(style)),
+                        hide: Some(Hiding {
+                            shape,
+                            ..Hiding::new(style)
+                        }),
                         ..if drawn {
                             Treatment::default()
                         } else {
@@ -1110,7 +1184,7 @@ mod tests {
                     assert_ne!(
                         expected,
                         shown(&picture),
-                        "{format:?} {style:?}: something hidden"
+                        "{format:?} {style:?} {shape:?}: something hidden"
                     );
                     for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
                         let differ = expected
@@ -1120,7 +1194,8 @@ mod tests {
                             .count();
                         assert_eq!(
                             differ, 0,
-                            "{format:?} {style:?}, boxes drawn {drawn}, plane {plane}: {differ} bytes differ"
+                            "{format:?} {style:?} {shape:?}, boxes drawn {drawn}, plane {plane}: \
+                             {differ} bytes differ"
                         );
                     }
                 }

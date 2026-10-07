@@ -75,9 +75,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   and labels onto the picture, and an `ObjectAnalytics`'s zones and lines
   with their counts, each as `OverlayParts` says; and hide what was found —
   faces, number plates — by a mosaic, a blur or a fill, of the box or the
-  ellipse inside it, each class as its `ClassRule` says (an ellipse not yet
-  on Metal); `WhisperTranscriber`, `FrameCounter`,
-  `PacketCounter`.
+  ellipse inside it, each class as its `ClassRule` says;
+  `WhisperTranscriber`, `FrameCounter`, `PacketCounter`.
 - **Whole pipelines**: `Player`, a file played with its sound in a window.
 
 A 10-bit file — an iPhone's HDR — stays ten bits on CUDA: `CudaDecoder`

@@ -1,12 +1,16 @@
 // `MetalDetectionOverlay`'s hiding: a rectangle of a plane cut into cells,
 // each painted the mean of the samples under it — a mosaic — or that mean
-// blended into its neighbours' — a blur. The Metal counterpart of
+// blended into its neighbours' — a blur — or, cut to the ellipse inside the
+// rectangle, only the samples whose centres are inside it. The Metal
+// counterpart of
 // `REDACT_PTX`'s `cell_means` and `cell_paint`, and of `SwDetectionOverlay`'s
 // `hide_plane`, written to give the same bytes: the planes are read and
 // written as integers through `*Uint` views, the sums made in the CPU's order,
 // and every operation rounded as written — compiled without fast math, the
 // fusing of a multiply into an add turned off, the one division taken as
-// `precise::divide`, and the result rounded half to even by `rint`.
+// `precise::divide`, and the result rounded half to even by `rint`. A fill
+// cut to an ellipse is one cell whose mean is the fill's colour, written into
+// the means rather than taken.
 //
 // Texture 0 is the plane: `r8Uint` for luma, `rg8Uint` for NV12's Cb and Cr,
 // `rgba8Uint` for BGRA, every byte of a sample treated alike. Buffer 0 is the
@@ -23,7 +27,8 @@ struct Cells {
     uint2 size;
     // How many cells across and down.
     uint2 cells;
-    // x: 1 to blend each cell into its neighbours, 0 for a mosaic.
+    // x: 1 to blend each cell into its neighbours, 0 for a mosaic; y: 1 to
+    // paint only the ellipse inside the rectangle.
     uint2 smooth;
 };
 
@@ -77,6 +82,16 @@ kernel void cell_paint(texture2d<uint, access::read_write> plane [[texture(0)]],
                        uint2 id [[thread_position_in_grid]]) {
     if (id.x >= c.size.x || id.y >= c.size.y) {
         return;
+    }
+    // Cut to the ellipse touching the rectangle's sides where asked: a sample
+    // whose centre is outside it is left as it is — each step rounded as the
+    // CPU's `inside_ellipse` rounds it.
+    if (c.smooth.y != 0) {
+        float dx = precise::divide((float(id.x) + 0.5f) * 2.0f, float(c.size.x)) - 1.0f;
+        float dy = precise::divide((float(id.y) + 0.5f) * 2.0f, float(c.size.y)) - 1.0f;
+        if (dx * dx + dy * dy > 1.0f) {
+            return;
+        }
     }
     uint across = c.cells.x;
     float4 value;

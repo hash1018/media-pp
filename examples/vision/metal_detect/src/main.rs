@@ -39,8 +39,9 @@
 //! its crossings each way. The overlay draws on copies, so the branch
 //! printing beside it sees the pictures as they were handed on.
 //! `--hide person=blur` hides a class there instead of boxing it —
-//! `mosaic`, `blur` or `fill`, a mosaic where none is said — and may be
-//! given once for each class.
+//! `mosaic`, `blur` or `fill`, a mosaic where none is said, the ellipse
+//! inside each box with `,ellipse` after it — and may be given once for
+//! each class.
 //!
 //! A phone's portrait recording, stored on its side, is looked at and
 //! labelled the right way up, and recorded saying it is turned, as the
@@ -48,16 +49,19 @@
 //!
 //! The model is an Ultralytics YOLO ONNX export — YOLOv8 and YOLO11, or
 //! YOLOv10 and YOLO26 — of the stock weights: the boxes are named with
-//! COCO's 80 classes, whatever the model says. Built with `ort-coreml`, on
+//! COCO's 80 classes, whatever the model says. Or with `--retinaface` it
+//! is a RetinaFace export, whose faces are labelled `face` and carry five
+//! points each: `--retinaface --out faces.mp4 --hide face=mosaic,ellipse`
+//! hides every face. Built with `ort-coreml`, on
 //! an Apple silicon Mac. The file's video has to be one VideoToolbox decodes
 //! to NV12 — 8-bit H.264 or HEVC, say: a 10-bit one is refused as the
 //! pipeline is wired, the decoder's P010 being a layout the detector does
 //! not take. `--pictures` stops it after about that many.
 //!
 //!     cargo run --release -p metal_detect -- path/to/model.onnx path/to/video.mp4 \
-//!         [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
+//!         [--retinaface] [--track] [--interval N] [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
 //!         [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
-//!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]
+//!         [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -86,12 +90,13 @@ mod example {
         color::Color,
         elements::{
             Analytics, AnalyticsOptions, AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS,
-            ClassRule, DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, InputScale,
-            LabelStyle, Line, LineCount, MetalDetectionOverlay, MetalOrtClassifier,
-            MetalOrtDetector, MetalOrtDetectorOptions, ObjectAnalytics, ObjectTracker,
-            OrtClassifierOptions, OrtDetectorOptions, OverlayParts, RedactStyle, TrackFormat,
-            TrackerOptions, Treatment, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxDevice,
-            VideoToolboxEncoder, VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
+            ClassRule, DetectionOverlayOptions, Detections, DetectorModel, FileDemuxer, FileMuxer,
+            HideShape, Hiding, InputScale, LabelStyle, Line, LineCount, MetalDetectionOverlay,
+            MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions, ObjectAnalytics,
+            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, OverlayParts, RedactStyle,
+            TrackFormat, TrackerOptions, Treatment, VideoToolboxCodec, VideoToolboxDecoder,
+            VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
+            VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -122,11 +127,19 @@ mod example {
         out: Option<String>,
         hide: Vec<ClassRule>,
         pictures: usize,
+        /// The model is a RetinaFace face detector, not YOLO.
+        retinaface: bool,
     }
 
-    /// `CLASS[=mosaic|blur|fill]` from `--hide`: that class's detections
-    /// hidden that way — a mosaic where no way is said — and drawn no box.
+    /// `CLASS[=mosaic|blur|fill][,ellipse]` from `--hide`: that class's
+    /// detections hidden that way — a mosaic where no way is said, the whole
+    /// box unless `,ellipse` — and drawn no box.
     fn hide_rule(spec: &str) -> Option<ClassRule> {
+        // `,ellipse` last hides the ellipse inside the box, not the box.
+        let (spec, shape) = match spec.strip_suffix(",ellipse") {
+            Some(spec) => (spec, HideShape::Ellipse),
+            None => (spec, HideShape::Rectangle),
+        };
         let (class, style) = spec.split_once('=').unwrap_or((spec, "mosaic"));
         let style = match style {
             "mosaic" => RedactStyle::mosaic(),
@@ -134,16 +147,29 @@ mod example {
             "fill" => RedactStyle::Fill(Color::BLACK),
             _ => return None,
         };
-        (!class.is_empty()).then(|| ClassRule::new(class, Treatment::hidden(style)))
+        let hiding = Hiding {
+            shape,
+            ..Hiding::new(style)
+        };
+        (!class.is_empty()).then(|| {
+            ClassRule::new(
+                class,
+                Treatment {
+                    draw: None,
+                    hide: Some(hiding),
+                    ..Treatment::none()
+                },
+            )
+        })
     }
 
     fn args() -> Args {
         let usage = || -> ! {
             eprintln!(
-                "usage: metal_detect <model.onnx> <video.mp4> [--track] [--interval N] \
+                "usage: metal_detect <model.onnx> <video.mp4> [--retinaface] [--track] [--interval N] \
                  [--confirm N] [--visual] [--line X1,Y1,X2,Y2]... \
                  [--classifier imagenet.onnx [--classifier-labels classes.txt] [--classify 2,5,7]] \
-                 [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill]]...] [--pictures N]"
+                 [--out boxes.mp4 [--hide CLASS[=mosaic|blur|fill][,ellipse]]...] [--pictures N]"
             );
             std::process::exit(1);
         };
@@ -153,11 +179,13 @@ mod example {
         let mut lines = Vec::new();
         let mut hide = Vec::new();
         let mut visual = false;
+        let mut retinaface = false;
         let (mut classifier, mut classifier_labels, mut classify) = (None, None, None);
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--track" => track = true,
+                "--retinaface" => retinaface = true,
                 "--visual" => {
                     track = true;
                     visual = true;
@@ -241,6 +269,7 @@ mod example {
             out,
             hide,
             pictures,
+            retinaface,
         }
     }
 
@@ -265,6 +294,7 @@ mod example {
             out,
             hide,
             pictures: limit,
+            retinaface,
         } = args();
         // A second model on what was found, if asked for: an ImageNet
         // classifier, as the public ones are, on the classes asked for.
@@ -302,13 +332,19 @@ mod example {
         let started = Instant::now();
         // COCO's class names, which stock Ultralytics weights are trained
         // on, given rather than read from the model: an export that lost
-        // them would otherwise put numbers on the boxes.
+        // them would otherwise put numbers on the boxes. RetinaFace's faces
+        // are named `face` by the detector itself.
         let detector = MetalOrtDetector::new(
             "detector",
             &model,
             MetalOrtDetectorOptions {
                 detector: OrtDetectorOptions {
-                    labels: Some(COCO_CLASS_LABELS.map(String::from).to_vec()),
+                    model: if retinaface {
+                        DetectorModel::RetinaFace
+                    } else {
+                        DetectorModel::Yolo
+                    },
+                    labels: (!retinaface).then(|| COCO_CLASS_LABELS.map(String::from).to_vec()),
                     // The tracker matches unconfident detections too, so it
                     // is handed them.
                     conf_threshold: if track {
