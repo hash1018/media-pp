@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::OrtError;
 use super::classify::Selects;
 use super::model::ModelInput;
-use crate::elements::{Detection, Embedding};
+use crate::elements::{Cutout, Detection, Embedding};
 use crate::orientation::Orientation;
 
 /// How an embedder decides what to look at, and how it fits each object to
@@ -39,6 +39,13 @@ pub struct OrtEmbedderOptions {
     /// object with no tracker's number is embedded on every picture it is
     /// detected on.
     pub reembed: u32,
+    /// Whether each vector carries the picture it was made from
+    /// ([`Embedding::cutout`](crate::elements::Embedding::cutout)): the
+    /// object as the model saw it, for a person to know it by — a face's
+    /// thumbnail. It is read back from the model's own input, so it costs
+    /// a copy of that input for every object embedded, which is once a
+    /// [`reembed`](Self::reembed) for an object followed.
+    pub cutouts: bool,
 }
 
 impl Default for OrtEmbedderOptions {
@@ -53,6 +60,7 @@ impl Default for OrtEmbedderOptions {
             min_size: 32,
             min_detection_score: 0.5,
             reembed: 30,
+            cutouts: false,
         }
     }
 }
@@ -242,6 +250,60 @@ pub(crate) fn similarity(from: &[(f32, f32)], to: &[(f32, f32)]) -> Option<[f32;
     ])
 }
 
+/// The pictures `rows` inputs of a model were made from, `size` each,
+/// read back from `tensor` — the inputs, one after another, three planes
+/// each — by undoing `values`: each plane less its bias, over its scale,
+/// put back in RGB order and made eight bits.
+pub(crate) fn cutouts(
+    tensor: &[f32],
+    rows: usize,
+    size: (u32, u32),
+    values: ModelInput,
+) -> Vec<Arc<Cutout>> {
+    let (width, height) = (size.0 as usize, size.1 as usize);
+    let plane = width * height;
+    let planes = values.planes();
+    tensor
+        .chunks(plane * 3)
+        .take(rows)
+        .filter_map(|input| {
+            let mut rgb = vec![0u8; plane * 3];
+            for (channel, &p) in planes.iter().enumerate() {
+                let (scale, bias) = (values.scale[p], values.bias[p]);
+                let from = input.get(p * plane..(p + 1) * plane)?;
+                for (pixel, &value) in from.iter().enumerate() {
+                    let unit = if scale == 0.0 {
+                        0.0
+                    } else {
+                        (value - bias) / scale
+                    };
+                    rgb[pixel * 3 + channel] = (unit.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+            Cutout::new(size.0, size.1, rgb).map(Arc::new)
+        })
+        .collect()
+}
+
+/// `found`, each with the picture its vector was made from — `cutouts` in
+/// the same order; one with no vector is left so.
+pub(crate) fn with_cutouts(
+    found: Vec<Option<Embedding>>,
+    cutouts: Vec<Arc<Cutout>>,
+) -> Vec<Option<Embedding>> {
+    let mut cutouts = cutouts.into_iter();
+    found
+        .into_iter()
+        .map(|embedding| {
+            let cutout = cutouts.next();
+            match (embedding, cutout) {
+                (Some(embedding), Some(cutout)) => Some(embedding.with_cutout(cutout)),
+                (embedding, _) => embedding,
+            }
+        })
+        .collect()
+}
+
 /// Each picture's vector from a model's first output of `shape` — `[batch,
 /// dim]`, or `[batch, dim, 1, 1]` as some export it — the first `rows` of
 /// it, made `embedder`'s.
@@ -271,6 +333,36 @@ mod tests {
 
     fn near(a: (f32, f32), b: (f32, f32), within: f32) -> bool {
         (a.0 - b.0).abs() < within && (a.1 - b.1).abs() < within
+    }
+
+    /// A model's input made from known pixels — in BGR, scaled and moved —
+    /// gives back those pixels, input by input.
+    #[test]
+    fn a_cutout_is_the_picture_the_input_was_made_from() {
+        let values = ModelInput {
+            order: super::super::ChannelOrder::Bgr,
+            scale: [2.0; 3],
+            bias: [-1.0; 3],
+        };
+        // Two inputs of 2 by 1 pixels: red then grey; blue then white.
+        let pixels: [[[u8; 3]; 2]; 2] = [[[255, 0, 0], [128, 128, 128]], [[0, 0, 255], [255; 3]]];
+        let planes = values.planes();
+        let mut tensor = vec![0.0f32; 2 * 3 * 2];
+        for (row, input) in pixels.iter().enumerate() {
+            for (pixel, rgb) in input.iter().enumerate() {
+                for (channel, &value) in rgb.iter().enumerate() {
+                    let p = planes[channel];
+                    tensor[row * 6 + p * 2 + pixel] =
+                        f32::from(value) / 255.0 * values.scale[p] + values.bias[p];
+                }
+            }
+        }
+        let back = cutouts(&tensor, 2, (2, 1), values);
+        assert_eq!(back.len(), 2);
+        for (cutout, input) in back.iter().zip(&pixels) {
+            assert_eq!((cutout.width, cutout.height), (2, 1));
+            assert_eq!(&cutout.rgb[..], input.as_flattened());
+        }
     }
 
     /// Points turned a third of a quarter, doubled and moved are brought

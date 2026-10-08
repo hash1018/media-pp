@@ -49,8 +49,8 @@ pub use cut::{MetalCutDetector, MetalCutDetectorError};
 #[cfg(feature = "ort")]
 pub use infer::*;
 pub use meta::{
-    Analytics, COCO_CLASS_LABELS, Classification, Crossing, Detection, Detections, Embedding,
-    LineCount, SceneCut, ZoneCount,
+    Analytics, COCO_CLASS_LABELS, Classification, Crossing, Cutout, Detection, Detections,
+    Embedding, LineCount, SceneCut, ZoneCount,
 };
 pub use overlay::{
     BoxColors, BoxStyle, ClassId, ClassRule, DetectionOverlayOptions, DetectionOverlayOptionsError,

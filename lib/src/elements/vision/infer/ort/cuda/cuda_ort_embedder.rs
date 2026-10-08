@@ -30,7 +30,7 @@ use crate::{
 use super::super::ChannelOrder;
 use super::super::OrtError;
 use super::super::classify::{Input, Memory, Plan, apply_each};
-use super::super::embed::{OrtEmbedderOptions, Warp, embeddings};
+use super::super::embed::{OrtEmbedderOptions, Warp, cutouts, embeddings, with_cutouts};
 use crate::orientation::Orientations;
 
 /// The most objects embedded in one run of a model that takes any number
@@ -242,6 +242,16 @@ impl Embedder {
             // The kernels ran on this driver's context; the model reads the
             // tensor on ONNX Runtime's own stream.
             self.driver.synchronize()?;
+            // The pictures, read back from the inputs the model is about
+            // to be handed.
+            let cut = if self.options.cutouts {
+                let mut inputs =
+                    vec![0.0f32; group.len() * 3 * model.0 as usize * model.1 as usize];
+                self.driver.download(&self.tensor, &mut inputs)?;
+                cutouts(&inputs, group.len(), model, values)
+            } else {
+                Vec::new()
+            };
             let shape = Shape::new([rows as i64, 3, i64::from(model.1), i64::from(model.0)]);
             // SAFETY: the pointer is this element's own device allocation of
             // `capacity` inputs, at least `rows` — exactly `shape` or more — in
@@ -257,7 +267,10 @@ impl Embedder {
             let outputs = self.session.run(inputs![input])?;
             let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
             let shape: Vec<usize> = shape.iter().map(|&side| side.max(0) as usize).collect();
-            found.extend(embeddings(&self.name, &shape, data, group.len())?);
+            found.extend(with_cutouts(
+                embeddings(&self.name, &shape, data, group.len())?,
+                cut,
+            ));
         }
         Ok(found)
     }
@@ -418,6 +431,7 @@ mod tests {
                 scale: [2.0; 3],
                 bias: [-1.0; 3],
             },
+            cutouts: true,
             ..OrtEmbedderOptions::default()
         };
         let Ok(mut gpu) = CudaOrtEmbedder::new("gpu", &device, &model, options.clone()) else {
@@ -473,6 +487,24 @@ mod tests {
                 let alike = cpu.embeddings[0].similarity(gpu).expect("of one length");
                 eprintln!("{format:?}: {alike}");
                 assert!(alike > 0.98, "{format:?}: the vectors are {alike} alike");
+                // The pictures they were made from are the same picture.
+                let (cpu, gpu) = (
+                    cpu.embeddings[0]
+                        .cutout
+                        .as_ref()
+                        .expect("a cutout on the CPU"),
+                    gpu.cutout.as_ref().expect("a cutout on the GPU"),
+                );
+                assert_eq!((cpu.width, cpu.height), (gpu.width, gpu.height));
+                let apart = cpu
+                    .rgb
+                    .iter()
+                    .zip(gpu.rgb.iter())
+                    .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                    .sum::<f64>()
+                    / cpu.rgb.len() as f64;
+                eprintln!("{format:?}: cutouts {apart:.2} apart on average");
+                assert!(apart < 4.0, "{format:?}: the cutouts are {apart} apart");
             }
         }
     }

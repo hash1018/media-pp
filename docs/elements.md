@@ -64,7 +64,9 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `MetalOrtClassifier`, which name each object found with a second model;
   `SwOrtEmbedder`, `CudaOrtEmbedder` and `MetalOrtEmbedder`, which make
   each object found a vector — a face straightened by its five points, or
-  a whole box — that lies near another's where the two look alike;
+  a whole box — that lies near another's where the two look alike, and,
+  asked (`OrtEmbedderOptions::cutouts`), the picture it was made from beside
+  it, for a person to know the object by (`Embedding::cutout`);
   `ObjectTracker`, which numbers each
   object across pictures and fills in the pictures a detector let by —
   following by look, saying on each box how sure the look was

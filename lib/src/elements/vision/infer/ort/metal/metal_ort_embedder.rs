@@ -22,7 +22,7 @@ use crate::{
 
 use super::super::OrtError;
 use super::super::classify::{Input, Memory, Plan, apply_each};
-use super::super::embed::{OrtEmbedderOptions, Warp, embeddings};
+use super::super::embed::{OrtEmbedderOptions, Warp, cutouts, embeddings, with_cutouts};
 use super::fitting::Fitting;
 use super::{CORE_ML_BATCH, object_model_session};
 
@@ -122,6 +122,16 @@ impl Embedder {
             // A model of fixed batch is handed exactly that many; one of
             // open batch, as many as there are.
             let rows = self.input.batch.unwrap_or(group.len());
+            let cut = if self.options.cutouts {
+                cutouts(
+                    self.fitting.input(rows),
+                    group.len(),
+                    (width, height),
+                    self.options.input,
+                )
+            } else {
+                Vec::new()
+            };
             let input = TensorRef::from_array_view((
                 [rows, 3, height as usize, width as usize],
                 self.fitting.input(rows),
@@ -129,7 +139,10 @@ impl Embedder {
             let outputs = self.session.run(inputs![input])?;
             let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
             let shape: Vec<usize> = shape.iter().map(|&side| side.max(0) as usize).collect();
-            found.extend(embeddings(&self.name, &shape, data, group.len())?);
+            found.extend(with_cutouts(
+                embeddings(&self.name, &shape, data, group.len())?,
+                cut,
+            ));
         }
         Ok(found)
     }

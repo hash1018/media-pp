@@ -85,6 +85,41 @@ pub struct Embedding {
     pub embedder: Arc<str>,
     /// The vector, of length 1.
     pub vector: Arc<[f32]>,
+    /// The picture of the object the vector was made from, as the model
+    /// saw it — cut out, straightened and upright — where the embedder was
+    /// asked to keep it — `OrtEmbedderOptions::cutouts`, with the `ort`
+    /// feature; `None` otherwise. Shared, as the vector is,
+    /// by every picture the object's vector is kept for.
+    pub cutout: Option<Arc<Cutout>>,
+}
+
+/// A picture of one object, as an embedding model was handed it: RGB, eight
+/// bits a channel, row by row from the top, `width` by `height` — the
+/// model's own input size. What the model looked at, so what a person
+/// shown it would recognise the object by.
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Cutout {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 3` bytes: red, green and blue of each pixel.
+    pub rgb: Arc<[u8]>,
+}
+
+impl Cutout {
+    /// A `width` by `height` picture of `rgb`'s bytes; `None` where they are
+    /// not three for each pixel.
+    pub fn new(width: u32, height: u32, rgb: impl Into<Arc<[u8]>>) -> Option<Self> {
+        let rgb = rgb.into();
+        (rgb.len() == width as usize * height as usize * 3).then_some(Self { width, height, rgb })
+    }
+}
+
+// Its bytes are not worth printing.
+impl std::fmt::Debug for Cutout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cutout({}x{})", self.width, self.height)
+    }
 }
 
 impl Embedding {
@@ -95,7 +130,14 @@ impl Embedding {
         (length.is_finite() && length > 0.0).then(|| Self {
             embedder: embedder.into(),
             vector: vector.iter().map(|v| v / length).collect(),
+            cutout: None,
         })
+    }
+
+    /// The embedding with the picture it was made from.
+    pub fn with_cutout(mut self, cutout: Arc<Cutout>) -> Self {
+        self.cutout = Some(cutout);
+        self
     }
 
     /// How alike the two objects look, from -1 to 1: the cosine of the angle

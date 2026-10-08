@@ -19,7 +19,7 @@ use crate::{
 
 use super::OrtError;
 use super::classify::{Input, Memory, Plan, apply_each, image_input};
-use super::embed::{OrtEmbedderOptions, Warp, embeddings};
+use super::embed::{OrtEmbedderOptions, Warp, cutouts, embeddings, with_cutouts};
 use super::model::ModelInput;
 use super::sw_ort_detector::{ToRgb, is_hardware};
 use crate::orientation::Orientations;
@@ -122,6 +122,10 @@ impl Embedder {
             for (slot, warp) in group.iter().enumerate() {
                 warp_into(&rgb, *warp, (width, height), values, &mut tensor, slot);
             }
+            let cut = match (self.options.cutouts, tensor.as_slice()) {
+                (true, Some(inputs)) => cutouts(inputs, group.len(), (width, height), values),
+                _ => Vec::new(),
+            };
             let outputs = self
                 .session
                 .run(inputs![
@@ -132,7 +136,10 @@ impl Embedder {
                 .try_extract_tensor::<f32>()
                 .map_err(OrtError::from)?;
             let shape: Vec<usize> = shape.iter().map(|&side| side.max(0) as usize).collect();
-            found.extend(embeddings(&self.name, &shape, data, group.len())?);
+            found.extend(with_cutouts(
+                embeddings(&self.name, &shape, data, group.len())?,
+                cut,
+            ));
         }
         Ok(found)
     }

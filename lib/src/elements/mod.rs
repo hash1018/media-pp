@@ -306,7 +306,7 @@ pub use vision::{
 };
 pub use vision::{
     Analytics, AnalyticsOptions, BoxColors, BoxStyle, COCO_CLASS_LABELS, ClassId, ClassRule,
-    Classification, Crossing, CutDetectorOptions, CutDetectorOptionsError, Detection,
+    Classification, Crossing, CutDetectorOptions, CutDetectorOptionsError, Cutout, Detection,
     DetectionOverlayOptions, DetectionOverlayOptionsError, Detections, Embedding, HideShape,
     Hiding, LabelStyle, Line, LineCount, ObjectAnalytics, ObjectAnalyticsError, ObjectTracker,
     OverlayParts, RedactStyle, SceneCut, StreamAnalyticsOptions, SwCutDetector, SwCutDetectorError,
