@@ -38,13 +38,9 @@ pub enum MetalConverterError {
     #[error("MetalConverter only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
-    /// The frame is not an NV12 VideoToolbox frame, nor an HDR P010 one.
+    /// The frame is not an NV12 or P010 VideoToolbox frame.
     #[error("MetalConverter {0}")]
     Frame(String),
-    /// A P010 frame tagged neither PQ nor HLG: SDR, which has no tone map
-    /// to bring it down by.
-    #[error("MetalConverter takes P010 only as HDR, tagged PQ or HLG")]
-    SdrP010,
 
     /// A Metal call this element made failed.
     #[error(transparent)]
@@ -60,9 +56,10 @@ impl From<MetalPassError> for MetalConverterError {
     }
 }
 
-/// Turns NV12 VideoToolbox frames into BGRA ones, on the GPU with Metal —
-/// what a BGRA-only element on Metal, a key or an effect, is put behind when
-/// what arrives is a decoder's or a camera's NV12. The Metal counterpart of
+/// Turns NV12 and P010 VideoToolbox frames into BGRA ones, on the GPU with
+/// Metal — what a BGRA-only element on Metal, a key or an effect, is put
+/// behind when what arrives is a decoder's or a camera's NV12, and what
+/// brings a 10-bit decode to something `MetalRenderer` shows. The Metal counterpart of
 /// `VulkanConverter`; the other direction is the NV12
 /// [`MetalVideoCompositor`](crate::elements::MetalVideoCompositor)'s own.
 ///
@@ -71,11 +68,11 @@ impl From<MetalPassError> for MetalConverterError {
 /// comes out full-range RGB, opaque, with its timing carried through and
 /// tagged as what it now is.
 ///
-/// A P010 frame tagged PQ or HLG — the 10 bits HDR is decoded to — is
-/// brought to SDR BT.709 on the way instead, by `core/tone_map.rs`'s
-/// definition, the one `CudaConverter` and `D3d11ToneMap` draw with, and
-/// tagged BT.709 for it. SDR P010 is refused with
-/// [`MetalConverterError::SdrP010`].
+/// P010 — what `VideoToolboxDecoder` makes of 10-bit video — is read the
+/// same way, its ten bits taken at the top of each sample's two bytes. One
+/// tagged PQ or HLG is brought to SDR BT.709 on the way instead, by
+/// `core/tone_map.rs`'s definition, the one `CudaConverter` and
+/// `D3d11ToneMap` draw with, and tagged BT.709 for it.
 pub struct MetalConverter(FilterStage<Converting>);
 
 filter_stage!(MetalConverter);
@@ -86,9 +83,11 @@ struct Converting {
     pp_log: PpLog,
     name: Arc<str>,
     pass: MetalPass,
+    /// The SDR P010 pass, made at the first such frame.
+    wide: Option<MetalPass>,
     /// The HDR P010 pass, made at the first such frame.
     tone_map: Option<MetalPass>,
-    /// What output frames are made on, for `tone_map` when it is made.
+    /// What output frames are made on, for the passes made later.
     device: VideoToolboxDevice,
     repeated: RepeatedOutput,
 }
@@ -104,11 +103,12 @@ impl MetalConverter {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::MetalConverter, &name, None);
         let pass = MetalPass::new(device, SHADER, "convert", PassInput::Nv12)?;
-        pp_info!(pp_log: &pp_log, "opened: NV12 or HDR P010 -> BGRA");
+        pp_info!(pp_log: &pp_log, "opened: NV12 or P010 -> BGRA");
         Ok(Self(FilterStage::new(Converting {
             name,
             pp_log,
             pass,
+            wide: None,
             tone_map: None,
             device: device.clone(),
             repeated: RepeatedOutput::new(),
@@ -121,8 +121,9 @@ impl Converting {
         &mut self,
         source: &ffmpeg::frame::Video,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-        if sw_format_of(source) == Ok(ffmpeg::format::Pixel::P010LE) {
-            return self.tone_map(source);
+        let wide = sw_format_of(source) == Ok(ffmpeg::format::Pixel::P010LE);
+        if wide && let Some(map) = crate::tone_map::ToneMap::of_frame(source) {
+            return self.tone_map(source, &map);
         }
         let rows = ColorDescription::of(source).yuv_to_rgb_rows(source.height());
         let mut words = vec![
@@ -132,8 +133,21 @@ impl Converting {
             0u32.to_ne_bytes(),
         ];
         words.extend(rows.iter().flatten().map(|value| value.to_ne_bytes()));
-        let mut output = self
-            .pass
+        // P010's samples are read as sixteen-bit fractions, which the rows
+        // for eight take to within 0.4% — as the tone map reads them.
+        let pass = if wide {
+            later(
+                &mut self.wide,
+                &self.device,
+                SHADER,
+                "convert",
+                PassInput::P010,
+            )
+            .inspect_err(|error| pp_error!(self, "{error}"))?
+        } else {
+            &mut self.pass
+        };
+        let mut output = pass
             .run(source, &parameters(&words))
             .map_err(MetalConverterError::from)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
@@ -148,25 +162,21 @@ impl Converting {
         Ok(output)
     }
 
-    /// An HDR P010 `source` brought to SDR BGRA.
+    /// An HDR P010 `source` brought to SDR BGRA as `map` says.
     fn tone_map(
         &mut self,
         source: &ffmpeg::frame::Video,
+        map: &crate::tone_map::ToneMap,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-        let map = crate::tone_map::ToneMap::of_frame(source).ok_or_else(|| {
-            let error = MetalConverterError::SdrP010;
-            pp_error!(self, "{error}");
-            error
-        })?;
-        let pass = match &mut self.tone_map {
-            Some(pass) => pass,
-            empty => empty.insert(
-                MetalPass::new(&self.device, TONE_MAP, "tone_map", PassInput::P010)
-                    .map_err(MetalConverterError::from)
-                    .inspect_err(|error| pp_error!(self, "{error}"))?,
-            ),
-        };
-        let parameters = tone_map_parameters(&map, (source.width(), source.height()));
+        let pass = later(
+            &mut self.tone_map,
+            &self.device,
+            TONE_MAP,
+            "tone_map",
+            PassInput::P010,
+        )
+        .inspect_err(|error| pp_error!(self, "{error}"))?;
+        let parameters = tone_map_parameters(map, (source.width(), source.height()));
         let mut output = pass
             .run(source, &parameters)
             .map_err(MetalConverterError::from)
@@ -179,6 +189,20 @@ impl Converting {
         }
         .describe(&mut output);
         Ok(output)
+    }
+}
+
+/// The pass in `slot`, made on `device` the first time it is asked for.
+fn later<'a>(
+    slot: &'a mut Option<MetalPass>,
+    device: &VideoToolboxDevice,
+    shader: &str,
+    entry: &str,
+    input: PassInput,
+) -> std::result::Result<&'a mut MetalPass, MetalConverterError> {
+    match slot {
+        Some(pass) => Ok(pass),
+        empty => Ok(empty.insert(MetalPass::new(device, shader, entry, input)?)),
     }
 }
 
@@ -330,12 +354,12 @@ mod tests {
         }
     }
 
-    /// An HDR P010 picture, HLG or PQ, comes out SDR BGRA by
-    /// `core/tone_map.rs`'s definition, pixel for pixel to within the
-    /// rounding of a GPU's powers, tagged BT.709 with its timestamp carried;
-    /// an SDR one is refused and nothing is handed on.
+    /// A P010 picture comes out BGRA with its timestamp carried: an HDR
+    /// one, HLG or PQ, by `core/tone_map.rs`'s definition, pixel for pixel
+    /// to within the rounding of a GPU's powers, and tagged BT.709; an SDR
+    /// one as its own rows make it, with the primaries it had.
     #[test]
-    fn hdr_p010_comes_out_tone_mapped() {
+    fn p010_comes_out_as_its_rgb_tone_mapped_where_hdr() {
         use crate::tone_map::ToneMap;
         let Some(device) = try_videotoolbox_device() else {
             return;
@@ -390,19 +414,8 @@ mod tests {
             upload.consume(MediaBuffer::video(frame.clone())).unwrap();
             let input = uploaded.lock().unwrap().remove(0);
 
-            let Some(map) = ToneMap::of_frame(&frame) else {
-                assert!(
-                    matches!(
-                        converter.consume(input),
-                        Err(crate::error::Error::MetalConverterError(
-                            MetalConverterError::SdrP010
-                        ))
-                    ),
-                    "SDR P010 has no tone map"
-                );
-                assert!(converted.lock().unwrap().is_empty(), "nothing handed on");
-                continue;
-            };
+            let map = ToneMap::of_frame(&frame);
+            let rows = ColorDescription::of(&frame).yuv_to_rgb_rows(height as u32);
             converter.consume(input).unwrap();
             let mut download = VideoToolboxDownload::new("download");
             let back = capture(&mut download);
@@ -415,7 +428,12 @@ mod tests {
             assert_eq!(out.format(), ffmpeg::format::Pixel::BGRA);
             assert_eq!(out.pts(), Some(7));
             assert_eq!(out.color_space(), ffmpeg::color::Space::RGB);
-            assert_eq!(out.color_primaries(), ffmpeg::color::Primaries::BT709);
+            let primaries = if map.is_some() {
+                ffmpeg::color::Primaries::BT709
+            } else {
+                ffmpeg::color::Primaries::BT2020
+            };
+            assert_eq!(out.color_primaries(), primaries);
             assert_eq!(
                 out.color_transfer_characteristic(),
                 ffmpeg::color::TransferCharacteristic::BT709
@@ -425,7 +443,14 @@ mod tests {
                 for x in 0..width {
                     let (cb, cr) = chroma(x / 2, y / 2);
                     let unit = |code: u16| f32::from(code << 6) / 65535.0;
-                    let want = map.apply(unit(luma(x, y)), unit(cb), unit(cr));
+                    let ycc = [unit(luma(x, y)), unit(cb), unit(cr)];
+                    let want = match &map {
+                        Some(map) => map.apply(ycc[0], ycc[1], ycc[2]),
+                        None => rows.map(|[y, cb, cr, offset]| {
+                            let value = y * ycc[0] + cb * ycc[1] + cr * ycc[2] + offset;
+                            (value.clamp(0.0, 1.0) * 255.0).round() as u8
+                        }),
+                    };
                     let got = &out.data(0)[y * out.stride(0) + x * 4..][..4];
                     assert_eq!(got[3], 255);
                     for (got, want) in [got[2], got[1], got[0]].iter().zip(want) {
