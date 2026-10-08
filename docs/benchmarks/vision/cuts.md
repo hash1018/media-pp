@@ -56,10 +56,10 @@ python docs/benchmarks/vision/cuts/score.py docs/benchmarks/vision/cuts/tears-of
 
 | | Found | False | Missed | Precision | Recall |
 |---|---:|---:|---:|---:|---:|
-| Tears of Steel | 92 | 6 | 0 | | |
-| Sintel | 71 | 3 | 1 | | |
-| Elephants Dream | 57 | 5 | 1 | | |
-| **All** | **220** | **14** | **2** | **0.940** | **0.991** |
+| Tears of Steel | 92 | 5 | 0 | | |
+| Sintel | 71 | 2 | 1 | | |
+| Elephants Dream | 57 | 4 | 1 | | |
+| **All** | **220** | **11** | **2** | **0.952** | **0.991** |
 | ffmpeg `scdet`, threshold 8 — its best | 191 | 18 | 31 | 0.914 | 0.860 |
 | ffmpeg `scdet`, threshold 3 — to miss as few | 215 | 151 | 7 | 0.587 | 0.968 |
 
@@ -87,6 +87,15 @@ another video will show. Of what was tried —
   kinds of miss went — precision 0.952, recall 0.973 at three times, and
   0.940 and 0.991 at 2.5, three more false ones in 19 minutes for four
   more cuts found. 2.5 is the default.
+- a picture far from the last but alike it in shape, its luma cells
+  correlated with the last's at 0.85 or more, taken for a light over the
+  same shot rather than a cut. A concert recording on a stage of
+  swinging, switching lights had 137 cuts, 65 of them one shot brightened
+  or dimmed where the singer stood and not behind her — each such pair
+  correlated over 0.85, the cut that followed at about 0. Here it lost no
+  cut and three false ones: precision 0.952, recall 0.991. At 0.8 a cut in
+  Sintel went too; at 0.9 precision was 0.936, a false one more than
+  without it. 0.85 is what the detectors do.
 
 ## Speed
 

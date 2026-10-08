@@ -10,7 +10,9 @@
 //! ([`CutDetectorOptions::threshold`]), so that a fast pan, every picture
 //! far from the last, is not a string of cuts. A flash — a picture or two
 //! unlike the ones on either side — is told from a cut by the pictures
-//! after it ([`CutDetectorOptions::lookahead`]), and a fade through black is
+//! after it ([`CutDetectorOptions::lookahead`]); a light switched or swung
+//! over the same shot by its luma keeping its shape — the cells correlated
+//! as they were, the brighter parts brighter — and a fade through black is
 //! a cut where the picture comes back: edited video goes through black
 //! between shots, and a tracker starting over where it did not costs
 //! little.
@@ -61,6 +63,15 @@ const STRONG: (f32, f32) = (40.0, 2.0);
 /// fade passes through.
 const DARK_LUMA: f32 = 24.0;
 const DARK_SPREAD: f32 = 24.0;
+
+/// How alike in shape — the correlation of their luma cells — a picture
+/// far from the last may be to it and still be no cut: a stage light
+/// switched or swung, the singer brightened and the dark behind her not.
+/// A concert recording had 65 of its 137 cuts so, each with its two
+/// pictures correlated over 0.85, and the cut that followed them at about
+/// 0; on the hand-marked films the same veto lost no cut and three false
+/// ones.
+const RELIT: f32 = 0.85;
 
 /// How a cut detector tells a cut.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -177,6 +188,31 @@ impl Thumbnail {
                 (low.min(v), high.max(v))
             });
         mean < DARK_LUMA && high - low < DARK_SPREAD
+    }
+
+    /// How alike its luma is to `other`'s in shape: their correlation,
+    /// from -1 to 1, which a light brightening or dimming the picture —
+    /// the whole of it or the brighter parts more — leaves near 1.
+    fn correlation(&self, other: &Thumbnail) -> f32 {
+        if self.cells != other.cells {
+            return 0.0;
+        }
+        let n = self.luma.len() as f32;
+        let (ma, mb) = (
+            self.luma.iter().sum::<f32>() / n,
+            other.luma.iter().sum::<f32>() / n,
+        );
+        let (mut ab, mut aa, mut bb) = (0.0f32, 0.0f32, 0.0f32);
+        for (a, b) in self.luma.iter().zip(&other.luma) {
+            let (a, b) = (a - ma, b - mb);
+            ab += a * b;
+            aa += a * a;
+            bb += b * b;
+        }
+        if aa <= 0.0 || bb <= 0.0 {
+            return 0.0;
+        }
+        ab / (aa * bb).sqrt()
     }
 
     /// How far it is from `other`: the mean difference of the luma cells,
@@ -365,7 +401,10 @@ impl Judge {
                     score >= self.options.threshold * average
                         || (score >= strong && score >= strong_ratio * average)
                 });
-            if stands_out && settled {
+            // The same shot under another light: the brighter parts brighter
+            // or darker, the picture's shape as it was.
+            let relit = thumbnail.correlation(last) >= RELIT;
+            if stands_out && settled && !relit {
                 // A flash: one of the pictures after it is like the one
                 // before it again. It, and those up to that one, are let by.
                 let back = self.held.iter().position(|after| {
@@ -524,6 +563,26 @@ mod tests {
         assert!(judged(quick(), thumbnails.clone()).is_empty());
         thumbnails.extend((0..5).map(|n| flat(30.0 + n as f32 * 16.0)));
         assert_eq!(judged(quick(), thumbnails), vec![12]);
+    }
+
+    /// A light switched on over the same shot — the bright half brighter,
+    /// the dark half as it was — is no cut, though as far from the last as
+    /// a cut; the same change to another shape is one.
+    #[test]
+    fn a_light_over_the_same_shot_is_no_cut() {
+        let shaped = |left: f32, right: f32| Thumbnail {
+            cells: (4, 2),
+            luma: vec![left, left, right, right, left, left, right, right],
+            chroma_cells: (2, 1),
+            chroma: vec![128.0; 4],
+        };
+        let mut lit = vec![shaped(40.0, 120.0); 10];
+        lit.extend(vec![shaped(40.0, 200.0); 10]);
+        assert!(judged(quick(), lit).is_empty());
+
+        let mut cut = vec![shaped(40.0, 120.0); 10];
+        cut.extend(vec![shaped(200.0, 40.0); 10]);
+        assert_eq!(judged(quick(), cut), vec![10]);
     }
 
     /// A flash — a picture or two unlike those on either side — is no cut,
