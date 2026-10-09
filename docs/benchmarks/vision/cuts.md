@@ -96,6 +96,14 @@ another video will show. Of what was tried —
   cut and three false ones: precision 0.952, recall 0.991. At 0.8 a cut in
   Sintel went too; at 0.9 precision was 0.936, a false one more than
   without it. 0.85 is what the detectors do.
+- a picture past 40 whose luma cells correlate with the last's under 0.2
+  taken for a cut whatever the average before it. On the concert, a stage
+  light flickering for ten pictures — each flicker no cut, being a light —
+  had raised the average to 48, and the cut to the audience after it, at
+  70 and correlated at 0.02, was missed; a track ran on from the singer's
+  face to a woman's in the audience. Here it found and called nothing
+  more, at 0.1, 0.2 and 0.3 alike. Leaving the flickers out of the average
+  instead found that cut too, but cost Sintel a cut and six false ones.
 
 ## Speed
 

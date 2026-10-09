@@ -372,12 +372,13 @@ compile error with no explanation.
   forgets where each object was. Each picture is made a thumbnail — luma
   in 64 by 36 cells, chroma in 32 by 18 — and a cut is a picture far from
   the last, and further than the pictures before it moved, as
-  `CutDetectorOptions` says; a flash, the blur running up to a cut and a
+  `CutDetectorOptions` says, or very far and of another shape altogether;
+  a light over the same shot keeps its shape and is none; a flash, the blur running up to a cut and a
   fade through black are told apart by holding `lookahead` pictures. The
   CUDA one averages the cells on the GPU with the overlay's mosaic kernel
   and copies the thumbnail down, the same thumbnail the CPU makes, so the
   two find the same cuts. On 222 cuts marked by hand in three Blender
-  films the defaults found 220 and called 14 that were none, where ffmpeg's
+  films the defaults found 220 and called 11 that were none, where ffmpeg's
   `scdet` at its best found 191 for 18
   (`docs/benchmarks/vision/cuts.md`). `cut_detect` prints a file's cuts.
   `MetalCutDetector` does the same on VideoToolbox pictures, NV12 or P010,

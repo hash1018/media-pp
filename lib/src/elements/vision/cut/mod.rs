@@ -72,6 +72,14 @@ const DARK_SPREAD: f32 = 24.0;
 /// 0; on the hand-marked films the same veto lost no cut and three false
 /// ones.
 const RELIT: f32 = 0.85;
+/// How unlike in shape a picture [`STRONG`]ly far from the last must be
+/// to be a cut however far the pictures before it moved: a stage light
+/// flickering for a few pictures before a cut — each flicker no cut, being
+/// [`RELIT`] — raised the average the cut was weighed against to 48 where
+/// it stood at 70, its luma cells correlated with the last's at 0.02. On
+/// the hand-marked films it found no other cut and called none, at 0.1,
+/// 0.2 and 0.3 alike.
+const UNLIKE: f32 = 0.2;
 
 /// How a cut detector tells a cut.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -192,10 +200,11 @@ impl Thumbnail {
 
     /// How alike its luma is to `other`'s in shape: their correlation,
     /// from -1 to 1, which a light brightening or dimming the picture —
-    /// the whole of it or the brighter parts more — leaves near 1.
-    fn correlation(&self, other: &Thumbnail) -> f32 {
+    /// the whole of it or the brighter parts more — leaves near 1. None
+    /// where either is of one luma throughout, and has no shape to compare.
+    fn correlation(&self, other: &Thumbnail) -> Option<f32> {
         if self.cells != other.cells {
-            return 0.0;
+            return Some(0.0);
         }
         let n = self.luma.len() as f32;
         let (ma, mb) = (
@@ -210,9 +219,9 @@ impl Thumbnail {
             bb += b * b;
         }
         if aa <= 0.0 || bb <= 0.0 {
-            return 0.0;
+            return None;
         }
-        ab / (aa * bb).sqrt()
+        Some(ab / (aa * bb).sqrt())
     }
 
     /// How far it is from `other`: the mean difference of the luma cells,
@@ -395,15 +404,18 @@ impl Judge {
             // Far from the last, and further than the pictures before had
             // been from each other: with none before to weigh it by — the
             // stream's second picture — it is not called a cut.
+            // Or very far, and of another shape altogether.
             let (strong, strong_ratio) = STRONG;
+            let correlation = thumbnail.correlation(last);
             let stands_out = score >= self.options.min_score
                 && average.is_some_and(|average| {
                     score >= self.options.threshold * average
                         || (score >= strong && score >= strong_ratio * average)
+                        || (score >= strong && correlation.is_some_and(|c| c < UNLIKE))
                 });
             // The same shot under another light: the brighter parts brighter
             // or darker, the picture's shape as it was.
-            let relit = thumbnail.correlation(last) >= RELIT;
+            let relit = correlation.is_some_and(|c| c >= RELIT);
             if stands_out && settled && !relit {
                 // A flash: one of the pictures after it is like the one
                 // before it again. It, and those up to that one, are let by.
@@ -583,6 +595,28 @@ mod tests {
         let mut cut = vec![shaped(40.0, 120.0); 10];
         cut.extend(vec![shaped(200.0, 40.0); 10]);
         assert_eq!(judged(quick(), cut), vec![10]);
+    }
+
+    /// A light flickering over a shot for a few pictures, each far from the
+    /// last, does not hide the cut after it: a picture very far from the
+    /// last and of another shape is one, however far the flickers went.
+    #[test]
+    fn a_flicker_does_not_hide_the_cut_after_it() {
+        let shaped = |luma: [f32; 8]| Thumbnail {
+            cells: (4, 2),
+            luma: luma.to_vec(),
+            chroma_cells: (2, 1),
+            chroma: vec![128.0; 4],
+        };
+        let dim = shaped([40.0, 40.0, 120.0, 120.0, 40.0, 40.0, 120.0, 120.0]);
+        let lit = shaped([40.0, 40.0, 250.0, 250.0, 40.0, 40.0, 250.0, 250.0]);
+        // Bright above and dark below: its cells uncorrelated with either.
+        let other = shaped([200.0, 200.0, 200.0, 200.0, 40.0, 40.0, 40.0, 40.0]);
+        let mut pictures = vec![dim.clone(); 10];
+        pictures.extend((0..7).map(|n| if n % 2 == 0 { lit.clone() } else { dim.clone() }));
+        // 105 from the last, under twice the flickers' average.
+        pictures.extend(vec![other; 10]);
+        assert_eq!(judged(quick(), pictures), vec![17]);
     }
 
     /// A flash — a picture or two unlike those on either side — is no cut,
