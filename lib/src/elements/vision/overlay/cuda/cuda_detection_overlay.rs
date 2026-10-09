@@ -32,7 +32,7 @@ use crate::{
 };
 
 use super::super::{
-    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
+    Canvas, Cut, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
     Rect, bt709_limited, hides, marks_turned, rasterize, ten_bit,
 };
 use crate::elements::Analytics;
@@ -335,7 +335,7 @@ impl Overlaying {
         &mut self,
         surface: Surface,
         rect: Rect,
-        (cells, smooth, ellipse): ((u32, u32), bool, bool),
+        (cells, smooth, cut): ((u32, u32), bool, Cut),
         fill: Option<Color>,
     ) -> std::result::Result<(), CudaDriverError> {
         let Some((kernels, means)) = &mut self.cells else {
@@ -420,8 +420,13 @@ impl Overlaying {
             }
         };
         for (plane, colour) in planes.into_iter().zip(colours) {
-            self.driver
-                .hide_cells(kernels, means, plane, (smooth, ellipse), colour.as_deref())?;
+            self.driver.hide_cells(
+                kernels,
+                means,
+                plane,
+                (smooth, cut.ellipse, cut.feather),
+                colour.as_deref(),
+            )?;
         }
         Ok(())
     }
@@ -532,22 +537,18 @@ impl Overlaying {
         if let Some(detections) = detections {
             for hide in hides(canvas, &self.options, detections) {
                 match hide {
-                    Hide::Fill {
-                        rect,
-                        color,
-                        ellipse: false,
-                    } if !p010 => self.fill(surface, rect, color)?,
-                    Hide::Fill {
-                        rect,
-                        color,
-                        ellipse,
-                    } => self.hide_cells(surface, rect, ((1, 1), false, ellipse), Some(color))?,
+                    Hide::Fill { rect, color, cut } if cut.is_box() && !p010 => {
+                        self.fill(surface, rect, color)?
+                    }
+                    Hide::Fill { rect, color, cut } => {
+                        self.hide_cells(surface, rect, ((1, 1), false, cut), Some(color))?
+                    }
                     Hide::Cells {
                         rect,
                         cells,
                         smooth,
-                        ellipse,
-                    } => self.hide_cells(surface, rect, (cells, smooth, ellipse), None)?,
+                        cut,
+                    } => self.hide_cells(surface, rect, (cells, smooth, cut), None)?,
                 }
             }
         }
@@ -960,7 +961,7 @@ mod tests {
     /// The point of the kernels: a mosaic and a blur on the GPU write the
     /// same bytes as the CPU's overlay on the same picture, NV12 and BGRA
     /// alike — one face, grown by the margin, cut into cells of uneven
-    /// width, its colour at half the size.
+    /// width, its colour at half the size — hard-edged and faded.
     #[test]
     fn a_box_is_hidden_on_the_gpu_as_on_the_cpu() {
         let Some((device, _serial)) = try_cuda_device() else {
@@ -994,13 +995,21 @@ mod tests {
             (CudaFrameFormat::Bgra, ffmpeg::format::Pixel::BGRA),
             (CudaFrameFormat::P010, ffmpeg::format::Pixel::P010LE),
         ] {
-            for (style, shape) in styles.into_iter().flat_map(|style| {
-                [HideShape::Rectangle, HideShape::Ellipse].map(|shape| (style, shape))
+            // Each shape hard and faded at its edge.
+            for (style, shape, feather) in styles.into_iter().flat_map(|style| {
+                [
+                    (HideShape::Rectangle, 0.0),
+                    (HideShape::Ellipse, 0.0),
+                    (HideShape::Rectangle, 0.3),
+                    (HideShape::Ellipse, 0.3),
+                ]
+                .map(|(shape, feather)| (style, shape, feather))
             }) {
                 let options = DetectionOverlayOptions {
                     others: Treatment {
                         hide: Some(Hiding {
                             shape,
+                            feather,
                             ..Hiding::new(style)
                         }),
                         ..Treatment::none()
@@ -1046,7 +1055,7 @@ mod tests {
                 assert_ne!(
                     expected,
                     shown(&picture),
-                    "{format:?} {style:?} {shape:?}: something hidden"
+                    "{format:?} {style:?} {shape:?} {feather}: something hidden"
                 );
                 for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
                     let differ = expected
@@ -1056,7 +1065,7 @@ mod tests {
                         .count();
                     assert_eq!(
                         differ, 0,
-                        "{format:?} {style:?} {shape:?}, plane {plane}: {differ} bytes differ"
+                        "{format:?} {style:?} {shape:?} {feather}, plane {plane}: {differ} bytes differ"
                     );
                 }
             }

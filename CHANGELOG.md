@@ -12,6 +12,9 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`Hiding` has a `feather`.** A struct written out in full names it;
+  one built from `Hiding::new` and `..` gets 0, the hard edge it had.
+
 - **`CudaOrtEmbedder::new` takes `CudaOrtEmbedderOptions`.** Beside the
   `OrtEmbedderOptions` every embedder takes, it says with `ort-tensorrt`
   where TensorRT keeps the engine it builds (`engine_cache`), as
@@ -241,6 +244,13 @@ compile error with no explanation.
   `match` on any of them needs an arm for it.
 
 ### Added
+
+- **A hidden box can fade into the picture (`Hiding::feather`).** From the
+  edge of the box, or of the ellipse inside it, the mosaic, blur or fill
+  is mixed over what was there less and less toward the edge, by a smooth
+  step, over that fraction of the way to the middle; a rectangle's corners
+  are rounded as far. The CPU's and CUDA's overlays write the same bytes,
+  NV12, BGRA and P010 alike; Metal's computes it the same way.
 
 - **`MetalConverter` takes 10-bit, and brings HDR to SDR.** A P010
   VideoToolbox frame — what `VideoToolboxDecoder` makes of 10-bit video —

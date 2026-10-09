@@ -4582,7 +4582,8 @@ MEANS_DONE:
     .param .u32 cells_y,
     .param .u64 means,
     .param .u32 smooth,
-    .param .u32 ellipse
+    .param .u32 ellipse,
+    .param .f32 feather
 )
 {
     .reg .pred  %p<8>;
@@ -4614,12 +4615,18 @@ MEANS_DONE:
     setp.ge.u32     %p1, %r13, %r3;
     @%p1 bra        PAINT_DONE;
 
-    // Cut to the ellipse inside the plane where asked: a sample whose
-    // centre is outside it is left as it is. dx = (x + 0.5) * 2 / width - 1,
-    // and dy so down, each step rounded as the CPU's overlay rounds it.
+    // How much of the cover the sample takes (`cover` on the CPU), each
+    // step rounded as it rounds it: dx = (x + 0.5) * 2 / width - 1, and dy
+    // so down; inside the ellipse, or the rectangle, wholly from `feather`
+    // of the way in, by a smooth step toward the edge, the rectangle's
+    // corners rounded as far; outside, left as it is.
     ld.param.u32    %r31, [ellipse];
-    setp.eq.u32     %p4, %r31, 0;
-    @%p4 bra        PAINT_INSIDE;
+    ld.param.f32    %f30, [feather];
+    mov.f32         %f31, 0f3F800000;
+    setp.ne.u32     %p6, %r31, 0;
+    setp.gt.f32     %p7, %f30, 0f00000000;
+    or.pred         %p5, %p6, %p7;
+    @!%p5 bra       PAINT_INSIDE;
     cvt.rn.f32.u32  %f27, %r10;
     add.rn.f32      %f27, %f27, 0f3F000000;
     mul.rn.f32      %f27, %f27, 0f40000000;
@@ -4632,12 +4639,43 @@ MEANS_DONE:
     cvt.rn.f32.u32  %f28, %r3;
     div.rn.f32      %f29, %f29, %f28;
     sub.rn.f32      %f29, %f29, 0f3F800000;
+    @!%p6 bra       PAINT_RECT;
     mul.rn.f32      %f27, %f27, %f27;
     mul.rn.f32      %f29, %f29, %f29;
     add.rn.f32      %f27, %f27, %f29;
     setp.gt.f32     %p4, %f27, 0f3F800000;
     @%p4 bra        PAINT_DONE;
+    @!%p7 bra       PAINT_INSIDE;
+    sqrt.rn.f32     %f27, %f27;
+    sub.rn.f32      %f27, 0f3F800000, %f27;
+    div.rn.f32      %f27, %f27, %f30;
+    bra             PAINT_SOFT;
+PAINT_RECT:
+    sub.rn.f32      %f28, 0f3F800000, %f30;
+    abs.f32         %f27, %f27;
+    sub.rn.f32      %f27, %f27, %f28;
+    max.f32         %f27, %f27, 0f00000000;
+    div.rn.f32      %f27, %f27, %f30;
+    abs.f32         %f29, %f29;
+    sub.rn.f32      %f29, %f29, %f28;
+    max.f32         %f29, %f29, 0f00000000;
+    div.rn.f32      %f29, %f29, %f30;
+    mul.rn.f32      %f27, %f27, %f27;
+    mul.rn.f32      %f29, %f29, %f29;
+    add.rn.f32      %f27, %f27, %f29;
+    sqrt.rn.f32     %f27, %f27;
+    sub.rn.f32      %f27, 0f3F800000, %f27;
+PAINT_SOFT:
+    setp.le.f32     %p4, %f27, 0f00000000;
+    @%p4 bra        PAINT_DONE;
+    min.f32         %f27, %f27, 0f3F800000;
+    mul.rn.f32      %f29, %f27, %f27;
+    mul.rn.f32      %f28, %f27, 0f40000000;
+    sub.rn.f32      %f28, 0f40400000, %f28;
+    mul.rn.f32      %f31, %f29, %f28;
 PAINT_INSIDE:
+    // Mixed over what was there where it takes less than all.
+    setp.lt.f32     %p5, %f31, 0f3F800000;
 
     // The sample: y * pitch + x * channels bytes into the plane.
     mul.wide.u32    %rd3, %r13, %r1;
@@ -4668,9 +4706,16 @@ PAINT_FLAT:
     mul.wide.u32    %rd8, %r18, 4;
     add.s64         %rd9, %rd7, %rd8;
     ld.global.f32   %f1, [%rd9];
-    cvt.rni.u16.f32 %rs1, %f1;
     cvt.u64.u32     %rd10, %r18;
     add.s64         %rd11, %rd5, %rd10;
+    @!%p5 bra       PAINT_FLAT_PUT;
+    ld.global.u8    %rs1, [%rd11];
+    cvt.rn.f32.u16  %f2, %rs1;
+    sub.rn.f32      %f3, %f1, %f2;
+    mul.rn.f32      %f3, %f3, %f31;
+    add.rn.f32      %f1, %f2, %f3;
+PAINT_FLAT_PUT:
+    cvt.rni.u16.f32 %rs1, %f1;
     st.global.u8    [%rd11], %rs1;
     add.u32         %r18, %r18, 1;
     bra             PAINT_FLAT;
@@ -4751,9 +4796,16 @@ PAINT_BLEND:
     sub.rn.f32      %f26, %f25, %f24;
     mul.rn.f32      %f26, %f26, %f13;
     add.rn.f32      %f26, %f24, %f26;
-    cvt.rni.u16.f32 %rs1, %f26;
     cvt.u64.u32     %rd10, %r18;
     add.s64         %rd11, %rd5, %rd10;
+    @!%p5 bra       PAINT_BLEND_PUT;
+    ld.global.u8    %rs1, [%rd11];
+    cvt.rn.f32.u16  %f14, %rs1;
+    sub.rn.f32      %f15, %f26, %f14;
+    mul.rn.f32      %f15, %f15, %f31;
+    add.rn.f32      %f26, %f14, %f15;
+PAINT_BLEND_PUT:
+    cvt.rni.u16.f32 %rs1, %f26;
     st.global.u8    [%rd11], %rs1;
     add.u32         %r18, %r18, 1;
     bra             PAINT_BLEND;
@@ -4900,7 +4952,8 @@ MEANS16_DONE:
     .param .u32 cells_y,
     .param .u64 means,
     .param .u32 smooth,
-    .param .u32 ellipse
+    .param .u32 ellipse,
+    .param .f32 feather
 )
 {
     .reg .pred  %p<8>;
@@ -4932,12 +4985,18 @@ MEANS16_DONE:
     setp.ge.u32     %p1, %r13, %r3;
     @%p1 bra        PAINT16_DONE;
 
-    // Cut to the ellipse inside the plane where asked: a sample whose
-    // centre is outside it is left as it is. dx = (x + 0.5) * 2 / width - 1,
-    // and dy so down, each step rounded as the CPU's overlay rounds it.
+    // How much of the cover the sample takes (`cover` on the CPU), each
+    // step rounded as it rounds it: dx = (x + 0.5) * 2 / width - 1, and dy
+    // so down; inside the ellipse, or the rectangle, wholly from `feather`
+    // of the way in, by a smooth step toward the edge, the rectangle's
+    // corners rounded as far; outside, left as it is.
     ld.param.u32    %r31, [ellipse];
-    setp.eq.u32     %p4, %r31, 0;
-    @%p4 bra        PAINT16_INSIDE;
+    ld.param.f32    %f30, [feather];
+    mov.f32         %f31, 0f3F800000;
+    setp.ne.u32     %p6, %r31, 0;
+    setp.gt.f32     %p7, %f30, 0f00000000;
+    or.pred         %p5, %p6, %p7;
+    @!%p5 bra       PAINT16_INSIDE;
     cvt.rn.f32.u32  %f27, %r10;
     add.rn.f32      %f27, %f27, 0f3F000000;
     mul.rn.f32      %f27, %f27, 0f40000000;
@@ -4950,12 +5009,43 @@ MEANS16_DONE:
     cvt.rn.f32.u32  %f28, %r3;
     div.rn.f32      %f29, %f29, %f28;
     sub.rn.f32      %f29, %f29, 0f3F800000;
+    @!%p6 bra       PAINT16_RECT;
     mul.rn.f32      %f27, %f27, %f27;
     mul.rn.f32      %f29, %f29, %f29;
     add.rn.f32      %f27, %f27, %f29;
     setp.gt.f32     %p4, %f27, 0f3F800000;
     @%p4 bra        PAINT16_DONE;
+    @!%p7 bra       PAINT16_INSIDE;
+    sqrt.rn.f32     %f27, %f27;
+    sub.rn.f32      %f27, 0f3F800000, %f27;
+    div.rn.f32      %f27, %f27, %f30;
+    bra             PAINT16_SOFT;
+PAINT16_RECT:
+    sub.rn.f32      %f28, 0f3F800000, %f30;
+    abs.f32         %f27, %f27;
+    sub.rn.f32      %f27, %f27, %f28;
+    max.f32         %f27, %f27, 0f00000000;
+    div.rn.f32      %f27, %f27, %f30;
+    abs.f32         %f29, %f29;
+    sub.rn.f32      %f29, %f29, %f28;
+    max.f32         %f29, %f29, 0f00000000;
+    div.rn.f32      %f29, %f29, %f30;
+    mul.rn.f32      %f27, %f27, %f27;
+    mul.rn.f32      %f29, %f29, %f29;
+    add.rn.f32      %f27, %f27, %f29;
+    sqrt.rn.f32     %f27, %f27;
+    sub.rn.f32      %f27, 0f3F800000, %f27;
+PAINT16_SOFT:
+    setp.le.f32     %p4, %f27, 0f00000000;
+    @%p4 bra        PAINT16_DONE;
+    min.f32         %f27, %f27, 0f3F800000;
+    mul.rn.f32      %f29, %f27, %f27;
+    mul.rn.f32      %f28, %f27, 0f40000000;
+    sub.rn.f32      %f28, 0f40400000, %f28;
+    mul.rn.f32      %f31, %f29, %f28;
 PAINT16_INSIDE:
+    // Mixed over what was there where it takes less than all.
+    setp.lt.f32     %p5, %f31, 0f3F800000;
 
     // The sample: y * pitch + x * channels bytes into the plane.
     mul.wide.u32    %rd3, %r13, %r1;
@@ -4987,10 +5077,18 @@ PAINT16_FLAT:
     mul.wide.u32    %rd8, %r18, 4;
     add.s64         %rd9, %rd7, %rd8;
     ld.global.f32   %f1, [%rd9];
-    cvt.rni.u16.f32 %rs1, %f1;
     cvt.u64.u32     %rd10, %r18;
     shl.b64         %rd10, %rd10, 1;
     add.s64         %rd11, %rd5, %rd10;
+    @!%p5 bra       PAINT16_FLAT_PUT;
+    ld.global.u16   %rs1, [%rd11];
+    shr.u16         %rs1, %rs1, 6;
+    cvt.rn.f32.u16  %f2, %rs1;
+    sub.rn.f32      %f3, %f1, %f2;
+    mul.rn.f32      %f3, %f3, %f31;
+    add.rn.f32      %f1, %f2, %f3;
+PAINT16_FLAT_PUT:
+    cvt.rni.u16.f32 %rs1, %f1;
     shl.b16         %rs1, %rs1, 6;
     st.global.u16   [%rd11], %rs1;
     add.u32         %r18, %r18, 1;
@@ -5072,10 +5170,18 @@ PAINT16_BLEND:
     sub.rn.f32      %f26, %f25, %f24;
     mul.rn.f32      %f26, %f26, %f13;
     add.rn.f32      %f26, %f24, %f26;
-    cvt.rni.u16.f32 %rs1, %f26;
     cvt.u64.u32     %rd10, %r18;
     shl.b64         %rd10, %rd10, 1;
     add.s64         %rd11, %rd5, %rd10;
+    @!%p5 bra       PAINT16_BLEND_PUT;
+    ld.global.u16   %rs1, [%rd11];
+    shr.u16         %rs1, %rs1, 6;
+    cvt.rn.f32.u16  %f14, %rs1;
+    sub.rn.f32      %f15, %f26, %f14;
+    mul.rn.f32      %f15, %f15, %f31;
+    add.rn.f32      %f26, %f14, %f15;
+PAINT16_BLEND_PUT:
+    cvt.rni.u16.f32 %rs1, %f26;
     shl.b16         %rs1, %rs1, 6;
     st.global.u16   [%rd11], %rs1;
     add.u32         %r18, %r18, 1;

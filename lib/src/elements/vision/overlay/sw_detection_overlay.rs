@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::{
-    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
-    Rect, bt709_limited, cell_edge, hides, inside_ellipse, marks_turned, rasterize, ten_bit,
+    Canvas, Cut, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
+    Rect, bt709_limited, cell_edge, cover, fade, hides, marks_turned, rasterize, ten_bit,
 };
 use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, TextMask, load_font};
@@ -289,9 +289,9 @@ fn paint(
 
 /// One plane of a box to hide: `size` samples of `channels` channels each
 /// from byte `offset` of a plane, rows `stride` apart, cut into `cells`
-/// across and down — and, with `ellipse`, only the samples
-/// [`inside_ellipse`] of it painted. A channel is a byte, or with `wide`
-/// two, ten bits at the top, as P010 lays them.
+/// across and down — and only as much of each sample covered as [`cover`]
+/// says of `cut`. A channel is a byte, or with `wide` two, ten bits at the
+/// top, as P010 lays them.
 #[derive(Clone, Copy)]
 struct CellPlane {
     stride: usize,
@@ -300,7 +300,7 @@ struct CellPlane {
     channels: usize,
     cells: (u32, u32),
     smooth: bool,
-    ellipse: bool,
+    cut: Cut,
     wide: bool,
 }
 
@@ -318,7 +318,7 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
         channels,
         cells: (across, down),
         smooth,
-        ellipse,
+        cut,
         wide,
     } = plane;
     let bytes = if wide { 2 } else { 1 };
@@ -382,10 +382,19 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
     };
     for y in 0..height {
         for x in 0..width {
-            if ellipse && !inside_ellipse(x, y, width, height) {
+            let Some(alpha) = cover(x, y, width, height, cut) else {
                 continue;
-            }
+            };
             let sample = at(x, y);
+            // Where the edge fades, the cover mixed over what was there.
+            let put = |data: &mut [u8], channel: usize, value: f32| {
+                let value = if alpha < 1.0 {
+                    fade(read(data, sample, channel), value, alpha)
+                } else {
+                    value
+                };
+                write(data, sample, channel, value);
+            };
             if smooth {
                 let (c0, c1, t) = between(x, across, width);
                 let (r0, r1, s) = between(y, down, height);
@@ -397,14 +406,14 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
                     let (m10, m11) = (mean(r1, c0, channel), mean(r1, c1, channel));
                     let top = m00 + (m01 - m00) * t;
                     let bottom = m10 + (m11 - m10) * t;
-                    write(data, sample, channel, top + (bottom - top) * s);
+                    put(data, channel, top + (bottom - top) * s);
                 }
             } else {
                 let cx = ((x + 1) * across - 1) / width;
                 let cy = ((y + 1) * down - 1) / height;
                 let first = (cy * across + cx) as usize * channels;
                 for channel in 0..channels {
-                    write(data, sample, channel, means[first + channel]);
+                    put(data, channel, means[first + channel]);
                 }
             }
         }
@@ -414,12 +423,12 @@ fn hide_plane(data: &mut [u8], plane: CellPlane, fill: Option<&[f32]>) {
 /// Hides `rect` of `frame` by its cells, plane by plane: a picture whose
 /// colour is stored per 2x2 block has its colour cut into the same cells
 /// at half the size, `rect` being on whole blocks. With `fill`, as one
-/// cell that colour — a fill cut to an ellipse.
+/// cell that colour — a fill cut to an ellipse, or faded at its edge.
 fn hide_cells(
     frame: &mut ffmpeg::frame::Video,
     planes: Planes,
     rect: Rect,
-    (cells, smooth, ellipse): ((u32, u32), bool, bool),
+    (cells, smooth, cut): ((u32, u32), bool, Cut),
     fill: Option<Color>,
 ) {
     let (x, y) = (rect.x as usize, rect.y as usize);
@@ -432,7 +441,7 @@ fn hide_cells(
         channels,
         cells,
         smooth,
-        ellipse,
+        cut,
         wide: false,
     };
     let transfer = frame.color_transfer_characteristic();
@@ -587,30 +596,20 @@ impl Overlaying {
         if let Some(detections) = detections {
             for hide in hides(canvas, &self.options, detections) {
                 match hide {
-                    Hide::Fill {
-                        rect,
-                        color,
-                        ellipse: false,
-                    } if !matches!(planes, Planes::P010) => {
+                    Hide::Fill { rect, color, cut }
+                        if cut.is_box() && !matches!(planes, Planes::P010) =>
+                    {
                         paint(&mut copy, planes, rect, color, None)
                     }
-                    Hide::Fill {
-                        rect,
-                        color,
-                        ellipse,
-                    } => hide_cells(
-                        &mut copy,
-                        planes,
-                        rect,
-                        ((1, 1), false, ellipse),
-                        Some(color),
-                    ),
+                    Hide::Fill { rect, color, cut } => {
+                        hide_cells(&mut copy, planes, rect, ((1, 1), false, cut), Some(color))
+                    }
                     Hide::Cells {
                         rect,
                         cells,
                         smooth,
-                        ellipse,
-                    } => hide_cells(&mut copy, planes, rect, (cells, smooth, ellipse), None),
+                        cut,
+                    } => hide_cells(&mut copy, planes, rect, (cells, smooth, cut), None),
                 }
             }
         }
@@ -1419,7 +1418,10 @@ mod tests {
                 rect: square(100, 300),
                 cells: (6, 6),
                 smooth: false,
-                ellipse: false,
+                cut: Cut {
+                    ellipse: false,
+                    feather: 0.0,
+                },
             }],
             "a near face: six cells of fifty"
         );
@@ -1429,7 +1431,10 @@ mod tests {
                 rect: square(100, 20),
                 cells: (3, 3),
                 smooth: false,
-                ellipse: false,
+                cut: Cut {
+                    ellipse: false,
+                    feather: 0.0,
+                },
             }],
             "a far face: cells of at least eight, about three across"
         );

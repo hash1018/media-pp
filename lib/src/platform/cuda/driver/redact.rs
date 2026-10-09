@@ -236,7 +236,8 @@ impl CudaDriver {
 
     /// Paints each cell of `plane` its mean — or, with `smooth`, its mean
     /// blended into its neighbours' — through `means`; with `ellipse`, only
-    /// the samples inside the ellipse touching the plane's sides. With
+    /// the samples inside the ellipse touching the plane's sides, and with
+    /// `feather`, faded toward the edge (`overlay::cover`). With
     /// `fill`, the means are not taken: the plane, as one cell, is painted
     /// those values — a fill cut to an ellipse. Launches on the default
     /// stream, each reading what the one before wrote; nothing is waited
@@ -246,7 +247,7 @@ impl CudaDriver {
         kernels: &RedactKernels,
         means: &CellMeans,
         plane: CellPlane,
-        (smooth, ellipse): (bool, bool),
+        (smooth, ellipse, feather): (bool, bool, f32),
         fill: Option<&[f32]>,
     ) -> Result<(), CudaDriverError> {
         let (cells_x, cells_y) = plane.cells;
@@ -274,6 +275,7 @@ impl CudaDriver {
         let mut data = means.pointer;
         let mut smooth = u32::from(smooth);
         let mut ellipse = u32::from(ellipse);
+        let mut feather = feather;
         self.with_context(|| {
             let mut params: Vec<*mut c_void> = vec![
                 arg(&mut source),
@@ -321,8 +323,9 @@ impl CudaDriver {
             }
             params.push(arg(&mut smooth));
             params.push(arg(&mut ellipse));
-            // SAFETY: as above, with `smooth` and `ellipse` last as
-            // `cell_paint` declares them; a thread a sample of the same
+            params.push(arg(&mut feather));
+            // SAFETY: as above, with `smooth`, `ellipse` and `feather` last
+            // as `cell_paint` declares them; a thread a sample of the same
             // plane, each writing its own.
             unsafe {
                 launch(

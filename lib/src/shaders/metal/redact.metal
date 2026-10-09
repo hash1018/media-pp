@@ -1,7 +1,8 @@
 // `MetalDetectionOverlay`'s hiding: a rectangle of a plane cut into cells,
 // each painted the mean of the samples under it — a mosaic — or that mean
 // blended into its neighbours' — a blur — or, cut to the ellipse inside the
-// rectangle, only the samples whose centres are inside it. The Metal
+// rectangle, only the samples whose centres are inside it; with a feather,
+// mixed over what each sample was less toward the edge. The Metal
 // counterpart of
 // `REDACT_PTX`'s `cell_means` and `cell_paint`, and of `SwDetectionOverlay`'s
 // `hide_plane`, written to give the same bytes: the planes are read and
@@ -34,6 +35,9 @@ struct Cells {
     // the top of sixteen, read as `r16Uint` and `rg16Uint`, the six below
     // written naught; 0 for bytes.
     uint2 shift;
+    // x: how far in from the edge the cover fades, a fraction of the way
+    // to the middle; 0 for a hard edge.
+    float2 feather;
 };
 
 // The `index`th of `cells` stretches a side `length` long starts here.
@@ -87,14 +91,37 @@ kernel void cell_paint(texture2d<uint, access::read_write> plane [[texture(0)]],
     if (id.x >= c.size.x || id.y >= c.size.y) {
         return;
     }
-    // Cut to the ellipse touching the rectangle's sides where asked: a sample
-    // whose centre is outside it is left as it is — each step rounded as the
-    // CPU's `inside_ellipse` rounds it.
-    if (c.smooth.y != 0) {
+    // How much of the cover the sample takes, as the CPU's `cover` computes
+    // it, each step rounded as it rounds it: inside the ellipse touching the
+    // rectangle's sides where asked, or the rectangle, wholly from `feather`
+    // of the way in, by a smooth step toward the edge, the rectangle's
+    // corners rounded as far; outside, left as it is.
+    float feather = c.feather.x;
+    float alpha = 1.0f;
+    if (c.smooth.y != 0 || feather > 0.0f) {
         float dx = precise::divide((float(id.x) + 0.5f) * 2.0f, float(c.size.x)) - 1.0f;
         float dy = precise::divide((float(id.y) + 0.5f) * 2.0f, float(c.size.y)) - 1.0f;
-        if (dx * dx + dy * dy > 1.0f) {
-            return;
+        float t;
+        bool soft = true;
+        if (c.smooth.y != 0) {
+            float r2 = dx * dx + dy * dy;
+            if (r2 > 1.0f) {
+                return;
+            }
+            soft = feather > 0.0f;
+            t = soft ? precise::divide(1.0f - precise::sqrt(r2), feather) : 1.0f;
+        } else {
+            float edge = 1.0f - feather;
+            float u = precise::divide(max(abs(dx) - edge, 0.0f), feather);
+            float v = precise::divide(max(abs(dy) - edge, 0.0f), feather);
+            t = 1.0f - precise::sqrt(u * u + v * v);
+        }
+        if (soft) {
+            if (t <= 0.0f) {
+                return;
+            }
+            t = min(t, 1.0f);
+            alpha = t * t * (3.0f - 2.0f * t);
         }
     }
     uint across = c.cells.x;
@@ -114,6 +141,11 @@ kernel void cell_paint(texture2d<uint, access::read_write> plane [[texture(0)]],
         uint cx = ((id.x + 1) * across - 1) / c.size.x;
         uint cy = ((id.y + 1) * c.cells.y - 1) / c.size.y;
         value = means[cy * across + cx];
+    }
+    // Where the edge fades, the cover mixed over what was there.
+    if (alpha < 1.0f) {
+        float4 original = float4(plane.read(c.origin + id) >> c.shift.x);
+        value = original + (value - original) * alpha;
     }
     plane.write(uint4(rint(value)) << c.shift.x, c.origin + id);
 }

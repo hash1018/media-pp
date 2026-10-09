@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::super::{
-    Canvas, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
+    Canvas, Cut, DetectionOverlayOptions, DetectionOverlayOptionsError, Hide, LABEL_CACHE, MaskKey,
     Rect, bt709_limited, hides, marks_turned, rasterize, ten_bit,
 };
 use crate::elements::Analytics;
@@ -254,13 +254,14 @@ impl MetalDetectionOverlay {
 }
 
 /// The parameters of one plane's cells, as the redaction shader's `Cells`:
-/// blended with `smooth`, cut to the ellipse inside with `ellipse`, and
-/// with `wide` read and written in the top ten bits of sixteen.
+/// blended with `smooth`, cut as `cut` says — to the ellipse inside, faded
+/// at the edge — and with `wide` read and written in the top ten bits of
+/// sixteen.
 fn cells(
     origin: (u32, u32),
     size: (u32, u32),
     cells: (u32, u32),
-    (smooth, ellipse, wide): (bool, bool, bool),
+    (smooth, cut, wide): (bool, Cut, bool),
 ) -> Vec<u8> {
     [
         origin.0,
@@ -270,12 +271,17 @@ fn cells(
         cells.0,
         cells.1,
         u32::from(smooth),
-        u32::from(ellipse),
+        u32::from(cut.ellipse),
         if wide { 6 } else { 0 },
         0,
     ]
     .iter()
     .flat_map(|word| word.to_ne_bytes())
+    .chain(
+        [cut.feather, 0.0]
+            .iter()
+            .flat_map(|value: &f32| value.to_ne_bytes()),
+    )
     .collect()
 }
 
@@ -310,8 +316,8 @@ fn paint(rect: Rect, colour: [f32; 3], masked: bool) -> Vec<u8> {
 
 impl Overlaying {
     /// Encodes `rect` of each of `planes` cut into `cells`, each painted its
-    /// mean — blended with `smooth`, only inside the ellipse with
-    /// `ellipse` — the means kept in `self.means` from byte `at` on, which
+    /// mean — blended with `smooth`, cut as `cut` says — the means kept in
+    /// `self.means` from byte `at` on, which
     /// it moves past them. With `fill`, a value for each plane, the means
     /// are not taken: written as the fill's colour, for a fill cut to an
     /// ellipse. NV12's colour is cut into the same cells at half the size,
@@ -321,7 +327,7 @@ impl Overlaying {
         pass: &mut Pass,
         planes: &[Texture],
         rect: Rect,
-        (count, smooth, ellipse, wide): ((u32, u32), bool, bool, bool),
+        (count, smooth, cut, wide): ((u32, u32), bool, Cut, bool),
         fill: Option<Vec<[f32; 4]>>,
         at: &mut usize,
     ) -> std::result::Result<(), MetalDetectionOverlayError> {
@@ -335,7 +341,7 @@ impl Overlaying {
         let whole = ((rect.x, rect.y), (rect.width, rect.height));
         let half = ((rect.x / 2, rect.y / 2), (rect.width / 2, rect.height / 2));
         for (index, (plane, (origin, size))) in planes.iter().zip([whole, half]).enumerate() {
-            let parameters = cells(origin, size, count, (smooth, ellipse, wide));
+            let parameters = cells(origin, size, count, (smooth, cut, wide));
             let n = (count.0 * count.1) as usize;
             match &fill {
                 Some(colours) => {
@@ -567,9 +573,9 @@ impl Overlaying {
             .iter()
             .map(|hide| match hide {
                 Hide::Cells { cells, .. } => planes_of(*cells),
-                // A fill cut to an ellipse, or any in ten bits, is one cell
-                // its colour.
-                Hide::Fill { ellipse: true, .. } => planes_of((1, 1)),
+                // A fill cut to an ellipse or faded, or any in ten bits, is
+                // one cell its colour.
+                Hide::Fill { cut, .. } if !cut.is_box() => planes_of((1, 1)),
                 Hide::Fill { .. } if wide => planes_of((1, 1)),
                 Hide::Fill { .. } => 0,
             })
@@ -622,11 +628,7 @@ impl Overlaying {
         let mut at = 0;
         for hide in &hidden {
             match *hide {
-                Hide::Fill {
-                    rect,
-                    color,
-                    ellipse,
-                } if wide => {
+                Hide::Fill { rect, color, cut } if wide => {
                     // As the CPU paints it: one cell of the colour in ten
                     // bits, an SDR colour at the picture's reference white.
                     let [y, cb, cr] = ten_bit(color, source.color_transfer_characteristic());
@@ -634,26 +636,18 @@ impl Overlaying {
                         &mut pass,
                         &integers,
                         rect,
-                        ((1, 1), false, ellipse, true),
+                        ((1, 1), false, cut, true),
                         Some(vec![[y, 0.0, 0.0, 0.0], [cb, cr, 0.0, 0.0]]),
                         &mut at,
                     )?;
                 }
-                Hide::Fill {
-                    rect,
-                    color,
-                    ellipse: false,
-                } => pass.dispatch(
+                Hide::Fill { rect, color, cut } if cut.is_box() => pass.dispatch(
                     paint_kernel,
                     &solid,
                     Some(&paint(rect, colour_of(color, nv12), false)),
                     (rect.width, rect.height),
                 ),
-                Hide::Fill {
-                    rect,
-                    color,
-                    ellipse: true,
-                } => {
+                Hide::Fill { rect, color, cut } => {
                     let (y, cb, cr) = bt709_limited(color);
                     let colours = if nv12 {
                         vec![[y, 0, 0, 0], [cb, cr, 0, 0]]
@@ -665,7 +659,7 @@ impl Overlaying {
                         &mut pass,
                         &integers,
                         rect,
-                        ((1, 1), false, true, false),
+                        ((1, 1), false, cut, false),
                         Some(colours.collect()),
                         &mut at,
                     )?;
@@ -674,12 +668,12 @@ impl Overlaying {
                     rect,
                     cells: count,
                     smooth,
-                    ellipse,
+                    cut,
                 } => self.hide_cells(
                     &mut pass,
                     &integers,
                     rect,
-                    (count, smooth, ellipse, wide),
+                    (count, smooth, cut, wide),
                     None,
                     &mut at,
                 )?,

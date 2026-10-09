@@ -219,24 +219,33 @@ pub struct Hiding {
     /// What of the grown box is covered: all of it, or the ellipse inside
     /// it, which hides a face as well with less of the picture around it.
     pub shape: HideShape,
+    /// How far in from the shape's edge the cover fades into the picture,
+    /// as a fraction of the way to its middle: 0 a hard edge; 0.25 a
+    /// cover that takes the picture wholly only from a quarter of the way
+    /// in, mixed with less of it toward the edge. A rectangle's corners
+    /// are rounded as far. What is to be hidden whole belongs inside the
+    /// faded band — grow the margin as much again. From 0 to 1.
+    pub feather: f32,
 }
 
 impl Hiding {
-    /// `style`, with a tenth's margin, the whole box.
+    /// `style`, with a tenth's margin, the whole box, a hard edge.
     pub fn new(style: RedactStyle) -> Self {
         Self {
             style,
             margin: 0.1,
             shape: HideShape::Rectangle,
+            feather: 0.0,
         }
     }
 }
 
 /// What of a box a [`Hiding`] covers.
 ///
-/// An ellipse's edge is hard: a pixel — or, where the picture's colour is
-/// stored per 2x2 block, a block — is covered where its centre is inside
-/// the ellipse the box is drawn round, and left as it was where not.
+/// Without a [`Hiding::feather`] an ellipse's edge is hard: a pixel — or,
+/// where the picture's colour is stored per 2x2 block, a block — is
+/// covered where its centre is inside the ellipse the box is drawn round,
+/// and left as it was where not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HideShape {
     /// The whole box.
@@ -246,15 +255,81 @@ pub enum HideShape {
     Ellipse,
 }
 
+/// What of a plane is covered: the whole of it or the ellipse touching its
+/// sides, and how far in from that edge the cover fades
+/// ([`Hiding::feather`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Cut {
+    pub(crate) ellipse: bool,
+    pub(crate) feather: f32,
+}
+
+impl Cut {
+    /// Whether every sample takes the cover whole.
+    pub(crate) fn is_box(self) -> bool {
+        !self.ellipse && self.feather <= 0.0
+    }
+}
+
 /// Whether the centre of sample `(x, y)` of a `width` by `height` plane is
-/// inside the ellipse that touches its four sides — computed in this
-/// order, each step rounded as `f32` is, as the CUDA kernel `cell_paint`
-/// computes it, so that the two cover the same samples. A plane of colour
-/// stored per 2x2 block, half the size, so asks of each block's centre.
+/// inside the ellipse that touches its four sides.
+#[cfg(test)]
 pub(crate) fn inside_ellipse(x: u32, y: u32, width: u32, height: u32) -> bool {
+    cover(
+        x,
+        y,
+        width,
+        height,
+        Cut {
+            ellipse: true,
+            feather: 0.0,
+        },
+    )
+    .is_some()
+}
+
+/// How much of the cover sample `(x, y)` of a `width` by `height` plane
+/// takes, cut as `cut` says: `None` outside it, left as it was; 1 wholly;
+/// less within the faded band at the edge, rising as a smooth step. A
+/// rectangle's band follows its sides and rounds its corners; an
+/// ellipse's lies along its rim. Computed in this order, each step rounded
+/// as `f32` is, as the CUDA kernel `cell_paint` computes it, so that the
+/// two write the same bytes. A plane of colour stored per 2x2 block, half
+/// the size, so asks of each block's centre.
+pub(crate) fn cover(x: u32, y: u32, width: u32, height: u32, cut: Cut) -> Option<f32> {
+    if cut.is_box() {
+        return Some(1.0);
+    }
+    let feather = cut.feather;
     let dx = (x as f32 + 0.5) * 2.0 / width as f32 - 1.0;
     let dy = (y as f32 + 0.5) * 2.0 / height as f32 - 1.0;
-    dx * dx + dy * dy <= 1.0
+    let t = if cut.ellipse {
+        let r2 = dx * dx + dy * dy;
+        if r2 > 1.0 {
+            return None;
+        }
+        if feather <= 0.0 {
+            return Some(1.0);
+        }
+        (1.0 - r2.sqrt()) / feather
+    } else {
+        let edge = 1.0 - feather;
+        let u = (dx.abs() - edge).max(0.0) / feather;
+        let v = (dy.abs() - edge).max(0.0) / feather;
+        1.0 - (u * u + v * v).sqrt()
+    };
+    if t <= 0.0 {
+        return None;
+    }
+    let t = t.min(1.0);
+    Some(t * t * (3.0 - 2.0 * t))
+}
+
+/// `value` — a sample's cover — taken as much as `alpha` says over
+/// `original`, what the sample was: `original + (value - original) *
+/// alpha`, in that order, as the kernels mix it.
+pub(crate) fn fade(original: f32, value: f32, alpha: f32) -> f32 {
+    original + (value - original) * alpha
 }
 
 /// How a [`Hiding`] covers a box.
@@ -327,6 +402,9 @@ pub enum DetectionOverlayOptionsError {
     /// A hiding margin that is not a number of 0 or more.
     #[error("hiding margin {0} is not a number of 0 or more")]
     Margin(f32),
+    /// A hiding feather that is not a number from 0 to 1.
+    #[error("hiding feather {0} is not a number from 0 to 1")]
+    Feather(f32),
     /// A minimum score that is not a number.
     #[error("min_score is not a number")]
     MinScore,
@@ -476,6 +554,11 @@ impl DetectionOverlayOptions {
             {
                 return Err(DetectionOverlayOptionsError::Margin(hiding.margin));
             }
+            if let Some(hiding) = treatment.hide
+                && !(0.0..=1.0).contains(&hiding.feather)
+            {
+                return Err(DetectionOverlayOptionsError::Feather(hiding.feather));
+            }
         }
         Ok(())
     }
@@ -502,6 +585,7 @@ impl DetectionOverlayOptions {
         self.treatments().any(|treatment| {
             treatment.hide.is_some_and(|hiding| {
                 hiding.shape == HideShape::Ellipse
+                    || hiding.feather > 0.0
                     || matches!(
                         hiding.style,
                         RedactStyle::Mosaic { .. } | RedactStyle::Blur { .. }
@@ -1014,14 +1098,10 @@ pub(crate) enum Hide {
         rect: Rect,
         cells: (u32, u32),
         smooth: bool,
-        ellipse: bool,
+        cut: Cut,
     },
     /// `rect` filled with one colour.
-    Fill {
-        rect: Rect,
-        color: Color,
-        ellipse: bool,
-    },
+    Fill { rect: Rect, color: Color, cut: Cut },
 }
 
 /// What `options` hide of `detections` on a picture `canvas` describes:
@@ -1048,14 +1128,13 @@ pub(crate) fn hides(
                 detection.height * (1.0 + 2.0 * margin),
             );
             let rect = canvas.place(&grown)?;
-            let ellipse = hiding.shape == HideShape::Ellipse;
+            let cut = Cut {
+                ellipse: hiding.shape == HideShape::Ellipse,
+                feather: hiding.feather,
+            };
             let (cells, min_cell, smooth) = match hiding.style {
                 RedactStyle::Fill(color) => {
-                    return Some(Hide::Fill {
-                        rect,
-                        color,
-                        ellipse,
-                    });
+                    return Some(Hide::Fill { rect, color, cut });
                 }
                 RedactStyle::Mosaic { cells, min_cell } => (cells, min_cell, false),
                 RedactStyle::Blur { cells, min_cell } => (cells, min_cell, true),
@@ -1070,7 +1149,7 @@ pub(crate) fn hides(
                 rect,
                 cells: (along(rect.width), along(rect.height)),
                 smooth,
-                ellipse,
+                cut,
             })
         })
         .collect()
@@ -1365,6 +1444,42 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    /// A faded cut takes the whole cover in its middle, less toward its
+    /// edge, and none past it; a rectangle's corner is rounded; with no
+    /// feather the box is whole and the ellipse hard.
+    #[test]
+    fn a_faded_cut_takes_less_toward_its_edge() {
+        let soft = |ellipse| Cut {
+            ellipse,
+            feather: 0.5,
+        };
+        for ellipse in [false, true] {
+            assert_eq!(
+                cover(50, 50, 100, 100, soft(ellipse)),
+                Some(1.0),
+                "the middle"
+            );
+            let near = cover(5, 50, 100, 100, soft(ellipse)).unwrap();
+            let nearer = cover(1, 50, 100, 100, soft(ellipse)).unwrap();
+            assert!(
+                0.0 < nearer && nearer < near && near < 1.0,
+                "{nearer} < {near}"
+            );
+        }
+        assert_eq!(
+            cover(0, 0, 100, 100, soft(false)),
+            None,
+            "the rectangle's corner rounded off"
+        );
+        let hard = Cut {
+            ellipse: false,
+            feather: 0.0,
+        };
+        assert_eq!(cover(0, 0, 100, 100, hard), Some(1.0));
+        assert!(inside_ellipse(50, 50, 100, 100) && !inside_ellipse(0, 0, 100, 100));
+        assert_eq!(fade(10.0, 110.0, 0.25), 35.0);
+    }
 
     /// A font this machine has, to draw labels in, or `None` — as the
     /// compositors' text tests find one.
