@@ -10,7 +10,7 @@ pub use cuda_ort_classifier::CudaOrtClassifier;
 #[cfg(feature = "ort-tensorrt")]
 pub use cuda_ort_detector::UseTensorRtPolicy;
 pub use cuda_ort_detector::{CudaOrtDetector, CudaOrtDetectorOptions};
-pub use cuda_ort_embedder::CudaOrtEmbedder;
+pub use cuda_ort_embedder::{CudaOrtEmbedder, CudaOrtEmbedderOptions};
 pub use runtime::{CudaRuntime, LibraryVersion, RuntimeShortfall};
 
 use crate::element::ElementType;
@@ -114,11 +114,13 @@ const TENSORRT_OPT_BATCH: usize = 2;
 /// precision where it can run: its input, `open` for a side it leaves open,
 /// what it runs on, for the log, and the libraries asked. Its engine is
 /// built for every batch from one to `most`, where the model's batch is
-/// open; `doing` is what a warning says runs on CUDA alone.
+/// open, and kept in `engine_cache` where one is given (see
+/// [`engine_paths`]); `doing` is what a warning says runs on CUDA alone.
 fn object_model_session(
     model_path: &std::path::Path,
     open: u32,
     most: usize,
+    engine_cache: Option<&std::path::Path>,
     pp_log: &crate::pp_log::PpLog,
     doing: &str,
 ) -> Result<
@@ -146,7 +148,7 @@ fn object_model_session(
         pp_warn!(pp_log: pp_log, "TensorRT cannot be used ({tensorrt}): {doing} on CUDA alone");
     }
     #[cfg(not(feature = "ort-tensorrt"))]
-    let _ = (pp_log, doing);
+    let _ = (pp_log, doing, engine_cache);
     #[cfg(feature = "ort-tensorrt")]
     let tensorrt = runtime == CudaRuntime::TensorRt;
     if let CudaRuntime::Unavailable { cuda } = runtime {
@@ -172,8 +174,7 @@ fn object_model_session(
             opt: TENSORRT_OPT_BATCH.min(capacity),
             max: capacity,
         });
-        let root = default_engine_cache();
-        let cache = engine_directory(&root, profile);
+        let (cache, timing) = engine_paths(engine_cache, profile);
         if let Err(error) = std::fs::create_dir_all(&cache) {
             pp_warn!(pp_log: pp_log, "no engine cache at {}: {error}", cache.display());
         }
@@ -183,7 +184,7 @@ fn object_model_session(
             .with_engine_cache(true)
             .with_engine_cache_path(cache.display())
             .with_timing_cache(true)
-            .with_timing_cache_path(root.display());
+            .with_timing_cache_path(timing.display());
         if let Some(profile) = profile {
             let (width, height) = input.size;
             let shape = |batch: usize| format!("{input_name}:{batch}x3x{height}x{width}");
@@ -225,6 +226,25 @@ fn default_engine_cache() -> std::path::PathBuf {
     base.join("media-pp").join("tensorrt")
 }
 
+/// Where an engine built for `profile` is kept, and the timing cache: in
+/// `given` both, where a directory is given — it is used as it is, and the
+/// caller keeps engines of one model built for different batches apart —
+/// and otherwise in [`default_engine_cache`], the engine in a directory of
+/// its batches' own ([`engine_directory`]).
+#[cfg(feature = "ort-tensorrt")]
+fn engine_paths(
+    given: Option<&std::path::Path>,
+    profile: Option<BatchProfile>,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    match given {
+        Some(dir) => (dir.to_path_buf(), dir.to_path_buf()),
+        None => {
+            let root = default_engine_cache();
+            (engine_directory(&root, profile), root)
+        }
+    }
+}
+
 /// The batches a TensorRT engine is built for: the fewest, the one it is
 /// fastest at, and the most.
 #[cfg(feature = "ort-tensorrt")]
@@ -258,7 +278,27 @@ fn engine_directory(root: &std::path::Path, profile: Option<BatchProfile>) -> st
 mod tests {
     use std::path::Path;
 
-    use super::{BatchProfile, engine_directory};
+    use super::{BatchProfile, engine_directory, engine_paths};
+
+    /// A directory given keeps the engine and the timing cache both, as it
+    /// is, whatever the batches; none given is the user's cache, the engine
+    /// apart by its batches.
+    #[test]
+    fn a_directory_given_keeps_engine_and_timing_as_it_is() {
+        let given = Path::new("/app/cache/tensorrt");
+        let profile = Some(BatchProfile {
+            min: 1,
+            opt: 2,
+            max: 32,
+        });
+        assert_eq!(
+            engine_paths(Some(given), profile),
+            (given.to_path_buf(), given.to_path_buf())
+        );
+        let (engine, timing) = engine_paths(None, profile);
+        assert_eq!(engine, timing.join("batch-1-2-32"));
+        assert!(timing.ends_with("media-pp/tensorrt"));
+    }
 
     /// Each range of batches has a directory of its own, so that engines
     /// built for two do not take each other's place; no range is the cache

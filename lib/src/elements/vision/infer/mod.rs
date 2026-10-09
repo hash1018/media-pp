@@ -19,6 +19,6 @@ pub use self::ort::{
 };
 #[cfg(feature = "ort-cuda")]
 pub use self::ort::{
-    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder, CudaRuntime,
-    LibraryVersion, RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
+    CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };

@@ -306,14 +306,8 @@ impl CudaOrtDetector {
             } else {
                 None
             };
-            let (cache, timing) = match &options.engine_cache {
-                Some(cache) => (cache.clone(), cache.clone()),
-                None => {
-                    let root = super::default_engine_cache();
-                    let profile = batches.as_ref().map(|(_, profile)| *profile);
-                    (super::engine_directory(&root, profile), root)
-                }
-            };
+            let profile = batches.as_ref().map(|(_, profile)| *profile);
+            let (cache, timing) = super::engine_paths(options.engine_cache.as_deref(), profile);
             if let Err(error) = std::fs::create_dir_all(&cache) {
                 pp_warn!(pp_log: &pp_log, "no engine cache at {}: {error}", cache.display());
             }

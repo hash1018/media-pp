@@ -35,8 +35,8 @@ pub use classify::{InputScale, OrtClassifierOptions};
 pub use cuda::UseTensorRtPolicy;
 #[cfg(feature = "ort-cuda")]
 pub use cuda::{
-    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder, CudaRuntime,
-    LibraryVersion, RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
+    CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
 pub use embed::{Alignment, OrtEmbedderOptions};
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]

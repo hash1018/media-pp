@@ -117,7 +117,7 @@ impl CudaOrtClassifier {
 
         let model_path = model_path.as_ref();
         let (session, input, provider, linked) =
-            super::object_model_session(model_path, 224, MAX_BATCH, &pp_log, "classifying")?;
+            super::object_model_session(model_path, 224, MAX_BATCH, None, &pp_log, "classifying")?;
         let capacity = input.batch.unwrap_or(MAX_BATCH).max(1);
         let labels = labels(options.labels.as_deref(), &session);
         let driver = CudaDriver::retain_primary().map_err(OrtError::from)?;

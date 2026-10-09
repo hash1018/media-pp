@@ -327,8 +327,8 @@ pub use vision::{
 };
 #[cfg(feature = "ort-cuda")]
 pub use vision::{
-    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder, CudaRuntime,
-    LibraryVersion, RuntimeShortfall,
+    CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
+    CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use vision::{

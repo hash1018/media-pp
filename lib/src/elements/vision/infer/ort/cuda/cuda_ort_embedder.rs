@@ -37,6 +37,25 @@ use crate::orientation::Orientations;
 /// at once.
 const MAX_BATCH: usize = 32;
 
+/// How a [`CudaOrtEmbedder`] runs: what every embedder takes, and where
+/// TensorRT keeps the engine it builds.
+#[derive(Debug, Clone, Default)]
+pub struct CudaOrtEmbedderOptions {
+    /// The model's input, what is embedded and how it is straightened, as
+    /// every embedder takes them.
+    pub embedder: OrtEmbedderOptions,
+    /// Where TensorRT keeps the engine it builds for this model and GPU,
+    /// and its timing cache. Building one takes minutes; every later start
+    /// loads it in under a second. `None` keeps them in the user's cache
+    /// directory under `media-pp/tensorrt`, as
+    /// [`CudaOrtDetectorOptions::engine_cache`](crate::elements::CudaOrtDetectorOptions::engine_cache)
+    /// does; a directory given is used as it is, and can be the one a
+    /// detector of another model is given — ONNX Runtime names an engine
+    /// after its model.
+    #[cfg(feature = "ort-tensorrt")]
+    pub engine_cache: Option<std::path::PathBuf>,
+}
+
 /// Makes each object a detector found on each CUDA picture into a vector
 /// with an embedding model, without the picture leaving the GPU — what
 /// [`SwOrtEmbedder`](crate::elements::SwOrtEmbedder) does on the CPU: a
@@ -104,13 +123,24 @@ impl CudaOrtEmbedder {
         name: impl Into<String>,
         device: &CudaDevice,
         model_path: impl AsRef<Path>,
-        options: OrtEmbedderOptions,
+        options: CudaOrtEmbedderOptions,
     ) -> Result<Self> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaOrtEmbedder, &name, None);
         let path = model_path.as_ref().display().to_string();
-        let (session, input, provider, linked) =
-            super::object_model_session(model_path.as_ref(), 112, MAX_BATCH, &pp_log, "embedding")?;
+        #[cfg(feature = "ort-tensorrt")]
+        let engine_cache = options.engine_cache.as_deref();
+        #[cfg(not(feature = "ort-tensorrt"))]
+        let engine_cache = None;
+        let (session, input, provider, linked) = super::object_model_session(
+            model_path.as_ref(),
+            112,
+            MAX_BATCH,
+            engine_cache,
+            &pp_log,
+            "embedding",
+        )?;
+        let options = options.embedder;
         let capacity = input.batch.unwrap_or(MAX_BATCH).max(1);
         let driver = CudaDriver::retain_primary().map_err(OrtError::from)?;
         let kernels = driver.fit_kernels().map_err(OrtError::from)?;
@@ -434,7 +464,13 @@ mod tests {
             cutouts: true,
             ..OrtEmbedderOptions::default()
         };
-        let Ok(mut gpu) = CudaOrtEmbedder::new("gpu", &device, &model, options.clone()) else {
+        // Every other field is `ort-tensorrt`'s alone.
+        #[allow(clippy::needless_update)]
+        let gpu_options = CudaOrtEmbedderOptions {
+            embedder: options.clone(),
+            ..CudaOrtEmbedderOptions::default()
+        };
+        let Ok(mut gpu) = CudaOrtEmbedder::new("gpu", &device, &model, gpu_options) else {
             eprintln!("skipping: the CUDA runtime cannot be used here");
             return;
         };

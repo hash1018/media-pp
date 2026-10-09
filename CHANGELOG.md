@@ -12,6 +12,16 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`CudaOrtEmbedder::new` takes `CudaOrtEmbedderOptions`.** Beside the
+  `OrtEmbedderOptions` every embedder takes, it says with `ort-tensorrt`
+  where TensorRT keeps the engine it builds (`engine_cache`), as
+  `CudaOrtDetectorOptions::engine_cache` does for a detector; `None`, the
+  default, keeps it where it was.
+
+  | Before | Now |
+  |---|---|
+  | `CudaOrtEmbedder::new(name, device, model, options)` | `CudaOrtEmbedder::new(name, device, model, CudaOrtEmbedderOptions { embedder: options, ..CudaOrtEmbedderOptions::default() })` |
+
 - **`OrtDetectorOptions` has a `model`, and `Detection` has
   `landmarks`.** `DetectorModel::Yolo`, the default, is what every
   detector read before. `DetectorModel::Custom { input, decoder }` runs a
