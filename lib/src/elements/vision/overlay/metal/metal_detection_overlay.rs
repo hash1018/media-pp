@@ -1143,9 +1143,9 @@ mod tests {
 
     /// A mosaic, a blur and a fill on the GPU write the same bytes as the
     /// CPU's overlay on the same picture, NV12 and BGRA alike, of the whole
-    /// box or the ellipse inside it — two faces, grown by the margin, cut
-    /// into cells of uneven width, the colour at half the size — and a box
-    /// drawn over a hidden face is drawn over it.
+    /// box or the ellipse inside it, hard-edged and faded — two faces, grown
+    /// by the margin, cut into cells of uneven width, the colour at half the
+    /// size — and a box drawn over a hidden face is drawn over it.
     #[test]
     fn a_box_is_hidden_on_the_gpu_as_on_the_cpu() {
         use super::super::super::{HideShape, Hiding, RedactStyle, Treatment};
@@ -1177,9 +1177,15 @@ mod tests {
             },
             RedactStyle::Fill(Color::new(10, 200, 30)),
         ];
-        let shapes = [HideShape::Rectangle, HideShape::Ellipse];
+        // Each shape hard and faded at its edge.
+        let shapes = [
+            (HideShape::Rectangle, 0.0),
+            (HideShape::Ellipse, 0.0),
+            (HideShape::Rectangle, 0.3),
+            (HideShape::Ellipse, 0.3),
+        ];
         for format in FORMATS {
-            for (style, shape) in styles
+            for (style, (shape, feather)) in styles
                 .into_iter()
                 .flat_map(|style| shapes.map(|shape| (style, shape)))
             {
@@ -1187,6 +1193,7 @@ mod tests {
                     let treatment = Treatment {
                         hide: Some(Hiding {
                             shape,
+                            feather,
                             ..Hiding::new(style)
                         }),
                         ..if drawn {
@@ -1231,7 +1238,7 @@ mod tests {
                     assert_ne!(
                         expected,
                         shown(&picture),
-                        "{format:?} {style:?} {shape:?}: something hidden"
+                        "{format:?} {style:?} {shape:?} {feather}: something hidden"
                     );
                     for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
                         let differ = expected
@@ -1241,8 +1248,8 @@ mod tests {
                             .count();
                         assert_eq!(
                             differ, 0,
-                            "{format:?} {style:?} {shape:?}, boxes drawn {drawn}, plane {plane}: \
-                             {differ} bytes differ"
+                            "{format:?} {style:?} {shape:?} {feather}, boxes drawn {drawn}, \
+                             plane {plane}: {differ} bytes differ"
                         );
                     }
                 }
@@ -1317,9 +1324,10 @@ mod tests {
     }
 
     /// In a P010 picture — HLG, ten bits at the top of two bytes — a mosaic,
-    /// a blur and a fill, of the box or the ellipse inside it, write the
-    /// CPU's bytes, the samples around left as they were to the last bit; a
-    /// picture of it is refused where anything would be drawn.
+    /// a blur and a fill, of the box or the ellipse inside it, hard-edged
+    /// and faded, write the CPU's bytes, the samples around left as they
+    /// were to the last bit; a picture of it is refused where anything would
+    /// be drawn.
     #[test]
     fn a_p010_picture_is_hidden_on_the_gpu_as_on_the_cpu() {
         use super::super::super::{HideShape, Hiding, RedactStyle, Treatment};
@@ -1355,11 +1363,17 @@ mod tests {
             RedactStyle::Fill(Color::WHITE),
         ];
         for style in styles {
-            for shape in [HideShape::Rectangle, HideShape::Ellipse] {
+            for (shape, feather) in [
+                (HideShape::Rectangle, 0.0),
+                (HideShape::Ellipse, 0.0),
+                (HideShape::Rectangle, 0.3),
+                (HideShape::Ellipse, 0.3),
+            ] {
                 let options = DetectionOverlayOptions {
                     others: Treatment {
                         hide: Some(Hiding {
                             shape,
+                            feather,
                             ..Hiding::new(style)
                         }),
                         ..Treatment::none()
@@ -1395,7 +1409,7 @@ mod tests {
                 assert_ne!(
                     expected,
                     shown(&picture),
-                    "{style:?} {shape:?}: something hidden"
+                    "{style:?} {shape:?} {feather}: something hidden"
                 );
                 for (plane, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
                     let differ = expected
@@ -1405,7 +1419,7 @@ mod tests {
                         .count();
                     assert_eq!(
                         differ, 0,
-                        "{style:?} {shape:?}, plane {plane}: {differ} bytes differ"
+                        "{style:?} {shape:?} {feather}, plane {plane}: {differ} bytes differ"
                     );
                 }
             }

@@ -301,6 +301,7 @@ mod tests {
                 scale: [2.0; 3],
                 bias: [-1.0; 3],
             },
+            cutouts: true,
             ..OrtEmbedderOptions::default()
         };
         let mut gpu =
@@ -352,6 +353,24 @@ mod tests {
                 let alike = cpu.embeddings[0].similarity(gpu).expect("of one length");
                 eprintln!("{layout:?}: {alike}");
                 assert!(alike > 0.98, "{layout:?}: the vectors are {alike} alike");
+                // The pictures they were made from are the same picture.
+                let (cpu, gpu) = (
+                    cpu.embeddings[0]
+                        .cutout
+                        .as_ref()
+                        .expect("a cutout on the CPU"),
+                    gpu.cutout.as_ref().expect("a cutout on the GPU"),
+                );
+                assert_eq!((cpu.width, cpu.height), (gpu.width, gpu.height));
+                let apart = cpu
+                    .rgb
+                    .iter()
+                    .zip(gpu.rgb.iter())
+                    .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                    .sum::<f64>()
+                    / cpu.rgb.len() as f64;
+                eprintln!("{layout:?}: cutouts {apart:.2} apart on average");
+                assert!(apart < 4.0, "{layout:?}: the cutouts are {apart} apart");
             }
         }
     }

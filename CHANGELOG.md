@@ -249,8 +249,8 @@ compile error with no explanation.
   edge of the box, or of the ellipse inside it, the mosaic, blur or fill
   is mixed over what was there less and less toward the edge, by a smooth
   step, over that fraction of the way to the middle; a rectangle's corners
-  are rounded as far. The CPU's and CUDA's overlays write the same bytes,
-  NV12, BGRA and P010 alike; Metal's computes it the same way.
+  are rounded as far. The CPU's, CUDA's and Metal's overlays write the
+  same bytes, NV12, BGRA and P010 alike.
 
 - **`MetalConverter` takes 10-bit, and brings HDR to SDR.** A P010
   VideoToolbox frame — what `VideoToolboxDecoder` makes of 10-bit video —
