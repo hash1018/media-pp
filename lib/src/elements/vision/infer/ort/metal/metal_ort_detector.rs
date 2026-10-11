@@ -44,12 +44,16 @@ pub struct MetalOrtDetectorOptions {
     /// batch is run in parts this size.
     ///
     /// It takes a model whose batch is left open, as an Ultralytics export
-    /// with `dynamic=True` is, and fixes that batch at this size for Core
-    /// ML — the height and width such an export leaves open beside it at
-    /// 640 — as Core ML compiles a model of open shape again for each new
-    /// batch, and runs much of one it has no bound for on the CPU: a
-    /// batch cut short is run at the full size, the inputs past its pictures
-    /// left as they were. A model made for one picture at a time — the
+    /// with `dynamic=True` is, and fixes that batch for Core ML — the
+    /// height and width such an export leaves open beside it at 640 — as
+    /// Core ML compiles a model of open shape again for each new batch,
+    /// and runs much of one it has no bound for on the CPU. It is fixed at
+    /// this, and at one for a run of a single input — made the first time
+    /// one comes, and kept in [`model_cache`](Self::model_cache) — so a
+    /// picture with no tiles to look in is not run at the cost of seven;
+    /// a run of more goes through the session of this, the inputs past its
+    /// pictures left as they were. A model made for one picture at a time
+    /// — the
     /// YOLOv10n release — is run so, with a warning. The default, 1, is a
     /// detector of one picture at a time.
     pub max_batch: usize,
@@ -123,7 +127,8 @@ filter_stage!(MetalOrtDetector);
 struct Detecting {
     name: Arc<str>,
     pp_log: PpLog,
-    session: Session,
+    /// The model's session, or its sessions, one for each batch size.
+    runs: Runs,
     options: OrtDetectorOptions,
     labels: Arc<[Arc<str>]>,
     /// The values the model wants.
@@ -134,10 +139,6 @@ struct Detecting {
     interval: Interval,
     /// How many pictures the model is run on at once.
     max_batch: usize,
-    /// How many inputs the model is handed each run where its batch is
-    /// fixed — by the model or for Core ML — or `None` where it takes as
-    /// many as there are pictures.
-    rows: Option<usize>,
     /// The pictures of the batch under way, in the order they came.
     held: Vec<Held>,
     /// The pipeline's, to report a picture's failure on where others must
@@ -181,7 +182,7 @@ impl MetalOrtDetector {
             .commit_from_file(model_path.as_ref())
             .map_err(OrtError::from)?;
         let (width, height) = model_input(&open)?;
-        let (batch, mut fixed) = match open.inputs().first().map(|input| input.dtype()) {
+        let (batch, fixed) = match open.inputs().first().map(|input| input.dtype()) {
             Some(ValueType::Tensor {
                 shape,
                 dimension_symbols,
@@ -227,26 +228,34 @@ impl MetalOrtDetector {
                 (options.max_batch, None)
             }
         };
-        if let Batch::Named(symbol) = &batch {
-            fixed.push((symbol.clone(), options.max_batch as i64));
-        }
-        let fixed: Vec<(&str, i64)> = fixed
-            .iter()
-            .map(|(symbol, size)| (symbol.as_str(), *size))
-            .collect();
-        let session = core_ml_session(
-            model_path,
-            &fixed,
-            options.compute_units,
-            options.model_cache.as_deref(),
-            &pp_log,
-        )?;
+        let remake = Remake {
+            path: model_path.as_ref().to_path_buf(),
+            sides: fixed,
+            batch: match &batch {
+                Batch::Named(symbol) => Some(symbol.clone()),
+                _ => None,
+            },
+            units: options.compute_units,
+            cache: options.model_cache.clone(),
+        };
+        // The largest first: it reads the model's input and labels, and a
+        // batch of every size fits it.
+        let session = remake.session(max_batch, &pp_log)?;
         let model = model_input(&session)?;
         let labels = options
             .detector
             .model
             .labels(labels(options.detector.labels.as_deref(), &session));
         let fitting = Fitting::new(model, rows.unwrap_or(max_batch))?;
+        let runs = match batch {
+            Batch::Named(_) => Runs::Open {
+                batch: session,
+                max_batch,
+                alone: None,
+                remake,
+            },
+            _ => Runs::One { session, rows },
+        };
 
         pp_info!(
             pp_log: &pp_log,
@@ -266,20 +275,124 @@ impl MetalOrtDetector {
         Ok(Self(FilterStage::new(Detecting {
             name,
             pp_log,
-            session,
+            runs,
             values: options.detector.model.input(),
             decoder: options.detector.model.decoder(model),
             options: options.detector,
             labels,
             interval,
             max_batch,
-            rows,
             held: Vec::new(),
             context: None,
             fitting,
             orientations: Orientations::default(),
             best: BestClass::new()?,
         })))
+    }
+}
+
+/// The sessions a model is run through, and how many inputs each is
+/// handed.
+enum Runs {
+    /// Every run through one session, handed `rows` inputs — the batch the
+    /// model fixes itself — or, where `None`, as many as there are: a batch
+    /// left open with no name to fix it by.
+    One {
+        session: Session,
+        rows: Option<usize>,
+    },
+    /// A batch left open by name, which Core ML is given fixed: at
+    /// `max_batch` for runs of more than one input, and at one for a single
+    /// input, made the first time one comes. One session alone ran a
+    /// picture with no tiles to look in at the cost of seven — a detector of
+    /// a picture and its six tiles — the inputs past it computed and thrown
+    /// away, and most runs of a face detector over close-ups are one
+    /// picture: on a music show 56% of them, and twenty seconds of it
+    /// analysed in 73 s with this where it took 174 s. Sessions at 2 and 4
+    /// besides took 440 MB more where these two take 165 MB, in no less
+    /// time.
+    Open {
+        batch: Session,
+        max_batch: usize,
+        alone: Option<Session>,
+        remake: Remake,
+    },
+}
+
+impl Runs {
+    /// The session for a run of `n` inputs, and how many it is handed: `n`
+    /// or more, the inputs past the run's left as they were.
+    fn for_run(
+        &mut self,
+        n: usize,
+        pp_log: &PpLog,
+    ) -> std::result::Result<(&mut Session, usize), OrtError> {
+        match self {
+            Runs::One { session, rows } => Ok((session, rows.unwrap_or(n))),
+            Runs::Open {
+                batch, max_batch, ..
+            } if n > 1 || *max_batch == 1 => Ok((batch, *max_batch)),
+            Runs::Open { alone, remake, .. } => {
+                let session = match alone {
+                    Some(session) => session,
+                    empty => {
+                        let session = remake.session(1, pp_log)?;
+                        pp_info!(pp_log: pp_log, "a session for one picture at a time made");
+                        empty.insert(session)
+                    }
+                };
+                Ok((session, 1))
+            }
+        }
+    }
+
+    /// The batch sizes a session has been made for, smallest first.
+    #[cfg(test)]
+    fn made(&self) -> Vec<usize> {
+        match self {
+            Runs::One { .. } => Vec::new(),
+            Runs::Open {
+                max_batch, alone, ..
+            } => alone
+                .as_ref()
+                .map(|_| 1)
+                .into_iter()
+                .chain([*max_batch])
+                .collect(),
+        }
+    }
+}
+
+/// How a session on the model is made, at a batch of any size.
+struct Remake {
+    path: std::path::PathBuf,
+    /// The sides the model leaves open by name, fixed at its input's.
+    sides: Vec<(String, i64)>,
+    /// The batch's name, where the model leaves it open by one.
+    batch: Option<String>,
+    units: CoreMlComputeUnits,
+    cache: Option<std::path::PathBuf>,
+}
+
+impl Remake {
+    /// A session handed `size` inputs a run, where the batch is open by
+    /// name; otherwise as the model has it.
+    fn session(&self, size: usize, pp_log: &PpLog) -> std::result::Result<Session, OrtError> {
+        let mut fixed: Vec<(&str, i64)> = self
+            .sides
+            .iter()
+            .map(|(symbol, side)| (symbol.as_str(), *side))
+            .collect();
+        if let Some(batch) = &self.batch {
+            fixed.push((batch, size as i64));
+        }
+        core_ml_session(
+            &self.path,
+            &fixed,
+            self.units,
+            self.cache.as_deref(),
+            pp_log,
+        )
     }
 }
 
@@ -372,13 +485,14 @@ impl Detecting {
             .map(|((picture, _), cut)| (*picture, cut.as_slice()))
             .collect();
         self.fitting.fit_each(&pictures, self.values)?;
-        // A model of fixed batch is handed exactly that many; one of open
-        // batch, as many as there are.
-        let rows = self.rows.unwrap_or(looks.len());
+        // A model of fixed batch is handed exactly that many; one fixed for
+        // Core ML, the fewest of its sessions that hold them all; one left
+        // open, as many as there are.
+        let (session, rows) = self.runs.for_run(looks.len(), &self.pp_log)?;
         let (width, height) = (self.fitting.model.0 as usize, self.fitting.model.1 as usize);
         let input =
             TensorRef::from_array_view(([rows, 3, height, width], self.fitting.input(rows)))?;
-        let outputs = self.session.run(inputs![input])?;
+        let outputs = session.run(inputs![input])?;
         let letterboxes: Vec<Letterbox> = looks.iter().map(|(_, letterbox)| *letterbox).collect();
         if self.options.model.is_yolo() {
             let (shape, floats) = outputs[0].try_extract_tensor::<f32>()?;
@@ -907,6 +1021,93 @@ mod tests {
             .and_then(|input| input.dtype().tensor_shape())
             .and_then(|shape| shape.iter().next().copied())
             .is_some_and(|batch| batch < 0)
+    }
+
+    /// A single picture goes through a session of one, made as it is first
+    /// needed, and a batch of more through the session of `max_batch`; each
+    /// finds in each picture what one picture at a time finds. Needs a
+    /// model whose batch is left open and a video; skipped, saying so,
+    /// without them.
+    #[test]
+    fn a_single_picture_runs_through_a_session_of_one() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        if !open_batch(&model) {
+            eprintln!("skipping: {model} takes one picture at a time");
+            return;
+        }
+        let pictures = crate::test_support::pictures_with_objects(&model, &video, 5);
+        if pictures.len() < 5 {
+            eprintln!("skipping: fewer than five pictures in {video} with something on them");
+            return;
+        }
+        let options = |max_batch| MetalOrtDetectorOptions {
+            max_batch,
+            ..MetalOrtDetectorOptions::default()
+        };
+        let mut alone = MetalOrtDetector::new("alone", &model, options(1)).expect("loads");
+        let one_at_a_time = capture(&mut alone);
+        for (index, n) in pictures.iter().copied().enumerate() {
+            alone
+                .consume(in_batch(&device, &video, n, index, 1))
+                .expect("detects");
+        }
+        let expected: Vec<_> = one_at_a_time.lock().unwrap().iter().map(found_in).collect();
+
+        let mut batched = MetalOrtDetector::new("batched", &model, options(7)).expect("loads");
+        assert_eq!(
+            batched.0.inner().runs.made(),
+            vec![7],
+            "the largest only, at first"
+        );
+        let handed = capture(&mut batched);
+        for (size, made) in [
+            (2, vec![7]),
+            (1, vec![1, 7]),
+            (3, vec![1, 7]),
+            (5, vec![1, 7]),
+        ] {
+            for (index, n) in pictures.iter().copied().take(size).enumerate() {
+                batched
+                    .consume(in_batch(&device, &video, n, index, size))
+                    .expect("detects");
+            }
+            assert_eq!(
+                batched.0.inner().runs.made(),
+                made,
+                "after a batch of {size}"
+            );
+            let got: Vec<_> = handed
+                .lock()
+                .unwrap()
+                .drain(..)
+                .map(|buf| found_in(&buf))
+                .collect();
+            assert_eq!(got.len(), size);
+            for (index, (alone, batched)) in expected.iter().zip(&got).enumerate() {
+                assert!(!alone.is_empty(), "picture {index} has something in it");
+                assert_eq!(
+                    alone.len(),
+                    batched.len(),
+                    "a batch of {size}, picture {index}"
+                );
+                for (a, b) in alone.iter().zip(batched) {
+                    assert_eq!(a.0, b.0, "a batch of {size}, picture {index}");
+                    assert!(
+                        (a.1 - b.1).abs() < 0.01 && (a.2 - b.2).abs() < 0.01,
+                        "a batch of {size}, picture {index}: {a:?} against {b:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// The pictures of a batch are held until its last has come, then

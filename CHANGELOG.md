@@ -1254,6 +1254,17 @@ compile error with no explanation.
 
 ### Changed
 
+- **`MetalOrtDetector` runs a single picture at the cost of one.** A model
+  whose batch is left open by name was fixed at `max_batch` for Core ML
+  and every run computed that many inputs: a face detector of a picture
+  and its six tiles ran a close-up with no tiles at the cost of seven. A
+  run of one input now goes through a session fixed at one, made the
+  first time one comes and kept in the model cache. On a music show 56%
+  of the face detector's runs were one picture, and twenty seconds of it
+  analysed in gamchum in 73 s where it took 174 s, with the same tracks;
+  the second session takes 165 MB. Sessions at 2 and 4 as well cost
+  440 MB in all and saved no more time.
+
 - **`SwOrtDetector` and `SwOrtClassifier` read an untagged HD picture as
   BT.709,** as the CUDA and Metal detectors and every renderer already did:
   a picture that names no matrix is BT.709 above 576 lines and BT.601 at
