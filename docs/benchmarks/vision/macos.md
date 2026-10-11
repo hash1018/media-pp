@@ -32,7 +32,9 @@ Three things in the matrix change meaning:
   precision; what it is told is where it may run, `--compute-units
   all|gpu|ane` — `MetalOrtDetectorOptions::compute_units`, a
   `CoreMlComputeUnits`. The Neural Engine against the GPU is the
-  comparison that matters on a Mac.
+  comparison that matters on a Mac. Core ML keeps what it compiles in a cache of its
+  own (`MetalOrtDetectorOptions::model_cache`, `~/Library/Caches/media-pp/coreml`
+  by default), so only the first start of a model compiles it.
 - **`--track visual` on the CPU.** Metal follows VideoToolbox pictures by
   look on the GPU with no feature to turn that off, so E6 has no CPU row
   on a Mac.

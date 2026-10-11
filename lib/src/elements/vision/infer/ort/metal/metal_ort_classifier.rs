@@ -84,7 +84,7 @@ impl MetalOrtClassifier {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::MetalOrtClassifier, &name, None);
         let path = model_path.as_ref().display().to_string();
-        let (session, input) = object_model_session(model_path.as_ref(), 224, &pp_log)?;
+        let (session, input) = object_model_session(model_path.as_ref(), 224, None, &pp_log)?;
         let labels = labels(options.labels.as_deref(), &session);
         let fitting = Fitting::new(input.size, input.batch.unwrap_or(CORE_ML_BATCH))?;
         pp_info!(

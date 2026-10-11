@@ -437,6 +437,7 @@ fn detector(
                 detector: options,
                 max_batch: args.batch.max(1),
                 compute_units: compute_units(&args.units).unwrap_or_default(),
+                ..MetalOrtDetectorOptions::default()
             },
         )?),
     })

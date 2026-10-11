@@ -8,7 +8,7 @@ mod metal_ort_classifier;
 mod metal_ort_detector;
 mod metal_ort_embedder;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ort::{
     ep::CoreML,
@@ -24,7 +24,7 @@ use crate::pp_log::{PpLog, pp_warn};
 
 pub use metal_ort_classifier::MetalOrtClassifier;
 pub use metal_ort_detector::{MetalOrtDetector, MetalOrtDetectorOptions};
-pub use metal_ort_embedder::MetalOrtEmbedder;
+pub use metal_ort_embedder::{MetalOrtEmbedder, MetalOrtEmbedderOptions};
 
 /// Where Core ML may run a model: what its `MLComputeUnits` allows. The
 /// CPU is allowed in each, for the layers the others do not take — a
@@ -50,21 +50,39 @@ pub enum CoreMlComputeUnits {
 ///
 /// `fixed`, the dimensions the model leaves open by their names, and the
 /// size each is fixed at for this session; `units`, where Core ML may run
-/// it.
+/// it; `cache`, where the model Core ML compiles is kept — see
+/// [`model_cache`]. A cache that cannot be made is gone without, with a
+/// warning: the model is compiled anew, as it is every time without one.
 fn core_ml_session(
     model_path: impl AsRef<Path>,
     fixed: &[(&str, i64)],
     units: CoreMlComputeUnits,
+    cache: Option<&Path>,
+    pp_log: &PpLog,
 ) -> Result<Session, OrtError> {
-    let provider = CoreML::default()
+    let mut provider = CoreML::default()
         .with_model_format(ModelFormat::MLProgram)
         .with_compute_units(match units {
             CoreMlComputeUnits::All => ComputeUnits::All,
             CoreMlComputeUnits::CpuAndGpu => ComputeUnits::CPUAndGPU,
             CoreMlComputeUnits::CpuAndNeuralEngine => ComputeUnits::CPUAndNeuralEngine,
-        })
-        .build()
-        .error_on_failure();
+        });
+    let cache = model_cache(cache, fixed);
+    match (std::fs::create_dir_all(&cache), cache.to_str()) {
+        (Ok(()), Some(dir)) => provider = provider.with_model_cache_dir(dir),
+        (Err(error), _) => pp_warn!(
+            pp_log: pp_log,
+            "no model cache at {}: {error}; Core ML compiles the model anew",
+            cache.display()
+        ),
+        (Ok(()), None) => pp_warn!(
+            pp_log: pp_log,
+            "the model cache {} is no UTF-8 path, which ONNX Runtime takes; \
+             Core ML compiles the model anew",
+            cache.display()
+        ),
+    }
+    let provider = provider.build().error_on_failure();
     let mut builder = Session::builder()?;
     for &(name, size) in fixed {
         builder = builder
@@ -76,6 +94,47 @@ fn core_ml_session(
         .map_err(|error| OrtError::Ort(error.into()))?
         .commit_from_file(model_path)
         .map_err(OrtError::from)
+}
+
+/// Where the model Core ML compiles for a session with `fixed` dimensions is
+/// kept: in `given`, or where none is, the user's cache directory under
+/// `media-pp/coreml` — `~/Library/Caches/media-pp/coreml` — each in a
+/// directory of its fixed dimensions' own (`batch-4`, `as-made`).
+///
+/// Without one, ONNX Runtime converts the model and Core ML compiles it on
+/// every session, each time a pipeline is made. With one, the first
+/// session's is kept and every later one loads it: on an M5, a RetinaFace
+/// ResNet-50 fixed to a batch of 7, YOLO11n the same, SFace and OSNet
+/// opened in 2.0 seconds compiled and in 0.4 from the cache.
+/// ONNX Runtime keys a model by its graph and metadata, not by its weights,
+/// so a model whose weights alone change under the same name is taken for
+/// the one it replaced: give it a name of its own, or another cache. The
+/// fixed dimensions are kept apart here, so one model fixed to a batch of 1
+/// and to one of 7 — sessions the file alone does not tell apart — can
+/// never be given each other's compiled model.
+fn model_cache(given: Option<&Path>, fixed: &[(&str, i64)]) -> PathBuf {
+    let root = given.map(Path::to_path_buf).unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library").join("Caches"))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("media-pp")
+            .join("coreml")
+    });
+    let shapes: Vec<String> = fixed
+        .iter()
+        .map(|(name, size)| {
+            let name: String = name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            format!("{name}-{size}")
+        })
+        .collect();
+    root.join(if shapes.is_empty() {
+        "as-made".to_string()
+    } else {
+        shapes.join("_")
+    })
 }
 
 /// How many objects a model that takes any number at once is fixed to take
@@ -100,6 +159,7 @@ const CORE_ML_BATCH: usize = 4;
 fn object_model_session(
     model_path: &Path,
     open: u32,
+    cache: Option<&Path>,
     pp_log: &PpLog,
 ) -> Result<(Session, Input), OrtError> {
     // Read on the CPU first, which compiles nothing: what the model calls a
@@ -130,7 +190,41 @@ fn object_model_session(
             .map(|name| (name, CORE_ML_BATCH as i64))
             .as_slice(),
         CoreMlComputeUnits::All,
+        cache,
+        pp_log,
     )?;
     let input = image_input(&session, open)?;
     Ok((session, input))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where a model fixed to a batch is kept: under the directory given,
+    /// or media-pp's own under the user's caches, in one of its fixed
+    /// dimensions' own, so one model fixed two ways is kept twice.
+    #[test]
+    fn a_model_is_cached_apart_for_each_shape_it_is_fixed_to() {
+        let given = Path::new("/somewhere/cache");
+        assert_eq!(model_cache(Some(given), &[]), given.join("as-made"));
+        assert_eq!(
+            model_cache(Some(given), &[("batch", 7)]),
+            given.join("batch-7")
+        );
+        assert_eq!(
+            model_cache(Some(given), &[("height", 640), ("batch:0", 1)]),
+            given.join("height-640_batch_0-1")
+        );
+        assert_ne!(
+            model_cache(Some(given), &[("batch", 1)]),
+            model_cache(Some(given), &[("batch", 7)])
+        );
+        let own = model_cache(None, &[("batch", 4)]);
+        assert!(
+            own.ends_with("media-pp/coreml/batch-4"),
+            "{}",
+            own.display()
+        );
+    }
 }

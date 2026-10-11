@@ -3,7 +3,10 @@
 //! the GPU.
 
 use crate::orientation::Orientations;
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use ort::{inputs, session::Session, value::TensorRef, value::ValueType};
 
@@ -55,6 +58,14 @@ pub struct MetalOrtDetectorOptions {
     /// tells which suits a model — on an M5, YOLO11n ran three to four
     /// times slower held to the Neural Engine than with the GPU.
     pub compute_units: CoreMlComputeUnits,
+    /// Where the model Core ML compiles is kept, for every later start to
+    /// load rather than compile again. `None` keeps it in the user's cache directory under
+    /// `media-pp/coreml`; a directory given is used for it, and can be one
+    /// an embedder or a detector of another model is given too. Either way
+    /// the model fixed to one batch is kept apart from the same model fixed
+    /// to another. The Metal counterpart of
+    /// `CudaOrtDetectorOptions::engine_cache`.
+    pub model_cache: Option<PathBuf>,
 }
 
 impl Default for MetalOrtDetectorOptions {
@@ -63,6 +74,7 @@ impl Default for MetalOrtDetectorOptions {
             detector: OrtDetectorOptions::default(),
             max_batch: 1,
             compute_units: CoreMlComputeUnits::All,
+            model_cache: None,
         }
     }
 }
@@ -222,7 +234,13 @@ impl MetalOrtDetector {
             .iter()
             .map(|(symbol, size)| (symbol.as_str(), *size))
             .collect();
-        let session = core_ml_session(model_path, &fixed, options.compute_units)?;
+        let session = core_ml_session(
+            model_path,
+            &fixed,
+            options.compute_units,
+            options.model_cache.as_deref(),
+            &pp_log,
+        )?;
         let model = model_input(&session)?;
         let labels = options
             .detector
@@ -724,6 +742,57 @@ mod tests {
     /// detector finds in the same picture — the same objects, in the same
     /// places — from NV12 and from BGRA alike. Needs a model and a video
     /// with something in it, wherever; skipped, saying so, without them.
+    /// A model compiled into a cache is loaded from it by the next
+    /// detector, which finds exactly what the first one did; a cache that
+    /// cannot be made leaves the detector to compile its model as before.
+    #[test]
+    fn a_cached_model_finds_what_it_found_compiled() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let cache = std::env::temp_dir().join(format!("media-pp-coreml-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let picture = nth_picture(&video, 1, ffmpeg::format::Pixel::NV12);
+        let detect = |cache: &Path| {
+            let mut detector = MetalOrtDetector::new(
+                "gpu",
+                &model,
+                MetalOrtDetectorOptions {
+                    model_cache: Some(cache.to_path_buf()),
+                    ..MetalOrtDetectorOptions::default()
+                },
+            )
+            .expect("loads on Core ML");
+            found(&mut detector, upload(&device, picture.clone()))
+                .items
+                .iter()
+                .map(|d| (d.class_id, d.score, d.x, d.y, d.width, d.height))
+                .collect::<Vec<_>>()
+        };
+        let compiled = detect(&cache);
+        let kept = std::fs::read_dir(&cache)
+            .expect("the cache is made")
+            .flatten()
+            .any(|shape| {
+                std::fs::read_dir(shape.path()).is_ok_and(|mut models| models.next().is_some())
+            });
+        assert!(kept, "a compiled model is kept in {}", cache.display());
+        assert_eq!(detect(&cache), compiled, "loaded from the cache");
+
+        // A file where the cache would be: no cache, the same objects.
+        let blocked = cache.join("blocked");
+        std::fs::write(&blocked, b"").unwrap();
+        assert_eq!(detect(&blocked), compiled, "compiled without a cache");
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
     #[test]
     fn it_finds_through_core_ml_what_the_cpu_finds() {
         let (Ok(model), Ok(video)) = (

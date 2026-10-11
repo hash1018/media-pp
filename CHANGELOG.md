@@ -12,6 +12,20 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`MetalOrtEmbedder::new` takes `MetalOrtEmbedderOptions`, and Core ML
+  keeps what it compiles.** Beside the `OrtEmbedderOptions` every embedder
+  takes, it says where the model Core ML compiles is kept (`model_cache`),
+  as `MetalOrtDetectorOptions::model_cache` now does for a detector — the
+  Metal counterpart of `engine_cache`. `None`, the default, keeps it in
+  `~/Library/Caches/media-pp/coreml`; the classifier keeps its there too.
+  Without one every session converted and compiled its model again: four
+  models opened in 2.0 s that now open in 0.4 s from the cache. A model
+  fixed to one batch is kept apart from the same model fixed to another.
+
+  | Before | Now |
+  |---|---|
+  | `MetalOrtEmbedder::new(name, model, options)` | `MetalOrtEmbedder::new(name, model, MetalOrtEmbedderOptions { embedder: options, ..MetalOrtEmbedderOptions::default() })` |
+
 - **`Hiding` has a `feather`.** A struct written out in full names it;
   one built from `Hiding::new` and `..` gets 0, the hard edge it had.
 

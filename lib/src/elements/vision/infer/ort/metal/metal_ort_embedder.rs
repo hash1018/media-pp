@@ -2,7 +2,10 @@
 //! embedding model on VideoToolbox pictures, each object read from the
 //! picture on the GPU.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use ort::{inputs, session::Session, value::TensorRef};
 
@@ -25,6 +28,22 @@ use super::super::classify::{Input, Memory, Plan, apply_each};
 use super::super::embed::{OrtEmbedderOptions, Warp, cutouts, embeddings, with_cutouts};
 use super::fitting::Fitting;
 use super::{CORE_ML_BATCH, object_model_session};
+
+/// How a [`MetalOrtEmbedder`] runs: what every embedder takes, and where
+/// the model Core ML compiles is kept.
+#[derive(Debug, Clone, Default)]
+pub struct MetalOrtEmbedderOptions {
+    /// The model's input, what is embedded and how it is straightened, as
+    /// every embedder takes them.
+    pub embedder: OrtEmbedderOptions,
+    /// Where the model Core ML compiles is kept, for every later start to
+    /// load. `None` keeps it in the user's cache directory under
+    /// `media-pp/coreml`, as
+    /// [`MetalOrtDetectorOptions::model_cache`](crate::elements::MetalOrtDetectorOptions::model_cache)
+    /// does; a directory given is used for it, and can be the one a
+    /// detector of another model is given.
+    pub model_cache: Option<PathBuf>,
+}
 
 /// Makes each object a detector found on each VideoToolbox picture into a
 /// vector with an embedding model — what
@@ -50,7 +69,9 @@ use super::{CORE_ML_BATCH, object_model_session};
 ///
 /// As the classifier does, it runs through Core ML or not at all, and a
 /// model that takes any number of objects at once is fixed to take four,
-/// which Core ML compiles once; a picture's objects go in fours.
+/// which Core ML compiles once and keeps — see
+/// [`MetalOrtEmbedderOptions::model_cache`]; a picture's objects go in
+/// fours.
 ///
 /// # Requirements
 ///
@@ -77,12 +98,17 @@ impl MetalOrtEmbedder {
     pub fn new(
         name: impl Into<String>,
         model_path: impl AsRef<Path>,
-        options: OrtEmbedderOptions,
+        options: MetalOrtEmbedderOptions,
     ) -> Result<Self> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::MetalOrtEmbedder, &name, None);
         let path = model_path.as_ref().display().to_string();
-        let (session, input) = object_model_session(model_path.as_ref(), 112, &pp_log)?;
+        let MetalOrtEmbedderOptions {
+            embedder: options,
+            model_cache,
+        } = options;
+        let (session, input) =
+            object_model_session(model_path.as_ref(), 112, model_cache.as_deref(), &pp_log)?;
         let fitting = Fitting::new(input.size, input.batch.unwrap_or(CORE_ML_BATCH))?;
         pp_info!(
             pp_log: &pp_log,
@@ -304,8 +330,15 @@ mod tests {
             cutouts: true,
             ..OrtEmbedderOptions::default()
         };
-        let mut gpu =
-            MetalOrtEmbedder::new("gpu", &model, options.clone()).expect("loads on Core ML");
+        let mut gpu = MetalOrtEmbedder::new(
+            "gpu",
+            &model,
+            MetalOrtEmbedderOptions {
+                embedder: options.clone(),
+                ..MetalOrtEmbedderOptions::default()
+            },
+        )
+        .expect("loads on Core ML");
         let mut cpu = SwOrtEmbedder::new("cpu", &model, options).expect("loads");
         let faces = OrtDetectorOptions {
             model: DetectorModel::RetinaFace,
