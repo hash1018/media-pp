@@ -10,14 +10,24 @@ struct VertexOutput
     float2 uv : TEXCOORD0;
 };
 
+// Where each point shown is read from in the stored picture, so that a
+// phone's portrait recording, stored on its side, is shown upright: the
+// rows of Orientation::uv_rows, one for u and one for v.
+cbuffer Turn : register(b0)
+{
+    float4 u_row;
+    float4 v_row;
+};
+
 // Builds a screen-covering triangle without a vertex buffer.
 VertexOutput vs_main(uint vertex_id : SV_VertexID)
 {
     VertexOutput output;
-    output.uv = float2((vertex_id << 1) & 2, vertex_id & 2);
+    float3 shown = float3((vertex_id << 1) & 2, vertex_id & 2, 1.0);
+    output.uv = float2(dot(u_row.xyz, shown), dot(v_row.xyz, shown));
     output.position = float4(
-        output.uv.x * 2.0 - 1.0,
-        1.0 - output.uv.y * 2.0,
+        shown.x * 2.0 - 1.0,
+        1.0 - shown.y * 2.0,
         0.0,
         1.0
     );

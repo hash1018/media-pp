@@ -179,6 +179,50 @@ impl Orientation {
         [a << 16, b << 16, 0, c << 16, d << 16, 0, 0, 0, 1 << 30]
     }
 
+    /// Where a point of what is shown is in the stored picture, each side
+    /// running from 0 to 1: `u = row0 · (u', v', 1)`, `v = row1 · (u', v',
+    /// 1)`, each row padded to four floats as a shader's constants are.
+    /// What a renderer samples the picture by to show it the right way up.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+            all(target_os = "linux", feature = "vulkan"),
+            all(target_os = "macos", feature = "metal")
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn uv_rows(self) -> [[f32; 4]; 2] {
+        // About the centre the stored point is x = a x' + b y', y = c x' +
+        // d y' (see `sampling`); with x = 2u - 1 that is u = a u' + b v' +
+        // (1 - a - b) / 2.
+        let Linear { a, b, c, d } = self.linear();
+        let row = |p: i32, q: i32| [p as f32, q as f32, (1 - p - q) as f32 / 2.0, 0.0];
+        [row(a, b), row(c, d)]
+    }
+
+    /// Says this of `frame` as a decoder would: its display matrix, none
+    /// where upright.
+    #[cfg(test)]
+    pub(crate) fn mark(self, frame: &mut Video) {
+        let kind = ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX;
+        let matrix = self.matrix();
+        // SAFETY: `frame` is live and borrowed mutably; FFmpeg allocates the
+        // 36 bytes asked for, which the matrix fills.
+        unsafe {
+            ffi::av_frame_remove_side_data(frame.as_mut_ptr(), kind);
+            if !self.is_upright() {
+                let data =
+                    ffi::av_frame_new_side_data(frame.as_mut_ptr(), kind, size_of_val(&matrix));
+                assert!(!data.is_null());
+                std::ptr::copy_nonoverlapping(
+                    matrix.as_ptr().cast::<u8>(),
+                    (*data).data,
+                    size_of_val(&matrix),
+                );
+            }
+        }
+    }
+
     /// Every one there is.
     const ALL: [Self; 8] = {
         let rotations = [
@@ -383,6 +427,38 @@ mod tests {
             let shown = orientation.to_display([0.1, 0.2, 0.3, 0.4]);
             assert!(near(orientation.from_display(shown), [0.1, 0.2, 0.3, 0.4]));
         }
+    }
+
+    /// A renderer's sampling reads each point of what is shown from where
+    /// the turn took it, the corners and the centre alike.
+    #[test]
+    fn uv_rows_find_each_shown_point_where_it_is_stored() {
+        for orientation in Orientation::ALL {
+            let [u_row, v_row] = orientation.uv_rows();
+            for (u, v) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.25, 0.75), (0.5, 0.5)] {
+                let stored = (
+                    u_row[0] * u + u_row[1] * v + u_row[2],
+                    v_row[0] * u + v_row[1] * v + v_row[2],
+                );
+                let [left, top, ..] = orientation.to_display([stored.0, stored.1, 0.0, 0.0]);
+                assert!(
+                    (left - u).abs() < 1e-6 && (top - v).abs() < 1e-6,
+                    "{orientation:?}: ({u}, {v}) read from {stored:?}"
+                );
+            }
+        }
+        assert_eq!(
+            Orientation::UPRIGHT.uv_rows(),
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]
+        );
+    }
+
+    /// A picture turned a quarter clockwise shows its stored bottom-left
+    /// corner at the top left.
+    #[test]
+    fn a_quarter_turn_shows_the_bottom_left_at_the_top_left() {
+        let [u_row, v_row] = Orientation::rotated(Rotation::Clockwise90).uv_rows();
+        assert_eq!((u_row[2], v_row[2]), (0.0, 1.0));
     }
 
     /// The sampling reads each shown pixel from where the turn took it.

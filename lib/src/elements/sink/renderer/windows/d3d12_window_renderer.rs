@@ -59,6 +59,7 @@ use crate::{
         D3d12Gpu, D3d12RendererError, SubmitError, WindowControl, WindowEvents, WindowOptions,
     },
     error::Result,
+    orientation::{Orientation, Orientations},
     platform::windows::{hlsl::compile_shader, window::OwnedWindow},
     pool::UnboundObjectPoolRef,
     pp_log::{PpLog, pp_error, pp_info},
@@ -141,6 +142,8 @@ pub struct D3d12WindowRenderer {
     presenter: WindowPresenter,
     /// `Some` for a window it opened itself.
     control: Option<WindowControl>,
+    /// Which way up each picture is shown, read from the picture.
+    orientations: Mutex<Orientations>,
 }
 
 impl D3d12WindowRenderer {
@@ -219,6 +222,7 @@ impl D3d12WindowRenderer {
             pp_log,
             presenter,
             control,
+            orientations: Mutex::default(),
         }
     }
 
@@ -232,12 +236,17 @@ impl D3d12WindowRenderer {
         &self,
         frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> std::result::Result<(), D3d12RendererError> {
+        let orientation = self
+            .orientations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .of(&frame, &self.pp_log);
         if frame.format() != Pixel::D3D12 {
             let layout = SystemLayout::of(frame.format())
                 .ok_or(D3d12RendererError::UnsupportedFormat(frame.format()))?;
             return self
                 .presenter
-                .show_system(&frame, layout)
+                .show_system(&frame, layout, orientation)
                 .map_err(D3d12RendererError::Submit);
         }
         let picture = check_d3d12_frame(&frame, &self.presenter.device)?;
@@ -248,7 +257,7 @@ impl D3d12WindowRenderer {
         // alive until the GPU is done with it.
         unsafe {
             self.presenter
-                .show(picture, (width, height), rows, Box::new(frame))
+                .show(picture, (width, height), orientation, rows, Box::new(frame))
                 .map_err(D3d12RendererError::Submit)
         }
     }
@@ -400,6 +409,10 @@ struct WindowPresenter {
     /// colour it came out.
     #[cfg(test)]
     probe: Arc<Mutex<Option<[u8; 4]>>>,
+    /// Where in the window that pixel is, as fractions of it: its centre
+    /// unless a test says otherwise.
+    #[cfg(test)]
+    probe_at: Arc<Mutex<[f32; 2]>>,
     /// Where that pixel is copied to: one row of a readback buffer.
     #[cfg(test)]
     readback: ID3D12Resource,
@@ -580,6 +593,8 @@ impl WindowPresenter {
                 #[cfg(test)]
                 probe: Arc::default(),
                 #[cfg(test)]
+                probe_at: Arc::new(Mutex::new([0.5, 0.5])),
+                #[cfg(test)]
                 readback,
                 _keep: keep,
             })
@@ -600,7 +615,9 @@ impl WindowPresenter {
         target: &ID3D12Resource,
         state: &PresentState,
     ) -> D3D12_RESOURCE_STATES {
-        let (x, y) = (state.width / 2, state.height / 2);
+        let [x, y] = *self.probe_at.lock().unwrap();
+        let at = |fraction: f32, size: u32| ((fraction * size as f32) as u32).min(size - 1);
+        let (x, y) = (at(x, state.width), at(y, state.height));
         // SAFETY: the caller's promise; the descriptions are locals, and the
         // references they take are released right after the call.
         unsafe {
@@ -749,6 +766,7 @@ impl WindowPresenter {
         state: &mut PresentState,
         source: DrawSource<'_>,
         (frame_width, frame_height): (u32, u32),
+        orientation: Orientation,
         rows: Option<&[[f32; 4]; 3]>,
     ) -> windows::core::Result<()> {
         let unexpected = || windows::core::Error::from(windows::Win32::Foundation::E_UNEXPECTED);
@@ -847,9 +865,14 @@ impl WindowPresenter {
             if let Some(rows) = rows {
                 list.SetGraphicsRoot32BitConstants(1, 12, rows.as_ptr().cast(), 0);
             }
+            // Which way up it is shown, as the second's eight; and the
+            // window fitted to it as it is shown.
+            let turn = orientation.uv_rows();
+            list.SetGraphicsRoot32BitConstants(2, 8, turn.as_ptr().cast(), 0);
+            let (shown_width, shown_height) = orientation.display_size(frame_width, frame_height);
             list.RSSetViewports(&[letterbox(
-                frame_width,
-                frame_height,
+                shown_width,
+                shown_height,
                 state.width,
                 state.height,
             )]);
@@ -955,6 +978,7 @@ impl WindowPresenter {
         &self,
         picture: D3d12Picture,
         (width, height): (u32, u32),
+        orientation: Orientation,
         rows: [[f32; 4]; 3],
         keep_alive: Box<dyn Any + Send>,
     ) -> std::result::Result<(), SubmitError> {
@@ -967,6 +991,7 @@ impl WindowPresenter {
                 &mut state,
                 DrawSource::Texture(&picture),
                 (width, height),
+                orientation,
                 Some(&rows),
             )
         })?;
@@ -983,6 +1008,7 @@ impl WindowPresenter {
         &self,
         frame: &ffmpeg::frame::Video,
         layout: SystemLayout,
+        orientation: Orientation,
     ) -> std::result::Result<(), SubmitError> {
         let (width, height) = (frame.width(), frame.height());
         let planes = planes_of(frame, layout).ok_or(SubmitError::InvalidFrame)?;
@@ -997,6 +1023,7 @@ impl WindowPresenter {
                 &mut state,
                 DrawSource::System(layout),
                 (width, height),
+                orientation,
                 rows.as_ref(),
             )
         })?;
@@ -1701,6 +1728,16 @@ mod tests {
     /// Draws `frame` — through `upload` first, where there is one — and
     /// reads back the centre of the window.
     fn drawn(gpu: &D3d12Gpu, upload: Option<D3d12Upload>, frame: MediaBuffer) -> Option<[u8; 3]> {
+        drawn_at(gpu, upload, frame, [0.5, 0.5])
+    }
+
+    /// What `frame` comes out as at `at`, fractions of the window.
+    fn drawn_at(
+        gpu: &D3d12Gpu,
+        upload: Option<D3d12Upload>,
+        frame: MediaBuffer,
+        at: [f32; 2],
+    ) -> Option<[u8; 3]> {
         let (renderer, _events) = match D3d12WindowRenderer::open(
             "screen",
             gpu,
@@ -1717,6 +1754,7 @@ mod tests {
             }
         };
         let probe = renderer.probe();
+        *renderer.presenter.probe_at.lock().unwrap() = at;
         let (source, handle) = AppSource::new("frames", 4);
         let (pipeline, ()) = Pipeline::new("window-colour", source, |source, ctx| {
             let branch = match upload {
@@ -1742,6 +1780,77 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         let [r, g, b, _] = probe.lock().unwrap().expect("the frame was drawn");
         Some([r, g, b])
+    }
+
+    /// A picture 64 by 32, its left half red and its right half blue,
+    /// stored as `orientation` says it is shown.
+    fn halves(orientation: crate::orientation::Orientation) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, 64, 32);
+        let stride = frame.stride(0);
+        for (n, pixel) in frame
+            .data_mut(0)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            *pixel = if n % (stride / 4) < 32 {
+                [0, 0, 255, 255]
+            } else {
+                [255, 0, 0, 255]
+            };
+        }
+        frame.set_pts(Some(0));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+        orientation.mark(&mut frame);
+        MediaBuffer::video(frame)
+    }
+
+    /// A phone's portrait recording, stored on its side, is shown upright:
+    /// the side of it that is stored on the left is shown at the top when
+    /// it is turned a quarter clockwise, at the bottom a quarter the other
+    /// way, and on the left when it is not turned.
+    #[test]
+    fn a_turned_picture_is_shown_upright() {
+        use crate::orientation::{Orientation, Rotation};
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        const RED: [u8; 3] = [255, 0, 0];
+        const BLUE: [u8; 3] = [0, 0, 255];
+        let cases = [
+            (Orientation::UPRIGHT, [0.25, 0.5], RED),
+            (Orientation::UPRIGHT, [0.75, 0.5], BLUE),
+            (
+                Orientation::rotated(Rotation::Clockwise90),
+                [0.5, 0.25],
+                RED,
+            ),
+            (
+                Orientation::rotated(Rotation::Clockwise90),
+                [0.5, 0.75],
+                BLUE,
+            ),
+            (
+                Orientation::rotated(Rotation::Clockwise270),
+                [0.5, 0.25],
+                BLUE,
+            ),
+            (
+                Orientation::rotated(Rotation::Clockwise270),
+                [0.5, 0.75],
+                RED,
+            ),
+        ];
+        for (orientation, at, expected) in cases {
+            let Some(got) = drawn_at(&gpu, None, halves(orientation), at) else {
+                return;
+            };
+            assert!(
+                near(got, expected),
+                "{orientation:?} at {at:?}: {got:?}, not {expected:?}"
+            );
+        }
     }
 
     fn near(got: [u8; 3], expected: [u8; 3]) -> bool {

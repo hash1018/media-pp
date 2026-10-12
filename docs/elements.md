@@ -108,8 +108,11 @@ the detection overlays lay labels out as the picture is shown, and
 `ObjectAnalytics` stands an object on the bottom of its box as shown. A
 recording re-encoded from such a file keeps the matrix only when told, with
 `TrackFormat::with_orientation(stream.orientation()?)`; a stream copied
-through keeps it as it is. The renderers and `Player` do not turn pictures
-yet.
+through keeps it as it is. The window renderers — and so `VideoWindow` and
+`Player` — show each picture upright, fitted to the window as it is shown,
+and an element that makes a picture anew (a scaler, an upload, a tone map)
+carries the matrix on. The renderers that hand a picture to code of your own
+(`D3d11Renderer`, `CudaRenderer`, ...) hand it over as stored.
 
 Elements of your own are a `Source`, a `Filter` or a `Sink`; the crate
 documentation's first page says what each is handed, and

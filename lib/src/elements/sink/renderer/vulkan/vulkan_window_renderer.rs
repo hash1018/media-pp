@@ -30,6 +30,7 @@ use crate::{
     elements::sink::renderer::presentation_delay::PresentationDelay,
     elements::{VulkanGpu, WindowControl, WindowEvents, WindowOptions},
     error::Result,
+    orientation::{Orientation, Orientations},
     platform::linux::{
         vulkan::VulkanShared,
         x11_window::{OwnedWindow, refresh_interval},
@@ -203,6 +204,8 @@ pub struct VulkanWindowRenderer {
     drawing: Option<Drawing>,
     /// `Some` for a window it opened itself.
     control: Option<WindowControl>,
+    /// Which way up each picture is shown, read from the picture.
+    orientations: Orientations,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -305,6 +308,7 @@ impl VulkanWindowRenderer {
             size,
             domains,
             drawing: None,
+            orientations: Orientations::default(),
             control: None,
         })
     }
@@ -336,6 +340,7 @@ impl VulkanWindowRenderer {
             _ => frame.color_range(),
         };
         let colour = Colour::of(frame.color_space(), range, height);
+        let orientation = self.orientations.of(frame, &self.pp_log);
         match frame.format() {
             #[cfg(feature = "cuda")]
             Pixel::CUDA => {
@@ -375,7 +380,7 @@ impl VulkanWindowRenderer {
                     interop: &interop,
                 };
                 self.presenter
-                    .present(width, height, layout, colour, source)?;
+                    .present(width, height, layout, (colour, orientation), source)?;
                 Ok((layout, MemoryDomain::Cuda))
             }
             format => {
@@ -384,8 +389,13 @@ impl VulkanWindowRenderer {
                 if frame.planes() < layout.plane_count() {
                     return Err(VulkanWindowRendererError::UnsupportedFrame(format));
                 }
-                self.presenter
-                    .present(width, height, layout, colour, Source::System(frame))?;
+                self.presenter.present(
+                    width,
+                    height,
+                    layout,
+                    (colour, orientation),
+                    Source::System(frame),
+                )?;
                 Ok((layout, MemoryDomain::System))
             }
         }
@@ -953,7 +963,7 @@ impl Presenter {
         width: u32,
         height: u32,
         layout: Layout,
-        colour: Colour,
+        shown: (Colour, Orientation),
         source: Source<'_>,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
         // What a measured presentation delay counts from: the moment the frame
@@ -973,7 +983,7 @@ impl Presenter {
         }
         self.ensure_video(width, height, layout, source.domain())?;
         self.stage(source)?;
-        self.draw(width, height, colour, handed)
+        self.draw(width, height, shown, handed)
     }
 
     /// Puts one frame's planes where [`Self::record`] finds them: packed into
@@ -1034,12 +1044,12 @@ impl Presenter {
     }
 
     /// Draws the frame [`Self::stage`] put in place into the window,
-    /// letterboxed, and presents it.
+    /// letterboxed, and presents it: in `shown`'s colour, turned as it says.
     fn draw(
         &mut self,
         width: u32,
         height: u32,
-        colour: Colour,
+        shown: (Colour, Orientation),
         handed: Instant,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
         let target = self.target_extent(width, height)?;
@@ -1071,7 +1081,7 @@ impl Presenter {
         // submission on it was waited for in `present`.
         unsafe { self.gpu.device.reset_fences(&[self.in_flight]) }
             .map_err(call("vkResetFences"))?;
-        self.record(image as usize, [width, height], colour)?;
+        self.record(image as usize, [width, height], shown)?;
 
         let swapchain = self.swapchain.as_ref().expect("made above");
         let wait = [self.image_available];
@@ -1714,8 +1724,15 @@ impl Presenter {
         &self,
         image: usize,
         frame: [u32; 2],
-        colour: Colour,
+        (colour, orientation): (Colour, Orientation),
     ) -> std::result::Result<(), VulkanWindowRendererError> {
+        // The window fitted to the picture as it is shown, and the
+        // constants both stages read: its colour, then which way up it is.
+        let (shown_width, shown_height) = orientation.display_size(frame[0], frame[1]);
+        let mut constants = colour.bytes().to_vec();
+        for value in orientation.uv_rows().as_flattened() {
+            constants.extend_from_slice(&value.to_ne_bytes());
+        }
         let device = &self.gpu.device;
         let cmd = self.command_buffer;
         let video = self.video.as_ref().expect("ensured before drawing");
@@ -1812,14 +1829,18 @@ impl Presenter {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipelines[video.layout.index()],
             );
-            device.cmd_set_viewport(cmd, 0, &[letterbox(frame, swapchain.extent)]);
+            device.cmd_set_viewport(
+                cmd,
+                0,
+                &[letterbox([shown_width, shown_height], swapchain.extent)],
+            );
             device.cmd_set_scissor(cmd, 0, &[whole]);
             device.cmd_push_constants(
                 cmd,
                 self.pipeline_layout,
-                vk::ShaderStageFlags::FRAGMENT,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 0,
-                &colour.bytes(),
+                &constants,
             );
             device.cmd_bind_descriptor_sets(
                 cmd,
@@ -2258,9 +2279,9 @@ fn create_pipeline(
         .map_err(call("vkCreateDescriptorSetLayout"))?;
         let layouts = [descriptor_layout];
         let constants = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
-            .size(std::mem::size_of::<Colour>() as u32)];
+            .size((std::mem::size_of::<Colour>() + std::mem::size_of::<[[f32; 4]; 2]>()) as u32)];
         // SAFETY: both arrays outlive the call and the layout is live.
         let pipeline_layout = match unsafe {
             device.create_pipeline_layout(

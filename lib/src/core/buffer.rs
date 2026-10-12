@@ -363,16 +363,32 @@ pub fn set_time_base(frame: &mut ffmpeg::Frame, time_base: ffmpeg::Rational) {
     unsafe { (*frame.as_mut_ptr()).time_base = time_base.into() };
 }
 
-/// Hands `source`'s timing to `destination`: its PTS, and the unit it is in.
+/// Hands `source`'s timing to `destination`: its PTS, and the unit it is in
+/// — and which way up it is shown, the display matrix a phone's portrait
+/// recording carries ([`crate::orientation::Orientation::of`]), so that a
+/// renderer after a scaler or an upload still shows it upright.
 ///
 /// For an element that makes its output frame itself rather than with
-/// `av_frame_copy_props` — which already carries both, and every other
+/// `av_frame_copy_props` — which already carries all three, and every other
 /// property besides.
 pub(crate) fn carry_timing(destination: &mut ffmpeg::Frame, source: &ffmpeg::Frame) {
     destination.set_pts(source.pts());
+    let matrix = ffi::AVFrameSideDataType::AV_FRAME_DATA_DISPLAYMATRIX;
     // SAFETY: both are live `AVFrame`s and distinct, `destination` borrowed
-    // mutably; `time_base` is a plain field.
-    unsafe { (*destination.as_mut_ptr()).time_base = (*source.as_ptr()).time_base };
+    // mutably; `time_base` is a plain field, a side-data entry's `data` is
+    // `size` bytes by FFmpeg's definition, and a new one's the `size` asked
+    // for. Where one cannot be made, the picture goes on taken as stored.
+    unsafe {
+        (*destination.as_mut_ptr()).time_base = (*source.as_ptr()).time_base;
+        ffi::av_frame_remove_side_data(destination.as_mut_ptr(), matrix);
+        let from = ffi::av_frame_get_side_data(source.as_ptr(), matrix);
+        if !from.is_null() {
+            let to = ffi::av_frame_new_side_data(destination.as_mut_ptr(), matrix, (*from).size);
+            if !to.is_null() {
+                std::ptr::copy_nonoverlapping((*from).data, (*to).data, (*from).size);
+            }
+        }
+    }
 }
 
 /// Which buffer a video frame's pixels live in.
@@ -543,6 +559,24 @@ mod tests {
         carry_timing(&mut carried, &source);
         assert_eq!(carried.pts(), Some(441));
         assert_eq!(time_base(&carried), Some(ffmpeg::Rational::new(1, 44_100)));
+    }
+
+    /// A picture an element makes anew is shown the way the one it was
+    /// made from is: a turned one turned, an upright one upright whatever
+    /// the frame it is made in said before.
+    #[test]
+    fn a_picture_made_anew_is_shown_the_way_its_source_is() {
+        use crate::orientation::{Orientation, Rotation};
+        let turned = Orientation::rotated(Rotation::Clockwise90);
+        let mut source = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 16, 16);
+        turned.mark(&mut source);
+        let mut made = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 8, 8);
+        carry_timing(&mut made, &source);
+        assert_eq!(Orientation::of(&made), Ok(turned));
+
+        let upright = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 16, 16);
+        carry_timing(&mut made, &upright);
+        assert_eq!(Orientation::of(&made), Ok(Orientation::UPRIGHT));
     }
 
     #[derive(Debug, PartialEq)]

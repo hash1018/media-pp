@@ -19,6 +19,11 @@ struct Present {
     float4 r;
     float4 g;
     float4 b;
+    // Where a point of what is shown is in the stored picture, each side 0
+    // to 1: (u, v, 1) dotted with each, so that a phone's portrait
+    // recording, stored on its side, is shown upright (Orientation::uv_rows).
+    float4 u_row;
+    float4 v_row;
 };
 
 constexpr sampler picture_sampler(filter::linear, address::clamp_to_edge);
@@ -29,7 +34,9 @@ static bool picture_uv(constant Present &present, uint2 id, thread float2 &uv) {
     if (local.x < 0 || local.y < 0 || local.x >= present.picture.z || local.y >= present.picture.w) {
         return false;
     }
-    uv = (float2(local) + float2(0.5)) / float2(present.picture.zw) * present.uv.xy;
+    float3 shown = float3((float2(local) + float2(0.5)) / float2(present.picture.zw), 1.0);
+    float2 stored = float2(dot(present.u_row.xyz, shown), dot(present.v_row.xyz, shown));
+    uv = stored * present.uv.xy;
     return true;
 }
 

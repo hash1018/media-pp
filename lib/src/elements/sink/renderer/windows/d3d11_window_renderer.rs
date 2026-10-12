@@ -52,6 +52,7 @@ use crate::{
         D3d11Gpu, D3d11RendererError, SubmitError, WindowControl, WindowEvents, WindowOptions,
     },
     error::Result,
+    orientation::{Orientation, Orientations},
     platform::windows::{d3d11::compile_shader, window::OwnedWindow},
     pp_log::{PpLog, pp_error, pp_info},
 };
@@ -128,6 +129,8 @@ pub struct D3d11WindowRenderer {
     presenter: WindowPresenter,
     /// `Some` for a window it opened itself.
     control: Option<WindowControl>,
+    /// Which way up each picture is shown, read from the picture.
+    orientations: Mutex<Orientations>,
 }
 
 impl D3d11WindowRenderer {
@@ -206,6 +209,7 @@ impl D3d11WindowRenderer {
             pp_log,
             presenter,
             control,
+            orientations: Mutex::default(),
         }
     }
 
@@ -216,17 +220,22 @@ impl D3d11WindowRenderer {
     }
 
     fn draw(&self, frame: &ffmpeg::frame::Video) -> std::result::Result<(), D3d11RendererError> {
+        let orientation = self
+            .orientations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .of(frame, &self.pp_log);
         if frame.format() != Pixel::D3D11 {
             let layout = SystemLayout::of(frame.format())
                 .ok_or(D3d11RendererError::UnsupportedFormat(frame.format()))?;
             return self
                 .presenter
-                .show_system(frame, layout)
+                .show_system(frame, layout, orientation)
                 .map_err(D3d11RendererError::Submit);
         }
         let picture = check_d3d11_frame(frame, &self.presenter.device)?;
         self.presenter
-            .show(&picture, frame)
+            .show(&picture, frame, orientation)
             .map_err(D3d11RendererError::Submit)
     }
 }
@@ -349,6 +358,9 @@ struct WindowPresenter {
     /// The three rows the YUV shaders turn Y'CbCr into R'G'B' with,
     /// written from each frame's own colour description.
     colour: ID3D11Buffer,
+    /// The two rows the vertex stage reads each point shown from the
+    /// stored picture by, written from each frame's orientation.
+    turn: ID3D11Buffer,
     hwnd: isize,
     /// Set once a call reports the device removed, after which every draw
     /// fails fast rather than touching the GPU again.
@@ -358,6 +370,10 @@ struct WindowPresenter {
     /// before it is presented, for a test to check the colour it came out.
     #[cfg(test)]
     probe: Arc<Mutex<Option<[u8; 4]>>>,
+    /// Where in the window that pixel is, as fractions of it: its centre
+    /// unless a test says otherwise.
+    #[cfg(test)]
+    probe_at: Arc<Mutex<[f32; 2]>>,
     /// Last, so the swap chain above is released before the window goes.
     _keep: Keep,
 }
@@ -495,6 +511,19 @@ impl WindowPresenter {
                     Some(&mut colour),
                 )
                 .map_err(present)?;
+            let mut turn = None;
+            device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: size_of::<[[f32; 4]; 2]>() as u32,
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                        ..Default::default()
+                    },
+                    None,
+                    Some(&mut turn),
+                )
+                .map_err(present)?;
             let missing = || {
                 present(windows::core::Error::from(
                     windows::Win32::Foundation::E_POINTER,
@@ -509,6 +538,7 @@ impl WindowPresenter {
                 yuv420p_pixel_shader: yuv420p_pixel_shader.ok_or_else(missing)?,
                 sampler: sampler.ok_or_else(missing)?,
                 colour: colour.ok_or_else(missing)?,
+                turn: turn.ok_or_else(missing)?,
                 hwnd: hwnd.0 as isize,
                 device_lost: AtomicBool::new(false),
                 state: Mutex::new(PresentState {
@@ -521,6 +551,8 @@ impl WindowPresenter {
                 }),
                 #[cfg(test)]
                 probe: Arc::default(),
+                #[cfg(test)]
+                probe_at: Arc::new(Mutex::new([0.5, 0.5])),
                 _keep: keep,
             })
         }
@@ -567,14 +599,16 @@ impl WindowPresenter {
     }
 
     /// Binds, draws the frame letterboxed into the window, and presents — the
-    /// whole sequence under the shared context's lock.
+    /// whole sequence under the shared context's lock. A `frame_width` by
+    /// `frame_height` picture is shown turned as `orientation` says, at the
+    /// size it is shown at.
     fn draw(
         &self,
         pixel_shader: &ID3D11PixelShader,
         planes: Planes<'_>,
         colour: Option<[[f32; 4]; 3]>,
-        frame_width: u32,
-        frame_height: u32,
+        (frame_width, frame_height): (u32, u32),
+        orientation: Orientation,
     ) -> std::result::Result<(), SubmitError> {
         // What a measured presentation delay counts from: the moment the frame
         // is handed over, which is what a synchronizer schedules.
@@ -607,7 +641,9 @@ impl WindowPresenter {
             Planes::System(frame, layout) => self.upload(&mut state, &context, frame, layout)?,
         };
         let planes = planes.as_slice();
-        let viewport = letterbox(frame_width, frame_height, state.width, state.height);
+        let (shown_width, shown_height) = orientation.display_size(frame_width, frame_height);
+        let viewport = letterbox(shown_width, shown_height, state.width, state.height);
+        let turn = orientation.uv_rows();
         let scissor = RECT {
             left: 0,
             top: 0,
@@ -632,6 +668,8 @@ impl WindowPresenter {
             context.RSSetViewports(Some(&[viewport]));
             context.RSSetScissorRects(Some(&[scissor]));
             context.VSSetShader(&self.vertex_shader, None);
+            context.UpdateSubresource(&self.turn, 0, None, turn.as_ptr().cast(), 0, 0);
+            context.VSSetConstantBuffers(0, Some(&[Some(self.turn.clone())]));
             context.PSSetShader(pixel_shader, None);
             context.PSSetShaderResources(0, Some(planes));
             context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
@@ -644,6 +682,7 @@ impl WindowPresenter {
             // frame's texture is not held by leftover state.
             context.PSSetShaderResources(0, Some(&vec![None; planes.len()]));
             context.PSSetConstantBuffers(0, Some(&[None]));
+            context.VSSetConstantBuffers(0, Some(&[None]));
             context.OMSetRenderTargets(None, None);
         }
         #[cfg(test)]
@@ -697,7 +736,9 @@ impl WindowPresenter {
             let (Ok(()), Some(staging)) = (made, staging) else {
                 return;
             };
-            let (x, y) = (state.width / 2, state.height / 2);
+            let [x, y] = *self.probe_at.lock().unwrap();
+            let at = |fraction: f32, size: u32| ((fraction * size as f32) as u32).min(size - 1);
+            let (x, y) = (at(x, state.width), at(y, state.height));
             context.CopySubresourceRegion(
                 &staging,
                 0,
@@ -771,6 +812,7 @@ impl WindowPresenter {
         &self,
         picture: &D3d11Picture,
         frame: &ffmpeg::frame::Video,
+        orientation: Orientation,
     ) -> std::result::Result<(), SubmitError> {
         let (width, height) = (frame.width(), frame.height());
         self.usable(width, height)?;
@@ -781,8 +823,8 @@ impl WindowPresenter {
                 &self.bgra_pixel_shader,
                 Planes::Views(vec![bgra]),
                 None,
-                width,
-                height,
+                (width, height),
+                orientation,
             );
         }
         // One NV12 texture read as two planes: the view's format picks which.
@@ -792,8 +834,8 @@ impl WindowPresenter {
             &self.nv12_pixel_shader,
             Planes::Views(vec![luma, chroma]),
             Some(colour_rows(frame)),
-            width,
-            height,
+            (width, height),
+            orientation,
         )
     }
 
@@ -804,6 +846,7 @@ impl WindowPresenter {
         &self,
         frame: &ffmpeg::frame::Video,
         layout: SystemLayout,
+        orientation: Orientation,
     ) -> std::result::Result<(), SubmitError> {
         let (width, height) = (frame.width(), frame.height());
         self.usable(width, height)?;
@@ -813,7 +856,13 @@ impl WindowPresenter {
             SystemLayout::Yuv420p => (&self.yuv420p_pixel_shader, Some(colour_rows(frame))),
             SystemLayout::Bgra => (&self.bgra_pixel_shader, None),
         };
-        self.draw(shader, Planes::System(frame, layout), colour, width, height)
+        self.draw(
+            shader,
+            Planes::System(frame, layout),
+            colour,
+            (width, height),
+            orientation,
+        )
     }
 
     /// Uploads `frame`'s planes into textures made for its layout and size
@@ -1208,6 +1257,11 @@ mod tests {
     /// Draws `frame` — through a `D3d11Upload` first, or as it is — and
     /// reads back the centre of the window.
     fn drawn(gpu: &D3d11Gpu, frame: MediaBuffer, upload: bool) -> Option<[u8; 3]> {
+        drawn_at(gpu, frame, upload, [0.5, 0.5])
+    }
+
+    /// What `frame` comes out as at `at`, fractions of the window.
+    fn drawn_at(gpu: &D3d11Gpu, frame: MediaBuffer, upload: bool, at: [f32; 2]) -> Option<[u8; 3]> {
         let (renderer, _events) = match D3d11WindowRenderer::open(
             "screen",
             gpu,
@@ -1224,6 +1278,7 @@ mod tests {
             }
         };
         let probe = renderer.probe();
+        *renderer.presenter.probe_at.lock().unwrap() = at;
         let (source, handle) = AppSource::new("frames", 4);
         let (pipeline, ()) = Pipeline::new("window-colour", source, |source, ctx| {
             let branch = if upload {
@@ -1252,6 +1307,80 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         let [r, g, b, _] = probe.lock().unwrap().expect("the frame was drawn");
         Some([r, g, b])
+    }
+
+    /// A picture 64 by 32, its left half red and its right half blue,
+    /// stored as `orientation` says it is shown.
+    fn halves(orientation: crate::orientation::Orientation) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, 64, 32);
+        let stride = frame.stride(0);
+        for (n, pixel) in frame
+            .data_mut(0)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            *pixel = if n % (stride / 4) < 32 {
+                [0, 0, 255, 255]
+            } else {
+                [255, 0, 0, 255]
+            };
+        }
+        frame.set_pts(Some(0));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+        orientation.mark(&mut frame);
+        MediaBuffer::video(frame)
+    }
+
+    /// A phone's portrait recording, stored on its side, is shown upright:
+    /// the side of it that is stored on the left is shown at the top when
+    /// it is turned a quarter clockwise, at the bottom a quarter the other
+    /// way, and on the left when it is not turned — uploaded or handed
+    /// over in system memory alike.
+    #[test]
+    fn a_turned_picture_is_shown_upright() {
+        use crate::orientation::{Orientation, Rotation};
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        const RED: [u8; 3] = [255, 0, 0];
+        const BLUE: [u8; 3] = [0, 0, 255];
+        let cases = [
+            (Orientation::UPRIGHT, [0.25, 0.5], RED),
+            (Orientation::UPRIGHT, [0.75, 0.5], BLUE),
+            (
+                Orientation::rotated(Rotation::Clockwise90),
+                [0.5, 0.25],
+                RED,
+            ),
+            (
+                Orientation::rotated(Rotation::Clockwise90),
+                [0.5, 0.75],
+                BLUE,
+            ),
+            (
+                Orientation::rotated(Rotation::Clockwise270),
+                [0.5, 0.25],
+                BLUE,
+            ),
+            (
+                Orientation::rotated(Rotation::Clockwise270),
+                [0.5, 0.75],
+                RED,
+            ),
+        ];
+        for upload in [false, true] {
+            for (orientation, at, expected) in cases {
+                let Some(got) = drawn_at(&gpu, halves(orientation), upload, at) else {
+                    return;
+                };
+                assert!(
+                    near(got, expected),
+                    "{orientation:?} at {at:?}, upload={upload}: {got:?}, not {expected:?}"
+                );
+            }
+        }
     }
 
     fn near(got: [u8; 3], expected: [u8; 3]) -> bool {

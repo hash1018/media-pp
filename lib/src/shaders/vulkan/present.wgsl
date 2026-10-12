@@ -10,6 +10,9 @@
 // each drawn with their own coefficients rather than one of them with the
 // other's. They are three affine rows from `color::yuv_to_rgb_rows`, the
 // same the D3D renderers use; see `Colour` in `vulkan_window_renderer.rs`.
+// After them come two more, which the vertex stage reads each point shown
+// from the stored picture by, so that a phone's portrait recording, stored
+// on its side, is shown upright (`Orientation::uv_rows`).
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -26,20 +29,25 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
     // this pipeline draws through an ordinary positive-height Vulkan
     // viewport, whose framebuffer y grows downward. Without the flip the
     // picture is upside down.
-    out.uv = vec2<f32>(x, 1.0 - y);
+    let shown = vec3<f32>(x, 1.0 - y, 1.0);
+    out.uv = vec2<f32>(dot(constants.u_row.xyz, shown), dot(constants.v_row.xyz, shown));
     out.pos = vec4<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
     return out;
 }
 
-// Each row turns (Y, Cb, Cr, 1), every sample normalized to 0..1, into one
-// of R, G and B: range and matrix both, offsets in the fourth column.
-struct Colour {
+// Each of `r`, `g` and `b` turns (Y, Cb, Cr, 1), every sample normalized to
+// 0..1, into one of R, G and B: range and matrix both, offsets in the fourth
+// column. `u_row` and `v_row` give a point of the stored picture from one
+// shown, (u, v, 1) dotted with each.
+struct Constants {
     r: vec4<f32>,
     g: vec4<f32>,
     b: vec4<f32>,
+    u_row: vec4<f32>,
+    v_row: vec4<f32>,
 };
 
-var<immediate> colour: Colour;
+var<immediate> constants: Constants;
 
 @group(0) @binding(0) var frame_sampler: sampler;
 @group(0) @binding(1) var plane0: texture_2d<f32>;
@@ -48,7 +56,7 @@ var<immediate> colour: Colour;
 
 fn to_rgb(luma: f32, cb: f32, cr: f32) -> vec4<f32> {
     let yuv = vec4<f32>(luma, cb, cr, 1.0);
-    let rgb = vec3<f32>(dot(colour.r, yuv), dot(colour.g, yuv), dot(colour.b, yuv));
+    let rgb = vec3<f32>(dot(constants.r, yuv), dot(constants.g, yuv), dot(constants.b, yuv));
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 

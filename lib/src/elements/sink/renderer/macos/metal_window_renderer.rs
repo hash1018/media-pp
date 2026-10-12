@@ -30,6 +30,7 @@ use crate::{
         sink::renderer::presentation_delay::PresentationDelay,
     },
     error::Result,
+    orientation::{Orientation, Orientations},
     platform::macos::{
         metal::{Kernel, MetalGpu, Texture, write_texture},
         pixel_buffer::PixelBuffer,
@@ -132,6 +133,8 @@ pub struct MetalWindowRenderer {
     presenter: Presenter,
     /// `Some` for a window it opened itself.
     control: Option<WindowControl>,
+    /// Which way up each picture is shown, read from the picture.
+    orientations: Orientations,
 }
 
 impl MetalWindowRenderer {
@@ -210,6 +213,7 @@ impl MetalWindowRenderer {
             pp_log,
             presenter,
             control,
+            orientations: Orientations::default(),
         }
     }
 }
@@ -283,8 +287,9 @@ impl RawSink for MetalWindowRenderer {
         let MediaBuffer::Video(frame) = buf else {
             return Ok(());
         };
+        let orientation = self.orientations.of(&frame, &self.pp_log);
         self.presenter
-            .draw(&frame)
+            .draw(&frame, orientation)
             .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
         if let Some((width, height)) = self.presenter.resized.take() {
             pp_debug!(self, "drawing at {width}x{height}");
@@ -358,14 +363,17 @@ struct Present {
     picture: [i32; 4],
     uv: [f32; 4],
     rows: [[f32; 4]; 3],
+    /// `Orientation::uv_rows`: where a point shown is stored.
+    turn: [[f32; 4]; 2],
 }
 
 impl Present {
-    fn bytes(&self) -> [u8; 80] {
-        let mut bytes = [0u8; 80];
+    fn bytes(&self) -> [u8; 112] {
+        let mut bytes = [0u8; 112];
         let words = self.picture.iter().map(|value| value.to_ne_bytes()).chain(
             std::iter::once(&self.uv)
                 .chain(&self.rows)
+                .chain(&self.turn)
                 .flatten()
                 .map(|value| value.to_ne_bytes()),
         );
@@ -444,10 +452,12 @@ impl Presenter {
         })
     }
 
-    /// Draws `frame` into the next drawable, letterboxed, and presents it.
+    /// Draws `frame` into the next drawable, letterboxed and turned as
+    /// `orientation` says, and presents it.
     fn draw(
         &mut self,
         frame: &ffmpeg::frame::Video,
+        orientation: Orientation,
     ) -> std::result::Result<(), MetalWindowRendererError> {
         if let Some(measured) = self.measured.lock().ok().and_then(|mut slot| slot.take()) {
             self.delay.record(measured);
@@ -491,7 +501,8 @@ impl Presenter {
         };
         let target = drawable.texture();
 
-        let picture = letterbox(frame.width(), frame.height(), width, height);
+        let (shown_width, shown_height) = orientation.display_size(frame.width(), frame.height());
+        let picture = letterbox(shown_width, shown_height, width, height);
         let rows = match layout {
             Layout::Bgra => [[0.0; 4]; 3],
             Layout::Nv12 | Layout::Yuv420p => {
@@ -513,6 +524,7 @@ impl Presenter {
                 0.0,
             ],
             rows,
+            turn: orientation.uv_rows(),
         };
         let kernel = match layout {
             Layout::Nv12 => &self.nv12,
@@ -694,7 +706,7 @@ mod tests {
     }
 
     /// The shader's `Present` is laid out as the bytes say: the rectangle,
-    /// then the scale, then the three rows.
+    /// then the scale, then the three rows, then the two that turn it.
     #[test]
     fn present_is_laid_out_as_the_shader_reads_it() {
         let bytes = Present {
@@ -705,6 +717,7 @@ mod tests {
                 [0.0, 1.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 0.0],
             ],
+            turn: [[0.0, 1.0, 0.0, 0.0], [-1.0, 0.0, 1.0, 0.0]],
         }
         .bytes();
         assert_eq!(&bytes[..4], &1i32.to_ne_bytes());
@@ -712,5 +725,8 @@ mod tests {
         assert_eq!(&bytes[16..20], &0.5f32.to_ne_bytes());
         assert_eq!(&bytes[32..36], &1.0f32.to_ne_bytes());
         assert_eq!(&bytes[72..76], &1.0f32.to_ne_bytes());
+        assert_eq!(&bytes[84..88], &1.0f32.to_ne_bytes());
+        assert_eq!(&bytes[96..100], &(-1.0f32).to_ne_bytes());
+        assert_eq!(&bytes[104..108], &1.0f32.to_ne_bytes());
     }
 }

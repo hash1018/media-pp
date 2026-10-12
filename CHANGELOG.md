@@ -259,6 +259,18 @@ compile error with no explanation.
 
 ### Added
 
+- **The window renderers show a phone's portrait recording upright.**
+  `D3d11WindowRenderer`, `D3d12WindowRenderer`, `VulkanWindowRenderer` and
+  `MetalWindowRenderer` — and so `VideoWindow` and `Player` — read each
+  picture's display matrix (`Orientation::of`), fit the window to the
+  picture as it is shown, and sample it turned. The elements that make a
+  picture anew with their own frame rather than FFmpeg's copy of its
+  properties — `SwScaler`, `D3d11Upload`, `D3d11Scaler`, `D3d11Download`,
+  the D3D11 tone map, chroma key and video effect, and the software chroma
+  key and video effect — carry the matrix on, where before a picture
+  through them was taken as stored. On Windows each of a quarter turn
+  either way and none is drawn and read back; Metal is not run here.
+
 - **`for_stream` on `CudaEncoder`, `SwEncoder` and `VideoToolboxEncoder`
   keeps an HDR10 file's mastering display and light levels.** Re-encoding
   a PQ file's pictures, the encoder takes what the source stream says:
@@ -450,7 +462,7 @@ compile error with no explanation.
   - `cuda_detect`, `cuda_track`, `metal_detect` and `transcode` keep the
     file's orientation in what they record.
 
-  The renderers and `Player` do not turn pictures yet.
+  The window renderers came later, in an entry of their own.
 
 - **An element of your own can work on CUDA pictures without them
   leaving the GPU.** `CudaSurfaceView::new(&device, &frame)` asks of a
