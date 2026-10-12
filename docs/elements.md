@@ -56,7 +56,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
 - **Analysis**: `SwOrtDetector`, `CudaOrtDetector` and `MetalOrtDetector`,
   filters that put what a YOLO model, a RetinaFace face detector — whose
-  faces carry their eyes, nose and mouth as landmarks — or a model of the
+  faces carry their eyes, nose and mouth as landmarks — a DETR-family
+  detector (D-FINE, RT-DETR, RF-DETR, `DetectorModel::Detr`) or a model of the
   application's own, read by its `DetectorDecoder`, finds on each picture
   as `Detections` metadata, in overlapping tiles too where small ones must
   be found (`Tiles`, those worth looking in picked picture by picture by a

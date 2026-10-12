@@ -259,6 +259,19 @@ compile error with no explanation.
 
 ### Added
 
+- **DETR-family detectors in every ORT detector (`DetectorModel::Detr`).**
+  D-FINE, RT-DETR and RF-DETR as transformers exports them: `logits`, each
+  class's logit for each of the queries, and `pred_boxes`, each box's
+  centre and size as fractions of the input — by those names or by their
+  shapes. Each query is its best class at that logit's sigmoid; the input
+  is filled as the variant's `ModelInput` says (RGB from 0 to 1 for D-FINE
+  and RT-DETR, less ImageNet's mean and over its deviation for RF-DETR).
+  These are Apache-2.0 detectors where Ultralytics' YOLO is AGPL. On an
+  RTX 3050 through TensorRT, D-FINE nano runs a 1080p file at 255 pictures
+  a second where YOLO11n runs 375, decode included; it scores the same
+  people lower than YOLO does — a person YOLO scores 0.5 at about 0.19 —
+  so thresholds tuned to YOLO need tuning anew.
+
 - **A hidden box can fade into the picture (`Hiding::feather`).** From the
   edge of the box, or of the ellipse inside it, the mosaic, blur or fill
   is mixed over what was there less and less toward the edge, by a smooth

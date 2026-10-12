@@ -20,6 +20,7 @@ use crate::ffmpeg;
 mod classify;
 #[cfg(feature = "ort-cuda")]
 mod cuda;
+mod detr;
 mod embed;
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 mod metal;

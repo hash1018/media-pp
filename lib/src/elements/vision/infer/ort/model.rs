@@ -12,7 +12,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::{OrtDetectorOptions, OrtError, retinaface, retinaface::RetinaFace, yolo::Yolo};
+use super::{
+    OrtDetectorOptions, OrtError, detr::Detr, retinaface, retinaface::RetinaFace, yolo::Yolo,
+};
 use crate::buffer::Metadata;
 use crate::elements::Detection;
 use crate::orientation::Orientation;
@@ -39,6 +41,30 @@ pub enum DetectorModel {
     /// the corners of the mouth, as the model orders them. Duplicates are
     /// suppressed by [`OrtDetectorOptions::iou_threshold`].
     RetinaFace,
+    /// A detector of the DETR family as transformers exports one — D-FINE,
+    /// RT-DETR, RF-DETR: one input, filled as `input` says, and two outputs
+    /// of a row per query, each class's logit (`[batch, queries, classes]`)
+    /// and the box's centre and size as fractions of the input
+    /// (`[batch, queries, 4]`), named `logits` and `pred_boxes` or told
+    /// apart by their shapes. Each query is its best class, scored by that
+    /// logit's sigmoid, as these models score each class on their own;
+    /// [`OrtDetectorOptions::labels`] names the classes by the model's own
+    /// numbering, which for RF-DETR's COCO is the dataset's ids, a person
+    /// 1, where D-FINE's and RT-DETR's count from 0. The models need no
+    /// suppression of duplicates; boxes are suppressed by
+    /// [`OrtDetectorOptions::iou_threshold`] all the same, where the tiles
+    /// of a picture find one object twice.
+    ///
+    /// D-FINE and RT-DETR take RGB from 0 to 1, `ModelInput::default()`;
+    /// RF-DETR takes it less ImageNet's mean and over its deviation. The
+    /// exports leave the input's height and width open, which a detector
+    /// takes for 640 — an export fixed to its own size is needed for any
+    /// other, as RF-DETR nano's 384. Their scores sit lower than YOLO's for
+    /// the same object: thresholds tuned to a YOLO model need tuning anew.
+    Detr {
+        /// The values the model wants.
+        input: ModelInput,
+    },
     /// A model this crate does not read: its input filled as `input` says,
     /// and its output read by `decoder`.
     Custom {
@@ -54,6 +80,7 @@ impl fmt::Debug for DetectorModel {
         match self {
             Self::Yolo => f.write_str("Yolo"),
             Self::RetinaFace => f.write_str("RetinaFace"),
+            Self::Detr { input } => f.debug_struct("Detr").field("input", input).finish(),
             Self::Custom { input, decoder } => f
                 .debug_struct("Custom")
                 .field("input", input)
@@ -69,6 +96,7 @@ impl PartialEq for DetectorModel {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Yolo, Self::Yolo) | (Self::RetinaFace, Self::RetinaFace) => true,
+            (Self::Detr { input }, Self::Detr { input: other }) => input == other,
             (
                 Self::Custom { input, decoder },
                 Self::Custom {
@@ -87,7 +115,7 @@ impl DetectorModel {
         match self {
             Self::Yolo => ModelInput::default(),
             Self::RetinaFace => retinaface::INPUT,
-            Self::Custom { input, .. } => *input,
+            Self::Detr { input } | Self::Custom { input, .. } => *input,
         }
     }
 
@@ -97,6 +125,7 @@ impl DetectorModel {
         match self {
             Self::Yolo => Arc::new(Yolo),
             Self::RetinaFace => Arc::new(RetinaFace::new(input)),
+            Self::Detr { .. } => Arc::new(Detr),
             Self::Custom { decoder, .. } => Arc::clone(decoder),
         }
     }
