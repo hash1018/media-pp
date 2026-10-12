@@ -267,8 +267,11 @@ compile error with no explanation.
   tone-maps by. `FileMuxer` writes them beside the track (`mdcv`, `clli`)
   from the encoder's parameters, and NVENC and `libsvtav1` into the
   bitstream too; FFmpeg's VideoToolbox encoder does not. Before, they
-  were dropped, and each player guessed. Dolby Vision's per-scene
-  metadata is still not kept.
+  were dropped, and each player guessed. A PQ file whose container keeps
+  neither, its bitstream does, has them read from its first picture when
+  `FileDemuxer` opens it — decoded in software, that stream only — so its
+  `StreamInfo` says them as one whose container kept them would. Dolby
+  Vision's per-scene metadata is still not kept.
 
 - **DETR-family detectors in every ORT detector (`DetectorModel::Detr`).**
   D-FINE, RT-DETR and RF-DETR as transformers exports them: `logits`, each

@@ -1464,7 +1464,7 @@ pub(crate) fn assert_hdr10_kept(
 /// each of the ten rationals within a hundredth of a percent, the two flags
 /// alike. Compared by value, since each codec gives them back in its own
 /// units — HEVC's SEI in 50000ths of a coordinate, AV1's in 65536ths.
-fn assert_same_display(actual: Option<Vec<u8>>, expected: Option<Vec<u8>>, what: &str) {
+pub(crate) fn assert_same_display(actual: Option<Vec<u8>>, expected: Option<Vec<u8>>, what: &str) {
     let values = |bytes: &[u8]| -> Vec<f64> {
         let ints: Vec<i32> = bytes
             .as_chunks::<4>()
@@ -1499,4 +1499,28 @@ fn assert_same_display(actual: Option<Vec<u8>>, expected: Option<Vec<u8>>, what:
             if expected.is_some() { "one" } else { "none" }
         ),
     }
+}
+
+/// What `parameters` keep of HDR10 beside a track: the mastering display
+/// and the light levels, as FFmpeg keeps their bytes.
+pub(crate) fn hdr10_beside(
+    parameters: &ffmpeg_next::codec::Parameters,
+) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    use ffmpeg_next::ffi::AVPacketSideDataType as Kind;
+    // SAFETY: the parameters are borrowed; an entry's `data` is `size`
+    // bytes by FFmpeg's definition.
+    let read = |kind| unsafe {
+        let raw = parameters.as_ptr();
+        let entry = ffmpeg_next::ffi::av_packet_side_data_get(
+            (*raw).coded_side_data,
+            (*raw).nb_coded_side_data,
+            kind,
+        );
+        (!entry.is_null())
+            .then(|| std::slice::from_raw_parts((*entry).data, (*entry).size).to_vec())
+    };
+    (
+        read(Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA),
+        read(Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL),
+    )
 }

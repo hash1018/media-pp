@@ -307,6 +307,10 @@ struct Demuxing {
     pp_log: PpLog,
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
+    /// Every stream as `open` said it, by index — an HDR10 stream's light
+    /// read from its bitstream where its container keeps none — which
+    /// `best` hands out too.
+    streams: Vec<StreamInfo>,
     /// What each stream's output declares, by stream index.
     contracts: Vec<OutputContract>,
     /// Packets read but not yet handed on, in file order: what a seek read
@@ -423,6 +427,63 @@ fn duration_ns(duration: Duration) -> i64 {
     duration.as_nanos().min(i64::MAX as u128) as i64
 }
 
+/// How many of a stream's packets are read looking for its first picture.
+const HDR10_PROBE_PACKETS: usize = 64;
+
+/// Where `stream` is PQ and its container keeps neither its mastering
+/// display nor its light levels, reads them from its first picture —
+/// HEVC's SEI, AV1's metadata — decoded in software from a reading of the
+/// file of its own, and puts them in its parameters as a container keeps
+/// them. So an encoder opened `for_stream` says them again, and a copy of
+/// the stream keeps them beside its track. Whether any were found; no other
+/// stream is read, and a stream that cannot be decoded here goes without.
+fn hdr10_from_bitstream(path: &Path, stream: &mut StreamInfo) -> bool {
+    use crate::color::HdrMetadata;
+    // SAFETY: a plain field of parameters the stream owns.
+    let transfer = unsafe { (*stream.parameters.as_ptr()).color_trc };
+    if stream.kind != ffmpeg::media::Type::Video
+        || transfer != ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
+        || !HdrMetadata::of(&stream.parameters).is_empty()
+    {
+        return false;
+    }
+    let Ok(mut input) = ffmpeg::format::input(path) else {
+        return false;
+    };
+    let Ok(mut decoder) =
+        ffmpeg::codec::context::Context::from_parameters(stream.parameters.clone())
+            .and_then(|context| context.decoder().video())
+    else {
+        return false;
+    };
+    let mut picture = ffmpeg::frame::Video::empty();
+    let mut decoded = false;
+    let mut sent = 0;
+    for (read, packet) in input.packets() {
+        if read.index() != stream.index {
+            continue;
+        }
+        if decoder.send_packet(&packet).is_ok() && decoder.receive_frame(&mut picture).is_ok() {
+            decoded = true;
+            break;
+        }
+        sent += 1;
+        if sent >= HDR10_PROBE_PACKETS {
+            break;
+        }
+    }
+    if !decoded {
+        // A decoder that holds pictures back hands over the first now.
+        decoded = decoder.send_eof().is_ok() && decoder.receive_frame(&mut picture).is_ok();
+    }
+    let hdr = HdrMetadata::of_picture(&picture);
+    if !decoded || hdr.is_empty() {
+        return false;
+    }
+    hdr.add_to(&mut stream.parameters);
+    true
+}
+
 impl FileDemuxer {
     /// Opens the file and returns it alongside every stream it contains,
     /// so the caller can inspect them (count, media type, ...) before
@@ -438,12 +499,17 @@ impl FileDemuxer {
             source,
         })?;
 
-        let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
+        let mut streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
         if streams.is_empty() {
             return Err(FileDemuxerError::NoStreams {
                 path: path.as_ref().to_path_buf(),
             });
         }
+        let hdr10_read = streams
+            .iter_mut()
+            .map(|stream| hdr10_from_bitstream(path.as_ref(), stream))
+            .filter(|&read| read)
+            .count();
 
         // Per stream, from the medium the container announced: every output
         // hands on `MediaBuffer::Packet`, so only this tells an audio stream
@@ -466,11 +532,18 @@ impl FileDemuxer {
             path.as_ref().display(),
             streams.len()
         );
+        if hdr10_read > 0 {
+            pp_info!(
+                pp_log: &pp_log,
+                "HDR10 mastering display and light levels read from the first picture of {hdr10_read} stream(s)"
+            );
+        }
         Ok((
             Self(SourceStage::new(Demuxing {
                 name,
                 pp_log,
                 input,
+                streams: streams.clone(),
                 contracts,
                 ahead: VecDeque::new(),
                 linked: None,
@@ -516,12 +589,12 @@ impl FileDemuxer {
     /// FFmpeg's own choice (`av_find_best_stream`) passes over a stream marked
     /// as an attached picture and prefers one with more than a single frame.
     pub fn best(&self, kind: ffmpeg::media::Type) -> Result<StreamInfo, FileDemuxerError> {
-        self.0
-            .inner()
+        let demuxing = self.0.inner();
+        demuxing
             .input
             .streams()
             .best(kind)
-            .map(|stream| StreamInfo::of(&stream))
+            .and_then(|stream| demuxing.streams.get(stream.index()).cloned())
             .ok_or(FileDemuxerError::NoStream(kind))
     }
 
@@ -1179,6 +1252,117 @@ fn ts_to_duration(ts: i64, time_base: ffmpeg::Rational) -> Duration {
 mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A PQ file whose container keeps no HDR10 light, its bitstream does:
+    /// opened, its stream says the mastering display and light levels as
+    /// one whose container kept them would — `best` the same — and a file
+    /// whose container keeps them is not read for them.
+    #[test]
+    fn a_pq_stream_whose_container_keeps_no_hdr10_says_what_its_bitstream_does() {
+        use crate::element::{RawSink, SrcPads};
+        use crate::elements::{FileMuxer, SwEncoder, SwEncoderOptions, TrackFormat, VideoCodec};
+        use crate::test_support::{assert_same_display, hdr10_beside, hdr10_source};
+        use ffmpeg_next::ffi::AVPacketSideDataType as Kind;
+        if ffmpeg::decoder::find_by_name("libdav1d").is_none() {
+            eprintln!("skipping: no libdav1d to read the AV1 with");
+            return;
+        }
+        let source = hdr10_source(true);
+        let (width, height) = (320u32, 240u32);
+        for beside in [false, true] {
+            let mut encoder = match SwEncoder::for_stream(
+                "encoder",
+                SwEncoderOptions {
+                    codec: VideoCodec::Svtav1,
+                    width,
+                    height,
+                    pixel_format: ffmpeg::format::Pixel::YUV420P10LE,
+                    frame_rate: ffmpeg::Rational::new(30, 1),
+                    bit_rate: 500_000,
+                    gop_size: 30,
+                    max_b_frames: None,
+                },
+                &source.stream,
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    eprintln!("skipping: no 10-bit libsvtav1 in this build ({error})");
+                    return;
+                }
+            };
+            // The track as the encoder made it, less what its container
+            // would keep beside it unless `beside`.
+            let mut parameters = encoder.parameters();
+            if !beside {
+                // SAFETY: the parameters are this test's own.
+                unsafe {
+                    let raw = parameters.as_mut_ptr();
+                    for kind in [
+                        Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+                        Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+                    ] {
+                        ffmpeg::ffi::av_packet_side_data_remove(
+                            (*raw).coded_side_data,
+                            &mut (*raw).nb_coded_side_data,
+                            kind,
+                        );
+                    }
+                }
+            }
+            let path = std::env::temp_dir().join(format!("media-pp-pq-beside-{beside}.mp4"));
+            let mut muxer = FileMuxer::create(&path).expect("create");
+            let track = muxer
+                .add_stream("video", TrackFormat::new(parameters, encoder.time_base()))
+                .expect("add");
+            let sink = muxer.open().expect("header").take(track).expect("track");
+            encoder.src_pads()[0].link(sink.into_raw());
+            for index in 0..5i64 {
+                let mut frame =
+                    ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P10LE, width, height);
+                for plane in 0..frame.planes() {
+                    frame.data_mut(plane).fill(0x01);
+                }
+                frame.set_pts(Some(index));
+                crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+                encoder
+                    .consume(crate::buffer::MediaBuffer::video(frame))
+                    .expect("encode");
+            }
+            crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos");
+            drop(encoder);
+
+            let kept = {
+                let input = ffmpeg::format::input(&path).expect("reopen");
+                let stream = input
+                    .streams()
+                    .best(ffmpeg::media::Type::Video)
+                    .expect("video");
+                hdr10_beside(&stream.parameters())
+            };
+            assert_eq!(
+                kept.0.is_some(),
+                beside,
+                "beside={beside}: the container as made"
+            );
+            let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
+            let best = demuxer.best(ffmpeg::media::Type::Video).expect("best");
+            for (said, what) in [(&streams[0], "open"), (&best, "best")] {
+                let (mastering, light) = hdr10_beside(&said.parameters);
+                assert_same_display(
+                    mastering,
+                    Some(source.mastering.clone()),
+                    &format!("beside={beside}, {what}: the mastering display"),
+                );
+                assert_eq!(
+                    light,
+                    Some(source.light.clone()),
+                    "beside={beside}, {what}: the light levels"
+                );
+            }
+            drop(demuxer);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 
     /// A video stream says its size and rate, what re-encoding it needs; a
     /// sound stream says neither.

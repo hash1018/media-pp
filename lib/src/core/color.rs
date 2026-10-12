@@ -156,6 +156,63 @@ impl HdrMetadata {
         }
     }
 
+    /// What a decoded picture carries of it — from its bitstream (HEVC's
+    /// SEI, AV1's metadata), or from its container through the decoder.
+    pub(crate) fn of_picture(picture: &ffmpeg_next::frame::Video) -> Self {
+        use ffmpeg_next::ffi::AVFrameSideDataType as Kind;
+        // SAFETY: the picture is borrowed; an entry's `data` is `size`
+        // bytes by FFmpeg's definition.
+        let read = |kind| unsafe {
+            let entry = ffmpeg_next::ffi::av_frame_get_side_data(picture.as_ptr(), kind);
+            (!entry.is_null() && (*entry).size > 0)
+                .then(|| std::slice::from_raw_parts((*entry).data, (*entry).size).into())
+        };
+        Self {
+            mastering_display: read(Kind::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA),
+            content_light: read(Kind::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL),
+        }
+    }
+
+    /// Writes into `parameters` whichever of the two they do not carry
+    /// already, as a container keeps them beside a track.
+    pub(crate) fn add_to(&self, parameters: &mut ffmpeg_next::codec::Parameters) {
+        use ffmpeg_next::ffi::AVPacketSideDataType as Kind;
+        let has = Self::of(parameters);
+        for (kind, bytes, there) in [
+            (
+                Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+                &self.mastering_display,
+                has.mastering_display.is_some(),
+            ),
+            (
+                Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+                &self.content_light,
+                has.content_light.is_some(),
+            ),
+        ] {
+            let Some(bytes) = bytes.as_ref().filter(|_| !there) else {
+                continue;
+            };
+            // SAFETY: the parameters are borrowed mutably; FFmpeg's
+            // side-data functions keep the list and its count in step, and a
+            // new entry's `data` is the `size` bytes asked for. Where it
+            // cannot allocate, the stream goes on without it.
+            unsafe {
+                let raw = parameters.as_mut_ptr();
+                let entry = ffmpeg_next::ffi::av_packet_side_data_new(
+                    &mut (*raw).coded_side_data,
+                    &mut (*raw).nb_coded_side_data,
+                    kind,
+                    bytes.len(),
+                    0,
+                );
+                if !entry.is_null() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*entry).data, bytes.len());
+                }
+            }
+        }
+    }
+
     /// Whether there is any of it.
     pub(crate) fn is_empty(&self) -> bool {
         self.mastering_display.is_none() && self.content_light.is_none()
