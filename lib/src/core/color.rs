@@ -115,6 +115,98 @@ impl ColorDescription {
     }
 }
 
+/// What an HDR10 stream says of the light it was made for, beside its
+/// colour: the mastering display (its primaries, white point and
+/// luminance range) and the content light levels (the brightest pixel and
+/// the brightest picture on average). A PQ picture's numbers are absolute
+/// light, and a display dimmer than the master tone-maps them by these;
+/// without them each display guesses, and highlights clip or the picture
+/// dims differently on each. HLG needs neither and seldom carries them.
+///
+/// Kept as the bytes FFmpeg keeps them in — the same structures as packet
+/// side data on a stream and as frame side data on an encoder — and copied
+/// across whole, so that nothing here mirrors their layout by hand.
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HdrMetadata {
+    mastering_display: Option<Box<[u8]>>,
+    content_light: Option<Box<[u8]>>,
+}
+
+#[cfg(feature = "cuda")]
+impl HdrMetadata {
+    /// What a stream's parameters carry of it — none of either where they
+    /// carry nothing, as a container that keeps neither box does.
+    pub(crate) fn of(parameters: &ffmpeg_next::codec::Parameters) -> Self {
+        use ffmpeg_next::ffi::AVPacketSideDataType as Kind;
+        // SAFETY: the parameters are borrowed, so their side-data list and
+        // its count stay in step for the read; an entry's `data` is `size`
+        // bytes by FFmpeg's definition.
+        let read = |kind| unsafe {
+            let raw = parameters.as_ptr();
+            let entry = ffmpeg_next::ffi::av_packet_side_data_get(
+                (*raw).coded_side_data,
+                (*raw).nb_coded_side_data,
+                kind,
+            );
+            (!entry.is_null() && (*entry).size > 0)
+                .then(|| std::slice::from_raw_parts((*entry).data, (*entry).size).into())
+        };
+        Self {
+            mastering_display: read(Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA),
+            content_light: read(Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL),
+        }
+    }
+
+    /// Whether there is any of it.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.mastering_display.is_none() && self.content_light.is_none()
+    }
+
+    /// Tells an encoder not yet opened, for it to write into its stream:
+    /// in the bitstream (HEVC's SEI) where the encoder writes one, and into
+    /// the parameters a muxer takes, which a container keeps beside the
+    /// track (MP4's `mdcv` and `clli`).
+    ///
+    /// # Safety
+    ///
+    /// `context` must be a live `AVCodecContext` that has not been opened.
+    pub(crate) unsafe fn tell(
+        &self,
+        context: *mut ffmpeg_next::ffi::AVCodecContext,
+    ) -> Result<(), ffmpeg_next::Error> {
+        use ffmpeg_next::ffi::AVFrameSideDataType as Kind;
+        for (kind, bytes) in [
+            (
+                Kind::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+                &self.mastering_display,
+            ),
+            (Kind::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL, &self.content_light),
+        ] {
+            let Some(bytes) = bytes else { continue };
+            // SAFETY: the caller's promise — a live context, before `open`,
+            // which is when the encoder takes this list over; a new entry's
+            // `data` is the `size` bytes asked for.
+            unsafe {
+                let entry = ffmpeg_next::ffi::av_frame_side_data_new(
+                    &mut (*context).decoded_side_data,
+                    &mut (*context).nb_decoded_side_data,
+                    kind,
+                    bytes.len(),
+                    ffmpeg_next::ffi::AV_FRAME_SIDE_DATA_FLAG_UNIQUE as _,
+                );
+                if entry.is_null() {
+                    return Err(ffmpeg_next::Error::Other {
+                        errno: ffmpeg_next::error::ENOMEM,
+                    });
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*entry).data, bytes.len());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The matrix a picture `height` lines tall was made with, by its `space`
 /// tag — or, where it has none, by the common SD/HD fallback: BT.601
 /// through 576 lines and BT.709 above. Every path that turns YUV into RGB
