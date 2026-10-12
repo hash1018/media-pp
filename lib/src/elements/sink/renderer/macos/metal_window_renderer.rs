@@ -729,4 +729,127 @@ mod tests {
         assert_eq!(&bytes[96..100], &(-1.0f32).to_ne_bytes());
         assert_eq!(&bytes[104..108], &1.0f32.to_ne_bytes());
     }
+
+    /// A phone's portrait recording, stored on its side, is drawn upright:
+    /// the shader samples each pixel shown where it is stored. A picture
+    /// whose left half is red and right half blue, drawn as stored and
+    /// turned a quarter each way, shows each half where the turn puts it —
+    /// read back from the target, as the D3D11 and D3D12 tests read their
+    /// windows.
+    #[test]
+    fn a_turned_picture_is_drawn_as_it_is_shown() {
+        use crate::orientation::Rotation;
+        use crate::platform::macos::metal::{MetalGpu, write_texture};
+        use objc2_metal::MTLTexture;
+        let Ok(gpu) = MetalGpu::new() else {
+            eprintln!("skipping: no Metal device");
+            return;
+        };
+        let [kernel] = gpu
+            .kernel_array(SHADER, ["present_bgra"])
+            .expect("the shader compiles");
+        // Stored 8 by 4: red on the left, blue on the right, BGRA bytes.
+        let (width, height) = (8u32, 4u32);
+        let pixels: Vec<u8> = (0..height)
+            .flat_map(|_| {
+                (0..width).flat_map(|x| {
+                    if x < width / 2 {
+                        [0, 0, 255, 255]
+                    } else {
+                        [255, 0, 0, 255]
+                    }
+                })
+            })
+            .collect();
+        let picture = gpu
+            .texture(
+                MTLPixelFormat::BGRA8Unorm,
+                width,
+                height,
+                MTLTextureUsage::ShaderRead,
+                true,
+            )
+            .unwrap();
+        write_texture(&picture, &pixels, width as usize * 4, width, height);
+        let side = 32u32;
+        let target = gpu
+            .texture(
+                MTLPixelFormat::BGRA8Unorm,
+                side,
+                side,
+                MTLTextureUsage::ShaderWrite,
+                true,
+            )
+            .unwrap();
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Clockwise270,
+        ] {
+            let orientation = Orientation {
+                rotation,
+                mirrored: false,
+            };
+            let (shown_width, shown_height) = orientation.display_size(width, height);
+            let rect = letterbox(shown_width, shown_height, side, side);
+            let present = Present {
+                picture: rect,
+                uv: [1.0, 1.0, 0.0, 0.0],
+                rows: [[0.0; 4]; 3],
+                turn: orientation.uv_rows(),
+            };
+            let mut pass = gpu.pass().unwrap();
+            pass.dispatch(
+                &kernel,
+                &[&target, &picture],
+                Some(&present.bytes()),
+                (side, side),
+            );
+            pass.finish().unwrap();
+            let mut drawn = vec![0u8; (side * side * 4) as usize];
+            // SAFETY: a shared texture of this size and format, which the
+            // finished pass wrote and nothing else uses.
+            unsafe {
+                target.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    std::ptr::NonNull::new(drawn.as_mut_ptr()).unwrap().cast(),
+                    (side * 4) as usize,
+                    objc2_metal::MTLRegion {
+                        origin: objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
+                        size: objc2_metal::MTLSize {
+                            width: side as usize,
+                            height: side as usize,
+                            depth: 1,
+                        },
+                    },
+                    0,
+                );
+            }
+            // Where the middle of each stored half is shown.
+            for (stored_left, wanted) in [(0.25f32, [0u8, 0, 255]), (0.75, [255, 0, 0])] {
+                let [left, top, ..] = orientation.to_display([stored_left, 0.5, 0.0, 0.0]);
+                let x = rect[0] + (left * rect[2] as f32) as i32;
+                let y = rect[1] + (top * rect[3] as f32) as i32;
+                let at = ((y as u32 * side + x as u32) * 4) as usize;
+                assert_eq!(
+                    &drawn[at..at + 3],
+                    &wanted,
+                    "{rotation:?}: stored ({stored_left}, 0.5), shown at ({x}, {y})"
+                );
+            }
+            // A quarter turn puts the stored left half on top or beneath.
+            let top_half = match rotation {
+                Rotation::Clockwise90 => [0u8, 0, 255],
+                Rotation::Clockwise270 => [255, 0, 0],
+                _ => continue,
+            };
+            let x = (rect[0] + rect[2] / 2) as u32;
+            let y = (rect[1] + rect[3] / 4) as u32;
+            let at = ((y * side + x) * 4) as usize;
+            assert_eq!(
+                &drawn[at..at + 3],
+                &top_half,
+                "{rotation:?}: the top of what is shown"
+            );
+        }
+    }
 }
