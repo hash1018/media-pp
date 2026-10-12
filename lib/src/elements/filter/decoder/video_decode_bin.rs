@@ -111,9 +111,9 @@ pub enum DecodeTarget {
         /// repeat of it; see `VideoEncodeBin` for what each of its paths
         /// holds. The hardware decoder's
         /// surface pool is fixed at this plus the codec's own references,
-        /// and at most 64 in all; frames held past it fail with
-        /// [`D3d11DecoderError::SurfacePoolExhausted`](crate::elements::D3d11DecoderError::SurfacePoolExhausted).
-        /// See [`crate::elements::D3d11Decoder::new`].
+        /// and at most 64 in all; past it, each picture goes on as a copy
+        /// made on the GPU until downstream lets go, so a budget too small
+        /// costs a copy a picture. See [`crate::elements::D3d11Decoder::new`].
         downstream_hw_frames: i32,
     },
     /// D3D12 resources on `gpu`, as [`crate::elements::D3d12Decoder`] and

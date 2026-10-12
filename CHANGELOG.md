@@ -1281,6 +1281,17 @@ compile error with no explanation.
 
 ### Changed
 
+- **`D3d11Decoder` hands on copies rather than running its pool out.**
+  Downstream holding more pictures than `downstream_hw_frames` failed the
+  stream with `SurfacePoolExhausted`, the fixed D3D11VA pool having no
+  surface left to decode into. A picture that would leave downstream
+  holding more than the surfaces asked for now goes on as a copy in a
+  texture of its own, made on the GPU, its surface back to the pool, until
+  downstream lets go; the log says so once. Within the budget nothing is
+  copied. `SurfacePoolExhausted` stays for a codec keeping more references
+  than the decoder counts on. A copy of a picture of an odd size, which
+  playing backwards makes too, is now made at the even size D3D11 takes.
+
 - **`MetalOrtDetector` runs a single picture at the cost of one.** A model
   whose batch is left open by name was fixed at `max_batch` for Core ML
   and every run computed that many inputs: a face detector of a picture

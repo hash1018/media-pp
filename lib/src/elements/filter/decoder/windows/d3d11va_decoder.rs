@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 use windows::Win32::Graphics::{
@@ -85,9 +85,12 @@ pub enum D3d11DecoderError {
     /// by frames still held downstream — in queues, by a slow renderer.
     /// FFmpeg reports it only as the error it happened to hit (usually
     /// `Invalid data found when processing input`) and says why only in its
-    /// log (`Static surface pool size exceeded`). Hold fewer decoded frames
-    /// downstream, or pass a larger `downstream_hw_frames` to
-    /// [`D3d11Decoder::new`] — within the 64 surfaces FFmpeg allows in all.
+    /// log (`Static surface pool size exceeded`). Rare since the decoder
+    /// hands on copies once downstream holds most of the pool (see
+    /// [`D3d11Decoder::new`]): what is left is a codec keeping more
+    /// references than the decoder counts on. Hold fewer decoded frames
+    /// downstream, or pass a larger `downstream_hw_frames` — within the 64
+    /// surfaces FFmpeg allows in all.
     #[error(
         "decoding failed with {held} decoded frames still held downstream of a \
          {pool}-surface D3D11VA pool, which does not grow: hold fewer (shorter \
@@ -109,6 +112,13 @@ pub enum D3d11DecoderError {
 /// most H.264 and HEVC ever keep. What the pool has beyond them is what
 /// downstream can hold.
 const CODEC_REFERENCE_SURFACES: usize = 16;
+
+/// The most surfaces FFmpeg gives a D3D11VA pool, taking what is past it
+/// from the ones asked for beside the codec's own.
+const D3D11VA_MAX_SURFACES: usize = 64;
+
+/// The working surfaces FFmpeg gives a pool beside the codec's references.
+const FFMPEG_WORK_SURFACES: usize = 4;
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
 /// via D3D11VA hardware acceleration — the D3D11 sibling of
@@ -148,6 +158,9 @@ pub struct D3d11Decoder {
     gpu: D3d11Gpu,
     /// What the copies travel in.
     copies: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Whether the log has been told pictures go on as copies, downstream
+    /// holding more than the pool spares.
+    told_copying: bool,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no
@@ -172,13 +185,18 @@ impl D3d11Decoder {
     /// sized once at `av_hwframe_ctx_init()` time and never grown — every
     /// decoded frame still alive downstream (sitting in a
     /// [`crate::queue::Queue`], held by a slow renderer, ...) keeps one pool
-    /// slot occupied, and once the pool runs out, decode itself starts
-    /// failing (`AVERROR(ENOMEM)`, "Static surface pool size exceeded" in
-    /// the log) instead of just blocking. Pass the deepest downstream
-    /// queue/buffer depth; the internal candidate must not be counted again.
-    /// Too small a downstream budget reproduces exactly that failure under
-    /// real playback, not just in theory, and it arrives as
-    /// [`D3d11DecoderError::SurfacePoolExhausted`].
+    /// slot occupied, and a pool run out fails decode itself
+    /// (`AVERROR(ENOMEM)`, "Static surface pool size exceeded" in the log)
+    /// rather than blocking it. Pass the deepest downstream queue/buffer
+    /// depth; the internal candidate must not be counted again.
+    ///
+    /// A downstream that holds more than that does not run the pool out:
+    /// a picture that would leave it holding more than the surfaces asked
+    /// for goes on as a copy in a texture of its own, made on the GPU, and
+    /// its surface back to the pool, until downstream lets go — which the
+    /// log says once. Within the budget nothing is copied, so a budget that
+    /// fits costs nothing; one too small costs a copy a picture rather than
+    /// the stream.
     ///
     /// The pool is capped, too: FFmpeg sizes it as the codec's own reference
     /// surfaces plus this budget, but never past 64 surfaces in all. A budget
@@ -270,6 +288,7 @@ impl D3d11Decoder {
             qos: Qos::default(),
             gpu: gpu.clone(),
             copies: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+            told_copying: false,
         })
     }
 
@@ -326,6 +345,39 @@ impl D3d11Decoder {
         }
     }
 
+    /// Whether the picture in hand would leave downstream holding more
+    /// than the pool spares it — the surfaces asked for beside the codec's
+    /// own, less what FFmpeg's cap took of them: where it goes on as a copy
+    /// instead. Said once in the log.
+    fn pool_running_low(&mut self) -> bool {
+        // The picture in hand among them.
+        let held = self.held.load(Ordering::Relaxed);
+        let Some(pool) = self.pool_size() else {
+            return false;
+        };
+        // SAFETY: a plain field of the decoder's own open context.
+        let asked = unsafe { (*self.decoder.as_ptr()).extra_hw_frames }.max(0) as usize;
+        let pool = pool.max(0) as usize;
+        let spared = if pool < D3D11VA_MAX_SURFACES {
+            asked
+        } else {
+            // Capped: what is left beside the most a codec keeps.
+            pool.saturating_sub(CODEC_REFERENCE_SURFACES + FFMPEG_WORK_SURFACES)
+                .min(asked)
+        };
+        let low = held > spared;
+        if low && !self.told_copying {
+            self.told_copying = true;
+            pp_warn!(
+                self,
+                "{held} decoded pictures held downstream of a pool that spares {spared}: \
+                 handing on copies until they are let go (raise downstream_hw_frames \
+                 to spare the copies)"
+            );
+        }
+        low
+    }
+
     /// A wrapper to decode into, counted in `held` until it is dropped.
     fn wrapper(&self) -> crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video> {
         self.held.fetch_add(1, Ordering::Relaxed);
@@ -357,6 +409,19 @@ impl D3d11Decoder {
                         frame = self.wrapper();
                         continue;
                     }
+                    if self.pool_running_low() {
+                        // A copy goes on in its place, and the surface back
+                        // to the pool now — see `Self::new`.
+                        let copy = self.copied(&frame)?;
+                        // SAFETY: the decoder's own frame, which nothing
+                        // else refers to; unreferenced, it is empty.
+                        unsafe { ffi::av_frame_unref(frame.as_mut_ptr()) };
+                        self.preroll_gate.push_admitted(
+                            MediaBuffer::Video(Arc::new(copy).into()),
+                            &mut self.pad,
+                        )?;
+                        continue;
+                    }
                     // Reassigning `frame` releases a suppressed one right here,
                     // returning its fixed-pool surface a whole branch earlier
                     // than dropping it downstream would.
@@ -375,7 +440,8 @@ impl D3d11Decoder {
 impl D3d11Decoder {
     /// `frame`'s picture in a texture of its own, as a frame with its
     /// timing and colour: what playing backwards holds, since a stretch is
-    /// more pictures than the decoder's pool has surfaces.
+    /// more pictures than the decoder's pool has surfaces, and what goes on
+    /// in a picture's place while downstream holds most of them.
     fn copied(
         &self,
         frame: &ffmpeg::frame::Video,
@@ -392,9 +458,15 @@ impl D3d11Decoder {
         // SAFETY: `source` is live and `surface` a writable description.
         unsafe { source.GetDesc(&mut surface) };
         let (width, height) = (frame.width(), frame.height());
+        // 4:2:0 at an even size, as D3D11 makes and copies it: a picture of
+        // an odd size takes the row and column past it from the surface,
+        // which is larger still.
+        let even = |side: u32, surface: u32| ((side + 1) & !1).min(surface);
+        let (texture_width, texture_height) =
+            (even(width, surface.Width), even(height, surface.Height));
         let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
+            Width: texture_width,
+            Height: texture_height,
             MipLevels: 1,
             ArraySize: 1,
             Format: surface.Format,
@@ -426,12 +498,12 @@ impl D3d11Decoder {
                 left: 0,
                 top: 0,
                 front: 0,
-                right: width,
-                bottom: height,
+                right: texture_width,
+                bottom: texture_height,
                 back: 1,
             };
             // SAFETY: both textures are on this device and in the same
-            // format; the box is the picture's own size, within both, and
+            // format; the box is the copy's own size, within both, and
             // `slice` is the surface's array slice the frame names.
             unsafe {
                 context.CopySubresourceRegion(
@@ -663,7 +735,6 @@ unsafe extern "C" fn get_format(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::RawSinkExt;
     use crate::test_support::try_d3d11_gpu;
 
     /// Regression test for a real crash (`STATUS_ACCESS_VIOLATION`/
@@ -917,13 +988,17 @@ mod tests {
         }
     }
 
-    /// Frames held downstream past what the fixed surface pool can spare used
-    /// to fail decoding with FFmpeg's `Invalid data found when processing
-    /// input`, the pool's own complaint reaching only FFmpeg's log. It fails
-    /// with `SurfacePoolExhausted`, saying how many frames were held and how
-    /// big the pool is; letting them go lets decoding carry on from the next keyframe.
+    /// Frames held downstream past what the fixed surface pool can spare
+    /// used to fail decoding, first with FFmpeg's `Invalid data found when
+    /// processing input` and then with `SurfacePoolExhausted`. With every
+    /// picture held and no room asked for downstream, each now comes out:
+    /// the first as the decoder's own surfaces, the rest, once the pool
+    /// runs low, as copies in textures of their own — the same pictures
+    /// a decoder whose pictures are let go of at once gives.
     #[test]
-    fn frames_held_past_the_surface_pool_say_so() {
+    fn frames_held_past_the_surface_pool_go_on_as_copies() {
+        use crate::elements::D3d11Download;
+        use crate::test_support::CapturingSink;
         let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
@@ -936,71 +1011,101 @@ mod tests {
             .best(ffmpeg::media::Type::Video)
             .expect("a video stream");
         let (index, params) = (stream.index(), stream.parameters());
-        // No room downstream at all: the pool is the codec's own references
-        // and the decoder's one candidate.
-        let mut decoder = match D3d11Decoder::new("decoder", params, &gpu, 0) {
-            Ok(decoder) => decoder,
-            Err(D3d11DecoderError::HwDeviceInit(code)) => {
-                eprintln!("skipping: this D3D11 device does not decode video ({code})");
-                return;
-            }
-            Err(error) => panic!("open the D3D11VA decoder: {error}"),
-        };
-        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
-        decoder.src_pads()[0].link(Box::new(Hoarder {
-            held: Arc::clone(&held),
-            pp_log: element_pp_log(ElementType::Other, "hoarder", None),
-        }));
-
         let packets: Vec<_> = input
             .packets()
             .filter(|(stream, _)| stream.index() == index)
             .map(|(_, packet)| Arc::new(packet))
             .collect();
-        let mut remaining = packets.iter();
-        let refused = remaining
-            .by_ref()
-            .find_map(|packet| {
+        // No room downstream at all: the pool is the codec's own references
+        // and the decoder's one candidate.
+        let decoder = |params| match D3d11Decoder::new("decoder", params, &gpu, 0) {
+            Ok(decoder) => Some(decoder),
+            Err(D3d11DecoderError::HwDeviceInit(code)) => {
+                eprintln!("skipping: this D3D11 device does not decode video ({code})");
+                None
+            }
+            Err(error) => panic!("open the D3D11VA decoder: {error}"),
+        };
+        let decode = |decoder: &mut D3d11Decoder| {
+            for packet in &packets {
                 decoder
                     .consume(MediaBuffer::Packet(Arc::clone(packet).into()))
-                    .err()
-            })
-            .expect("a pool with no room left for held frames runs out");
-        match refused {
-            crate::Error::D3d11DecoderError(D3d11DecoderError::SurfacePoolExhausted {
-                held: count,
-                pool,
-                ..
-            }) => {
-                assert!(
-                    count > 0 && pool > 0,
-                    "held {count} of a {pool}-surface pool"
-                );
-                assert!(
-                    refused_message_names_the_pool(count, pool),
-                    "the message says how many and how big"
-                );
+                    .expect("held pictures do not run the pool out");
             }
-            other => panic!("expected SurfacePoolExhausted, got {other}"),
-        }
+            crate::stream::deliver(decoder, &crate::stream::StreamEvent::Eos).expect("eos");
+        };
+        let capture = |received: &Arc<std::sync::Mutex<Vec<MediaBuffer>>>| CapturingSink {
+            received: Arc::clone(received),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        };
+        let pixels = |received: &Arc<std::sync::Mutex<Vec<MediaBuffer>>>| -> Vec<Vec<u8>> {
+            received
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|buffer| match buffer {
+                    MediaBuffer::Video(frame) => frame.data(0).to_vec(),
+                    _ => panic!("not a picture"),
+                })
+                .collect()
+        };
 
-        // The failed decode cost the codec a reference picture, so what
-        // follows it cannot decode until the next keyframe; a flush and the
-        // stream from its start is the recovery a seek makes.
-        held.lock().unwrap().clear();
-        drop(remaining);
-        decoder
-            .control(&crate::control::ControlMsg::Flush)
-            .expect("flush");
-        for packet in packets.iter().take(5) {
-            decoder
-                .consume(MediaBuffer::Packet(Arc::clone(packet).into()))
-                .expect("with the frames let go, decoding carries on");
-        }
+        // Every picture held, as a deep queue or a stalled renderer holds them.
+        let Some(mut holding) = decoder(params.clone()) else {
+            return;
+        };
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        holding.src_pads()[0].link(Box::new(Hoarder {
+            held: Arc::clone(&held),
+            pp_log: element_pp_log(ElementType::Other, "hoarder", None),
+        }));
+        decode(&mut holding);
+        let held = std::mem::take(&mut *held.lock().unwrap());
+        assert_eq!(held.len(), packets.len(), "every picture came out");
+        // The decoder's own surfaces belong to its frames context; a copy,
+        // a texture of its own, to none.
+        let copies: Vec<bool> = held
+            .iter()
+            .map(|buffer| {
+                let MediaBuffer::Video(frame) = buffer else {
+                    panic!("not a picture");
+                };
+                // SAFETY: a plain field of a held frame.
+                unsafe { (*frame.as_ptr()).hw_frames_ctx.is_null() }
+            })
+            .collect();
+        assert!(!copies[0], "the first is the decoder's own surface");
         assert!(
-            !held.lock().unwrap().is_empty(),
-            "and frames come out again"
+            *copies.last().unwrap(),
+            "pictures past what the pool spares are copies"
         );
+        // Downloaded, the copies are the pictures themselves.
+        let mut download = D3d11Download::new("download", &gpu).expect("download");
+        let from_held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        download.src_pads()[0].link(Box::new(capture(&from_held)));
+        for buffer in held {
+            download.consume(buffer).expect("download a held picture");
+        }
+        let Some(mut letting_go) = decoder(params) else {
+            return;
+        };
+        let mut download = D3d11Download::new("download", &gpu).expect("download");
+        let from_fresh = Arc::new(std::sync::Mutex::new(Vec::new()));
+        download.src_pads()[0].link(Box::new(capture(&from_fresh)));
+        letting_go.src_pads()[0].link(Box::new(download));
+        decode(&mut letting_go);
+        let (copied, fresh) = (pixels(&from_held), pixels(&from_fresh));
+        assert_eq!(copied.len(), fresh.len());
+        for (n, (copied, fresh)) in copied.iter().zip(&fresh).enumerate() {
+            assert!(copied == fresh, "picture {n}: the same pixels");
+        }
+    }
+
+    /// What is left of running the pool out says how many were held and how
+    /// big the pool is.
+    #[test]
+    fn the_refusal_names_the_pool() {
+        assert!(refused_message_names_the_pool(18, 21));
     }
 
     fn refused_message_names_the_pool(held: usize, pool: i32) -> bool {
