@@ -95,6 +95,12 @@ pub struct CudaDecoder {
     copies: CopyFrames,
     /// What the copies travel in.
     copy_wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The surfaces asked for beyond the codec's own, which `get_format`
+    /// opens NVDEC's pool with fewer of where its cap leaves no room —
+    /// see [`Self::new`].
+    extra_hw_frames: i32,
+    /// Whether the log has been told the pool was opened with fewer.
+    told_trimmed: bool,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -113,22 +119,21 @@ impl CudaDecoder {
     /// `downstream_hw_frames` is the deepest number of decoded frames that
     /// downstream queues and sinks may retain. The decoder adds its own one-
     /// frame accurate-seek candidate and writes the sum to
-    /// `AVCodecContext.extra_hw_frames`. NVDEC's surface pool is fixed-size
-    /// like D3D11VA's
-    /// (unlike the growable pools used elsewhere in this crate), so every
-    /// decoded frame still alive downstream — sitting in a
-    /// [`crate::queue::Queue`], held by a slow renderer — occupies a slot,
-    /// and running out fails decode rather than blocking it. Callers therefore
-    /// pass the downstream buffering depth only; the internal candidate must
-    /// not be counted again.
+    /// `AVCodecContext.extra_hw_frames`, as the D3D11VA decoder does, where
+    /// every frame alive downstream occupies a surface of a fixed pool.
+    /// NVDEC's differs: FFmpeg copies each picture out of the surface NVDEC
+    /// decoded it into, into a frame of a pool that grows, so what
+    /// downstream holds takes no decode surface, and these only deepen the
+    /// decode pool. Callers pass the downstream buffering depth only; the
+    /// internal candidate must not be counted again.
     ///
-    /// Unlike D3D11VA, though, NVDEC also imposes a hard **upper** bound: the
-    /// pool may hold at most 32 surfaces in total, counting the codec's own
-    /// reference frames. Asking for more does not degrade — `cuvidCreateDecoder`
-    /// fails outright and the stream does not decode at all, reported as
-    /// "Using more than 32 (N) decode surfaces might cause nvdec to fail".
-    /// So a downstream queue cannot simply be made as deep as convenient
-    /// here; it has to fit the budget alongside the reference frames.
+    /// That pool NVDEC caps at 32 surfaces, counting the stream's reference
+    /// frames and FFmpeg's working ones: `cuvidCreateDecoder` refuses more
+    /// outright, and the stream would not decode at all. Only the stream
+    /// says how many reference frames it keeps — an HEVC encoded with
+    /// B-frames as references can take a dozen — so once the first
+    /// picture's parameters are read, the pool is opened with as many of
+    /// the extra surfaces as fit, which the log says once.
     ///
     /// The decoder opened is the first one FFmpeg has for the codec that can
     /// decode on CUDA, which need not be the one FFmpeg would pick by default
@@ -201,6 +206,8 @@ impl CudaDecoder {
             qos: Qos::default(),
             copies: CopyFrames::default(),
             copy_wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+            extra_hw_frames,
+            told_trimmed: false,
         })
     }
 
@@ -259,6 +266,25 @@ impl CudaDecoder {
         Ok(wrapped)
     }
 
+    /// Says once in the log where `get_format` opened NVDEC's pool with
+    /// fewer extra surfaces than were asked for.
+    fn say_if_trimmed(&mut self) {
+        if self.told_trimmed {
+            return;
+        }
+        // SAFETY: a plain field of the decoder's own open context.
+        let opened_with = unsafe { (*self.decoder.as_ptr()).extra_hw_frames };
+        if opened_with < self.extra_hw_frames {
+            self.told_trimmed = true;
+            pp_info!(
+                self,
+                "NVDEC's pool has room for {opened_with} of the {} extra surfaces asked for \
+                 beside the stream's reference frames",
+                self.extra_hw_frames
+            );
+        }
+    }
+
     /// Hands on what was held of the stretch just over, last first.
     fn release(&mut self) -> crate::error::Result<()> {
         for buffer in self.stretch.end() {
@@ -276,6 +302,7 @@ impl CudaDecoder {
                         pp_error!(self, "decoder did not select the CUDA pixel format");
                         return Err(CudaDecoderError::HwAccelUnavailable.into());
                     }
+                    self.say_if_trimmed();
                     if self.stretch.holding() {
                         // Held as a copy; the surface goes back to the pool
                         // as `frame` is reused below.
@@ -446,6 +473,7 @@ unsafe extern "C" fn get_format(
     unsafe {
         while *fmt != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
             if *fmt == ffi::AVPixelFormat::AV_PIX_FMT_CUDA {
+                fit_surface_cap(ctx);
                 return ffi::AVPixelFormat::AV_PIX_FMT_CUDA;
             }
             fmt = fmt.add(1);
@@ -457,6 +485,48 @@ unsafe extern "C" fn get_format(
     }
 }
 
+/// The most surfaces NVDEC decodes into: `cuvidCreateDecoder` refuses a
+/// pool of more.
+const NVDEC_MAX_SURFACES: i32 = 32;
+
+/// What FFmpeg adds to a hardware decoder's pool beyond what
+/// `avcodec_get_hw_frames_parameters` says — its "4 base work surfaces",
+/// in `ff_decode_get_hw_frames_ctx`.
+const FFMPEG_WORK_SURFACES: i32 = 3;
+
+/// Opens NVDEC's pool with as many of `ctx`'s `extra_hw_frames` as fit
+/// under its cap beside the stream's reference frames, which only now,
+/// the stream's parameters read, can be counted — see
+/// [`CudaDecoder::new`]. Never raised again: a later stream needing fewer
+/// reference frames keeps the fewer extra surfaces.
+///
+/// # Safety
+///
+/// `ctx` must be the live codec context `get_format` was handed.
+unsafe fn fit_surface_cap(ctx: *mut ffi::AVCodecContext) {
+    // SAFETY: the caller's promise; `avcodec_get_hw_frames_parameters`
+    // is meant to be called from `get_format`, and the frames context it
+    // makes is only read and then let go of.
+    unsafe {
+        let mut frames: *mut ffi::AVBufferRef = std::ptr::null_mut();
+        let code = ffi::avcodec_get_hw_frames_parameters(
+            ctx,
+            (*ctx).hw_device_ctx,
+            ffi::AVPixelFormat::AV_PIX_FMT_CUDA,
+            &mut frames,
+        );
+        if code < 0 || frames.is_null() {
+            return;
+        }
+        let pool = (*((*frames).data as *const ffi::AVHWFramesContext)).initial_pool_size;
+        ffi::av_buffer_unref(&mut frames);
+        let over = pool + FFMPEG_WORK_SURFACES - NVDEC_MAX_SURFACES;
+        if pool > 0 && over > 0 {
+            (*ctx).extra_hw_frames = ((*ctx).extra_hw_frames - over).max(0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::test_support::CapturingSink;
@@ -464,6 +534,73 @@ mod tests {
 
     use super::*;
     use crate::test_support::{try_cuda_device, try_test_video};
+
+    /// A downstream deeper than NVDEC's pool has room for beside the
+    /// codec's own surfaces once failed the stream at its first picture.
+    /// The pool opens with what fits, and every picture comes out — all of
+    /// them held at once, as what downstream holds takes no decode surface
+    /// — the same pictures a decoder asked for few gives.
+    #[test]
+    fn a_downstream_deeper_than_nvdecs_pool_still_decodes_every_picture() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(path) = try_test_video() else {
+            return;
+        };
+        const PICTURES: usize = 45;
+        let decode = |downstream: i32| {
+            let mut input = ffmpeg::format::input(&path).expect("open");
+            let stream = input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .expect("video");
+            let index = stream.index();
+            let mut decoder = CudaDecoder::new("decoder", stream.parameters(), &device, downstream)
+                .expect("decoder");
+            let received = Arc::new(Mutex::new(Vec::new()));
+            decoder.src_pads()[0].link(Box::new(CapturingSink {
+                received: received.clone(),
+                pp_log: element_pp_log(ElementType::Other, "capture", None),
+            }));
+            // Every picture is held until the end: as deep a downstream as
+            // there are pictures.
+            let mut downloaded = Vec::new();
+            for (stream, packet) in input.packets() {
+                if stream.index() != index {
+                    continue;
+                }
+                decoder
+                    .consume(MediaBuffer::Packet(Arc::new(packet).into()))
+                    .expect("decode failed");
+                if received.lock().unwrap().len() >= PICTURES {
+                    break;
+                }
+            }
+            for buffer in received.lock().unwrap().iter().take(PICTURES) {
+                let MediaBuffer::Video(frame) = buffer else {
+                    panic!("not a picture");
+                };
+                assert_eq!(frame.format(), ffmpeg::format::Pixel::CUDA);
+                let mut host = ffmpeg::frame::Video::empty();
+                // SAFETY: a live CUDA frame, and an empty one to fill.
+                let code =
+                    unsafe { ffi::av_hwframe_transfer_data(host.as_mut_ptr(), frame.as_ptr(), 0) };
+                assert!(code >= 0, "download failed");
+                downloaded.push((frame.pts(), host.data(0).to_vec()));
+            }
+            downloaded
+        };
+        // 40 beside the codec's own and FFmpeg's is more than 32.
+        let deep = decode(40);
+        assert_eq!(deep.len(), PICTURES, "every picture, held, came out");
+        let shallow = decode(2);
+        assert_eq!(shallow.len(), PICTURES);
+        for (n, (deep, shallow)) in deep.iter().zip(&shallow).enumerate() {
+            assert_eq!(deep.0, shallow.0, "picture {n}: its pts");
+            assert!(deep.1 == shallow.1, "picture {n}: its pixels");
+        }
+    }
 
     /// The whole point of this element: frames come out GPU-resident, and
     /// the timeline survives. Asserted against whatever fixture is

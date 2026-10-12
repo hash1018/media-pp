@@ -229,12 +229,10 @@ mod linux_example {
 
     use crate::common;
 
-    /// Matches the `video-frames` queue below. NVDEC's surface pool is fixed
-    /// at open time. `CudaDecoder` reserves its accurate-seek candidate
-    /// internally, so construction supplies only this downstream queue depth.
-    /// NVDEC also caps the total pool at 32 surfaces, which is why this is far
-    /// shallower than the Windows branch's software decoder can afford; see
-    /// `CudaDecoder::new`'s docs. Eight frames are about 266 ms at 30 fps.
+    /// Matches the `video-frames` queue below. `CudaDecoder` reserves its
+    /// accurate-seek candidate internally, so construction supplies only
+    /// this downstream queue depth; see `CudaDecoder::new`'s docs. Eight
+    /// frames are about 266 ms at 30 fps.
     const VIDEO_QUEUE_DEPTH: usize = 8;
 
     pub fn play(path: String) -> media_pp::Result<()> {

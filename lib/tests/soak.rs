@@ -1835,10 +1835,8 @@ mod cuda {
         frames.get()
     }
 
-    /// NVDEC's surface pool is fixed-size *and* capped at 32 surfaces
-    /// including the codec's own reference frames (see `CudaDecoder::new`),
-    /// so a decode scenario's queue depth is part of that budget rather
-    /// than a free choice.
+    /// The decode scenarios' queue depth, given to `CudaDecoder::new` as
+    /// what downstream holds.
     const DECODE_QUEUE_DEPTH: usize = 4;
 
     /// NVDEC's process-side driver cache takes substantially longer to

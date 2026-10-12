@@ -419,10 +419,13 @@ final source of truth when documentation and implementation differ.
   all is settled.
 - D3D11VA decode surfaces are fixed-size. `extra_hw_frames` must cover the deepest
   downstream buffering, unlike the growable pools used elsewhere.
-- NVDEC's pool is fixed-size *and* capped: at most 32 surfaces including the
-  codec's own reference frames. Exceeding it fails `cuvidCreateDecoder`
-  outright rather than degrading, so a downstream `Queue` depth has to fit that
-  budget — see `CudaDecoder::new`.
+- NVDEC's decode pool is capped: at most 32 surfaces including the codec's
+  own reference frames, and `cuvidCreateDecoder` fails outright beyond it.
+  What downstream holds takes none of them (FFmpeg copies each picture out
+  into a pool that grows), so `CudaDecoder` opens the pool with as many extra
+  surfaces as fit once the stream says its reference frames — see
+  `CudaDecoder::new`. Never set NVDEC's `unsafe_output`: held pictures would
+  then keep their decode surfaces.
 - Before extending text overlays (for example multi-line layout, background
   boxes, or shared font caching), read the design and ownership rationale in
   `compositor/windows/d3d11_video_compositor/text_handle.rs` and

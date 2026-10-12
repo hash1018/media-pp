@@ -1331,6 +1331,17 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`CudaDecoder` decodes a stream with many reference frames whatever
+  `downstream_hw_frames` is.** NVDEC caps its pool at 32 surfaces, the
+  stream's reference frames and FFmpeg's working ones among them; an HEVC
+  encoded with B-frames as references and a downstream of 20 came to 33,
+  and `cuvidCreateDecoder` failed the stream at its first picture
+  (`HwAccelUnavailable`). The pool now opens with as many extra surfaces
+  as fit once the stream says how many reference frames it keeps. What
+  downstream holds never took them: FFmpeg copies each picture out into a
+  pool that grows, so a downstream of any depth decodes. The docs said
+  otherwise and are corrected.
+
 - **`VideoToolboxEncoder` with B-frames writes an MP4.** VideoToolbox's
   H.264 reorders pictures two deep, even where one B-frame is allowed, and
   FFmpeg's `h264_videotoolbox` dates them one deep: a packet then decoded
