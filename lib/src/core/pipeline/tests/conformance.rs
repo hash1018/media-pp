@@ -2042,7 +2042,17 @@ fn judge(
                     && pts > reference
                     && !lap.is_zero()
                 {
-                    let laps = ((pts - reference).as_nanos() + lap.as_nanos() / 2) / lap.as_nanos();
+                    // Lined up by the seek, the first sample is a whole
+                    // number of laps past where it landed, give or take its
+                    // own spacing: the nearest is how many. Sound a step
+                    // dropped goes on from further on, and how much further
+                    // the source read meanwhile — on two loaded cores, most
+                    // of a lap — so the most whole laps it is past says it.
+                    let laps = if skipped {
+                        (pts - reference + LANDING_TOLERANCE).as_nanos() / lap.as_nanos()
+                    } else {
+                        ((pts - reference).as_nanos() + lap.as_nanos() / 2) / lap.as_nanos()
+                    };
                     let shift = Duration::from_nanos((laps * lap.as_nanos()) as u64);
                     floor = floor.map(|floor| floor + shift);
                     ceiling = ceiling.map(|ceiling| ceiling + shift);
@@ -2302,6 +2312,103 @@ fn a_step_after_the_clock_ran_again_is_judged_on_its_own() {
         .expect("the matrix has the shape");
     trace_if_asked();
     if let Err(failure) = run_sequence(Shape::File(shape), 1_790_574_877_137_431_411, 12) {
+        panic!("{failure}");
+    }
+}
+
+/// What a looping file's sound terminal is handed when a step is followed
+/// by `then`: the step back to 7.883 s, from the end of the first 8 s lap,
+/// and then sound from 13.165 s on — on the second lap — and its end.
+fn sound_after_a_step(then: Call, step: bool) -> std::result::Result<(), String> {
+    let calls = [
+        Call {
+            step,
+            ..Call::new("step", Some(1), true)
+        },
+        then,
+    ];
+    let target = Duration::from_millis(7883);
+    let log = [
+        Entry::Call {
+            index: 0,
+            returned: false,
+        },
+        Entry::Timeline(target),
+        Entry::Segment {
+            id: 5,
+            flushed: true,
+        },
+        Entry::Segment {
+            id: 5,
+            flushed: false,
+        },
+        Entry::Call {
+            index: 0,
+            returned: true,
+        },
+        Entry::Call {
+            index: 1,
+            returned: false,
+        },
+        Entry::Data {
+            pts: Some(Duration::from_millis(13165)),
+            ahead: None,
+        },
+        Entry::Data {
+            pts: Some(Duration::from_millis(13188)),
+            ahead: None,
+        },
+        Entry::Eos,
+        Entry::Call {
+            index: 1,
+            returned: true,
+        },
+    ];
+    judge(
+        &log,
+        &calls,
+        &[(Some(target), SeekMode::Accurate, false)],
+        &[],
+        Judged {
+            duration: Some(Duration::from_secs(8)),
+            lap: Some(Duration::from_secs(8)),
+            lossless: true,
+            shows_pictures: false,
+            paced: true,
+        },
+    )
+}
+
+/// A step drops the sound, and a finish after it plays the sound on from
+/// wherever the source had read to — on a looping file, most of a lap on
+/// when two loaded cores let it read ahead while the step held the
+/// pictures. That sound is past the step's target on the timeline, not
+/// before it on the next lap: the judge counted the laps to the nearest
+/// and read 13.165 s as before 15.8 s. Linux CI found it (2026-10-12),
+/// about one run in two on two cores; the judge was wrong, not the
+/// pipeline. A seek, which lines the sound up again, is still held to its
+/// landing: sound so far from it on its lap is from before it.
+#[test]
+fn sound_a_step_dropped_goes_on_from_further_on_even_a_lap_on() {
+    let finish = Call::new("finish", None, false);
+    assert_eq!(sound_after_a_step(finish, true), Ok(()));
+
+    let seek = Call::new("seek", None, false);
+    let refused = sound_after_a_step(seek, false).expect_err("a seek lines the sound up");
+    assert!(refused.contains("from before it"), "{refused}");
+}
+
+/// The sequence that found it, replayed: on two loaded cores it failed
+/// about one run in two; elsewhere it passes either way.
+#[test]
+fn a_step_then_a_finish_on_a_looping_file_is_judged_by_where_the_sound_went_on() {
+    let label = "packettee-bin-none-pacer-resampled-normal";
+    let shape = matrix()
+        .into_iter()
+        .find(|shape| shape.label() == label)
+        .expect("the matrix has the shape");
+    trace_if_asked();
+    if let Err(failure) = run_sequence(Shape::File(shape), 1_791_799_124_319_102_004, 12) {
         panic!("{failure}");
     }
 }
