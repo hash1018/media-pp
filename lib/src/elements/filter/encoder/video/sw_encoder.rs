@@ -5,7 +5,7 @@ use ffmpeg_next as ffmpeg;
 use ffmpeg_next::Rescale;
 use thiserror::Error as ThisError;
 
-use crate::color::ColorDescription;
+use crate::color::{ColorDescription, HdrMetadata};
 use crate::{
     buffer::MediaBuffer,
     contract::{
@@ -309,7 +309,7 @@ impl SwEncoder {
     /// Opens the requested software video encoder with the supplied output definition.
     pub fn new(name: impl Into<String>, options: SwEncoderOptions) -> Result<Self> {
         crate::ensure_ffmpeg();
-        Self::open(name, options, None)
+        Self::open(name, options, None, &HdrMetadata::default())
     }
 
     /// As [`Self::new`], and the stream says `color` is what it holds —
@@ -324,13 +324,38 @@ impl SwEncoder {
         color: ColorDescription,
     ) -> Result<Self> {
         crate::ensure_ffmpeg();
-        Self::open(name, options, Some(color))
+        Self::open(name, options, Some(color), &HdrMetadata::default())
+    }
+
+    /// As [`Self::new`], for re-encoding the pictures of `stream`, as
+    /// decoded and still in its colour: the stream says what `stream`
+    /// says of it — its [`StreamInfo::color`], and an HDR10 stream's
+    /// mastering display and content light levels, which a PQ picture is
+    /// shown by on a display dimmer than the one it was made on. A codec
+    /// that carries them in its bitstream writes them there — `libsvtav1`
+    /// does — and an MP4 or MOV keeps them beside the track, the muxer
+    /// taking them from [`Self::parameters`]. Where `stream` names no
+    /// colour this is [`Self::new`].
+    ///
+    /// Not for pictures made into other colour on the way — HDR mapped to
+    /// SDR, say — which [`Self::with_color`] names as they are.
+    ///
+    /// [`StreamInfo::color`]: crate::elements::StreamInfo::color
+    pub fn for_stream(
+        name: impl Into<String>,
+        options: SwEncoderOptions,
+        stream: &crate::elements::StreamInfo,
+    ) -> Result<Self> {
+        crate::ensure_ffmpeg();
+        let hdr = HdrMetadata::of(&stream.parameters);
+        Self::open(name, options, stream.color(), &hdr)
     }
 
     fn open(
         name: impl Into<String>,
         options: SwEncoderOptions,
         color: Option<ColorDescription>,
+        hdr: &HdrMetadata,
     ) -> Result<Self> {
         let encoder_name = options.codec.encoder_name();
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
@@ -384,6 +409,8 @@ impl SwEncoder {
             // SAFETY: the encoder's own context, not yet opened.
             unsafe { color.tell(video.as_mut_ptr()) };
         }
+        // SAFETY: the encoder's own context, not yet opened.
+        unsafe { hdr.tell(video.as_mut_ptr()) }.map_err(SwEncoderError::from)?;
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
         let packet_duration = nominal_packet_duration(time_base, options.frame_rate);
@@ -397,6 +424,9 @@ impl SwEncoder {
             options.height,
             options.bit_rate
         );
+        if !hdr.is_empty() {
+            pp_info!(pp_log: &pp_log, "keeps the source's HDR10 mastering display and light levels");
+        }
         Ok(Self(FilterStage::new(Encoding {
             name,
             pp_log,
@@ -852,6 +882,68 @@ mod tests {
             described(&untold).0,
             ffmpeg::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED
         );
+    }
+
+    /// Re-encoding an HDR10 stream keeps its mastering display and light
+    /// levels beside the track and in the bitstream — AV1's metadata here —
+    /// and a stream that carries neither gets neither.
+    #[test]
+    fn a_re_encoded_hdr10_stream_keeps_its_mastering_display_and_light_levels() {
+        use crate::elements::FileMuxer;
+        use crate::test_support::{assert_hdr10_kept, hdr10_source};
+        if ffmpeg::decoder::find_by_name("libdav1d").is_none() {
+            eprintln!("skipping: no libdav1d to read the AV1 back with");
+            return;
+        }
+        let (width, height) = (320u32, 240u32);
+        for carried in [true, false] {
+            let source = hdr10_source(carried);
+            let options = SwEncoderOptions {
+                codec: VideoCodec::Svtav1,
+                width,
+                height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P10LE,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 500_000,
+                gop_size: 30,
+                max_b_frames: None,
+            };
+            let mut encoder = match SwEncoder::for_stream("encoder", options, &source.stream) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    eprintln!("skipping: no 10-bit libsvtav1 in this build ({error})");
+                    return;
+                }
+            };
+            let path = std::env::temp_dir().join(format!("media-pp-hdr10-svtav1-{carried}.mp4"));
+            let mut muxer = FileMuxer::create(&path).expect("create");
+            let track = muxer.add_stream("video", &encoder).expect("add");
+            let sink = muxer.open().expect("header").take(track).expect("track");
+            encoder.src_pads()[0].link(sink.into_raw());
+            for index in 0..5i64 {
+                let mut frame =
+                    ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P10LE, width, height);
+                for plane in 0..frame.planes() {
+                    frame.data_mut(plane).fill(0x01);
+                }
+                frame.set_pts(Some(index));
+                crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+                encoder
+                    .consume(MediaBuffer::video(frame))
+                    .expect("encode failed");
+            }
+            crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
+                .expect("eos failed");
+            drop(encoder);
+            assert_hdr10_kept(
+                &path,
+                &source,
+                true,
+                Some("libdav1d"),
+                &format!("carried={carried}"),
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     /// A frame of `format` and size, due at 0 in thirtieths.

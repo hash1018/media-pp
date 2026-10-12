@@ -91,9 +91,9 @@ A 10-bit file — an iPhone's HDR — stays ten bits on CUDA: `CudaDecoder`
 hands on P010, the detectors and classifiers look at an SDR copy of each
 picture, the overlays hide in its ten bits (drawing nothing), and
 `CudaEncoder` encodes HEVC Main 10 in the file's own colours
-(`CudaEncoder::for_stream`), an HDR10 file's mastering display and light
-levels kept, which `FileMuxer` writes as `hvc1`. On a
-Mac likewise: `VideoToolboxDecoder` hands on P010
+(`CudaEncoder::for_stream`, as `SwEncoder` and `VideoToolboxEncoder`
+have), an HDR10 file's mastering display and light levels kept, which
+`FileMuxer` writes as `hvc1`. On a Mac likewise: `VideoToolboxDecoder` hands on P010
 (`VideoToolboxFrameFormat::P010`), the Metal detectors, classifier and
 embedder look at an SDR copy, `MetalDetectionOverlay` hides in the ten
 bits, and `VideoToolboxEncoder` encodes HEVC Main 10.

@@ -126,14 +126,12 @@ impl ColorDescription {
 /// Kept as the bytes FFmpeg keeps them in — the same structures as packet
 /// side data on a stream and as frame side data on an encoder — and copied
 /// across whole, so that nothing here mirrors their layout by hand.
-#[cfg(feature = "cuda")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct HdrMetadata {
     mastering_display: Option<Box<[u8]>>,
     content_light: Option<Box<[u8]>>,
 }
 
-#[cfg(feature = "cuda")]
 impl HdrMetadata {
     /// What a stream's parameters carry of it — none of either where they
     /// carry nothing, as a container that keeps neither box does.

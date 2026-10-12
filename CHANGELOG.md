@@ -259,14 +259,16 @@ compile error with no explanation.
 
 ### Added
 
-- **`CudaEncoder::for_stream` keeps an HDR10 file's mastering display and
-  light levels.** Re-encoding a PQ file's pictures, the encoder takes
-  what the source stream says: its colour, as `with_color(stream.color())`
-  did, and the mastering display and content light levels a display
-  dimmer than the master tone-maps by. NVENC writes them into the HEVC's
-  SEI, and `FileMuxer` beside the track (`mdcv`, `clli`) from the
-  encoder's parameters. Before, they were dropped, and each player
-  guessed. Dolby Vision's per-scene metadata is still not kept.
+- **`for_stream` on `CudaEncoder`, `SwEncoder` and `VideoToolboxEncoder`
+  keeps an HDR10 file's mastering display and light levels.** Re-encoding
+  a PQ file's pictures, the encoder takes what the source stream says:
+  its colour, as `with_color(stream.color())` did, and the mastering
+  display and content light levels a display dimmer than the master
+  tone-maps by. `FileMuxer` writes them beside the track (`mdcv`, `clli`)
+  from the encoder's parameters, and NVENC and `libsvtav1` into the
+  bitstream too; FFmpeg's VideoToolbox encoder does not. Before, they
+  were dropped, and each player guessed. Dolby Vision's per-scene
+  metadata is still not kept.
 
 - **DETR-family detectors in every ORT detector (`DetectorModel::Detr`).**
   D-FINE, RT-DETR and RF-DETR as transformers exports them: `logits`, each

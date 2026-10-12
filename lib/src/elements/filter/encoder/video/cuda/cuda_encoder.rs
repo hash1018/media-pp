@@ -747,107 +747,29 @@ mod tests {
     /// still finds. A stream that carries neither gets neither.
     #[test]
     fn a_re_encoded_hdr10_stream_keeps_its_mastering_display_and_light_levels() {
-        use crate::color::HdrMetadata;
-        use crate::elements::{FileMuxer, StreamInfo};
-        use ffi::AVPacketSideDataType as Kind;
+        use crate::elements::FileMuxer;
+        use crate::test_support::{assert_hdr10_kept, hdr10_source};
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let _session = crate::test_support::encoder_session();
         let (width, height) = (320u32, 240u32);
-
-        /// FFmpeg's `AVMasteringDisplayMetadata`, mirrored only to make a
-        /// stream to re-encode: what is under test copies the bytes whole.
-        #[repr(C)]
-        struct MasteringDisplay {
-            primaries: [[ffi::AVRational; 2]; 3],
-            white_point: [ffi::AVRational; 2],
-            min_luminance: ffi::AVRational,
-            max_luminance: ffi::AVRational,
-            has_primaries: i32,
-            has_luminance: i32,
-        }
-        let r = |num, den| ffi::AVRational { num, den };
-        let mastering = MasteringDisplay {
-            primaries: [
-                [r(34000, 50000), r(16000, 50000)],
-                [r(13250, 50000), r(34500, 50000)],
-                [r(7500, 50000), r(3000, 50000)],
-            ],
-            white_point: [r(15635, 50000), r(16450, 50000)],
-            // In the units HEVC's SEI and MP4's `mdcv` keep, as a reader
-            // gives them back: 50000ths of a coordinate, 10000ths of a nit.
-            min_luminance: r(50, 10000),
-            max_luminance: r(10_000_000, 10000),
-            has_primaries: 1,
-            has_luminance: 1,
-        };
-        // MaxCLL and MaxFALL, two `unsigned`s.
-        let light: [u32; 2] = [1000, 400];
-        // SAFETY: both are plain `repr(C)` values, read as the bytes they are.
-        let (mastering, light) = unsafe {
-            (
-                std::slice::from_raw_parts(
-                    (&raw const mastering).cast::<u8>(),
-                    size_of::<MasteringDisplay>(),
-                ),
-                std::slice::from_raw_parts(light.as_ptr().cast::<u8>(), size_of_val(&light)),
-            )
-        };
-
-        let source = |hdr: bool| {
-            let mut parameters = ffmpeg::codec::Parameters::new();
-            // SAFETY: the parameters are this closure's own; FFmpeg's
-            // side-data functions keep the list and its count in step, and
-            // a new entry's `data` is the `size` bytes asked for.
-            unsafe {
-                let raw = parameters.as_mut_ptr();
-                (*raw).codec_type = ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
-                (*raw).color_space = ffi::AVColorSpace::AVCOL_SPC_BT2020_NCL;
-                (*raw).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
-                (*raw).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT2020;
-                (*raw).color_trc = ffi::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084;
-                if hdr {
-                    for (kind, bytes) in [
-                        (Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA, mastering),
-                        (Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL, light),
-                    ] {
-                        let entry = ffi::av_packet_side_data_new(
-                            &mut (*raw).coded_side_data,
-                            &mut (*raw).nb_coded_side_data,
-                            kind,
-                            bytes.len(),
-                            0,
-                        );
-                        assert!(!entry.is_null(), "side data");
-                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*entry).data, bytes.len());
-                    }
-                }
-            }
-            StreamInfo {
-                index: 0,
-                kind: ffmpeg::media::Type::Video,
-                parameters,
-                time_base: ffmpeg::Rational::new(1, 30),
-                frame_rate: Some(ffmpeg::Rational::new(30, 1)),
-            }
-        };
-
-        for hdr in [true, false] {
-            let source = source(hdr);
+        for carried in [true, false] {
+            let source = hdr10_source(carried);
             let options = CudaEncoderOptions {
                 codec: CudaCodec::H265,
                 input_format: CudaFrameFormat::P010,
                 ..options(width, height)
             };
-            let mut encoder = match CudaEncoder::for_stream("encoder", &device, options, &source) {
-                Ok(encoder) => encoder,
-                Err(error) => {
-                    eprintln!("skipping: NVENC unavailable on this machine ({error})");
-                    return;
-                }
-            };
-            let path = std::env::temp_dir().join(format!("media-pp-hdr10-{hdr}.mp4"));
+            let mut encoder =
+                match CudaEncoder::for_stream("encoder", &device, options, &source.stream) {
+                    Ok(encoder) => encoder,
+                    Err(error) => {
+                        eprintln!("skipping: NVENC unavailable on this machine ({error})");
+                        return;
+                    }
+                };
+            let path = std::env::temp_dir().join(format!("media-pp-hdr10-nvenc-{carried}.mp4"));
             let mut muxer = FileMuxer::create(&path).expect("create");
             let track = muxer.add_stream("video", &encoder).expect("add");
             let sink = muxer.open().expect("header").take(track).expect("track");
@@ -875,79 +797,7 @@ mod tests {
             crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
                 .expect("eos failed");
             drop(encoder);
-
-            let mut input = ffmpeg::format::input(&path).expect("reopen");
-            let (index, mut parameters) = {
-                let stream = input
-                    .streams()
-                    .best(ffmpeg::media::Type::Video)
-                    .expect("video");
-                (stream.index(), stream.parameters().clone())
-            };
-            assert_eq!(
-                HdrMetadata::of(&parameters),
-                HdrMetadata::of(&source.parameters),
-                "hdr={hdr}: beside the track"
-            );
-
-            // The HEVC alone: a decoder told nothing of what the container
-            // kept, so what its picture carries came from the bitstream.
-            // SAFETY: the parameters are this test's own copy.
-            unsafe {
-                let raw = parameters.as_mut_ptr();
-                for kind in [
-                    Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
-                    Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
-                ] {
-                    ffi::av_packet_side_data_remove(
-                        (*raw).coded_side_data,
-                        &mut (*raw).nb_coded_side_data,
-                        kind,
-                    );
-                }
-            }
-            let mut decoder = ffmpeg::codec::context::Context::from_parameters(parameters)
-                .expect("context")
-                .decoder()
-                .video()
-                .expect("decoder");
-            let mut picture = ffmpeg::frame::Video::empty();
-            let mut decoded = false;
-            for (stream, packet) in input.packets() {
-                if stream.index() != index {
-                    continue;
-                }
-                decoder.send_packet(&packet).expect("send");
-                if decoder.receive_frame(&mut picture).is_ok() {
-                    decoded = true;
-                    break;
-                }
-            }
-            if !decoded {
-                decoder.send_eof().expect("eof");
-                decoded = decoder.receive_frame(&mut picture).is_ok();
-            }
-            assert!(decoded, "hdr={hdr}: nothing decoded");
-            // SAFETY: the picture is this test's own; an entry's `data` is
-            // `size` bytes by FFmpeg's definition.
-            let carried = |kind| unsafe {
-                let entry = ffi::av_frame_get_side_data(picture.as_ptr(), kind);
-                (!entry.is_null())
-                    .then(|| std::slice::from_raw_parts((*entry).data, (*entry).size).to_vec())
-            };
-            use ffi::AVFrameSideDataType as Carried;
-            let expected = |bytes: &[u8]| hdr.then(|| bytes.to_vec());
-            assert_eq!(
-                carried(Carried::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA),
-                expected(mastering),
-                "hdr={hdr}: the mastering display in the HEVC"
-            );
-            assert_eq!(
-                carried(Carried::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL),
-                expected(light),
-                "hdr={hdr}: the light levels in the HEVC"
-            );
-            drop(input);
+            assert_hdr10_kept(&path, &source, true, None, &format!("carried={carried}"));
             let _ = std::fs::remove_file(&path);
         }
     }

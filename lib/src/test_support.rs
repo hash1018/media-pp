@@ -1249,3 +1249,254 @@ pub(crate) fn pictures_found_on(
     });
     chosen
 }
+
+/// An HDR10 stream for an encoder to re-encode: PQ in BT.2020, carrying a
+/// mastering display and content light levels — or, `carried` false,
+/// neither — and the bytes of each as FFmpeg keeps them.
+pub(crate) struct Hdr10Source {
+    pub(crate) stream: crate::elements::StreamInfo,
+    pub(crate) carried: bool,
+    pub(crate) mastering: Vec<u8>,
+    pub(crate) light: Vec<u8>,
+}
+
+pub(crate) fn hdr10_source(carried: bool) -> Hdr10Source {
+    use ffmpeg_next::ffi;
+    /// FFmpeg's `AVMasteringDisplayMetadata`, mirrored only to make a
+    /// stream to re-encode: what is under test copies the bytes whole.
+    #[repr(C)]
+    struct MasteringDisplay {
+        primaries: [[ffi::AVRational; 2]; 3],
+        white_point: [ffi::AVRational; 2],
+        min_luminance: ffi::AVRational,
+        max_luminance: ffi::AVRational,
+        has_primaries: i32,
+        has_luminance: i32,
+    }
+    let r = |num, den| ffi::AVRational { num, den };
+    // In the units HEVC's SEI and MP4's `mdcv` keep, as a reader gives
+    // them back: 50000ths of a coordinate, 10000ths of a nit.
+    let mastering = MasteringDisplay {
+        primaries: [
+            [r(34000, 50000), r(16000, 50000)],
+            [r(13250, 50000), r(34500, 50000)],
+            [r(7500, 50000), r(3000, 50000)],
+        ],
+        white_point: [r(15635, 50000), r(16450, 50000)],
+        min_luminance: r(50, 10000),
+        max_luminance: r(10_000_000, 10000),
+        has_primaries: 1,
+        has_luminance: 1,
+    };
+    // MaxCLL and MaxFALL, two `unsigned`s.
+    let light: [u32; 2] = [1000, 400];
+    // SAFETY: both are plain `repr(C)` values, read as the bytes they are.
+    let (mastering, light) = unsafe {
+        (
+            std::slice::from_raw_parts(
+                (&raw const mastering).cast::<u8>(),
+                size_of::<MasteringDisplay>(),
+            )
+            .to_vec(),
+            std::slice::from_raw_parts(light.as_ptr().cast::<u8>(), size_of_val(&light)).to_vec(),
+        )
+    };
+    let mut parameters = ffmpeg_next::codec::Parameters::new();
+    // SAFETY: the parameters are this function's own; FFmpeg's side-data
+    // functions keep the list and its count in step, and a new entry's
+    // `data` is the `size` bytes asked for.
+    unsafe {
+        let raw = parameters.as_mut_ptr();
+        (*raw).codec_type = ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+        (*raw).color_space = ffi::AVColorSpace::AVCOL_SPC_BT2020_NCL;
+        (*raw).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
+        (*raw).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT2020;
+        (*raw).color_trc = ffi::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084;
+        if carried {
+            for (kind, bytes) in [
+                (
+                    ffi::AVPacketSideDataType::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+                    &mastering,
+                ),
+                (
+                    ffi::AVPacketSideDataType::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+                    &light,
+                ),
+            ] {
+                let entry = ffi::av_packet_side_data_new(
+                    &mut (*raw).coded_side_data,
+                    &mut (*raw).nb_coded_side_data,
+                    kind,
+                    bytes.len(),
+                    0,
+                );
+                assert!(!entry.is_null(), "side data");
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*entry).data, bytes.len());
+            }
+        }
+    }
+    Hdr10Source {
+        stream: crate::elements::StreamInfo {
+            index: 0,
+            kind: ffmpeg_next::media::Type::Video,
+            parameters,
+            time_base: ffmpeg_next::Rational::new(1, 30),
+            frame_rate: Some(ffmpeg_next::Rational::new(30, 1)),
+        },
+        carried,
+        mastering,
+        light,
+    }
+}
+
+/// Asserts that the file at `path`, re-encoded from `source`, carries what
+/// `source` carried — or nothing, where it carried nothing — twice over:
+/// beside its video track, where an MP4 keeps it, and in the bitstream,
+/// which `decoder` (by name; FFmpeg's choice where `None`), told nothing
+/// of the container, finds on the first picture — the second only where
+/// `in_bitstream`, for an encoder that writes it there.
+pub(crate) fn assert_hdr10_kept(
+    path: &std::path::Path,
+    source: &Hdr10Source,
+    in_bitstream: bool,
+    decoder: Option<&str>,
+    what: &str,
+) {
+    use ffi::AVFrameSideDataType as Carried;
+    use ffi::AVPacketSideDataType as Kind;
+    use ffmpeg_next::ffi;
+    let expected = |bytes: &Vec<u8>| source.carried.then(|| bytes.clone());
+
+    let mut input = ffmpeg_next::format::input(path).expect("reopen");
+    let (index, mut parameters) = {
+        let stream = input
+            .streams()
+            .best(ffmpeg_next::media::Type::Video)
+            .expect("video");
+        (stream.index(), stream.parameters().clone())
+    };
+    // SAFETY: the parameters are this function's own copy; an entry's
+    // `data` is `size` bytes by FFmpeg's definition.
+    let beside = |parameters: &ffmpeg_next::codec::Parameters, kind| unsafe {
+        let raw = parameters.as_ptr();
+        let entry =
+            ffi::av_packet_side_data_get((*raw).coded_side_data, (*raw).nb_coded_side_data, kind);
+        (!entry.is_null())
+            .then(|| std::slice::from_raw_parts((*entry).data, (*entry).size).to_vec())
+    };
+    assert_same_display(
+        beside(&parameters, Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA),
+        expected(&source.mastering),
+        &format!("{what}: the mastering display beside the track"),
+    );
+    assert_eq!(
+        beside(&parameters, Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL),
+        expected(&source.light),
+        "{what}: the light levels beside the track"
+    );
+    if !in_bitstream {
+        return;
+    }
+
+    // SAFETY: the parameters are this function's own copy.
+    unsafe {
+        let raw = parameters.as_mut_ptr();
+        for kind in [
+            Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+            Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+        ] {
+            ffi::av_packet_side_data_remove(
+                (*raw).coded_side_data,
+                &mut (*raw).nb_coded_side_data,
+                kind,
+            );
+        }
+    }
+    let context =
+        ffmpeg_next::codec::context::Context::from_parameters(parameters).expect("context");
+    let codec = match decoder {
+        Some(name) => ffmpeg_next::decoder::find_by_name(name).expect("decoder"),
+        None => ffmpeg_next::decoder::find(context.id()).expect("decoder"),
+    };
+    let mut decoder = context
+        .decoder()
+        .open_as(codec)
+        .expect("open")
+        .video()
+        .expect("video");
+    let mut picture = ffmpeg_next::frame::Video::empty();
+    let mut decoded = false;
+    for (stream, packet) in input.packets() {
+        if stream.index() != index {
+            continue;
+        }
+        decoder.send_packet(&packet).expect("send");
+        if decoder.receive_frame(&mut picture).is_ok() {
+            decoded = true;
+            break;
+        }
+    }
+    if !decoded {
+        decoder.send_eof().expect("eof");
+        decoded = decoder.receive_frame(&mut picture).is_ok();
+    }
+    assert!(decoded, "{what}: nothing decoded");
+    // SAFETY: the picture is this function's own; an entry's `data` is
+    // `size` bytes by FFmpeg's definition.
+    let inside = |kind| unsafe {
+        let entry = ffi::av_frame_get_side_data(picture.as_ptr(), kind);
+        (!entry.is_null())
+            .then(|| std::slice::from_raw_parts((*entry).data, (*entry).size).to_vec())
+    };
+    assert_same_display(
+        inside(Carried::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA),
+        expected(&source.mastering),
+        &format!("{what}: the mastering display in the bitstream"),
+    );
+    assert_eq!(
+        inside(Carried::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL),
+        expected(&source.light),
+        "{what}: the light levels in the bitstream"
+    );
+}
+
+/// Asserts that two mastering displays, as FFmpeg keeps them, say the same:
+/// each of the ten rationals within a hundredth of a percent, the two flags
+/// alike. Compared by value, since each codec gives them back in its own
+/// units — HEVC's SEI in 50000ths of a coordinate, AV1's in 65536ths.
+fn assert_same_display(actual: Option<Vec<u8>>, expected: Option<Vec<u8>>, what: &str) {
+    let values = |bytes: &[u8]| -> Vec<f64> {
+        let ints: Vec<i32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&chunk| i32::from_ne_bytes(chunk))
+            .collect();
+        assert_eq!(ints.len(), 22, "{what}: ten rationals and two flags");
+        let mut values: Vec<f64> = ints[..20]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[num, den]| f64::from(*num) / f64::from(*den))
+            .collect();
+        values.extend(ints[20..].iter().map(|&flag| f64::from(flag)));
+        values
+    };
+    match (actual, expected) {
+        (None, None) => {}
+        (Some(actual), Some(expected)) => {
+            let (actual, expected) = (values(&actual), values(&expected));
+            for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+                assert!(
+                    (a - e).abs() <= 1e-4 * e.abs().max(1.0),
+                    "{what}: value {index} is {a}, not {e}"
+                );
+            }
+        }
+        (actual, expected) => panic!(
+            "{what}: {} where {} was expected",
+            if actual.is_some() { "one" } else { "none" },
+            if expected.is_some() { "one" } else { "none" }
+        ),
+    }
+}

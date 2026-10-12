@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 
-use crate::color::ColorDescription;
+use crate::color::{ColorDescription, HdrMetadata};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -271,7 +271,7 @@ impl VideoToolboxEncoder {
         options: VideoToolboxEncoderOptions,
     ) -> std::result::Result<Self, VideoToolboxEncoderError> {
         crate::ensure_ffmpeg();
-        Self::open(name, device, options, None)
+        Self::open(name, device, options, None, &HdrMetadata::default())
     }
 
     /// As [`Self::new`], and the stream says `color` is what it holds —
@@ -295,7 +295,31 @@ impl VideoToolboxEncoder {
         color: ColorDescription,
     ) -> std::result::Result<Self, VideoToolboxEncoderError> {
         crate::ensure_ffmpeg();
-        Self::open(name, device, options, Some(color))
+        Self::open(name, device, options, Some(color), &HdrMetadata::default())
+    }
+
+    /// As [`Self::new`], for re-encoding the pictures of `stream`, as
+    /// decoded and still in its colour: the stream says what `stream`
+    /// says of it — its [`StreamInfo::color`], as [`Self::with_color`]
+    /// would, and an HDR10 stream's mastering display and content light
+    /// levels, which a PQ picture is shown by on a display dimmer than
+    /// the one it was made on. An MP4 or MOV keeps them beside the track,
+    /// the muxer taking them from [`Self::parameters`]. Where `stream`
+    /// names no colour this is [`Self::new`].
+    ///
+    /// Not for pictures made into other colour on the way — HDR mapped to
+    /// SDR, say — which [`Self::with_color`] names as they are.
+    ///
+    /// [`StreamInfo::color`]: crate::elements::StreamInfo::color
+    pub fn for_stream(
+        name: impl Into<String>,
+        device: &VideoToolboxDevice,
+        options: VideoToolboxEncoderOptions,
+        stream: &crate::elements::StreamInfo,
+    ) -> std::result::Result<Self, VideoToolboxEncoderError> {
+        crate::ensure_ffmpeg();
+        let hdr = HdrMetadata::of(&stream.parameters);
+        Self::open(name, device, options, stream.color(), &hdr)
     }
 
     fn open(
@@ -303,6 +327,7 @@ impl VideoToolboxEncoder {
         device: &VideoToolboxDevice,
         options: VideoToolboxEncoderOptions,
         color: Option<ColorDescription>,
+        hdr: &HdrMetadata,
     ) -> std::result::Result<Self, VideoToolboxEncoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoToolboxEncoder, &name, None);
@@ -372,6 +397,7 @@ impl VideoToolboxEncoder {
                 if let Some(color) = color {
                     color.tell(ptr);
                 }
+                hdr.tell(ptr)?;
             }
             video.open_as(codec)
         })();
@@ -387,6 +413,9 @@ impl VideoToolboxEncoder {
             options.bit_rate,
             options.gop_size
         );
+        if !hdr.is_empty() {
+            pp_info!(pp_log: &pp_log, "keeps the source's HDR10 mastering display and light levels");
+        }
         Ok(Self(FilterStage::new(Encoding {
             name,
             pp_log,
@@ -974,6 +1003,65 @@ mod tests {
             mean < 8.0,
             "the last picture decodes to its ten bits: {mean} of 1023 off"
         );
+    }
+
+    /// Re-encoding an HDR10 stream keeps its mastering display and light
+    /// levels beside the track — FFmpeg's VideoToolbox encoder writes no
+    /// SEI of them — and a stream that carries neither gets neither.
+    #[test]
+    fn a_re_encoded_hdr10_stream_keeps_its_mastering_display_and_light_levels() {
+        use crate::elements::FileMuxer;
+        use crate::test_support::{assert_hdr10_kept, hdr10_source};
+        let Some(device) = try_videotoolbox_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        for carried in [true, false] {
+            let source = hdr10_source(carried);
+            let pq = source.stream.color().expect("the source says its colour");
+            let options = VideoToolboxEncoderOptions {
+                format: VideoToolboxFrameFormat::P010,
+                ..options(VideoToolboxCodec::H265, width, height)
+            };
+            let mut encoder = match VideoToolboxEncoder::for_stream(
+                "encoder",
+                &device,
+                options,
+                &source.stream,
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    eprintln!("skipping: no HEVC Main 10 encoder here ({error})");
+                    return;
+                }
+            };
+            let path = std::env::temp_dir().join(format!("media-pp-hdr10-vt-{carried}.mp4"));
+            let mut muxer = FileMuxer::create(&path).expect("create");
+            let track = muxer.add_stream("video", &encoder).expect("add");
+            let sink = muxer.open().expect("header").take(track).expect("track");
+            encoder.src_pads()[0].link(sink.into_raw());
+            let mut upload = VideoToolboxUpload::new("upload", &device);
+            let uploaded = capture(&mut upload);
+            for index in 0..5i64 {
+                let mut frame =
+                    ffmpeg::frame::Video::new(ffmpeg::format::Pixel::P010LE, width, height);
+                for plane in 0..2 {
+                    frame.data_mut(plane).fill(0x80);
+                }
+                frame.set_pts(Some(index));
+                crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+                // Uploaded, its pixel buffer says so, as a decoder's does.
+                pq.describe(&mut frame);
+                upload.consume(MediaBuffer::video(frame)).expect("upload");
+                let frame = uploaded.lock().unwrap().remove(0);
+                encoder.consume(frame).expect("encode");
+            }
+            crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos");
+            drop(encoder);
+            assert_hdr10_kept(&path, &source, false, None, &format!("carried={carried}"));
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     /// A picture an element made in a pool of its own says its colour in
