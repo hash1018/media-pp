@@ -40,6 +40,17 @@ pub enum FileMuxerError {
         path: PathBuf,
     },
 
+    /// [`FileMuxer::create_fragmented`] was given a name that picks a
+    /// container other than MP4 or MOV, the only ones written in fragments.
+    #[error(
+        "{} is not an MP4 or MOV name: only those are written in fragments",
+        path.display()
+    )]
+    NotFragmentable {
+        /// The file asked for.
+        path: PathBuf,
+    },
+
     /// The file could not be created: its directory is not there, or not
     /// writable.
     #[error("could not create {}: {source}", path.display())]
@@ -104,28 +115,70 @@ pub struct FileMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
+    /// Written as fragments ([`FileMuxer::create_fragmented`]).
+    fragmented: bool,
 }
 
 impl FileMuxer {
     /// Allocates the output file. No header is written yet — nothing is on
     /// disk in a readable shape until [`FileMuxer::open`] runs.
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        Self::create_as(path.as_ref(), false)
+    }
+
+    /// Allocates an MP4 or MOV file written in fragments: a header that
+    /// lists the tracks and no samples, then one fragment (`moof` + `mdat`)
+    /// after another, each beginning at a video keyframe — or, with no
+    /// video track, every second.
+    ///
+    /// What it is for is a file cut off. A plain MP4 says where every
+    /// sample is in one index its trailer writes, so a recording whose
+    /// process dies, or whose machine loses power, before the trailer is
+    /// a file nothing can open. Written in fragments, every fragment
+    /// already on disk plays; what is lost is the fragment under way, one
+    /// keyframe interval at most. The same shape is what a browser streams
+    /// from (Media Source Extensions, or WebCodecs behind `mp4box.js`)
+    /// without reading the whole file first.
+    ///
+    /// The cost is a slightly larger file, and a seek that reads through
+    /// the fragments rather than one index; the trailer still writes an
+    /// index of the fragments (`mfra`) for the players that look for it.
+    /// A name other than an MP4 or MOV one is refused before anything is
+    /// created.
+    pub fn create_fragmented(path: impl AsRef<Path>) -> Result<Self> {
+        Self::create_as(path.as_ref(), true)
+    }
+
+    fn create_as(path: &Path, fragmented: bool) -> Result<Self> {
         crate::ensure_ffmpeg();
-        let path = path.as_ref();
         // Asked first, as FFmpeg's own guess would be, so a name with no
         // container in it says so rather than FFmpeg's `Invalid argument`.
+        // `None` for a name that is not text, which FFmpeg is left to try.
         let named = path
             .to_str()
             .and_then(|name| CString::new(name).ok())
             .map(|name| {
                 // SAFETY: `name` is a live NUL-terminated string; the other
-                // two arguments may be null, and the result is only compared.
+                // two arguments may be null. A format returned is a static
+                // FFmpeg owns, whose name is a static string.
                 unsafe {
-                    !ffmpeg::ffi::av_guess_format(ptr::null(), name.as_ptr(), ptr::null()).is_null()
+                    let format =
+                        ffmpeg::ffi::av_guess_format(ptr::null(), name.as_ptr(), ptr::null());
+                    (!format.is_null()).then(|| {
+                        std::ffi::CStr::from_ptr((*format).name)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
                 }
             });
-        if named == Some(false) {
+        if named.as_ref().is_some_and(Option::is_none) {
             return Err(FileMuxerError::UnknownContainer {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        if fragmented && !named.flatten().is_some_and(|name| quicktime(&name)) {
+            return Err(FileMuxerError::NotFragmentable {
                 path: path.to_path_buf(),
             }
             .into());
@@ -138,6 +191,7 @@ impl FileMuxer {
             id: MuxerId::next(),
             output,
             streams: Vec::new(),
+            fragmented,
         })
     }
 
@@ -194,12 +248,10 @@ impl FileMuxer {
             let raw = parameters.as_ptr();
             ((*raw).codec_tag, (*raw).extradata_size)
         };
-        let format = self.output.format();
-        let quicktime = format
-            .name()
-            .split(',')
-            .any(|name| matches!(name, "mp4" | "mov" | "ipod" | "ismv" | "3gp" | "3g2"));
-        parameters.id() == ffmpeg::codec::Id::HEVC && tag == 0 && extradata > 0 && quicktime
+        parameters.id() == ffmpeg::codec::Id::HEVC
+            && tag == 0
+            && extradata > 0
+            && quicktime(self.output.format().name())
     }
 
     /// Writes the container header — every [`FileMuxer::add_stream`] call
@@ -232,7 +284,20 @@ impl FileMuxer {
     /// un-finalized (and unplayable) until the rest catch up too.
     pub fn open(mut self) -> Result<MuxerSinks> {
         crate::ensure_ffmpeg();
-        self.output.write_header().map_err(FileMuxerError::from)?;
+        if self.fragmented {
+            let options = self.fragment_options();
+            let unused = self
+                .output
+                .write_header_with(options)
+                .map_err(FileMuxerError::from)?;
+            debug_assert!(
+                unused.iter().next().is_none(),
+                "the mov muxer took no option named {:?}",
+                unused.iter().map(|(key, _)| key).collect::<Vec<_>>()
+            );
+        } else {
+            self.output.write_header().map_err(FileMuxerError::from)?;
+        }
         Ok(open_tracks::<Self>(
             self.id,
             self.output,
@@ -244,6 +309,54 @@ impl FileMuxer {
             },
         ))
     }
+}
+
+impl FileMuxer {
+    /// What the mov muxer is told for a file written in fragments.
+    ///
+    /// `empty_moov` puts the track list up front with no samples in it, and
+    /// `delay_moov` writes it with the first fragment rather than with the
+    /// header, so a track whose codec configuration comes only in its first
+    /// packets — a stream copied from a transport stream — still gets one.
+    /// `default_base_moof` makes each fragment's offsets its own, as Media
+    /// Source Extensions asks.
+    ///
+    /// A fragment ends at a video keyframe, so each begins with a picture
+    /// that decodes on its own. `frag_keyframe` looks at video tracks
+    /// alone, so a file of sound only would be one fragment the trailer
+    /// writes — nothing on disk until the end, the very thing fragments
+    /// are for; such a file is cut every second instead.
+    ///
+    /// `flush_packets` hands each fragment to the file as it is written
+    /// rather than leaving up to 32 KB of it in FFmpeg's own buffer, which a
+    /// process that dies takes with it. The mov muxer holds a fragment's
+    /// packets itself until it cuts one, so between fragments there is
+    /// nothing to hand over.
+    fn fragment_options(&self) -> ffmpeg::Dictionary<'static> {
+        let video = self
+            .output
+            .streams()
+            .any(|stream| stream.parameters().medium() == ffmpeg::media::Type::Video);
+        let mut options = ffmpeg::Dictionary::new();
+        options.set("flush_packets", "1");
+        if video {
+            options.set(
+                "movflags",
+                "frag_keyframe+empty_moov+delay_moov+default_base_moof",
+            );
+        } else {
+            options.set("movflags", "empty_moov+delay_moov+default_base_moof");
+            options.set("frag_duration", "1000000");
+        }
+        options
+    }
+}
+
+/// Whether FFmpeg's muxer `name` — a comma-separated list for the mov
+/// family — writes MP4 or MOV boxes.
+fn quicktime(name: &str) -> bool {
+    name.split(',')
+        .any(|name| matches!(name, "mp4" | "mov" | "ipod" | "ismv" | "3gp" | "3g2"))
 }
 
 impl Muxer for FileMuxer {
@@ -1229,6 +1342,260 @@ mod tests {
             "the text and its timing survived arriving last"
         );
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A software H.264 encoder of a small picture, a keyframe every
+    /// `gop` pictures; `None` where the build has neither, as above.
+    fn open_h264_encoder(gop: u32) -> Option<crate::elements::SwEncoder> {
+        use crate::elements::{SwEncoder, SwEncoderOptions, VideoCodec};
+        [VideoCodec::OpenH264, VideoCodec::H264]
+            .into_iter()
+            .find_map(|codec| {
+                SwEncoder::new(
+                    "video",
+                    SwEncoderOptions {
+                        codec,
+                        width: 160,
+                        height: 96,
+                        pixel_format: ffmpeg::format::Pixel::YUV420P,
+                        frame_rate: ffmpeg::Rational::new(30, 1),
+                        bit_rate: 200_000,
+                        gop_size: gop,
+                        max_b_frames: None,
+                    },
+                )
+                .ok()
+            })
+    }
+
+    /// Picture `index` of a 30-a-second stream, each a different shade.
+    fn picture(index: i64) -> MediaBuffer {
+        let pool = crate::pool::UnboundObjectPool::new(
+            0,
+            || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 160, 96),
+            |_| {},
+        );
+        let mut frame = pool.get();
+        for plane in 0..3 {
+            frame.data_mut(plane).fill((index * 7 % 200) as u8 + 16);
+        }
+        frame.set_pts(Some(index));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+        MediaBuffer::Video(Arc::new(frame).into())
+    }
+
+    /// The four-letter types of a file's top-level boxes, in order.
+    fn top_level_boxes(path: &Path) -> Vec<String> {
+        let bytes = std::fs::read(path).expect("the file must be there");
+        let mut boxes = Vec::new();
+        let mut at = 0usize;
+        while at + 8 <= bytes.len() {
+            let mut size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as u64;
+            boxes.push(String::from_utf8_lossy(&bytes[at + 4..at + 8]).into_owned());
+            if size == 1 && at + 16 <= bytes.len() {
+                size = u64::from_be_bytes(bytes[at + 8..at + 16].try_into().unwrap());
+            }
+            if size < 8 {
+                break;
+            }
+            at += size as usize;
+        }
+        boxes
+    }
+
+    /// How many packets of each track a file reads back with; `None` where
+    /// it does not open at all.
+    fn packets_read_back(path: &Path) -> Option<Vec<usize>> {
+        let mut input = ffmpeg::format::input(path).ok()?;
+        let mut counts = vec![0usize; input.streams().count()];
+        let mut packet = ffmpeg::Packet::empty();
+        while packet.read(&mut input).is_ok() {
+            counts[packet.stream()] += 1;
+            packet = ffmpeg::Packet::empty();
+        }
+        Some(counts)
+    }
+
+    /// Only an MP4 or MOV name is written in fragments; any other is
+    /// refused as that, before a file is made.
+    #[test]
+    fn only_an_mp4_or_mov_name_is_written_in_fragments() {
+        let path = std::env::temp_dir().join(format!(
+            "file_muxer_fragmented_refused_{}.mkv",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let Err(error) = FileMuxer::create_fragmented(&path) else {
+            panic!("a .mkv was taken to be written in fragments");
+        };
+        assert!(
+            matches!(
+                error,
+                Error::FileMuxerError(FileMuxerError::NotFragmentable { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(!path.exists(), "nothing is created for it");
+
+        let mov = std::env::temp_dir().join(format!(
+            "file_muxer_fragmented_mov_{}.mov",
+            std::process::id()
+        ));
+        drop(FileMuxer::create_fragmented(&mov).expect("a .mov is written in fragments"));
+        std::fs::remove_file(&mov).ok();
+    }
+
+    /// Video and sound written to the end in fragments: the track list
+    /// first, then a fragment at each keyframe, and every packet reads
+    /// back.
+    #[test]
+    fn a_fragmented_file_finished_holds_every_packet_in_fragments() {
+        let Some(mut video) = open_h264_encoder(15) else {
+            eprintln!("skipping: this FFmpeg build has no libopenh264 or libx264");
+            return;
+        };
+        let mut audio = open_aac_encoder(48_000, 1);
+        let path =
+            std::env::temp_dir().join(format!("file_muxer_fragmented_{}.mp4", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut muxer = FileMuxer::create_fragmented(&path).expect("the muxer must open");
+        let video_track = muxer.add_stream("video", &video).expect("add video");
+        let audio_track = muxer
+            .add_stream(
+                "audio",
+                TrackFormat::new(audio.parameters(), ffmpeg::Rational::new(1, 48_000)),
+            )
+            .expect("add audio");
+        let mut sinks = muxer.open().expect("open must write the header");
+        video.src_pads()[0].link(sinks.take(video_track).unwrap().into_raw());
+        audio.src_pads()[0].link(sinks.take(audio_track).unwrap().into_raw());
+
+        // Two seconds: four keyframes, and the sound beside them.
+        for index in 0..60i64 {
+            video.consume(picture(index)).expect("encode a picture");
+            audio
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48_000, 1, 1600, index * 1600)).into(),
+                ))
+                .expect("encode its sound");
+        }
+        crate::stream::deliver(&mut video, &crate::stream::StreamEvent::Eos).unwrap();
+        crate::stream::deliver(&mut audio, &crate::stream::StreamEvent::Eos).unwrap();
+        drop((video, audio));
+
+        let boxes = top_level_boxes(&path);
+        let moov = boxes
+            .iter()
+            .position(|b| b == "moov")
+            .expect("a track list");
+        let first_moof = boxes.iter().position(|b| b == "moof").expect("a fragment");
+        assert!(moov < first_moof, "the track list comes first: {boxes:?}");
+        assert!(
+            boxes.iter().filter(|b| *b == "moof").count() >= 4,
+            "a fragment at each keyframe: {boxes:?}"
+        );
+        let counts = packets_read_back(&path).expect("the file must open");
+        assert_eq!(counts[0], 60, "every picture reads back");
+        assert!(counts[1] > 0, "the sound reads back: {counts:?}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The point of fragments: a recording never finished still opens, with
+    /// the pictures of every fragment before the one under way. What is
+    /// read is a copy of the file taken while it is still being written —
+    /// what a process that dies leaves on disk, FFmpeg's own buffer never
+    /// handed over — and then the file itself once its sinks are dropped
+    /// with no `Eos` and no `Stop`. The same recording written plainly
+    /// opens in neither, or this would prove nothing.
+    #[test]
+    fn a_fragmented_recording_cut_off_still_plays() {
+        let cut_off = |fragmented: bool| {
+            let mut video = open_h264_encoder(15)?;
+            let path = std::env::temp_dir().join(format!(
+                "file_muxer_cut_off_{fragmented}_{}.mp4",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let mut muxer = if fragmented {
+                FileMuxer::create_fragmented(&path)
+            } else {
+                FileMuxer::create(&path)
+            }
+            .expect("the muxer must open");
+            let track = muxer.add_stream("video", &video).expect("add video");
+            let mut sinks = muxer.open().expect("open must write the header");
+            video.src_pads()[0].link(sinks.take(track).unwrap().into_raw());
+            // Four keyframe intervals and a half: the last fragment is
+            // still being gathered when the recording is cut off.
+            for index in 0..68i64 {
+                video.consume(picture(index)).expect("encode a picture");
+            }
+            let snapshot = path.with_extension("snapshot.mp4");
+            std::fs::copy(&path, &snapshot).expect("copy the file being written");
+            drop(sinks);
+            drop(video);
+            let read = (packets_read_back(&snapshot), packets_read_back(&path));
+            std::fs::remove_file(&snapshot).ok();
+            std::fs::remove_file(&path).ok();
+            Some(read)
+        };
+        let Some((snapshot, dropped)) = cut_off(true) else {
+            eprintln!("skipping: this FFmpeg build has no libopenh264 or libx264");
+            return;
+        };
+        for (what, counts) in [
+            ("a copy taken while writing", snapshot),
+            ("dropped", dropped),
+        ] {
+            let counts =
+                counts.unwrap_or_else(|| panic!("{what}: a fragmented recording must open"));
+            assert!(
+                counts[0] >= 60,
+                "{what}: every fragment before the one under way plays: {counts:?}"
+            );
+        }
+        assert_eq!(
+            cut_off(false).unwrap(),
+            (None, None),
+            "a plain MP4 cut off does not open, or this proves nothing"
+        );
+    }
+
+    /// Sound alone has no keyframes to cut at, so it is cut every second:
+    /// cut off, it still plays up to its last whole second.
+    #[test]
+    fn a_fragmented_recording_of_sound_alone_cut_off_still_plays() {
+        let mut audio = open_aac_encoder(48_000, 1);
+        let path = std::env::temp_dir().join(format!(
+            "file_muxer_cut_off_sound_{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut muxer = FileMuxer::create_fragmented(&path).expect("the muxer must open");
+        let track = muxer
+            .add_stream(
+                "audio",
+                TrackFormat::new(audio.parameters(), ffmpeg::Rational::new(1, 48_000)),
+            )
+            .expect("add audio");
+        let mut sinks = muxer.open().expect("open must write the header");
+        audio.src_pads()[0].link(sinks.take(track).unwrap().into_raw());
+        // Three seconds and a half.
+        for tick in 0..175i64 {
+            audio
+                .consume(MediaBuffer::Audio(
+                    Arc::new(silent_frame(48_000, 1, 960, tick * 960)).into(),
+                ))
+                .expect("encode sound");
+        }
+        drop(sinks);
+        drop(audio);
+
+        let counts = packets_read_back(&path).expect("sound cut off must open");
+        // 1024 samples a packet: three whole seconds are over 140.
+        assert!(counts[0] >= 140, "every whole second plays: {counts:?}");
         std::fs::remove_file(&path).ok();
     }
 }

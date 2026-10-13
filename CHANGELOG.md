@@ -257,7 +257,20 @@ compile error with no explanation.
   with the `videotoolbox` feature, `EncodePath::VideoToolbox` always). A
   `match` on any of them needs an arm for it.
 
+- **`FileMuxerError` has a `NotFragmentable` variant**, for a name
+  `FileMuxer::create_fragmented` cannot write in fragments — see Added. A
+  `match` on `FileMuxerError` needs an arm for it.
+
 ### Added
+
+- **`FileMuxer::create_fragmented` writes an MP4 or MOV in fragments.** The
+  track list comes first, then a fragment (`moof` + `mdat`) at each video
+  keyframe — every second for sound alone — each handed to the file as it
+  is cut. A recording cut off before its trailer, by a process that dies
+  or a machine that loses power, still opens with every fragment written
+  before the one under way, where a plain MP4 opens not at all; it is also
+  the shape a browser streams from. Any other name is refused
+  (`FileMuxerError::NotFragmentable`) before a file is made.
 
 - **The window renderers show a phone's portrait recording upright.**
   `D3d11WindowRenderer`, `D3d12WindowRenderer`, `VulkanWindowRenderer` and

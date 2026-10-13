@@ -199,8 +199,23 @@ impl<M: Muxer> SharedOutput<M> {
             return Ok(false);
         }
         state.finished = true;
-        state.output.write_trailer().map_err(M::ffmpeg_error)?;
+        write_trailer(&mut state.output).map_err(M::ffmpeg_error)?;
         Ok(true)
+    }
+}
+
+/// `av_write_trailer`, read as FFmpeg means it: below zero is a failure,
+/// anything else success. `Output::write_trailer` takes anything but zero
+/// for a failure, and the mov muxer writing fragments answers with the size
+/// of the fragment index it wrote last.
+fn write_trailer(
+    output: &mut ffmpeg::format::context::Output,
+) -> std::result::Result<(), ffmpeg::Error> {
+    // SAFETY: `output` is a live output context whose header was written;
+    // the caller holds it exclusively, and it is written to once only.
+    match unsafe { ffmpeg::ffi::av_write_trailer(output.as_mut_ptr()) } {
+        error if error < 0 => Err(ffmpeg::Error::from(error)),
+        _ => Ok(()),
     }
 }
 
