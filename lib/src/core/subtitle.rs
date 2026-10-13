@@ -384,7 +384,9 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
 
-        let mut muxer = crate::elements::FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer =
+            crate::elements::FileMuxer::create(&path, crate::elements::Mp4Layout::Standard)
+                .expect("the muxer must open");
         let text = muxer
             .add_stream(
                 "text",
@@ -453,7 +455,9 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_file(&path);
-        let mut muxer = crate::elements::FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer =
+            crate::elements::FileMuxer::create(&path, crate::elements::Mp4Layout::Standard)
+                .expect("the muxer must open");
         let text = muxer
             .add_stream(
                 "text",

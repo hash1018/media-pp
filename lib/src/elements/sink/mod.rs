@@ -28,7 +28,7 @@ mod whisper_transcriber;
 pub use app_sink::AppSink;
 pub use counter::CounterHandle;
 pub use frame_counter::FrameCounter;
-pub use muxer::{FileMuxer, FileMuxerError, SegmentPolicy, SegmentedFileMuxer};
+pub use muxer::{FileMuxer, FileMuxerError, Mp4Layout, SegmentPolicy, SegmentedFileMuxer};
 pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
 pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError, TrackFormat};
 pub use muxer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};

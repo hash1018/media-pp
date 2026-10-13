@@ -36,8 +36,8 @@ mod example {
         color::Color,
         elements::{
             CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, FileMuxer,
-            SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, TextLayer,
-            VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+            Mp4Layout, SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource,
+            TextLayer, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
@@ -156,7 +156,7 @@ mod example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

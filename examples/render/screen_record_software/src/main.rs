@@ -40,7 +40,7 @@ mod windows_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer, SwEncoder,
+            CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer, Mp4Layout, SwEncoder,
             SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::Pipeline,
@@ -102,7 +102,7 @@ mod windows_example {
         // No container/demuxer in this loop to get these from — SwEncoder
         // exposes its own codec parameters for exactly this case (see
         // `transcode_render`'s own use of this, wiring a decoder instead).
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
@@ -156,7 +156,7 @@ mod linux_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            CaptureSourceKind, FileMuxer, PipeWireScreenCaptureOptions,
+            CaptureSourceKind, FileMuxer, Mp4Layout, PipeWireScreenCaptureOptions,
             PipeWireScreenCaptureSource, SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::Pipeline,
@@ -231,7 +231,7 @@ mod linux_example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
@@ -295,8 +295,8 @@ mod macos_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            FileMuxer, ScreenCaptureKitOptions, ScreenCaptureKitSource, ScreenCaptureKitTarget,
-            SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
+            FileMuxer, Mp4Layout, ScreenCaptureKitOptions, ScreenCaptureKitSource,
+            ScreenCaptureKitTarget, SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::Pipeline,
     };
@@ -370,7 +370,7 @@ mod macos_example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

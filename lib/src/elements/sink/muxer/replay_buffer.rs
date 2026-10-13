@@ -47,7 +47,7 @@ use std::time::Duration;
 use ffmpeg_next::{self as ffmpeg, Rescale};
 use thiserror::Error as ThisError;
 
-use super::file_muxer::FileMuxer;
+use super::file_muxer::{FileMuxer, Mp4Layout};
 use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 use crate::{
     buffer::MediaBuffer,
@@ -457,7 +457,7 @@ impl Clip {
     /// Writes the clip to `path`, starting at zero — see this module's docs
     /// on why every track is moved by the one origin.
     fn write(self, path: &Path) -> Result<()> {
-        let mut muxer = FileMuxer::create(path)?;
+        let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
         let tracks = self
             .streams
             .iter()

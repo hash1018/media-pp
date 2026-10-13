@@ -7,7 +7,7 @@ mod segmented_file_muxer;
 mod track_sink;
 mod tracks;
 
-pub use file_muxer::{FileMuxer, FileMuxerError};
+pub use file_muxer::{FileMuxer, FileMuxerError, Mp4Layout};
 pub use hls_muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
 pub use replay_buffer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use rtmp_muxer::{RtmpMuxer, RtmpMuxerError};

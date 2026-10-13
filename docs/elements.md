@@ -49,10 +49,11 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `AudioTempo`,
   `AudioWaveform`, `SwAudioEncoder`; playback through `WasapiRenderer`,
   `PipeWireAudioRenderer` and `CoreAudioRenderer`.
-- **Outputs**: `FileMuxer` (an MP4 or MOV in fragments too, which a
-  recording cut off still opens from: `FileMuxer::create_fragmented`),
-  `SegmentedFileMuxer` (likewise, `create_fragmented`), `ReplayBuffer`, `HlsMuxer`, `RtmpMuxer`,
-  `RtspMuxer`, `WebRtcTrackSink`, `AppSink`, and virtual cameras:
+- **Outputs**: `FileMuxer` and `SegmentedFileMuxer` (an MP4 or MOV laid out
+  fast-start, for playing as it downloads, or in fragments, which a
+  recording cut off still opens from: `Mp4Layout`), `ReplayBuffer`,
+  `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`, and
+  virtual cameras:
   `MfVirtualCamera` on Windows, `V4l2VirtualCamera` on Linux.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.

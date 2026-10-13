@@ -58,9 +58,9 @@ use media_pp::{
     bus::BusEvent,
     color::Color,
     elements::{
-        FileDemuxer, FileMuxer, FrameCounter, SegmentPolicy, SegmentedFileMuxer, SwDecoder,
-        SwEncoder, SwEncoderOptions, SwVideoCompositor, TestVideoOptions, TestVideoSource,
-        VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+        FileDemuxer, FileMuxer, FrameCounter, Mp4Layout, SegmentPolicy, SegmentedFileMuxer,
+        SwDecoder, SwEncoder, SwEncoderOptions, SwVideoCompositor, TestVideoOptions,
+        TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
     },
     pipeline::{Pipeline, SeekMode},
 };
@@ -189,7 +189,7 @@ fn open_fixture(path: &str) -> (FileDemuxer, usize, ffmpeg::codec::Parameters) {
 fn record_once(path: &Path, teardown: Teardown) {
     let source = test_source("video");
     let encoder = encoder("encoder", 30);
-    let mut muxer = FileMuxer::create(path).expect("create the recording");
+    let mut muxer = FileMuxer::create(path, Mp4Layout::Standard).expect("create the recording");
     let video = muxer
         .add_stream("video", &encoder)
         .expect("add the video track");
@@ -592,6 +592,7 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
     let segment_dir = dir.path().to_path_buf();
     let mut muxer = SegmentedFileMuxer::create(
         SegmentPolicy::Duration(Duration::from_secs(1)),
+        Mp4Layout::Standard,
         move |index| segment_dir.join(format!("segment_{index:04}.mp4")),
     );
     let video = muxer.add_stream("video", &encoder);

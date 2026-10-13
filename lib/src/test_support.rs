@@ -275,7 +275,7 @@ fn build_sound(
 ) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     use crate::element::{RawSink, SrcPads};
     use crate::elements::{
-        AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
+        AudioCodec, FileMuxer, Mp4Layout, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
         TestAudioSource,
     };
     use crate::stream::{StreamEvent, deliver};
@@ -304,7 +304,7 @@ fn build_sound(
             bit_rate: 128_000,
         },
     )?;
-    let mut muxer = FileMuxer::create(&partial)?;
+    let mut muxer = FileMuxer::create(&partial, Mp4Layout::Standard)?;
     let track = muxer.add_stream("audio", &encoder)?;
     let mut sinks = muxer.open()?;
     encoder.src_pads()[0].link(sinks.take(track)?.into_raw());
@@ -798,8 +798,8 @@ fn build_fixture(
 ) -> std::result::Result<Fixture, Box<dyn std::error::Error>> {
     use crate::element::{RawSink, SrcPads};
     use crate::elements::{
-        AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions,
-        TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
+        AudioCodec, FileMuxer, Mp4Layout, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+        SwEncoderOptions, TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
     };
     use crate::stream::{StreamEvent, deliver};
     use ffmpeg_next as ffmpeg;
@@ -862,7 +862,7 @@ fn build_fixture(
         },
     )?;
 
-    let mut muxer = FileMuxer::create(&partial)?;
+    let mut muxer = FileMuxer::create(&partial, Mp4Layout::Standard)?;
     let video_track = muxer.add_stream("video", &video_encoder)?;
     let audio_track = muxer.add_stream("audio", &audio_encoder)?;
     let mut sinks = muxer.open()?;

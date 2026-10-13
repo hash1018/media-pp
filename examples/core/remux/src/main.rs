@@ -26,7 +26,7 @@ mod example {
     use media_pp::contract::MediaKind;
     use media_pp::{
         bus::BusEvent,
-        elements::{FileDemuxer, FileMuxer},
+        elements::{FileDemuxer, FileMuxer, Mp4Layout},
         pipeline::Pipeline,
     };
 
@@ -58,7 +58,7 @@ mod example {
         // A stream with no kind — a data stream, an attachment — is
         // skipped rather than failing the whole remux over one track
         // nothing here can describe.
-        let mut muxer = FileMuxer::create(&output_path)?;
+        let mut muxer = FileMuxer::create(&output_path, Mp4Layout::Standard)?;
         let mut kept = Vec::new();
         for stream in &streams {
             if MediaKind::packet_for(stream.kind).is_none() {

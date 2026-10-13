@@ -56,8 +56,8 @@ mod example {
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, Detection,
             DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, HideShape, Hiding,
-            InputScale, LabelStyle, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions,
-            RedactStyle, TrackFormat, TrackerOptions, Treatment,
+            InputScale, LabelStyle, Mp4Layout, ObjectTracker, OrtClassifierOptions,
+            OrtDetectorOptions, RedactStyle, TrackFormat, TrackerOptions, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -325,7 +325,7 @@ mod example {
                         max_b_frames: None,
                     },
                 )?;
-                let mut muxer = FileMuxer::create(path)?;
+                let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
                 let track = muxer.add_stream(
                     "video",
                     TrackFormat::from(&encoder).with_orientation(orientation),

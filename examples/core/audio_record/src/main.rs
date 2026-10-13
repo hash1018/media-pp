@@ -15,8 +15,8 @@ mod example {
 
     use media_pp::{
         elements::{
-            AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
-            TestAudioSource,
+            AudioCodec, FileMuxer, Mp4Layout, SwAudioEncoder, SwAudioEncoderOptions,
+            TestAudioOptions, TestAudioSource,
         },
         pipeline::Pipeline,
     };
@@ -53,7 +53,7 @@ mod example {
                 bit_rate: 128_000,
             },
         )?;
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("audio", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

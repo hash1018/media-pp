@@ -1010,7 +1010,7 @@ mod tests {
     /// SEI of them — and a stream that carries neither gets neither.
     #[test]
     fn a_re_encoded_hdr10_stream_keeps_its_mastering_display_and_light_levels() {
-        use crate::elements::FileMuxer;
+        use crate::elements::{FileMuxer, Mp4Layout};
         use crate::test_support::{assert_hdr10_kept, hdr10_source};
         let Some(device) = try_videotoolbox_device() else {
             return;
@@ -1037,7 +1037,7 @@ mod tests {
                 }
             };
             let path = std::env::temp_dir().join(format!("media-pp-hdr10-vt-{carried}.mp4"));
-            let mut muxer = FileMuxer::create(&path).expect("create");
+            let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer.add_stream("video", &encoder).expect("add");
             let sink = muxer.open().expect("header").take(track).expect("track");
             encoder.src_pads()[0].link(sink.into_raw());
@@ -1140,7 +1140,7 @@ mod tests {
     /// deeper than FFmpeg dates it.
     #[test]
     fn b_frames_are_dated_as_a_muxer_takes_them() {
-        use crate::elements::FileMuxer;
+        use crate::elements::{FileMuxer, Mp4Layout};
         let Some(device) = try_videotoolbox_device() else {
             return;
         };
@@ -1161,7 +1161,7 @@ mod tests {
                 };
                 let path = std::env::temp_dir()
                     .join(format!("media-pp-vt-b-frames-{codec:?}-{b_frames}.mp4"));
-                let mut muxer = FileMuxer::create(&path).expect("create");
+                let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
                 let track = muxer.add_stream("video", &encoder).expect("add");
                 let sink = muxer.open().expect("header").take(track).expect("track");
                 encoder.src_pads()[0].link(sink.into_raw());

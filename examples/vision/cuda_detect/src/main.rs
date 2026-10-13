@@ -71,7 +71,7 @@ mod example {
             AppSink, BoxStyle, COCO_CLASS_LABELS, ClassRule, CudaCodec, CudaDecoder,
             CudaDetectionOverlay, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
             CudaOrtDetector, CudaOrtDetectorOptions, DetectionOverlayOptions, Detections,
-            DetectorModel, FileDemuxer, FileMuxer, HideShape, Hiding, LabelStyle,
+            DetectorModel, FileDemuxer, FileMuxer, HideShape, Hiding, LabelStyle, Mp4Layout,
             OrtDetectorOptions, RedactStyle, Tiles, TrackFormat, Treatment,
         },
         ffmpeg::{Rational, media},
@@ -322,7 +322,7 @@ mod example {
                     Some(color) => CudaEncoder::with_color("encoder", &device, options, color)?,
                     None => CudaEncoder::new("encoder", &device, options)?,
                 };
-                let mut muxer = FileMuxer::create(path)?;
+                let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
                 let track = muxer.add_stream(
                     "video",
                     TrackFormat::from(&encoder).with_orientation(orientation),

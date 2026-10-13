@@ -1218,7 +1218,7 @@ mod tests {
     /// which BGRA handed to the transform was not at this size.
     #[test]
     fn a_media_foundation_stream_told_bt709_says_it_and_holds_it() {
-        use crate::elements::{D3d11Scaler, D3d11ScalerFormat, FileMuxer};
+        use crate::elements::{D3d11Scaler, D3d11ScalerFormat, FileMuxer, Mp4Layout};
 
         let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
@@ -1246,7 +1246,7 @@ mod tests {
 
         let path =
             std::env::temp_dir().join(format!("d3d11_encoder_colour_{}.mp4", std::process::id()));
-        let mut muxer = FileMuxer::create(&path).expect("the file opens");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the file opens");
         let track = muxer
             .add_stream("video", &encoder)
             .expect("the track is added");

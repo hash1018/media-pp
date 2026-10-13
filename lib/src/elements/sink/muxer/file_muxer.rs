@@ -40,13 +40,13 @@ pub enum FileMuxerError {
         path: PathBuf,
     },
 
-    /// [`FileMuxer::create_fragmented`] was given a name that picks a
-    /// container other than MP4 or MOV, the only ones written in fragments.
+    /// [`FileMuxer::create`] asked a file whose name picks a
+    /// container other than MP4 or MOV for a layout only those have.
     #[error(
-        "{} is not an MP4 or MOV name: only those are written in fragments",
+        "{} is not an MP4 or MOV name: only those are laid out fast-start or in fragments",
         path.display()
     )]
-    NotFragmentable {
+    NotMp4 {
         /// The file asked for.
         path: PathBuf,
     },
@@ -82,7 +82,7 @@ pub enum FileMuxerError {
 /// ```no_run
 /// # use media_pp::ffmpeg;
 /// # use media_pp::elements::{
-/// #     AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+/// #     AudioCodec, FileMuxer, Mp4Layout, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
 /// #     SwEncoderOptions, VideoCodec,
 /// # };
 /// # fn main() -> media_pp::Result<()> {
@@ -102,7 +102,7 @@ pub enum FileMuxerError {
 /// #     channels: 2,
 /// #     bit_rate: 128_000,
 /// # })?;
-/// let mut muxer = FileMuxer::create("out.mp4")?;
+/// let mut muxer = FileMuxer::create("out.mp4", Mp4Layout::Standard)?;
 /// let video = muxer.add_stream("video", &video_encoder)?;
 /// let audio = muxer.add_stream("audio", &audio_encoder)?;
 /// let mut sinks = muxer.open()?; // writes the header
@@ -115,42 +115,54 @@ pub struct FileMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
-    /// Written as fragments ([`FileMuxer::create_fragmented`]).
-    fragmented: bool,
+    layout: Mp4Layout,
+}
+
+/// Where an MP4 or MOV file keeps its index — the `moov` box that says where
+/// every sample is — given to [`FileMuxer::create`]. The samples are
+/// the same in all three; what differs is what can read the file before it
+/// is finished, and how soon one streamed starts to play.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mp4Layout {
+    /// The index after the samples, written by the trailer: the quickest to
+    /// finish. A file cut off before its trailer — a process that dies, a
+    /// machine that loses power — opens not at all, and one streamed plays
+    /// only once its end has been fetched.
+    #[default]
+    Standard,
+    /// The index moved in front of the samples as the file is finished, so
+    /// one streamed — in a browser, a messenger's preview, a cloud drive's
+    /// player — starts as its first bytes arrive. Finishing reads and writes
+    /// the whole file once more, which takes about as long as copying it;
+    /// for a file handed to someone else when it is done, not a recording
+    /// that may be cut off.
+    FastStart,
+    /// A header that lists the tracks and no samples, then one fragment
+    /// (`moof` + `mdat`) after another, each beginning at a video keyframe
+    /// — or, with no video track, every second — and each handed to the
+    /// file as it is cut.
+    ///
+    /// What it is for is a file cut off: every fragment already on disk
+    /// plays, and what is lost is the fragment under way, one keyframe
+    /// interval at most. The same shape is what a browser streams from
+    /// (Media Source Extensions, or WebCodecs behind `mp4box.js`) without
+    /// reading the whole file first. The cost is a slightly larger file,
+    /// and a seek that reads through the fragments rather than one index;
+    /// the trailer still writes an index of the fragments (`mfra`) for the
+    /// players that look for it.
+    Fragmented,
 }
 
 impl FileMuxer {
     /// Allocates the output file. No header is written yet — nothing is on
     /// disk in a readable shape until [`FileMuxer::open`] runs.
-    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        Self::create_as(path.as_ref(), false)
-    }
-
-    /// Allocates an MP4 or MOV file written in fragments: a header that
-    /// lists the tracks and no samples, then one fragment (`moof` + `mdat`)
-    /// after another, each beginning at a video keyframe — or, with no
-    /// video track, every second.
     ///
-    /// What it is for is a file cut off. A plain MP4 says where every
-    /// sample is in one index its trailer writes, so a recording whose
-    /// process dies, or whose machine loses power, before the trailer is
-    /// a file nothing can open. Written in fragments, every fragment
-    /// already on disk plays; what is lost is the fragment under way, one
-    /// keyframe interval at most. The same shape is what a browser streams
-    /// from (Media Source Extensions, or WebCodecs behind `mp4box.js`)
-    /// without reading the whole file first.
-    ///
-    /// The cost is a slightly larger file, and a seek that reads through
-    /// the fragments rather than one index; the trailer still writes an
-    /// index of the fragments (`mfra`) for the players that look for it.
-    /// A name other than an MP4 or MOV one is refused before anything is
-    /// created.
-    pub fn create_fragmented(path: impl AsRef<Path>) -> Result<Self> {
-        Self::create_as(path.as_ref(), true)
-    }
-
-    fn create_as(path: &Path, fragmented: bool) -> Result<Self> {
+    /// An MP4 or MOV file is laid out as `layout` says; a file of any other
+    /// container takes [`Mp4Layout::Standard`] alone, and asked for another
+    /// is refused as [`FileMuxerError::NotMp4`] before anything is created.
+    pub fn create(path: impl AsRef<Path>, layout: Mp4Layout) -> Result<Self> {
         crate::ensure_ffmpeg();
+        let path = path.as_ref();
         // Asked first, as FFmpeg's own guess would be, so a name with no
         // container in it says so rather than FFmpeg's `Invalid argument`.
         // `None` for a name that is not text, which FFmpeg is left to try.
@@ -177,8 +189,8 @@ impl FileMuxer {
             }
             .into());
         }
-        if fragmented && !named.flatten().is_some_and(|name| quicktime(&name)) {
-            return Err(FileMuxerError::NotFragmentable {
+        if layout != Mp4Layout::Standard && !named.flatten().is_some_and(|name| quicktime(&name)) {
+            return Err(FileMuxerError::NotMp4 {
                 path: path.to_path_buf(),
             }
             .into());
@@ -191,7 +203,7 @@ impl FileMuxer {
             id: MuxerId::next(),
             output,
             streams: Vec::new(),
-            fragmented,
+            layout,
         })
     }
 
@@ -284,8 +296,7 @@ impl FileMuxer {
     /// un-finalized (and unplayable) until the rest catch up too.
     pub fn open(mut self) -> Result<MuxerSinks> {
         crate::ensure_ffmpeg();
-        if self.fragmented {
-            let options = self.fragment_options();
+        if let Some(options) = self.layout_options() {
             let unused = self
                 .output
                 .write_header_with(options)
@@ -312,9 +323,13 @@ impl FileMuxer {
 }
 
 impl FileMuxer {
-    /// What the mov muxer is told for a file written in fragments.
+    /// What the mov muxer is told for the layout asked; `None` for the one
+    /// it writes untold.
     ///
-    /// `empty_moov` puts the track list up front with no samples in it, and
+    /// `faststart` has the trailer move the index in front of the samples,
+    /// reading the file back to do it.
+    ///
+    /// For fragments, `empty_moov` puts the track list up front with no samples in it, and
     /// `delay_moov` writes it with the first fragment rather than with the
     /// header, so a track whose codec configuration comes only in its first
     /// packets — a stream copied from a transport stream — still gets one.
@@ -332,12 +347,20 @@ impl FileMuxer {
     /// process that dies takes with it. The mov muxer holds a fragment's
     /// packets itself until it cuts one, so between fragments there is
     /// nothing to hand over.
-    fn fragment_options(&self) -> ffmpeg::Dictionary<'static> {
+    fn layout_options(&self) -> Option<ffmpeg::Dictionary<'static>> {
+        let mut options = ffmpeg::Dictionary::new();
+        match self.layout {
+            Mp4Layout::Standard => return None,
+            Mp4Layout::FastStart => {
+                options.set("movflags", "faststart");
+                return Some(options);
+            }
+            Mp4Layout::Fragmented => {}
+        }
         let video = self
             .output
             .streams()
             .any(|stream| stream.parameters().medium() == ffmpeg::media::Type::Video);
-        let mut options = ffmpeg::Dictionary::new();
         options.set("flush_packets", "1");
         if video {
             options.set(
@@ -348,7 +371,7 @@ impl FileMuxer {
             options.set("movflags", "empty_moov+delay_moov+default_base_moof");
             options.set("frag_duration", "1000000");
         }
-        options
+        Some(options)
     }
 }
 
@@ -388,7 +411,7 @@ mod tests {
     #[test]
     fn a_name_that_picks_no_container_is_refused_as_one() {
         let path = std::env::temp_dir().join("media-pp-muxer-test.unknownext");
-        let Err(error) = FileMuxer::create(&path) else {
+        let Err(error) = FileMuxer::create(&path, Mp4Layout::Standard) else {
             panic!("a name with no container in it was taken");
         };
         assert!(
@@ -412,7 +435,7 @@ mod tests {
         let path = std::env::temp_dir()
             .join("media-pp-no-such-directory")
             .join("out.mp4");
-        let Err(error) = FileMuxer::create(&path) else {
+        let Err(error) = FileMuxer::create(&path, Mp4Layout::Standard) else {
             panic!("a file in a directory that is not there was created");
         };
         assert!(
@@ -477,7 +500,7 @@ mod tests {
             "file_muxer_seek_check_test_{}.mp4",
             std::process::id()
         ));
-        let mut muxer = FileMuxer::create(&path).expect("create muxer");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create muxer");
         let audio = muxer
             .add_stream(
                 "audio",
@@ -504,7 +527,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("file_muxer_single_test_{}.mp4", std::process::id()));
 
-        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open");
         let audio = muxer
             .add_stream(
                 "audio",
@@ -547,7 +570,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("file_muxer_drop_test_{}.mp4", std::process::id()));
 
-        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open");
         // Never taken: its sink goes down with the rest, untouched.
         let _audio = muxer
             .add_stream(
@@ -581,7 +604,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("file_muxer_multi_test_{}.mp4", std::process::id()));
 
-        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open");
         let a = muxer
             .add_stream(
                 "a",
@@ -664,7 +687,8 @@ mod tests {
         let path = dir.join(format!("muxer_container_test_{}.mkv", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        let mut muxer = FileMuxer::create(&path).expect("the muxer must open a .mkv path");
+        let mut muxer =
+            FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open a .mkv path");
         let audio = muxer
             .add_stream(
                 "audio",
@@ -735,7 +759,7 @@ mod tests {
         let path = dir.join(format!("file_muxer_mkv_video_{}.mkv", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open");
         let _video = muxer
             .add_stream("video", &encoder)
             .expect("add_stream must succeed");
@@ -778,7 +802,7 @@ mod tests {
         let path = dir.join(format!("file_muxer_opus_mkv_{}.mkv", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open");
         let audio = muxer
             .add_stream(
                 "audio",
@@ -842,7 +866,7 @@ mod tests {
             let format = TrackFormat::from(&video)
                 .with_orientation(Orientation::rotated(Rotation::Half))
                 .with_orientation(orientation);
-            let mut muxer = FileMuxer::create(&path).expect("create");
+            let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer.add_stream("video", format).expect("add");
             let sink = muxer.open().expect("header").take(track).expect("track");
             let index = video.index;
@@ -937,7 +961,7 @@ mod tests {
         let time_base = video.time_base;
         let video = video.index;
 
-        let mut muxer = FileMuxer::create(&path).expect("create the remux");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create the remux");
         let track = muxer
             .add_stream("video", TrackFormat::new(parameters, time_base))
             .expect("add the video stream");
@@ -1113,7 +1137,7 @@ mod tests {
         // to one is a defect this crate has actually had.
         let audio_encoder = open_aac_encoder(48_000, 2);
 
-        let mut muxer = FileMuxer::create(&path).expect("create the output");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create the output");
         let video_track = muxer
             .add_stream("video", &video_encoder)
             .expect("add the video stream");
@@ -1234,7 +1258,7 @@ mod tests {
         // Milliseconds for the text track, which is its own timeline and
         // has no reason to share the video's or the audio's.
         let text_tb = ffmpeg::Rational::new(1, 1000);
-        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open");
         let video_track = muxer
             .add_stream("video", TrackFormat::new(video_params, video_tb))
             .expect("add_stream video");
@@ -1417,33 +1441,70 @@ mod tests {
         Some(counts)
     }
 
-    /// Only an MP4 or MOV name is written in fragments; any other is
-    /// refused as that, before a file is made.
+    /// Only an MP4 or MOV name takes a layout other than the standard one;
+    /// any other is refused as that, before a file is made.
     #[test]
-    fn only_an_mp4_or_mov_name_is_written_in_fragments() {
-        let path = std::env::temp_dir().join(format!(
-            "file_muxer_fragmented_refused_{}.mkv",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let Err(error) = FileMuxer::create_fragmented(&path) else {
-            panic!("a .mkv was taken to be written in fragments");
-        };
-        assert!(
-            matches!(
-                error,
-                Error::FileMuxerError(FileMuxerError::NotFragmentable { .. })
-            ),
-            "{error:?}"
-        );
-        assert!(!path.exists(), "nothing is created for it");
+    fn only_an_mp4_or_mov_name_takes_a_layout() {
+        for layout in [Mp4Layout::FastStart, Mp4Layout::Fragmented] {
+            let path = std::env::temp_dir().join(format!(
+                "file_muxer_layout_refused_{layout:?}_{}.mkv",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let Err(error) = FileMuxer::create(&path, layout) else {
+                panic!("a .mkv was taken to be laid out {layout:?}");
+            };
+            assert!(
+                matches!(error, Error::FileMuxerError(FileMuxerError::NotMp4 { .. })),
+                "{error:?}"
+            );
+            assert!(!path.exists(), "nothing is created for it");
 
-        let mov = std::env::temp_dir().join(format!(
-            "file_muxer_fragmented_mov_{}.mov",
-            std::process::id()
-        ));
-        drop(FileMuxer::create_fragmented(&mov).expect("a .mov is written in fragments"));
-        std::fs::remove_file(&mov).ok();
+            let mov = std::env::temp_dir().join(format!(
+                "file_muxer_layout_mov_{layout:?}_{}.mov",
+                std::process::id()
+            ));
+            drop(FileMuxer::create(&mov, layout).expect("a .mov takes the layout"));
+            std::fs::remove_file(&mov).ok();
+        }
+    }
+
+    /// Laid out fast-start, the index of a finished file comes before its
+    /// samples, where the standard layout puts it after them; every packet
+    /// reads back from both.
+    #[test]
+    fn a_fast_start_file_has_its_index_before_its_samples() {
+        for (layout, index_first) in [(Mp4Layout::FastStart, true), (Mp4Layout::Standard, false)] {
+            let Some(mut video) = open_h264_encoder(15) else {
+                eprintln!("skipping: this FFmpeg build has no libopenh264 or libx264");
+                return;
+            };
+            let path = std::env::temp_dir().join(format!(
+                "file_muxer_layout_{layout:?}_{}.mp4",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let mut muxer = FileMuxer::create(&path, layout).expect("the muxer must open");
+            let track = muxer.add_stream("video", &video).expect("add video");
+            let mut sinks = muxer.open().expect("open must write the header");
+            video.src_pads()[0].link(sinks.take(track).unwrap().into_raw());
+            for index in 0..60i64 {
+                video.consume(picture(index)).expect("encode a picture");
+            }
+            crate::stream::deliver(&mut video, &crate::stream::StreamEvent::Eos).unwrap();
+            drop(video);
+
+            let boxes = top_level_boxes(&path);
+            let moov = boxes.iter().position(|b| b == "moov").expect("an index");
+            let mdat = boxes.iter().position(|b| b == "mdat").expect("samples");
+            assert_eq!(moov < mdat, index_first, "{layout:?}: {boxes:?}");
+            assert_eq!(
+                packets_read_back(&path),
+                Some(vec![60]),
+                "{layout:?}: every picture reads back"
+            );
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     /// Video and sound written to the end in fragments: the track list
@@ -1460,7 +1521,8 @@ mod tests {
             std::env::temp_dir().join(format!("file_muxer_fragmented_{}.mp4", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        let mut muxer = FileMuxer::create_fragmented(&path).expect("the muxer must open");
+        let mut muxer =
+            FileMuxer::create(&path, Mp4Layout::Fragmented).expect("the muxer must open");
         let video_track = muxer.add_stream("video", &video).expect("add video");
         let audio_track = muxer
             .add_stream(
@@ -1519,9 +1581,9 @@ mod tests {
             ));
             let _ = std::fs::remove_file(&path);
             let mut muxer = if fragmented {
-                FileMuxer::create_fragmented(&path)
+                FileMuxer::create(&path, Mp4Layout::Fragmented)
             } else {
-                FileMuxer::create(&path)
+                FileMuxer::create(&path, Mp4Layout::Standard)
             }
             .expect("the muxer must open");
             let track = muxer.add_stream("video", &video).expect("add video");
@@ -1573,7 +1635,8 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let mut muxer = FileMuxer::create_fragmented(&path).expect("the muxer must open");
+        let mut muxer =
+            FileMuxer::create(&path, Mp4Layout::Fragmented).expect("the muxer must open");
         let track = muxer
             .add_stream(
                 "audio",

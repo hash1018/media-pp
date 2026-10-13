@@ -55,7 +55,7 @@ mod windows_example {
     use media_pp::{
         elements::{
             CaptureMode, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
-            D3d11VideoInputFormat, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer,
+            D3d11VideoInputFormat, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer, Mp4Layout,
         },
         pipeline::Pipeline,
     };
@@ -102,7 +102,7 @@ mod windows_example {
             },
         )?;
 
-        let mut muxer = FileMuxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
@@ -144,7 +144,8 @@ mod linux_example {
     use media_pp::{
         elements::{
             CaptureSourceKind, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions,
-            CudaFrameFormat, FileMuxer, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
+            CudaFrameFormat, FileMuxer, Mp4Layout, PipeWireScreenCaptureOptions,
+            PipeWireScreenCaptureSource,
         },
         pipeline::Pipeline,
     };
@@ -215,7 +216,7 @@ mod linux_example {
             },
         )?;
 
-        let mut muxer = FileMuxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
@@ -266,9 +267,9 @@ mod macos_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            FileMuxer, ScreenCaptureKitOptions, ScreenCaptureKitSource, ScreenCaptureKitTarget,
-            VideoToolboxCodec, VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
-            VideoToolboxFrameFormat,
+            FileMuxer, Mp4Layout, ScreenCaptureKitOptions, ScreenCaptureKitSource,
+            ScreenCaptureKitTarget, VideoToolboxCodec, VideoToolboxDevice, VideoToolboxEncoder,
+            VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
         pipeline::Pipeline,
     };
@@ -337,7 +338,7 @@ mod macos_example {
             },
         )?;
 
-        let mut muxer = FileMuxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

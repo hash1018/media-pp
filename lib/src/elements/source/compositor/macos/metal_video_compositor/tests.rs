@@ -869,8 +869,8 @@ fn a_composition_encodes_without_leaving_the_gpu() {
 #[test]
 fn a_file_is_decoded_composed_and_encoded_on_the_gpu() {
     use crate::elements::{
-        FileDemuxer, FileMuxer, VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxEncoder,
-        VideoToolboxEncoderOptions,
+        FileDemuxer, FileMuxer, Mp4Layout, VideoToolboxCodec, VideoToolboxDecoder,
+        VideoToolboxEncoder, VideoToolboxEncoderOptions,
     };
     use crate::pipeline::Pipeline;
     use std::time::{Duration, Instant};
@@ -941,7 +941,7 @@ fn a_file_is_decoded_composed_and_encoded_on_the_gpu() {
         std::process::id(),
         std::thread::current().id()
     ));
-    let mut muxer = FileMuxer::create(&file).unwrap();
+    let mut muxer = FileMuxer::create(&file, Mp4Layout::Standard).unwrap();
     let track = muxer.add_stream("video", &encoder).unwrap();
     let mut sinks = muxer.open().unwrap();
     let track_sink = sinks.take(track).unwrap();

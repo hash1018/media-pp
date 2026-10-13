@@ -176,9 +176,10 @@ pub use filter::{
 };
 pub use sink::{
     AppSink, CounterHandle, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer,
-    HlsMuxerError, HlsOptions, HlsSegmentFormat, MuxerSinks, MuxerTrack, MuxerTrackError,
-    PacketCounter, ReplayBuffer, ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError,
-    RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError, TrackFormat,
+    HlsMuxerError, HlsOptions, HlsSegmentFormat, Mp4Layout, MuxerSinks, MuxerTrack,
+    MuxerTrackError, PacketCounter, ReplayBuffer, ReplayBufferError, ReplayBufferHandle, RtmpMuxer,
+    RtmpMuxerError, RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError,
+    TrackFormat,
 };
 #[cfg(feature = "whisper")]
 pub use sink::{

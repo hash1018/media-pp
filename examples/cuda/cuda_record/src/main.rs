@@ -27,7 +27,7 @@ mod example {
     use media_pp::{
         elements::{
             AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
-            CudaUpload, FileMuxer, SwScaler,
+            CudaUpload, FileMuxer, Mp4Layout, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -65,7 +65,7 @@ mod example {
             },
         )?;
 
-        let mut muxer = FileMuxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

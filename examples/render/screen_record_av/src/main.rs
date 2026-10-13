@@ -45,7 +45,7 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            AudioCodec, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer,
+            AudioCodec, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer, Mp4Layout,
             SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, SwScaler,
             VideoCodec, WasapiCaptureOptions, WasapiCaptureSource, WasapiDeviceKind,
         },
@@ -128,7 +128,7 @@ mod windows_example {
 
         // No container/demuxer in this loop to get these from — each encoder
         // exposes its own codec parameters for exactly this case.
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let video_track = muxer.add_stream("video", &video_encoder)?;
         let audio_track = muxer.add_stream("audio", &audio_encoder)?;
         let mut sinks = muxer.open()?;
@@ -213,7 +213,7 @@ mod linux_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            AudioCodec, CaptureSourceKind, FileMuxer, PipeWireAudioCaptureOptions,
+            AudioCodec, CaptureSourceKind, FileMuxer, Mp4Layout, PipeWireAudioCaptureOptions,
             PipeWireAudioCaptureSource, PipeWireAudioDeviceKind, PipeWireScreenCaptureOptions,
             PipeWireScreenCaptureSource, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
             SwEncoderOptions, SwScaler, VideoCodec,
@@ -313,7 +313,7 @@ mod linux_example {
             },
         )?;
 
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let video_track = muxer.add_stream("video", &video_encoder)?;
         let audio_track = muxer.add_stream("audio", &audio_encoder)?;
         let mut sinks = muxer.open()?;
@@ -409,9 +409,9 @@ mod macos_example {
         bus::BusEvent,
         elements::{
             AudioCodec, CoreAudioCaptureOptions, CoreAudioCaptureSource, CoreAudioDeviceKind,
-            FileMuxer, ScreenCaptureKitOptions, ScreenCaptureKitSource, ScreenCaptureKitTarget,
-            SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, SwScaler,
-            VideoCodec,
+            FileMuxer, Mp4Layout, ScreenCaptureKitOptions, ScreenCaptureKitSource,
+            ScreenCaptureKitTarget, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+            SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::PipelineBuilder,
     };
@@ -493,7 +493,7 @@ mod macos_example {
             },
         )?;
 
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let video_track = muxer.add_stream("video", &video_encoder)?;
         let audio_track = muxer.add_stream("audio", &audio_encoder)?;
         let mut sinks = muxer.open()?;

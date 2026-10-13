@@ -1152,7 +1152,7 @@ mod tests {
         bin: VideoEncodeBin,
         frames: impl Iterator<Item = MediaBuffer>,
     ) -> Option<ColorDescription> {
-        use crate::elements::{FileDemuxer, FileMuxer};
+        use crate::elements::{FileDemuxer, FileMuxer, Mp4Layout};
 
         // A file of its own for every recording, not one per path: tests run
         // at once, and two that took the same path wrote into one file. On
@@ -1166,7 +1166,7 @@ mod tests {
             std::process::id(),
             RECORDINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let mut muxer = FileMuxer::create(&file).expect("the file opens");
+        let mut muxer = FileMuxer::create(&file, Mp4Layout::Standard).expect("the file opens");
         let track = muxer.add_stream("video", &bin).expect("the track is added");
         let mut sinks = muxer.open().expect("the file is written");
         let mut sink = sinks.take(track).expect("the track's sink");

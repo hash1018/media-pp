@@ -30,8 +30,8 @@ mod example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, TrackFormat, VideoDecodeBin,
-            VideoEncodeBin, VideoEncodeOptions,
+            DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, Mp4Layout, TrackFormat,
+            VideoDecodeBin, VideoEncodeBin, VideoEncodeOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
@@ -100,7 +100,7 @@ mod example {
             encoder.path()
         );
 
-        let mut muxer = FileMuxer::create(&output_path)?;
+        let mut muxer = FileMuxer::create(&output_path, Mp4Layout::Standard)?;
         let video_track = muxer.add_stream(
             "video",
             TrackFormat::from(&encoder).with_orientation(orientation),

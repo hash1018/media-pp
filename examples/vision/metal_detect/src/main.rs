@@ -97,11 +97,11 @@ mod example {
             Analytics, AnalyticsOptions, AppSink, BoxColors, BoxStyle, COCO_CLASS_LABELS,
             ClassRule, DetectionOverlayOptions, Detections, DetectorModel, FileDemuxer, FileMuxer,
             HideShape, Hiding, InputScale, LabelStyle, Line, LineCount, MetalDetectionOverlay,
-            MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions, ObjectAnalytics,
-            ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, OverlayParts, RedactStyle,
-            Tiles, TrackFormat, TrackerOptions, Treatment, VideoToolboxCodec, VideoToolboxDecoder,
-            VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
-            VideoToolboxFrameFormat,
+            MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions, Mp4Layout,
+            ObjectAnalytics, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, OverlayParts,
+            RedactStyle, Tiles, TrackFormat, TrackerOptions, Treatment, VideoToolboxCodec,
+            VideoToolboxDecoder, VideoToolboxDevice, VideoToolboxEncoder,
+            VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -530,7 +530,7 @@ mod example {
                     }
                     None => VideoToolboxEncoder::new("encoder", &device, options)?,
                 };
-                let mut muxer = FileMuxer::create(path)?;
+                let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
                 let track = muxer.add_stream(
                     "video",
                     TrackFormat::from(&encoder).with_orientation(orientation),

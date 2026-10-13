@@ -59,8 +59,8 @@ mod example {
     use std::sync::{Arc, Mutex};
 
     use media_pp::elements::{
-        AudioFormat, AudioResampler, ChunkPolicy, FileDemuxer, FileMuxer, SwDecoder, TokenTiming,
-        TrackFormat, WHISPER_SAMPLE_RATE, WhisperTranscriber,
+        AudioFormat, AudioResampler, ChunkPolicy, FileDemuxer, FileMuxer, Mp4Layout, SwDecoder,
+        TokenTiming, TrackFormat, WHISPER_SAMPLE_RATE, WhisperTranscriber,
     };
     use media_pp::ffmpeg;
     use media_pp::{
@@ -148,7 +148,7 @@ mod example {
         // Every track is described before the header is written, which is
         // why the text track is registered now and not when the first line
         // of it exists — see `FileMuxer::open`.
-        let mut muxer = FileMuxer::create(&output_path)?;
+        let mut muxer = FileMuxer::create(&output_path, Mp4Layout::Standard)?;
         let video_track = match video {
             Some(video) => {
                 let track = muxer.add_stream("video", &video)?;
@@ -175,7 +175,7 @@ mod example {
         // one text track.
         let sidecar = match sidecar {
             Some((path, codec)) => {
-                let mut muxer = FileMuxer::create(&path)?;
+                let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
                 let text_track = muxer.add_stream(
                     "sidecar",
                     TrackFormat::new(codec.parameters(), TEXT_TIME_BASE),

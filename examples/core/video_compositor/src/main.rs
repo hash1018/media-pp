@@ -28,9 +28,10 @@ mod example {
         bus::BusEvent,
         color::Color,
         elements::{
-            AppSource, AppSourceHandle, ChromaKeyMethod, ChromaKeyOptions, FileMuxer, SwChromaKey,
-            SwEncoder, SwEncoderOptions, SwScaler, SwVideoCompositor, TestVideoOptions,
-            TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+            AppSource, AppSourceHandle, ChromaKeyMethod, ChromaKeyOptions, FileMuxer, Mp4Layout,
+            SwChromaKey, SwEncoder, SwEncoderOptions, SwScaler, SwVideoCompositor,
+            TestVideoOptions, TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit,
+            VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
         pool::UnboundObjectPool,
@@ -145,7 +146,7 @@ mod example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
         let (output_pipeline, ()) =

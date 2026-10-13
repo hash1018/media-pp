@@ -271,7 +271,7 @@ mod checks {
         use media_pp::{
             bus::BusEvent,
             elements::{
-                AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+                AudioCodec, FileMuxer, Mp4Layout, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
                 SwEncoderOptions, SwScaler, TestAudioOptions, TestAudioSource, TestVideoOptions,
                 TestVideoSource, VideoCodec,
             },
@@ -302,7 +302,7 @@ mod checks {
             },
         )
         .expect("an AAC encoder");
-        let mut muxer = FileMuxer::create(path).expect("the file");
+        let mut muxer = FileMuxer::create(path, Mp4Layout::Standard).expect("the file");
         let video_track = muxer.add_stream("video", &video).expect("a picture track");
         let audio_track = muxer.add_stream("audio", &audio).expect("a sound track");
         let mut sinks = muxer.open().expect("the file opens");

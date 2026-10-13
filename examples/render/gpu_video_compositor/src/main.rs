@@ -45,8 +45,9 @@ mod windows_example {
         color::Color,
         elements::{
             D3d11Download, D3d11Gpu, D3d11Upload, D3d11VideoCompositor, D3d11WindowRenderer,
-            FileMuxer, SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource,
-            VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect, WindowOptions,
+            FileMuxer, Mp4Layout, SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions,
+            TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+            WindowOptions,
         },
         pipeline::Pipeline,
     };
@@ -196,7 +197,7 @@ mod windows_example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(path)?;
+        let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
@@ -298,8 +299,8 @@ mod linux_example {
         color::Color,
         elements::{
             CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, FileMuxer,
-            SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
-            VideoCompositorOptions, VideoFit, VideoLayer, VideoRect, VulkanGpu,
+            Mp4Layout, SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource,
+            VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect, VulkanGpu,
             VulkanWindowRenderer, WindowOptions,
         },
         pipeline::Pipeline,
@@ -446,7 +447,7 @@ mod linux_example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(path)?;
+        let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
@@ -543,10 +544,10 @@ mod macos_example {
         bus::BusEvent,
         color::Color,
         elements::{
-            FileMuxer, MetalVideoCompositor, MetalWindowRenderer, SwEncoder, SwEncoderOptions,
-            SwScaler, TestVideoOptions, TestVideoSource, VideoCodec, VideoCompositorOptions,
-            VideoFit, VideoLayer, VideoRect, VideoToolboxDevice, VideoToolboxDownload,
-            VideoToolboxFrameFormat, VideoToolboxUpload, WindowOptions,
+            FileMuxer, MetalVideoCompositor, MetalWindowRenderer, Mp4Layout, SwEncoder,
+            SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
+            VideoCompositorOptions, VideoFit, VideoLayer, VideoRect, VideoToolboxDevice,
+            VideoToolboxDownload, VideoToolboxFrameFormat, VideoToolboxUpload, WindowOptions,
         },
         pipeline::Pipeline,
     };
@@ -692,7 +693,7 @@ mod macos_example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(path)?;
+        let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

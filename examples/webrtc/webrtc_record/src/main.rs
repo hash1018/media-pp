@@ -38,9 +38,10 @@ mod example {
         bus::{BusEvent, BusReceiver},
         driver::DriverRunner,
         elements::{
-            AudioCodec, FileDemuxer, FileMuxer, Pacer, SwAudioEncoder, SwAudioEncoderOptions,
-            SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, TrackEndpoints, VideoCodec,
-            WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
+            AudioCodec, FileDemuxer, FileMuxer, Mp4Layout, Pacer, SwAudioEncoder,
+            SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
+            TrackEndpoints, VideoCodec, WebRtcHandle, WebRtcPeer, WebRtcTrackSink,
+            WebRtcTrackSource,
         },
         pipeline::{Pipeline, PipelineBuilder},
     };
@@ -257,7 +258,7 @@ mod example {
         audio_source: WebRtcTrackSource,
         audio_info: media_pp::elements::WebRtcStreamInfo,
     ) -> media_pp::Result<Arc<Pipeline>> {
-        let mut muxer = FileMuxer::create(output)?;
+        let mut muxer = FileMuxer::create(output, Mp4Layout::Standard)?;
         let video_track = muxer.add_stream("received-video", video_info.track_format()?)?;
         let audio_track = muxer.add_stream("received-audio", audio_info.track_format()?)?;
         let mut sinks = muxer.open()?;

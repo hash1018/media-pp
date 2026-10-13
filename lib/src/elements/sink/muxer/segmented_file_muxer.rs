@@ -8,7 +8,7 @@ use std::{
 use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 
-use super::file_muxer::{FileMuxer, FileMuxerError};
+use super::file_muxer::{FileMuxer, FileMuxerError, Mp4Layout};
 use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 use crate::{
     buffer::MediaBuffer,
@@ -71,7 +71,7 @@ struct StreamDef {
 /// # use std::{path::PathBuf, time::Duration};
 /// # use media_pp::ffmpeg;
 /// # use media_pp::elements::{
-/// #     AudioCodec, SegmentPolicy, SegmentedFileMuxer, SwAudioEncoder,
+/// #     AudioCodec, Mp4Layout, SegmentPolicy, SegmentedFileMuxer, SwAudioEncoder,
 /// #     SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
 /// # };
 /// # fn main() -> media_pp::Result<()> {
@@ -93,6 +93,7 @@ struct StreamDef {
 /// # })?;
 /// let mut muxer = SegmentedFileMuxer::create(
 ///     SegmentPolicy::Duration(Duration::from_secs(600)),
+///     Mp4Layout::Standard,
 ///     |index| PathBuf::from(format!("rec_{index:04}.mp4")),
 /// );
 /// let video = muxer.add_stream("video", &video_encoder);
@@ -108,9 +109,8 @@ pub struct SegmentedFileMuxer {
     policy: SegmentPolicy,
     naming: Box<dyn FnMut(u64) -> PathBuf + Send>,
     streams: Vec<StreamDef>,
-    /// Every segment written in fragments
-    /// ([`SegmentedFileMuxer::create_fragmented`]).
-    fragmented: bool,
+    /// How each segment is laid out, if an MP4 or MOV.
+    layout: Mp4Layout,
 }
 
 impl SegmentedFileMuxer {
@@ -120,38 +120,24 @@ impl SegmentedFileMuxer {
     /// directory/prefix (e.g. `|i| dir.join(format!("rec_{i:04}.mp4"))`);
     /// a timestamp-based scheme works just as well since `index` is only
     /// ever used to *call* this, never to build the path itself.
+    ///
+    /// Each segment is created as [`FileMuxer::create`] creates a file, laid
+    /// out as `layout` says — [`Mp4Layout::Fragmented`] for one that still
+    /// opens, up to its last fragment, when the recording is cut off. A name
+    /// `naming` gives whose container cannot be laid out so fails the
+    /// [`SegmentedFileMuxer::open`] or rotation that asked for it, as
+    /// [`FileMuxerError::NotMp4`](super::file_muxer::FileMuxerError::NotMp4).
     pub fn create(
         policy: SegmentPolicy,
+        layout: Mp4Layout,
         naming: impl FnMut(u64) -> PathBuf + Send + 'static,
-    ) -> Self {
-        Self::create_as(policy, Box::new(naming), false)
-    }
-
-    /// As [`SegmentedFileMuxer::create`], every segment an MP4 or MOV
-    /// written in fragments, as [`FileMuxer::create_fragmented`] writes one:
-    /// the segment under way when a recording is cut off still opens, up to
-    /// its last fragment, where a plain one would not open at all. A name
-    /// `naming` gives that is not an MP4 or MOV one fails the
-    /// [`SegmentedFileMuxer::open`] or rotation that asked for it, as
-    /// [`FileMuxerError::NotFragmentable`](super::file_muxer::FileMuxerError::NotFragmentable).
-    pub fn create_fragmented(
-        policy: SegmentPolicy,
-        naming: impl FnMut(u64) -> PathBuf + Send + 'static,
-    ) -> Self {
-        Self::create_as(policy, Box::new(naming), true)
-    }
-
-    fn create_as(
-        policy: SegmentPolicy,
-        naming: Box<dyn FnMut(u64) -> PathBuf + Send>,
-        fragmented: bool,
     ) -> Self {
         Self {
             id: MuxerId::next(),
             policy,
-            naming,
+            naming: Box::new(naming),
             streams: Vec::new(),
-            fragmented,
+            layout,
         }
     }
 
@@ -230,10 +216,10 @@ impl SegmentedFileMuxer {
             .map(|s| (s.name.clone(), MediaKind::packet_for(s.parameters.medium())))
             .collect();
         let path = (self.naming)(0);
-        let current_sinks = open_segment(&self.streams, path, self.fragmented)?;
+        let current_sinks = open_segment(&self.streams, path, self.layout)?;
         let group = Arc::new(SegmentGroup {
             policy: self.policy,
-            fragmented: self.fragmented,
+            layout: self.layout,
             video: self.streams.iter().position(|s| s.is_video),
             naming: Mutex::new(self.naming),
             state: Mutex::new(GroupState {
@@ -271,13 +257,9 @@ impl SegmentedFileMuxer {
 fn open_segment(
     streams: &[StreamDef],
     path: PathBuf,
-    fragmented: bool,
+    layout: Mp4Layout,
 ) -> Result<Vec<Box<dyn RawSink>>> {
-    let mut muxer = if fragmented {
-        FileMuxer::create_fragmented(&path)?
-    } else {
-        FileMuxer::create(&path)?
-    };
+    let mut muxer = FileMuxer::create(&path, layout)?;
     let tracks = streams
         .iter()
         .map(|stream| {
@@ -401,8 +383,8 @@ impl GroupState {
 /// never a mix).
 struct SegmentGroup {
     policy: SegmentPolicy,
-    /// Each segment opened in fragments.
-    fragmented: bool,
+    /// How each segment is laid out.
+    layout: Mp4Layout,
     /// The track a cut waits for a keyframe on, if there is one.
     video: Option<usize>,
     naming: Mutex<Box<dyn FnMut(u64) -> PathBuf + Send>>,
@@ -516,7 +498,7 @@ impl SegmentGroup {
         }
         let index = state.segment_index + 1;
         let path = (self.naming.lock().unwrap())(index);
-        state.current_sinks = open_segment(&state.streams, path, self.fragmented)?;
+        state.current_sinks = open_segment(&state.streams, path, self.layout)?;
         state.segment_index = index;
         state.segment_started = Instant::now();
         // This packet is the first of the new segment, so what was counted
@@ -760,6 +742,7 @@ mod tests {
 
         let mut muxer = SegmentedFileMuxer::create(
             SegmentPolicy::Duration(Duration::from_millis(300)),
+            Mp4Layout::Standard,
             move |index| {
                 let path = dir.join(format!("{prefix}_{index:03}.mp4"));
                 recorded_paths.lock().unwrap().push(path.clone());
@@ -851,6 +834,7 @@ mod tests {
         let recorded_paths = paths.clone();
         let mut muxer = SegmentedFileMuxer::create(
             SegmentPolicy::Duration(Duration::from_millis(300)),
+            Mp4Layout::Standard,
             move |index| {
                 let path = dir.join(format!("{prefix}_{index:03}.mp4"));
                 recorded_paths.lock().unwrap().push(path.clone());
@@ -935,11 +919,15 @@ mod tests {
         let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_paths = paths.clone();
 
-        let mut muxer = SegmentedFileMuxer::create(SegmentPolicy::Size(3_000), move |index| {
-            let path = dir.join(format!("{prefix}_{index:03}.mp4"));
-            recorded_paths.lock().unwrap().push(path.clone());
-            path
-        });
+        let mut muxer = SegmentedFileMuxer::create(
+            SegmentPolicy::Size(3_000),
+            Mp4Layout::Standard,
+            move |index| {
+                let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+                recorded_paths.lock().unwrap().push(path.clone());
+                path
+            },
+        );
         let video = muxer.add_stream("video", &encoder);
         let sink = muxer
             .open()
@@ -1038,11 +1026,12 @@ mod tests {
         let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_paths = paths.clone();
         // Any size at all is due at once, so every keyframe cuts.
-        let mut muxer = SegmentedFileMuxer::create(SegmentPolicy::Size(1), move |index| {
-            let path = dir.join(format!("{prefix}_{index:03}.mp4"));
-            recorded_paths.lock().unwrap().push(path.clone());
-            path
-        });
+        let mut muxer =
+            SegmentedFileMuxer::create(SegmentPolicy::Size(1), Mp4Layout::Standard, move |index| {
+                let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+                recorded_paths.lock().unwrap().push(path.clone());
+                path
+            });
         let tracks: Vec<_> = streams
             .iter()
             .enumerate()
@@ -1167,6 +1156,7 @@ mod tests {
         let recorded_path = path.clone();
         let mut muxer = SegmentedFileMuxer::create(
             SegmentPolicy::Duration(Duration::from_secs(3600)),
+            Mp4Layout::Standard,
             move |_index| recorded_path.clone(),
         );
         let video = muxer.add_stream("video", &encoder);
@@ -1235,6 +1225,7 @@ mod tests {
 
         let mut muxer = SegmentedFileMuxer::create(
             SegmentPolicy::Duration(Duration::from_millis(300)),
+            Mp4Layout::Standard,
             move |index| {
                 let path = dir.join(format!("{prefix}_{index:03}.mp4"));
                 recorded_paths.lock().unwrap().push(path.clone());
@@ -1318,13 +1309,14 @@ mod tests {
         let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_paths = paths.clone();
         // Several keyframe intervals of these plain pictures fill one.
-        let mut muxer = SegmentedFileMuxer::create_fragmented(SegmentPolicy::Size(20_000), {
-            move |index| {
-                let path = dir.join(format!("{prefix}_{index:03}.mp4"));
-                recorded_paths.lock().unwrap().push(path.clone());
-                path
-            }
-        });
+        let mut muxer =
+            SegmentedFileMuxer::create(SegmentPolicy::Size(20_000), Mp4Layout::Fragmented, {
+                move |index| {
+                    let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+                    recorded_paths.lock().unwrap().push(path.clone());
+                    path
+                }
+            });
         let video = muxer.add_stream("video", &encoder);
         let sinks = {
             let mut sinks = muxer.open().expect("open must succeed");

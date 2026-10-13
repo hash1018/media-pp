@@ -57,7 +57,7 @@ mod linux_example {
         color::Color,
         elements::{
             CaptureSourceKind, CudaCodec, CudaConverter, CudaDevice, CudaEncoder,
-            CudaEncoderOptions, CudaFrameFormat, CudaVideoCompositor, FileMuxer,
+            CudaEncoderOptions, CudaFrameFormat, CudaVideoCompositor, FileMuxer, Mp4Layout,
             PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource, TextLayer,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -196,7 +196,7 @@ mod linux_example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
@@ -265,10 +265,10 @@ mod macos_example {
     use media_pp::{
         color::Color,
         elements::{
-            FileMuxer, MetalVideoCompositor, ScreenCaptureKitOptions, ScreenCaptureKitSource,
-            ScreenCaptureKitTarget, TextLayer, VideoCompositorOptions, VideoFit, VideoLayer,
-            VideoRect, VideoToolboxCodec, VideoToolboxDevice, VideoToolboxEncoder,
-            VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
+            FileMuxer, MetalVideoCompositor, Mp4Layout, ScreenCaptureKitOptions,
+            ScreenCaptureKitSource, ScreenCaptureKitTarget, TextLayer, VideoCompositorOptions,
+            VideoFit, VideoLayer, VideoRect, VideoToolboxCodec, VideoToolboxDevice,
+            VideoToolboxEncoder, VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
         pipeline::Pipeline,
     };
@@ -407,7 +407,7 @@ mod macos_example {
                 max_b_frames: None,
             },
         )?;
-        let mut muxer = FileMuxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

@@ -257,22 +257,34 @@ compile error with no explanation.
   with the `videotoolbox` feature, `EncodePath::VideoToolbox` always). A
   `match` on any of them needs an arm for it.
 
-- **`FileMuxerError` has a `NotFragmentable` variant**, for a name
-  `FileMuxer::create_fragmented` cannot write in fragments — see Added. A
-  `match` on `FileMuxerError` needs an arm for it.
+- **`FileMuxer::create` and `SegmentedFileMuxer::create` take an
+  `Mp4Layout`**, how an MP4 or MOV file keeps its index — see Added.
+  `Mp4Layout::Standard` is the layout every file had; a file of another
+  container takes it alone, and asked for another is refused as the new
+  `FileMuxerError::NotMp4` before anything is created. A `match` on
+  `FileMuxerError` needs an arm for it.
+
+  | Before | Now |
+  |---|---|
+  | `FileMuxer::create(path)` | `FileMuxer::create(path, Mp4Layout::Standard)` |
+  | `SegmentedFileMuxer::create(policy, naming)` | `SegmentedFileMuxer::create(policy, Mp4Layout::Standard, naming)` |
 
 ### Added
 
-- **`FileMuxer::create_fragmented` writes an MP4 or MOV in fragments.** The
-  track list comes first, then a fragment (`moof` + `mdat`) at each video
-  keyframe — every second for sound alone — each handed to the file as it
-  is cut. A recording cut off before its trailer, by a process that dies
-  or a machine that loses power, still opens with every fragment written
-  before the one under way, where a plain MP4 opens not at all; it is also
-  the shape a browser streams from. Any other name is refused
-  (`FileMuxerError::NotFragmentable`) before a file is made.
-  `SegmentedFileMuxer::create_fragmented` writes every segment so, the one
-  under way when a recording is cut off among them.
+- **An MP4 or MOV file can be laid out fast-start or in fragments**
+  (`Mp4Layout`, given to `FileMuxer::create` and, for every segment,
+  `SegmentedFileMuxer::create`).
+  - `FastStart` moves the index in front of the samples as the file is
+    finished, so one streamed — in a browser, a messenger's preview, a cloud
+    drive's player — plays as its first bytes arrive. Finishing reads and
+    writes the file once more.
+  - `Fragmented` puts the track list first, then a fragment (`moof` +
+    `mdat`) at each video keyframe — every second for sound alone — each
+    handed to the file as it is cut. A recording cut off before its
+    trailer, by a process that dies or a machine that loses power, still
+    opens with every fragment written before the one under way, where a
+    standard MP4 opens not at all; it is also the shape a browser streams
+    from.
 
 - **The window renderers show a phone's portrait recording upright.**
   `D3d11WindowRenderer`, `D3d12WindowRenderer`, `VulkanWindowRenderer` and

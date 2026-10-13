@@ -39,7 +39,7 @@ mod windows_example {
     use media_pp::{
         elements::{
             AppSource, D3d11Gpu, D3d11Upload, D3d11VideoCodec, D3d11VideoEncoder,
-            D3d11VideoEncoderOptions, D3d11VideoInputFormat, FileMuxer, SwScaler,
+            D3d11VideoEncoderOptions, D3d11VideoInputFormat, FileMuxer, Mp4Layout, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -80,7 +80,7 @@ mod windows_example {
             },
         )?;
 
-        let mut muxer = FileMuxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path, Mp4Layout::Standard)?;
         let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 

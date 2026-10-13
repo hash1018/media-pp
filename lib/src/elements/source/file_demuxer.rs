@@ -1260,7 +1260,9 @@ mod tests {
     #[test]
     fn a_pq_stream_whose_container_keeps_no_hdr10_says_what_its_bitstream_does() {
         use crate::element::{RawSink, SrcPads};
-        use crate::elements::{FileMuxer, SwEncoder, SwEncoderOptions, TrackFormat, VideoCodec};
+        use crate::elements::{
+            FileMuxer, Mp4Layout, SwEncoder, SwEncoderOptions, TrackFormat, VideoCodec,
+        };
         use crate::test_support::{assert_same_display, hdr10_beside, hdr10_source};
         use ffmpeg_next::ffi::AVPacketSideDataType as Kind;
         if ffmpeg::decoder::find_by_name("libdav1d").is_none() {
@@ -1310,7 +1312,7 @@ mod tests {
                 }
             }
             let path = std::env::temp_dir().join(format!("media-pp-pq-beside-{beside}.mp4"));
-            let mut muxer = FileMuxer::create(&path).expect("create");
+            let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer
                 .add_stream("video", TrackFormat::new(parameters, encoder.time_base()))
                 .expect("add");
@@ -1429,7 +1431,7 @@ mod tests {
     /// with no stream for a caller to index into.
     #[test]
     fn a_file_with_no_streams_is_refused() {
-        use crate::elements::{FileMuxer, SwEncoder, SwEncoderOptions, VideoCodec};
+        use crate::elements::{FileMuxer, Mp4Layout, SwEncoder, SwEncoderOptions, VideoCodec};
 
         let path = std::env::temp_dir().join(format!(
             "media-pp-empty-recording-{}.mp4",
@@ -1449,7 +1451,7 @@ mod tests {
             },
         )
         .expect("the always-present encoder opens");
-        let mut muxer = FileMuxer::create(&path).unwrap();
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).unwrap();
         let track = muxer.add_stream("video", &encoder).unwrap();
         let mut sinks = muxer.open().unwrap();
         let mut sink = sinks.take(track).unwrap();

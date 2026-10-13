@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn ten_bit_pictures_are_encoded_as_hevc_main_10() {
         use crate::color::ColorDescription;
-        use crate::elements::FileMuxer;
+        use crate::elements::{FileMuxer, Mp4Layout};
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
@@ -675,7 +675,7 @@ mod tests {
                 }
             };
         let path = std::env::temp_dir().join("media-pp-main10.mp4");
-        let mut muxer = FileMuxer::create(&path).expect("create");
+        let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
         let track = muxer.add_stream("video", &encoder).expect("add");
         let sink = muxer.open().expect("header").take(track).expect("track");
         encoder.src_pads()[0].link(sink.into_raw());
@@ -747,7 +747,7 @@ mod tests {
     /// still finds. A stream that carries neither gets neither.
     #[test]
     fn a_re_encoded_hdr10_stream_keeps_its_mastering_display_and_light_levels() {
-        use crate::elements::FileMuxer;
+        use crate::elements::{FileMuxer, Mp4Layout};
         use crate::test_support::{assert_hdr10_kept, hdr10_source};
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
@@ -770,7 +770,7 @@ mod tests {
                     }
                 };
             let path = std::env::temp_dir().join(format!("media-pp-hdr10-nvenc-{carried}.mp4"));
-            let mut muxer = FileMuxer::create(&path).expect("create");
+            let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer.add_stream("video", &encoder).expect("add");
             let sink = muxer.open().expect("header").take(track).expect("track");
             encoder.src_pads()[0].link(sink.into_raw());
@@ -806,7 +806,7 @@ mod tests {
     /// not FFmpeg's `hev1`, which it refuses; H.264 keeps its own tag.
     #[test]
     fn hevc_goes_into_an_mp4_as_hvc1() {
-        use crate::elements::FileMuxer;
+        use crate::elements::{FileMuxer, Mp4Layout};
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
@@ -828,7 +828,7 @@ mod tests {
                 }
             };
             let path = std::env::temp_dir().join(format!("media-pp-{codec:?}-tag.mp4"));
-            let mut muxer = FileMuxer::create(&path).expect("create");
+            let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer.add_stream("video", &encoder).expect("add");
             let sink = muxer.open().expect("header").take(track).expect("track");
             encoder.src_pads()[0].link(sink.into_raw());
