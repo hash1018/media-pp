@@ -457,7 +457,12 @@ impl Clip {
     /// Writes the clip to `path`, starting at zero — see this module's docs
     /// on why every track is moved by the one origin.
     fn write(self, path: &Path) -> Result<()> {
-        let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
+        let layout = if super::file_muxer::names_mp4(path) {
+            Mp4Layout::FastStart
+        } else {
+            Mp4Layout::Standard
+        };
+        let mut muxer = FileMuxer::create(path, layout)?;
         let tracks = self
             .streams
             .iter()
@@ -514,7 +519,10 @@ impl ReplayBufferHandle {
     ///
     /// The container is the path's, as it is for [`FileMuxer`] — which is
     /// what writes it — and so is the rule that a file already at `path` is
-    /// replaced. A save that fails part-way removes what it wrote.
+    /// replaced. A save that fails part-way removes what it wrote. An MP4 or
+    /// MOV is laid out [`Mp4Layout::FastStart`]: a clip saved is one shared
+    /// as it is, played in a messenger or a browser as it downloads, and
+    /// moving a clip's index in front costs next to nothing.
     ///
     /// Blocks for the whole write — every packet of the clip onto the disk —
     /// so it belongs off any thread that has something else to keep up
@@ -858,6 +866,12 @@ mod tests {
         assert!(
             first_picture_decodes(&path),
             "a player can show the clip's first frame on its own"
+        );
+        let bytes = std::fs::read(&path).expect("the clip");
+        let at = |kind: &[u8]| bytes.windows(4).position(|window| window == kind);
+        assert!(
+            at(b"moov") < at(b"mdat"),
+            "an MP4 clip's index comes before its samples, to play as it downloads"
         );
         std::fs::remove_file(&path).ok();
     }

@@ -285,6 +285,8 @@ compile error with no explanation.
     opens with every fragment written before the one under way, where a
     standard MP4 opens not at all; it is also the shape a browser streams
     from.
+  - `ReplayBuffer` saves an MP4 or MOV clip fast-start: a clip saved is one
+    shared as it is, and moving a short clip's index costs next to nothing.
 
 - **The window renderers show a phone's portrait recording upright.**
   `D3d11WindowRenderer`, `D3d12WindowRenderer`, `VulkanWindowRenderer` and

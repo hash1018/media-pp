@@ -165,24 +165,7 @@ impl FileMuxer {
         let path = path.as_ref();
         // Asked first, as FFmpeg's own guess would be, so a name with no
         // container in it says so rather than FFmpeg's `Invalid argument`.
-        // `None` for a name that is not text, which FFmpeg is left to try.
-        let named = path
-            .to_str()
-            .and_then(|name| CString::new(name).ok())
-            .map(|name| {
-                // SAFETY: `name` is a live NUL-terminated string; the other
-                // two arguments may be null. A format returned is a static
-                // FFmpeg owns, whose name is a static string.
-                unsafe {
-                    let format =
-                        ffmpeg::ffi::av_guess_format(ptr::null(), name.as_ptr(), ptr::null());
-                    (!format.is_null()).then(|| {
-                        std::ffi::CStr::from_ptr((*format).name)
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                }
-            });
+        let named = container_named(path);
         if named.as_ref().is_some_and(Option::is_none) {
             return Err(FileMuxerError::UnknownContainer {
                 path: path.to_path_buf(),
@@ -373,6 +356,36 @@ impl FileMuxer {
         }
         Some(options)
     }
+}
+
+/// The muxer FFmpeg would pick for `path` by its name: `Some(None)` for a
+/// name that picks none, `None` for a name that is not text, which FFmpeg
+/// is left to try.
+fn container_named(path: &Path) -> Option<Option<String>> {
+    crate::ensure_ffmpeg();
+    path.to_str()
+        .and_then(|name| CString::new(name).ok())
+        .map(|name| {
+            // SAFETY: `name` is a live NUL-terminated string; the other two
+            // arguments may be null. A format returned is a static FFmpeg
+            // owns, whose name is a static string.
+            unsafe {
+                let format = ffmpeg::ffi::av_guess_format(ptr::null(), name.as_ptr(), ptr::null());
+                (!format.is_null()).then(|| {
+                    std::ffi::CStr::from_ptr((*format).name)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            }
+        })
+}
+
+/// Whether a file at `path` would be an MP4 or MOV, and so takes every
+/// [`Mp4Layout`].
+pub(crate) fn names_mp4(path: &Path) -> bool {
+    container_named(path)
+        .flatten()
+        .is_some_and(|name| quicktime(&name))
 }
 
 /// Whether FFmpeg's muxer `name` — a comma-separated list for the mov
