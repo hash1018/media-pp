@@ -108,6 +108,9 @@ pub struct SegmentedFileMuxer {
     policy: SegmentPolicy,
     naming: Box<dyn FnMut(u64) -> PathBuf + Send>,
     streams: Vec<StreamDef>,
+    /// Every segment written in fragments
+    /// ([`SegmentedFileMuxer::create_fragmented`]).
+    fragmented: bool,
 }
 
 impl SegmentedFileMuxer {
@@ -121,11 +124,34 @@ impl SegmentedFileMuxer {
         policy: SegmentPolicy,
         naming: impl FnMut(u64) -> PathBuf + Send + 'static,
     ) -> Self {
+        Self::create_as(policy, Box::new(naming), false)
+    }
+
+    /// As [`SegmentedFileMuxer::create`], every segment an MP4 or MOV
+    /// written in fragments, as [`FileMuxer::create_fragmented`] writes one:
+    /// the segment under way when a recording is cut off still opens, up to
+    /// its last fragment, where a plain one would not open at all. A name
+    /// `naming` gives that is not an MP4 or MOV one fails the
+    /// [`SegmentedFileMuxer::open`] or rotation that asked for it, as
+    /// [`FileMuxerError::NotFragmentable`](super::file_muxer::FileMuxerError::NotFragmentable).
+    pub fn create_fragmented(
+        policy: SegmentPolicy,
+        naming: impl FnMut(u64) -> PathBuf + Send + 'static,
+    ) -> Self {
+        Self::create_as(policy, Box::new(naming), true)
+    }
+
+    fn create_as(
+        policy: SegmentPolicy,
+        naming: Box<dyn FnMut(u64) -> PathBuf + Send>,
+        fragmented: bool,
+    ) -> Self {
         Self {
             id: MuxerId::next(),
             policy,
-            naming: Box::new(naming),
+            naming,
             streams: Vec::new(),
+            fragmented,
         }
     }
 
@@ -204,9 +230,10 @@ impl SegmentedFileMuxer {
             .map(|s| (s.name.clone(), MediaKind::packet_for(s.parameters.medium())))
             .collect();
         let path = (self.naming)(0);
-        let current_sinks = open_segment(&self.streams, path)?;
+        let current_sinks = open_segment(&self.streams, path, self.fragmented)?;
         let group = Arc::new(SegmentGroup {
             policy: self.policy,
+            fragmented: self.fragmented,
             video: self.streams.iter().position(|s| s.is_video),
             naming: Mutex::new(self.naming),
             state: Mutex::new(GroupState {
@@ -241,8 +268,16 @@ impl SegmentedFileMuxer {
 
 /// One segment file, its sinks in the order of `streams` — which is the
 /// order [`SegmentedTrackSink::track_index`] indexes them by.
-fn open_segment(streams: &[StreamDef], path: PathBuf) -> Result<Vec<Box<dyn RawSink>>> {
-    let mut muxer = FileMuxer::create(&path)?;
+fn open_segment(
+    streams: &[StreamDef],
+    path: PathBuf,
+    fragmented: bool,
+) -> Result<Vec<Box<dyn RawSink>>> {
+    let mut muxer = if fragmented {
+        FileMuxer::create_fragmented(&path)?
+    } else {
+        FileMuxer::create(&path)?
+    };
     let tracks = streams
         .iter()
         .map(|stream| {
@@ -366,6 +401,8 @@ impl GroupState {
 /// never a mix).
 struct SegmentGroup {
     policy: SegmentPolicy,
+    /// Each segment opened in fragments.
+    fragmented: bool,
     /// The track a cut waits for a keyframe on, if there is one.
     video: Option<usize>,
     naming: Mutex<Box<dyn FnMut(u64) -> PathBuf + Send>>,
@@ -479,7 +516,7 @@ impl SegmentGroup {
         }
         let index = state.segment_index + 1;
         let path = (self.naming.lock().unwrap())(index);
-        state.current_sinks = open_segment(&state.streams, path)?;
+        state.current_sinks = open_segment(&state.streams, path, self.fragmented)?;
         state.segment_index = index;
         state.segment_started = Instant::now();
         // This packet is the first of the new segment, so what was counted
@@ -1249,6 +1286,103 @@ mod tests {
         pipeline.bus().log_events();
 
         for path in paths.lock().unwrap().iter() {
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    /// Every segment of a recording made with `create_fragmented` is
+    /// written in fragments, and so is the one under way: cut off — its
+    /// sinks dropped with no `Eos` and no `Stop` — it still opens, where a
+    /// plain segment would not open at all.
+    #[test]
+    fn fragmented_segments_survive_a_recording_cut_off() {
+        use crate::element::{RawSink, SrcPads};
+        let Some(mut encoder) = open_h264_encoder(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: 160,
+                height: 96,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 200_000,
+                gop_size: 10,
+                max_b_frames: None,
+            },
+        ) else {
+            eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
+            return;
+        };
+        let dir = std::env::temp_dir();
+        let prefix = format!("segmented_fragmented_test_{}", std::process::id());
+        let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_paths = paths.clone();
+        // Several keyframe intervals of these plain pictures fill one.
+        let mut muxer = SegmentedFileMuxer::create_fragmented(SegmentPolicy::Size(20_000), {
+            move |index| {
+                let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+                recorded_paths.lock().unwrap().push(path.clone());
+                path
+            }
+        });
+        let video = muxer.add_stream("video", &encoder);
+        let sinks = {
+            let mut sinks = muxer.open().expect("open must succeed");
+            let sink = sinks.take(video).expect("the muxer's own track");
+            encoder.src_pads()[0].link(sink.into_raw());
+            sinks
+        };
+        let pool = crate::pool::UnboundObjectPool::new(
+            0,
+            || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 160, 96),
+            |_| {},
+        );
+        // On until the recording has been cut into a second segment, and
+        // then two and a half keyframe intervals into it: two fragments
+        // of that segment are on disk, the third is under way.
+        let mut after_cut = None;
+        for index in 0..3_000i64 {
+            match after_cut {
+                None if paths.lock().unwrap().len() >= 2 => after_cut = Some(0),
+                Some(25) => break,
+                Some(ref mut pictures) => *pictures += 1,
+                None => {}
+            }
+            let mut frame = pool.get();
+            for plane in 0..3 {
+                frame.data_mut(plane).fill((index * 7 % 200) as u8 + 16);
+            }
+            frame.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+            encoder
+                .consume(MediaBuffer::Video(Arc::new(frame).into()))
+                .expect("encode a picture");
+        }
+        drop(sinks);
+        drop(encoder);
+
+        let paths = paths.lock().unwrap().clone();
+        assert_eq!(after_cut, Some(25), "the recording was cut: {paths:?}");
+        for path in &paths {
+            let bytes = std::fs::read(path).expect("a segment on disk");
+            assert!(
+                bytes.windows(4).any(|window| window == b"moof"),
+                "{path:?} is written in fragments"
+            );
+            let mut input = ffmpeg::format::input(path)
+                .unwrap_or_else(|error| panic!("{path:?} must open: {error}"));
+            let mut pictures = 0;
+            let mut packet = ffmpeg::Packet::empty();
+            while packet.read(&mut input).is_ok() {
+                assert!(
+                    pictures > 0 || packet.is_key(),
+                    "{path:?} begins at a keyframe"
+                );
+                pictures += 1;
+            }
+            assert!(pictures >= 20, "{path:?} has {pictures} pictures");
+        }
+        for path in &paths {
             std::fs::remove_file(path).ok();
         }
     }

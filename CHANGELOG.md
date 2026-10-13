@@ -271,6 +271,8 @@ compile error with no explanation.
   before the one under way, where a plain MP4 opens not at all; it is also
   the shape a browser streams from. Any other name is refused
   (`FileMuxerError::NotFragmentable`) before a file is made.
+  `SegmentedFileMuxer::create_fragmented` writes every segment so, the one
+  under way when a recording is cut off among them.
 
 - **The window renderers show a phone's portrait recording upright.**
   `D3d11WindowRenderer`, `D3d12WindowRenderer`, `VulkanWindowRenderer` and

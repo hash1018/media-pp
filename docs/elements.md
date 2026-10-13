@@ -51,7 +51,7 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `PipeWireAudioRenderer` and `CoreAudioRenderer`.
 - **Outputs**: `FileMuxer` (an MP4 or MOV in fragments too, which a
   recording cut off still opens from: `FileMuxer::create_fragmented`),
-  `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`, `RtmpMuxer`,
+  `SegmentedFileMuxer` (likewise, `create_fragmented`), `ReplayBuffer`, `HlsMuxer`, `RtmpMuxer`,
   `RtspMuxer`, `WebRtcTrackSink`, `AppSink`, and virtual cameras:
   `MfVirtualCamera` on Windows, `V4l2VirtualCamera` on Linux.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
