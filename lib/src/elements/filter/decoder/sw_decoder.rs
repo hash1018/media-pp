@@ -345,6 +345,7 @@ impl RawSink for SwDecoder {
                         )
                     }
                     Kind::Audio(decoder) => {
+                        learn_packet_time_base(decoder, &packet);
                         decoder
                             .send_packet(&**packet)
                             .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
@@ -464,6 +465,30 @@ fn release(
         gate.push_admitted(buffer, pad)?;
     }
     Ok(())
+}
+
+/// Tells the codec what unit the packets' timestamps are in, from the
+/// packet itself, where it says and the codec does not know it already.
+///
+/// FFmpeg needs it to move a sound's timestamp past the samples it drops
+/// from the front of a frame: an AAC stream's encoder delay, or what an
+/// edit list says not to play. Without it the first frame of a file cut
+/// out of a longer one keeps its undropped start, a hundredth of a second
+/// or so ahead of where it plays, and FFmpeg only warns that it could not
+/// update the timestamps.
+fn learn_packet_time_base(context: &mut ffmpeg::codec::Context, packet: &ffmpeg::Packet) {
+    let time_base = packet.time_base();
+    if time_base.numerator() <= 0 || time_base.denominator() <= 0 {
+        return;
+    }
+    // SAFETY: a plain field of the codec context this decoder owns
+    // exclusively, which FFmpeg reads as each frame is decoded.
+    unsafe {
+        let context = context.as_mut_ptr();
+        if (*context).pkt_timebase.num <= 0 {
+            (*context).pkt_timebase = time_base.into();
+        }
+    }
 }
 
 fn drain_audio(
@@ -696,6 +721,105 @@ mod tests {
             };
             assert!(frame.pts().is_some(), "a decoded frame lost its pts");
         }
+    }
+
+    /// A sound cut out of a longer one starts partway into its first frame:
+    /// the demuxer says, beside that frame's packet, how many samples not
+    /// to play — what an edit list or an encoder's delay asks. The frame
+    /// handed on is the rest, stamped where the rest plays rather than
+    /// where the undropped frame began.
+    #[test]
+    fn a_sound_trimmed_at_its_start_is_stamped_where_it_plays() {
+        use crate::elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions};
+        use ffmpeg::codec::packet::Mut;
+
+        const RATE: u32 = 48_000;
+        const SKIP: u32 = 562;
+        let mut encoder = SwAudioEncoder::new(
+            "encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Aac,
+                sample_rate: RATE,
+                channels: 1,
+                bit_rate: 64_000,
+            },
+        )
+        .expect("AAC is built into FFmpeg");
+        let encoded = Arc::new(Mutex::new(Received::default()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            received: encoded.clone(),
+            pp_log: element_pp_log(ElementType::Other, "packets", None),
+        }));
+        for tick in 0..10i64 {
+            let mut frame = ffmpeg::frame::Audio::new(
+                ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                1024,
+                ffmpeg::ChannelLayout::MONO,
+            );
+            frame.set_rate(RATE);
+            frame.set_pts(Some(tick * 1024));
+            frame.data_mut(0).fill(0);
+            encoder
+                .consume(MediaBuffer::Audio(Arc::new(frame).into()))
+                .expect("encode");
+        }
+        crate::stream::deliver(&mut encoder, &StreamEvent::Eos).expect("drain the encoder");
+        let packets: Vec<ffmpeg::Packet> = encoded
+            .lock()
+            .unwrap()
+            .buffers
+            .iter()
+            .map(|buffer| match buffer {
+                MediaBuffer::Packet(packet) => ffmpeg::Packet::clone(packet),
+                _ => panic!("an encoder hands on packets"),
+            })
+            .collect();
+        let first = packets[0].pts().expect("a packet's time");
+        assert_eq!(
+            packets[0].time_base(),
+            ffmpeg::Rational::new(1, RATE as i32),
+            "the packets say what unit their times are in"
+        );
+
+        let mut decoder = SwDecoder::new("decoder", encoder.parameters()).expect("AAC decodes");
+        let received = link_capture(&mut decoder);
+        for (index, mut packet) in packets.into_iter().enumerate() {
+            if index == 0 {
+                // What FFmpeg's demuxers attach: samples to skip at the
+                // front, at the end, and a reason for each.
+                // SAFETY: a packet this test owns; the side data is
+                // allocated by FFmpeg at the size asked and written once.
+                unsafe {
+                    let data = ffmpeg::ffi::av_packet_new_side_data(
+                        packet.as_mut_ptr(),
+                        ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_SKIP_SAMPLES,
+                        10,
+                    );
+                    assert!(!data.is_null());
+                    let bytes = std::slice::from_raw_parts_mut(data, 10);
+                    bytes.fill(0);
+                    bytes[..4].copy_from_slice(&SKIP.to_le_bytes());
+                }
+            }
+            decoder
+                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
+                .expect("decode");
+        }
+
+        let received = received.lock().unwrap();
+        let Some(MediaBuffer::Audio(frame)) = received.buffers.first() else {
+            panic!("no sound was decoded");
+        };
+        assert_eq!(
+            frame.samples(),
+            1024 - SKIP as usize,
+            "the front is dropped"
+        );
+        assert_eq!(
+            frame.pts(),
+            Some(first + i64::from(SKIP)),
+            "the rest is stamped where it plays"
+        );
     }
 
     fn h264() -> (ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>) {

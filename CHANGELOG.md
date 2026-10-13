@@ -1372,6 +1372,19 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`SwDecoder` stamps a sound trimmed at its start where it plays.** A
+  file cut out of a longer one, or whose edit list starts partway into a
+  frame, has its demuxer say how many samples of the first frame not to
+  play; FFmpeg drops them, but moves the frame's timestamp past them only
+  when the codec knows the packets' time base, which nothing told it. The
+  rest of that frame came out stamped where the undropped frame began, a
+  hundredth of a second or so early, with a gap behind it. The decoder now
+  takes the time base from the packets. Checked against FFmpeg's own
+  reading of seven files with edit lists (a stream copy cut at a
+  non-keyframe, an empty edit, B-frame delays, H.264 and HEVC): every
+  picture's time and pixels, through `SwDecoder` and `CudaDecoder`, and
+  where an accurate seek lands, already agreed; only this sound did not.
+
 - **`CudaDecoder` decodes a stream with many reference frames whatever
   `downstream_hw_frames` is.** NVDEC caps its pool at 32 surfaces, the
   stream's reference frames and FFmpeg's working ones among them; an HEVC
