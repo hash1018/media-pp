@@ -48,12 +48,11 @@ pub enum SegmentPolicy {
 
 /// One track's fixed description — everything [`SegmentedFileMuxer::open`]
 /// needs to re-add it to a fresh [`FileMuxer`] on every rotation.
-/// `parameters` is cloned each time ([`FileMuxer::add_stream`] consumes its
+/// `format` is cloned each time ([`FileMuxer::add_stream`] consumes its
 /// own copy); the original stays here as the template.
 struct StreamDef {
     name: Arc<str>,
-    parameters: ffmpeg::codec::Parameters,
-    time_base: ffmpeg::Rational,
+    format: TrackFormat,
     /// Whether this is the track [`SegmentGroup::consume_packet`] waits for
     /// a keyframe on before actually cutting — see
     /// [`SegmentedFileMuxer::open`]'s own docs.
@@ -156,16 +155,12 @@ impl SegmentedFileMuxer {
         name: impl Into<String>,
         format: impl Into<TrackFormat>,
     ) -> MuxerTrack {
-        let TrackFormat {
-            parameters,
-            time_base,
-        } = format.into();
-        let is_video = parameters.medium() == ffmpeg::media::Type::Video;
+        let format: TrackFormat = format.into();
+        let is_video = format.parameters.medium() == ffmpeg::media::Type::Video;
         let track = self.id.track(self.streams.len());
         self.streams.push(StreamDef {
             name: name.into().into(),
-            parameters,
-            time_base,
+            format,
             is_video,
         });
         track
@@ -213,7 +208,12 @@ impl SegmentedFileMuxer {
         let tracks: Vec<(Arc<str>, Option<MediaKind>)> = self
             .streams
             .iter()
-            .map(|s| (s.name.clone(), MediaKind::packet_for(s.parameters.medium())))
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    MediaKind::packet_for(s.format.parameters.medium()),
+                )
+            })
             .collect();
         let path = (self.naming)(0);
         let current_sinks = open_segment(&self.streams, path, self.layout)?;
@@ -262,12 +262,7 @@ fn open_segment(
     let mut muxer = FileMuxer::create(&path, layout)?;
     let tracks = streams
         .iter()
-        .map(|stream| {
-            muxer.add_stream(
-                stream.name.to_string(),
-                TrackFormat::new(stream.parameters.clone(), stream.time_base),
-            )
-        })
+        .map(|stream| muxer.add_stream(stream.name.to_string(), stream.format.clone()))
         .collect::<Result<Vec<_>>>()?;
     let mut sinks = muxer.open()?;
     tracks
@@ -334,9 +329,9 @@ impl GroupState {
         unsafe {
             ffmpeg::ffi::av_compare_ts(
                 at,
-                self.streams[track].time_base.into(),
+                self.streams[track].format.time_base.into(),
                 reached,
-                self.streams[video].time_base.into(),
+                self.streams[video].format.time_base.into(),
             ) < 0
         }
     }
@@ -562,8 +557,8 @@ impl SegmentGroup {
             unsafe {
                 ffmpeg::ffi::av_rescale_q(
                     origin,
-                    state.streams[origin_track].time_base.into(),
-                    state.streams[track_index].time_base.into(),
+                    state.streams[origin_track].format.time_base.into(),
+                    state.streams[track_index].format.time_base.into(),
                 )
             }
         };

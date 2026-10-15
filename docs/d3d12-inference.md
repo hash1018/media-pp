@@ -109,8 +109,10 @@ D3d12Decoder ─▶ D3d12OrtDetector ─▶ … (the picture passed on, Detectio
   when the outputs may be read.
 - **The model.** Opset 20 or lower, fp16 inside for speed. The element
   overrides the open batch, height and width with what it runs; it does
-  not convert a model, and a model with ops DirectML lacks is logged as
-  running partly on the CPU rather than refused.
+  not convert a model. One exported past opset 20 is run, partly on the
+  CPU, rather than refused, and warned of when the element is made, since
+  ONNX Runtime hands the operators DirectML lacks to the CPU without a
+  word.
 - **Contract:** `PortContract::Frames` in `MemoryDomain::D3d12`, layouts
   NV12 and P010 (what the fit shader reads); the output passes the picture
   on unchanged (`OutputContract::SameLayout`).

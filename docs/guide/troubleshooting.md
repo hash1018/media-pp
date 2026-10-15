@@ -24,6 +24,19 @@ Set `FFMPEG_DIR` to an FFmpeg 8.0 development tree — the folder holding
 The FFmpeg binding is generated at build time with libclang. Install LLVM;
 on Windows, set `LIBCLANG_PATH` to its `bin` folder if it is not found.
 
+**media-pp fails to compile with `this function takes 1 argument but 0
+arguments were supplied` at `Session::builder()`.**
+Your crate resolved a newer `ort` release candidate than the one media-pp
+is written against; 0.3.1 and earlier allow it. Hold it back:
+
+```sh
+cargo update -p ort --precise 2.0.0-rc.13
+```
+
+**Building with `ort` sits for minutes in `ort-sys`'s build script.**
+It is downloading ONNX Runtime, a few hundred megabytes, once for each set
+of `ort-*` features — see [features](../features.md).
+
 **The `ort` feature fails on Windows creating symlinks.**
 Building ONNX Runtime links its DLLs into the target folder as symlinks,
 which Windows allows only in Developer Mode: *Settings → System → For
@@ -93,8 +106,9 @@ the setup script includes it. `VideoEncodeBin::path()` says which
 encoder it opened.
 
 **Detection on D3D12 is slow — tens of milliseconds a picture.**
-DirectML runs a model exported at ONNX opset 21 or 22 on the CPU. Convert
-it to opset 20, and to fp16 — see [D3D12 inference](../d3d12-inference.md).
+DirectML hands the operators of a model exported past ONNX opset 20 to the
+CPU, and the log says so when the detector is made. Export it again at
+opset 20, in fp16 — see [D3D12 inference](../d3d12-inference.md).
 
 ## Still stuck
 

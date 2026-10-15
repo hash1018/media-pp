@@ -46,7 +46,10 @@ arc-swap = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["local-offset"] }
 tracing-appender = "0.2"
-ort = { version = "2.0.0-rc.13", optional = true }
+# Exactly this release: ort's release candidates break their API between one
+# another (rc.14 changed `Session::builder`), and a `^` requirement lets a
+# new downstream crate resolve the next one.
+ort = { version = "=2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [

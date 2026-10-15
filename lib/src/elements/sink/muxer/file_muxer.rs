@@ -209,8 +209,9 @@ impl FileMuxer {
         let TrackFormat {
             parameters,
             time_base,
+            fixed_parameter_sets,
         } = format.into();
-        let hvc1 = self.hvc1(&parameters);
+        let hvc1 = self.hvc1(&parameters, fixed_parameter_sets);
         let mut stream = self
             .output
             .add_stream(parameters.id())
@@ -237,7 +238,14 @@ impl FileMuxer {
     /// HEVC in MP4 or MOV under it; `hvc1` is the same stream with its
     /// parameter sets in the sample entry, which every other player plays
     /// too.
-    fn hvc1(&self, parameters: &ffmpeg::codec::Parameters) -> bool {
+    ///
+    /// Or in band, from an encoder whose sets never change
+    /// (`fixed_parameter_sets`): FFmpeg's MP4 muxer then takes them from the
+    /// first packet into the sample entry, and out of every sample, as
+    /// `hvc1` requires. A stream copied from elsewhere with its sets in band
+    /// stays `hev1`, since they may change partway and only `hev1` lets a
+    /// sample carry new ones.
+    fn hvc1(&self, parameters: &ffmpeg::codec::Parameters, fixed_parameter_sets: bool) -> bool {
         // SAFETY: plain fields of parameters the caller owns.
         let (tag, extradata) = unsafe {
             let raw = parameters.as_ptr();
@@ -245,7 +253,7 @@ impl FileMuxer {
         };
         parameters.id() == ffmpeg::codec::Id::HEVC
             && tag == 0
-            && extradata > 0
+            && (extradata > 0 || fixed_parameter_sets)
             && quicktime(self.output.format().name())
     }
 

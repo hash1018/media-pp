@@ -57,6 +57,12 @@ pub struct MuxerTrack {
 pub struct TrackFormat {
     pub(crate) parameters: ffmpeg::codec::Parameters,
     pub(crate) time_base: ffmpeg::Rational,
+    /// Whether the stream's parameter sets are the same from its first
+    /// packet to its last, so an MP4 may keep them in the sample entry
+    /// alone even where `parameters` carries none: what an encoder of this
+    /// crate knows of its own output, and nothing can know of a stream
+    /// copied from elsewhere, whose sets may change partway.
+    pub(crate) fixed_parameter_sets: bool,
 }
 
 impl TrackFormat {
@@ -66,7 +72,18 @@ impl TrackFormat {
         Self {
             parameters,
             time_base,
+            fixed_parameter_sets: false,
         }
+    }
+
+    /// The same track, said to keep one set of parameter sets throughout —
+    /// for an encoder of this crate whose FFmpeg encoder hands its sets only
+    /// in band (`hevc_d3d12va`), so that a muxer of MP4 still writes its
+    /// HEVC as `hvc1`.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    pub(crate) fn with_fixed_parameter_sets(mut self) -> Self {
+        self.fixed_parameter_sets = true;
+        self
     }
 
     /// The same track, its pictures shown turned as `orientation` says:

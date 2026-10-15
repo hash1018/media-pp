@@ -407,10 +407,12 @@ impl Encoding {
 
 /// The track this encoder's packets make: its
 /// [`D3d12VideoEncoder::parameters`], timed in its
-/// [`D3d12VideoEncoder::time_base`].
+/// [`D3d12VideoEncoder::time_base`]. FFmpeg 8.0's `hevc_d3d12va` hands its
+/// parameter sets only in band, but they never change, so an MP4 still
+/// writes the HEVC as `hvc1`.
 impl From<&D3d12VideoEncoder> for crate::elements::TrackFormat {
     fn from(encoder: &D3d12VideoEncoder) -> Self {
-        Self::new(encoder.parameters(), encoder.time_base())
+        Self::new(encoder.parameters(), encoder.time_base()).with_fixed_parameter_sets()
     }
 }
 
@@ -477,7 +479,7 @@ impl Drop for Encoding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::RawSink;
+    use crate::element::{RawSink, SrcPads};
     use crate::elements::{D3d12Upload, SwDecoder};
     use crate::test_support::{capture, try_d3d12_gpu};
 
@@ -593,6 +595,89 @@ mod tests {
         }
     }
 
+    /// HEVC from D3D12 goes into an MP4 as `hvc1`, which an iPhone plays,
+    /// not FFmpeg's `hev1`, which it refuses — though `hevc_d3d12va` makes
+    /// no extradata, the MP4 muxer takes the parameter sets from the first
+    /// packet into the sample entry. The same packets described as a stream
+    /// copied from elsewhere, whose sets could change, stay `hev1`.
+    #[test]
+    fn hevc_goes_into_an_mp4_as_hvc1() {
+        use crate::elements::{FileMuxer, Mp4Layout, TrackFormat};
+        let _session = crate::test_support::encoder_session();
+        let Some(gpu) = try_d3d12_gpu() else {
+            return;
+        };
+        for (fixed, tag) in [(true, *b"hvc1"), (false, *b"hev1")] {
+            let Some(mut encoder) = opened(&gpu, D3d12VideoCodec::H265) else {
+                return;
+            };
+            let Ok(mut upload) = D3d12Upload::new("upload", &gpu) else {
+                eprintln!("skipping: FFmpeg could not create a D3D12VA frames context");
+                return;
+            };
+            let path = std::env::temp_dir().join(format!(
+                "media-pp-d3d12-hevc-tag-{}-{fixed}.mp4",
+                std::process::id()
+            ));
+            let format = if fixed {
+                TrackFormat::from(&encoder)
+            } else {
+                TrackFormat::new(encoder.parameters(), encoder.time_base())
+            };
+            let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
+            let track = muxer.add_stream("video", format).expect("add");
+            let sink = muxer.open().expect("header").take(track).expect("track");
+            encoder.src_pads()[0].link(sink.into_raw());
+            let uploaded = capture(&mut upload);
+            for index in 0..10 {
+                upload
+                    .consume(MediaBuffer::video(picture(index)))
+                    .expect("uploads");
+                let buf = uploaded.lock().unwrap().remove(0);
+                encoder.consume(buf).expect("encodes");
+            }
+            crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("drains");
+            drop(encoder);
+            let mut input = ffmpeg::format::input(&path).expect("reopen");
+            let stream = input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .expect("video");
+            let index = stream.index();
+            // SAFETY: plain fields of the stream's own parameters.
+            let (written, extradata) = unsafe {
+                let raw = stream.parameters().as_ptr();
+                ((*raw).codec_tag, (*raw).extradata_size)
+            };
+            let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+                .expect("context")
+                .decoder()
+                .video()
+                .expect("decoder");
+            let mut pictures = 0;
+            let mut frame = ffmpeg::frame::Video::empty();
+            for (stream, packet) in input.packets() {
+                if stream.index() == index {
+                    decoder.send_packet(&packet).expect("decodes");
+                    while decoder.receive_frame(&mut frame).is_ok() {
+                        pictures += 1;
+                    }
+                }
+            }
+            decoder.send_eof().expect("drains");
+            while decoder.receive_frame(&mut frame).is_ok() {
+                pictures += 1;
+            }
+            drop(input);
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(written.to_le_bytes(), tag, "fixed={fixed}");
+            assert!(
+                extradata > 0,
+                "fixed={fixed}: the sample entry holds the sets"
+            );
+            assert_eq!(pictures, 10, "fixed={fixed}: every picture decodes");
+        }
+    }
     /// A picture in system memory and one of another size are refused,
     /// saying so, and the encoder takes the next.
     #[test]

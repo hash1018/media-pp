@@ -345,6 +345,7 @@ impl Chosen {
         let TrackFormat {
             parameters,
             time_base,
+            ..
         } = TrackFormat::from(&encoder);
         before.push(Box::new(encoder));
         Self {

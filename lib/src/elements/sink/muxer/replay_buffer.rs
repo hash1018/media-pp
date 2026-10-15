@@ -151,6 +151,8 @@ struct StreamDef {
     name: Arc<str>,
     parameters: ffmpeg::codec::Parameters,
     time_base: ffmpeg::Rational,
+    /// As the track's `TrackFormat` said, for the clip's `FileMuxer`.
+    fixed_parameter_sets: bool,
 }
 
 impl ReplayBuffer {
@@ -179,12 +181,14 @@ impl ReplayBuffer {
         let TrackFormat {
             parameters,
             time_base,
+            fixed_parameter_sets,
         } = format.into();
         let track = self.id.track(self.streams.len());
         self.streams.push(StreamDef {
             name: name.into().into(),
             parameters,
             time_base,
+            fixed_parameter_sets,
         });
         track
     }
@@ -442,6 +446,7 @@ impl Window {
                     name: stream.name.clone(),
                     parameters: stream.parameters.clone(),
                     time_base: stream.time_base,
+                    fixed_parameter_sets: stream.fixed_parameter_sets,
                 })
                 .collect(),
             origins: self
@@ -480,7 +485,11 @@ impl Clip {
             .map(|stream| {
                 muxer.add_stream(
                     stream.name.to_string(),
-                    TrackFormat::new(stream.parameters.clone(), stream.time_base),
+                    TrackFormat {
+                        parameters: stream.parameters.clone(),
+                        time_base: stream.time_base,
+                        fixed_parameter_sets: stream.fixed_parameter_sets,
+                    },
                 )
             })
             .collect::<Result<Vec<_>>>()?;

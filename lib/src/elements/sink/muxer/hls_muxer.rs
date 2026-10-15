@@ -353,6 +353,7 @@ impl HlsMuxer {
         let TrackFormat {
             parameters,
             time_base,
+            ..
         } = format.into();
         let mut stream = self
             .output

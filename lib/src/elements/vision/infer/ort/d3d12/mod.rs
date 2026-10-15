@@ -10,6 +10,8 @@ mod d3d12_ort_detector;
 mod d3d12_ort_embedder;
 mod fitting;
 
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use ort::{
@@ -111,6 +113,7 @@ fn object_model_session(
     open_side: u32,
     pp_log: &PpLog,
 ) -> Result<(Session, Input), OrtError> {
+    warn_past_directml_opset(model_path, pp_log);
     let probe = Session::builder()
         .map_err(OrtError::from)?
         .commit_from_file(model_path)
@@ -154,6 +157,102 @@ fn object_model_session(
     Ok((session, input))
 }
 
+/// The newest ONNX operator set DirectML runs whole: an operator of a later
+/// one goes to the CPU, a node at a time, and the model then runs many times
+/// slower than on the GPU — see `docs/d3d12-inference.md`.
+const DIRECTML_OPSET: u64 = 20;
+
+/// Warns, through `pp_log`, where the model at `model_path` is written
+/// against a later operator set than [`DIRECTML_OPSET`]. ONNX Runtime says
+/// nothing when it hands DirectML's missing operators to the CPU, so this is
+/// the one place a user hears why the model is slow.
+fn warn_past_directml_opset(model_path: &Path, pp_log: &PpLog) {
+    if let Some(opset) = onnx_opset(model_path).filter(|&opset| opset > DIRECTML_OPSET) {
+        pp_warn!(
+            pp_log: pp_log,
+            "the model is exported at ONNX opset {opset}: DirectML runs opset \
+             {DIRECTML_OPSET} and lower, and hands the operators of later ones to \
+             the CPU, which makes it many times slower; export it at opset \
+             {DIRECTML_OPSET} or lower"
+        );
+    }
+}
+
+/// The ONNX operator set the model file at `path` is written against — its
+/// `ai.onnx` import — read from the file's top level without loading the
+/// graph, which is skipped over. `None` where the file cannot be read or
+/// does not say.
+fn onnx_opset(path: &Path) -> Option<u64> {
+    // `ModelProto` field 8, `opset_import`: repeated `OperatorSetIdProto`.
+    const OPSET_IMPORT: u64 = 8;
+    let mut file = BufReader::new(File::open(path).ok()?);
+    let mut opset = None;
+    // A clean end of the file is where the key would be.
+    while let Some(key) = varint(&mut file) {
+        match (key >> 3, key & 7) {
+            (_, 0) => {
+                varint(&mut file)?;
+            }
+            (_, 1) => file.seek_relative(8).ok()?,
+            (_, 5) => file.seek_relative(4).ok()?,
+            (OPSET_IMPORT, 2) => {
+                let mut entry = vec![0; usize::try_from(varint(&mut file)?).ok()?];
+                file.read_exact(&mut entry).ok()?;
+                if let Some((domain, version)) = operator_set(&entry)
+                    && (domain.is_empty() || domain == b"ai.onnx")
+                {
+                    opset = Some(version);
+                }
+            }
+            (_, 2) => {
+                let len = i64::try_from(varint(&mut file)?).ok()?;
+                file.seek_relative(len).ok()?;
+            }
+            _ => return None,
+        }
+    }
+    opset
+}
+
+/// An `OperatorSetIdProto`'s domain (field 1) and version (field 2).
+fn operator_set(mut entry: &[u8]) -> Option<(&[u8], u64)> {
+    let (mut domain, mut version): (&[u8], _) = (&[], None);
+    while !entry.is_empty() {
+        let key = varint(&mut entry)?;
+        match (key >> 3, key & 7) {
+            (2, 0) => version = Some(varint(&mut entry)?),
+            (_, 0) => {
+                varint(&mut entry)?;
+            }
+            (field, 2) => {
+                let len = usize::try_from(varint(&mut entry)?).ok()?;
+                let bytes = entry.get(..len)?;
+                if field == 1 {
+                    domain = bytes;
+                }
+                entry = &entry[len..];
+            }
+            _ => return None,
+        }
+    }
+    Some((domain, version?))
+}
+
+/// A protobuf base-128 varint, `None` at the end of `reader` or past ten
+/// bytes.
+fn varint(reader: &mut impl Read) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let mut byte = [0u8];
+        reader.read_exact(&mut byte).ok()?;
+        value |= u64::from(byte[0] & 0x7f) << shift;
+        if byte[0] & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
 /// Where a tensor DirectML reads is: a D3D12 buffer on its device.
 fn directml_memory() -> Result<MemoryInfo<'static>, OrtError> {
     Ok(MemoryInfo::new(
@@ -172,4 +271,85 @@ fn host_memory() -> Result<MemoryInfo<'static>, OrtError> {
         AllocatorType::Device,
         MemoryType::CPUOutput,
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A protobuf key: field number and wire type.
+    fn key(field: u64, wire: u64) -> Vec<u8> {
+        encode(field << 3 | wire)
+    }
+
+    fn encode(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn bytes_field(field: u64, bytes: &[u8]) -> Vec<u8> {
+        [key(field, 2), encode(bytes.len() as u64), bytes.to_vec()].concat()
+    }
+
+    fn operator_set_id(domain: &str, version: u64) -> Vec<u8> {
+        let mut entry = Vec::new();
+        if !domain.is_empty() {
+            entry.extend(bytes_field(1, domain.as_bytes()));
+        }
+        entry.extend([key(2, 0), encode(version)].concat());
+        bytes_field(8, &entry)
+    }
+
+    fn model_file(name: &str, contents: &[u8]) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("media-pp-opset-{}-{name}.onnx", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn the_opset_is_read_past_a_graph_it_skips() {
+        // ir_version, producer_name, a graph of a megabyte, then the
+        // imports: a custom domain's first, the default one's after it.
+        let contents = [
+            [key(1, 0), encode(10)].concat(),
+            bytes_field(2, b"pytorch"),
+            bytes_field(7, &vec![0xff; 1 << 20]),
+            operator_set_id("com.microsoft", 1),
+            operator_set_id("", 22),
+            [key(5, 0), encode(1)].concat(),
+        ]
+        .concat();
+        let path = model_file("default", &contents);
+        assert_eq!(onnx_opset(&path), Some(22));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn the_ai_onnx_domain_counts_as_the_default_one() {
+        let contents = [
+            operator_set_id("ai.onnx", 17),
+            operator_set_id("ai.onnx.ml", 3),
+        ]
+        .concat();
+        let path = model_file("named", &contents);
+        assert_eq!(onnx_opset(&path), Some(17));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_model_says_no_opset() {
+        let path = model_file("garbage", b"\x0f\x0f\x0f not protobuf");
+        assert_eq!(onnx_opset(&path), None);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(onnx_opset(Path::new("no such model.onnx")), None);
+    }
 }

@@ -36,7 +36,7 @@ use super::super::{
     decode_batch, labels, looks, merge_looks, model_input,
 };
 use super::fitting::{Cut, Fitting, Picture};
-use super::{DirectMl, directml_memory, host_memory};
+use super::{DirectMl, directml_memory, host_memory, warn_past_directml_opset};
 
 /// How a [`D3d12OrtDetector`] runs its model, beside what every detector is
 /// told.
@@ -165,6 +165,7 @@ impl D3d12OrtDetector {
         if let Some(tiles) = &options.detector.tiles {
             tiles.check()?;
         }
+        warn_past_directml_opset(model_path.as_ref(), &pp_log);
 
         // Read on the CPU first: whether the model leaves its batch open,
         // and by what name, to fix it for DirectML — and its height and

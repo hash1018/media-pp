@@ -147,6 +147,7 @@ impl RtspMuxer {
         let TrackFormat {
             parameters,
             time_base,
+            ..
         } = format.into();
         let pending = PendingStream::new(name, &parameters, time_base);
         let mut stream = self

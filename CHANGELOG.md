@@ -1509,6 +1509,27 @@ compile error with no explanation.
 
 ### Fixed
 
+- **The `ort` features build in a new crate again.** media-pp asked for
+  `ort` `2.0.0-rc.13` as a caret requirement, so a crate without a lockfile
+  of its own resolved `2.0.0-rc.14`, whose `Session::builder` takes an
+  argument, and media-pp failed to compile in it — after its build script
+  had downloaded ONNX Runtime anew. It now asks for `=2.0.0-rc.13`. With
+  0.3.1, `cargo update -p ort --precise 2.0.0-rc.13` holds it back.
+
+- **HEVC from `D3d12VideoEncoder` goes into an MP4 or MOV as `hvc1`.**
+  FFmpeg 8.0's `hevc_d3d12va` makes no extradata, so `FileMuxer` left the
+  track FFmpeg's `hev1`, which Apple's players refuse. The encoder's
+  parameter sets never change, which its track now says, so the muxer
+  writes `hvc1` with them in the sample entry, as for every other encoder
+  of this crate; a stream copied from elsewhere with its sets in band stays
+  `hev1`. `SegmentedFileMuxer` and `ReplayBuffer` follow.
+
+- **A D3D12 detector, classifier or embedder warns of a model past opset
+  20.** DirectML hands the operators of a later opset to the CPU, which made
+  a YOLO11 exported at opset 22 five times slower than at 13 without a word
+  from ONNX Runtime. The element now reads the model's opset and warns when
+  it is made.
+
 - **A replay buffer's failed save no longer deletes the file at its
   path.** `ReplayBufferHandle::save` removed the path on any failure,
   including one before anything was written — a path naming no container

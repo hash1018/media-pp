@@ -73,15 +73,25 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see building on
 - **`whisper-vulkan`**: the Vulkan SDK's shader compiler at build time; on
   Windows also long paths and a short target directory — see
   [`transcribe`](../examples/core/transcribe/README.md).
-- **`ort`**: a YOLO model exported to ONNX — YOLOv8 and YOLO11, or YOLOv10
-  and YOLO26.
+- **`ort`**: a model exported to ONNX — YOLOv8 and YOLO11, or YOLOv10
+  and YOLO26, RetinaFace, or a DETR-family detector. Building downloads
+  ONNX Runtime's prebuilt library, a few hundred megabytes and silent while
+  it runs, once for each set of `ort-*` features, and keeps it in the
+  user's cache (`ort.pyke.io`). For a machine with no network, point
+  `ORT_LIB_LOCATION` at an ONNX Runtime of your own; see
+  [`ort`'s linking guide](https://ort.pyke.io/setup/linking). media-pp
+  requires `ort` 2.0.0-rc.13 exactly, since its release candidates change
+  their API between one another.
 - **`ort-coreml`**: an Apple silicon Mac. ONNX Runtime's build with Core
   ML is fetched as the CPU one is, and there is none for Intel Macs; Core ML
   itself is part of macOS.
 - **`ort-directml`**: a D3D12 GPU of any vendor. ONNX Runtime's build with
   DirectML is fetched as the CPU one is — with `ort-tensorrt`, the one build
-  that has both — and `DirectML.dll` goes beside the program. A model runs
-  fastest at opset 20 or lower and with half-precision weights; see
+  that has both — and `DirectML.dll` goes beside the program. Export the model
+  at **opset 20 or lower** — Ultralytics' export picks the newest opset its
+  PyTorch knows, 22 or later, unless told `opset=20` — and with half-precision weights: DirectML hands the
+  operators of a later opset to the CPU, many times slower, and the
+  element warns of it when made. See
   [d3d12-inference.md](d3d12-inference.md).
 - **`ort-cuda`, `ort-tensorrt`**: CUDA 13's runtime, cuBLAS and cuRAND,
   and cuDNN 9 — and with `ort-tensorrt`, TensorRT 10 — are linked into the
