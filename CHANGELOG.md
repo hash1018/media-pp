@@ -1453,6 +1453,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **Turning playback around, and stepping, go on from the picture last
+  shown.** `Pipeline::set_rate` turning backwards into forwards, or the
+  other way, and `Pipeline::step` read which picture was shown before
+  pausing, so a picture shown in between was not the one gone on from:
+  going forwards again a picture was skipped, seen on Linux CI under load
+  (shown 2.333 s, forwards again from 2.4 s). They pause first now, then
+  read it.
+
 - **`CudaOrtDetector`, `CudaOrtClassifier` and `CudaOrtEmbedder` hand
   the model their input where it is.** `ort`'s `TensorRefMut::from_raw`
   locates every tensor it makes in host memory, whatever memory it is

@@ -423,7 +423,15 @@ impl Pipeline {
         }
         // Turning around: the picture shown, played the other way — a seek
         // to it, with the rate set before the sources are repositioned, since
-        // it is the sign a source reads to go back over its media.
+        // it is the sign a source reads to go back over its media. Paused
+        // first, then read: a picture read while playing goes on being
+        // followed by others, and the turn went on from one before the last
+        // shown, a picture skipped going forwards again.
+        self.stepped.store(false, Ordering::Release);
+        let playing = !self.paused.load(Ordering::Acquire);
+        if playing {
+            self.pause_runtime();
+        }
         let (_, pictures) = self.picture_terminals();
         let at = self
             .state
@@ -431,11 +439,6 @@ impl Pipeline {
             .map(|(at, _)| at)
             .or_else(|| self.position())
             .unwrap_or_default();
-        self.stepped.store(false, Ordering::Release);
-        let playing = !self.paused.load(Ordering::Acquire);
-        if playing {
-            self.pause_runtime();
-        }
         self.playback_clock.set_rate(rate);
         self.reposition(at, true);
         let preroll = self.preroll_for(|terminals| PrerollContext::for_seek(terminals, at));
@@ -489,9 +492,9 @@ impl Pipeline {
         }
         self.check_seek()?;
         let (every, terminals) = self.picture_terminals();
-        let Some((at, spacing)) = self.state.picture_at(&terminals) else {
+        if self.state.picture_at(&terminals).is_none() {
             return Err(PipelineError::NoPicture.into());
-        };
+        }
         // What shows no pictures — the sound — is not played meanwhile.
         let quiet: Vec<_> = every
             .into_iter()
@@ -501,6 +504,11 @@ impl Pipeline {
         if !self.paused.swap(true, Ordering::AcqRel) {
             self.pause_runtime();
         }
+        // The picture shown, read once paused: read playing, it was followed
+        // by others before the pause took.
+        let Some((at, spacing)) = self.state.picture_at(&terminals) else {
+            return Err(PipelineError::NoPicture.into());
+        };
         if frames == 0 {
             return Ok(at);
         }
