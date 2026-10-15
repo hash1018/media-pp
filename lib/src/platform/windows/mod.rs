@@ -16,6 +16,8 @@ pub(crate) mod d3d11va;
 #[cfg(feature = "d3d12")]
 pub(crate) mod d3d12_compute;
 #[cfg(feature = "d3d12")]
+pub(crate) mod d3d12_dcf;
+#[cfg(feature = "d3d12")]
 pub(crate) mod d3d12_gpu;
 #[cfg(feature = "d3d12")]
 pub(crate) mod d3d12va;

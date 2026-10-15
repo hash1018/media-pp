@@ -12,7 +12,8 @@ mod dcf;
 mod fft;
 #[cfg(any(
     feature = "cuda-visual-tracking",
-    all(target_os = "macos", feature = "metal")
+    all(target_os = "macos", feature = "metal"),
+    all(target_os = "windows", feature = "d3d12")
 ))]
 mod gpu;
 mod kalman;
@@ -67,8 +68,10 @@ pub struct TrackerOptions {
     /// `cuda-visual-tracking`, every object's filter run on the GPU at once;
     /// and with `metal` of NV12 and BGRA VideoToolbox pictures, every
     /// object's filter run on the GPU at once by Metal, which macOS ships, or
-    /// where Metal cannot, read where they are by the CPU. Pictures it cannot
-    /// read are followed by motion alone.
+    /// where Metal cannot, read where they are by the CPU; and with `d3d12`
+    /// of NV12 and P010 D3D12 pictures, every object's filter run on the GPU
+    /// at once on their own device. Pictures it cannot read are followed by
+    /// motion alone.
     pub visual: bool,
 }
 

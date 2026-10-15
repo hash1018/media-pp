@@ -148,6 +148,9 @@ struct Gpus {
     /// VideoToolbox pictures', with Metal.
     #[cfg(all(target_os = "macos", feature = "metal"))]
     metal: OnGpu<super::gpu::MetalLooks>,
+    /// D3D12 pictures', on their own device.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    d3d12: OnGpu<super::gpu::D3d12Looks>,
 }
 
 /// One GPU's filters, made at the first picture they can follow on — or,
@@ -155,7 +158,8 @@ struct Gpus {
 /// read down to the CPU's filters instead.
 #[cfg(any(
     feature = "cuda-visual-tracking",
-    all(target_os = "macos", feature = "metal")
+    all(target_os = "macos", feature = "metal"),
+    all(target_os = "windows", feature = "d3d12")
 ))]
 struct OnGpu<D> {
     looks: Option<super::gpu::GpuLooks<D>>,
@@ -164,7 +168,8 @@ struct OnGpu<D> {
 
 #[cfg(any(
     feature = "cuda-visual-tracking",
-    all(target_os = "macos", feature = "metal")
+    all(target_os = "macos", feature = "metal"),
+    all(target_os = "windows", feature = "d3d12")
 ))]
 impl<D> Default for OnGpu<D> {
     fn default() -> Self {
@@ -177,13 +182,16 @@ impl<D> Default for OnGpu<D> {
 
 #[cfg(any(
     feature = "cuda-visual-tracking",
-    all(target_os = "macos", feature = "metal")
+    all(target_os = "macos", feature = "metal"),
+    all(target_os = "windows", feature = "d3d12")
 ))]
 impl<D: super::gpu::DcfDevice> OnGpu<D> {
-    /// The filters, made now if they are not yet and can be.
-    fn open(&mut self, pp_log: &PpLog) -> Option<&mut super::gpu::GpuLooks<D>> {
+    /// The filters, made now if they are not yet and can be — on the device
+    /// of `first`, the picture they are first wanted for, where that is a
+    /// picture's own.
+    fn open(&mut self, pp_log: &PpLog, first: &D::Source) -> Option<&mut super::gpu::GpuLooks<D>> {
         if self.looks.is_none() && !self.failed {
-            match super::gpu::GpuLooks::<D>::open() {
+            match super::gpu::GpuLooks::<D>::open(first) {
                 Ok(looks) => {
                     pp_info!(
                         pp_log: pp_log,
@@ -211,12 +219,15 @@ enum OnGpuSource {
     Cuda(<super::gpu::CudaLooks as super::gpu::DcfDevice>::Source),
     #[cfg(all(target_os = "macos", feature = "metal"))]
     Metal(<super::gpu::MetalLooks as super::gpu::DcfDevice>::Source),
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    D3d12(<super::gpu::D3d12Looks as super::gpu::DcfDevice>::Source),
 }
 
 #[cfg_attr(
     not(any(
         feature = "cuda-visual-tracking",
-        all(target_os = "macos", feature = "metal")
+        all(target_os = "macos", feature = "metal"),
+        all(target_os = "windows", feature = "d3d12")
     )),
     allow(
         unused_variables,
@@ -230,11 +241,24 @@ impl Gpus {
     fn source(&mut self, frame: &ffmpeg::frame::Video, pp_log: &PpLog) -> Option<OnGpuSource> {
         #[cfg(feature = "cuda-visual-tracking")]
         if let Some(source) = <super::gpu::CudaLooks as super::gpu::DcfDevice>::source(frame) {
-            return self.cuda.open(pp_log).map(|_| OnGpuSource::Cuda(source));
+            return self
+                .cuda
+                .open(pp_log, &source)
+                .map(|_| OnGpuSource::Cuda(source));
         }
         #[cfg(all(target_os = "macos", feature = "metal"))]
         if let Some(source) = <super::gpu::MetalLooks as super::gpu::DcfDevice>::source(frame) {
-            return self.metal.open(pp_log).map(|_| OnGpuSource::Metal(source));
+            return self
+                .metal
+                .open(pp_log, &source)
+                .map(|_| OnGpuSource::Metal(source));
+        }
+        #[cfg(all(target_os = "windows", feature = "d3d12"))]
+        if let Some(source) = <super::gpu::D3d12Looks as super::gpu::DcfDevice>::source(frame) {
+            return self
+                .d3d12
+                .open(pp_log, &source)
+                .map(|_| OnGpuSource::D3d12(source));
         }
         None
     }
@@ -257,6 +281,14 @@ impl Gpus {
             #[cfg(all(target_os = "macos", feature = "metal"))]
             OnGpuSource::Metal(ref source) => self
                 .metal
+                .looks
+                .as_mut()
+                .ok_or("no filters on the GPU for this picture")?
+                .follow(tracker, source, MIN_PSR, LOOK_DOUBT)
+                .map_err(|error| error.to_string()),
+            #[cfg(all(target_os = "windows", feature = "d3d12"))]
+            OnGpuSource::D3d12(ref source) => self
+                .d3d12
                 .looks
                 .as_mut()
                 .ok_or("no filters on the GPU for this picture")?
@@ -290,6 +322,14 @@ impl Gpus {
                 .ok_or("no filters on the GPU for this picture")?
                 .detected(source, matched, alive)
                 .map_err(|error| error.to_string()),
+            #[cfg(all(target_os = "windows", feature = "d3d12"))]
+            OnGpuSource::D3d12(ref source) => self
+                .d3d12
+                .looks
+                .as_mut()
+                .ok_or("no filters on the GPU for this picture")?
+                .detected(source, matched, alive)
+                .map_err(|error| error.to_string()),
         }
     }
 
@@ -301,6 +341,10 @@ impl Gpus {
         }
         #[cfg(all(target_os = "macos", feature = "metal"))]
         if let Some(looks) = self.metal.looks.as_mut() {
+            looks.clear();
+        }
+        #[cfg(all(target_os = "windows", feature = "d3d12"))]
+        if let Some(looks) = self.d3d12.looks.as_mut() {
             looks.clear();
         }
     }
@@ -966,6 +1010,48 @@ mod tests {
         assert!(
             (on_cuda - in_memory).abs() < 2.0,
             "on CUDA {on_cuda} against {in_memory} in system memory"
+        );
+    }
+
+    /// The same turn on NV12 D3D12 pictures, followed on the GPU — where the
+    /// tracker could not read them at all before — holds the block as the
+    /// CPU's does, to within a pixel or two, saying how sure it was as the
+    /// CPU's does.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[test]
+    fn following_by_look_reads_d3d12_pictures() {
+        let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
+            return;
+        };
+        if crate::elements::D3d12Upload::new("probe", &gpu).is_err() {
+            eprintln!("skipping: FFmpeg could not create a D3D12VA frames context");
+            return;
+        }
+        let upload = |grey: ffmpeg::frame::Video| {
+            let (w, h) = (grey.width(), grey.height());
+            let mut nv12 = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, w, h);
+            nv12.set_pts(grey.pts());
+            let (from, to) = (grey.stride(0), nv12.stride(0));
+            for y in 0..h as usize {
+                let row = grey.data(0)[y * from..][..w as usize].to_vec();
+                nv12.data_mut(0)[y * to..][..w as usize].copy_from_slice(&row);
+            }
+            nv12.data_mut(1).fill(128);
+            let mut upload = crate::elements::D3d12Upload::new("upload", &gpu).expect("made above");
+            let uploaded = capture(&mut upload);
+            upload.consume(MediaBuffer::video(nv12)).expect("uploaded");
+            uploaded.lock().unwrap().remove(0)
+        };
+        let looks = looks_on(true, &upload);
+        eprintln!("looks on D3D12: {looks:?}");
+        assert_looks(&looks);
+        let on_d3d12 = worst_miss_on(true, &upload);
+        let in_memory = worst_miss(true);
+        eprintln!("worst miss by look: on D3D12 {on_d3d12}, in system memory {in_memory}");
+        assert!(on_d3d12 < 16.0, "on D3D12, {on_d3d12} pixels at worst");
+        assert!(
+            (on_d3d12 - in_memory).abs() < 2.0,
+            "on D3D12 {on_d3d12} against {in_memory} in system memory"
         );
     }
 

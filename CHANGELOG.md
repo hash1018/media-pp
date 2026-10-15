@@ -278,6 +278,16 @@ compile error with no explanation.
 
 ### Added
 
+- **`ObjectTracker` follows D3D12 pictures by look on the GPU**, with the
+  `d3d12` feature: what `cuda-visual-tracking` does for CUDA pictures and
+  `metal` for VideoToolbox ones, on any vendor's GPU. Every followed
+  object's filter is sampled from the NV12 or P010 picture where it is,
+  transformed and matched at once by kernels of this crate's own, on a
+  queue of the pictures' own device; four numbers an object come back.
+  Before, a tracker could not read a D3D12 picture at all and followed
+  its objects by motion alone. Where the kernels cannot be made, it says
+  so once and goes on by motion.
+
 - **`D3d12VideoEncoder` encodes D3D12 pictures through D3D12 Video**, with
   the `d3d12` feature, on any vendor's encode block: NV12 frames — a
   decoder's, an upload's, an overlay's or a tone map's — handed to FFmpeg's

@@ -2,7 +2,8 @@
 //! [`super::dcf`], every followed object's sampled, transformed and matched
 //! at once on the device — CUDA pictures with the `cuda-visual-tracking`
 //! feature (`platform::cuda::driver::CudaDcf`), VideoToolbox pictures with
-//! `metal` (`platform::macos::dcf::MetalDcf`). Only four numbers an object
+//! `metal` (`platform::macos::dcf::MetalDcf`), D3D12 pictures with `d3d12`
+//! (`platform::windows::d3d12_dcf::D3d12Dcf`). Only four numbers an object
 //! come back: where its response peaks, how high, and how sure.
 //!
 //! What every device shares — which slot each object's filter is in, the
@@ -32,8 +33,11 @@ pub(super) trait DcfDevice: Sized {
     /// Why the device would not.
     type Error: std::fmt::Display;
 
-    /// The device, with the window and the wanted response on it.
-    fn open(window: &[f32], target: &[[f32; 2]]) -> Result<Self, Self::Error>;
+    /// The device, with the window and the wanted response on it — the
+    /// device `first`, the first picture followed on, is on, where the
+    /// device is a picture's own.
+    fn open(window: &[f32], target: &[[f32; 2]], first: &Self::Source)
+    -> Result<Self, Self::Error>;
     /// What it is, for the log.
     fn describe(&self) -> String;
     /// Where `frame`'s brightness is, where the device reads it.
@@ -65,11 +69,12 @@ pub(super) struct GpuLooks<D> {
 }
 
 impl<D: DcfDevice> GpuLooks<D> {
-    /// The device, with the window and wanted response on it.
-    pub(super) fn open() -> Result<Self, D::Error> {
+    /// The device, with the window and wanted response on it — that of
+    /// `first`, the first picture followed on, where it is a picture's own.
+    pub(super) fn open(first: &D::Source) -> Result<Self, D::Error> {
         let target: Vec<[f32; 2]> = target().iter().map(|c| [c.re, c.im]).collect();
         Ok(Self {
-            device: D::open(window(), &target)?,
+            device: D::open(window(), &target, first)?,
             slots: HashMap::new(),
             free: Vec::new(),
             next: 0,
@@ -278,7 +283,11 @@ impl DcfDevice for CudaLooks {
     type Source = crate::platform::cuda::driver::DcfSource;
     type Error = crate::platform::cuda::driver::CudaDriverError;
 
-    fn open(window: &[f32], target: &[[f32; 2]]) -> Result<Self, Self::Error> {
+    fn open(
+        window: &[f32],
+        target: &[[f32; 2]],
+        _first: &Self::Source,
+    ) -> Result<Self, Self::Error> {
         let driver = crate::platform::cuda::driver::CudaDriver::retain_primary()?;
         let dcf = driver.dcf(window, target)?;
         Ok(Self { dcf, driver })
@@ -357,7 +366,11 @@ impl DcfDevice for MetalLooks {
     type Source = crate::platform::macos::dcf::MetalDcfSource;
     type Error = crate::platform::macos::metal::MetalError;
 
-    fn open(window: &[f32], target: &[[f32; 2]]) -> Result<Self, Self::Error> {
+    fn open(
+        window: &[f32],
+        target: &[[f32; 2]],
+        _first: &Self::Source,
+    ) -> Result<Self, Self::Error> {
         crate::platform::macos::dcf::MetalDcf::new(window, target).map(Self)
     }
 
@@ -370,6 +383,57 @@ impl DcfDevice for MetalLooks {
     }
 
     /// What wrote a VideoToolbox picture finished before handing it on.
+    fn ready(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn reserve_slots(&mut self, slots: usize) -> Result<(), Self::Error> {
+        self.0.reserve_slots(slots)
+    }
+
+    fn sample(&mut self, source: &Self::Source, jobs: &[DcfJob]) -> Result<(), Self::Error> {
+        self.0.sample(source, jobs)
+    }
+
+    fn find(&mut self, slots: &[u32], regulariser: f32) -> Result<Vec<[f32; 4]>, Self::Error> {
+        self.0.find(slots, regulariser)
+    }
+
+    fn learn(&mut self, slots: &[u32], rate: f32) -> Result<(), Self::Error> {
+        self.0.learn(slots, rate)
+    }
+
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        self.0.finish()
+    }
+}
+
+/// D3D12's: kernels of this crate's own, on the pictures' device.
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub(super) struct D3d12Looks(crate::platform::windows::d3d12_dcf::D3d12Dcf);
+
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+impl DcfDevice for D3d12Looks {
+    type Source = crate::platform::windows::d3d12_dcf::D3d12DcfSource;
+    type Error = windows::core::Error;
+
+    fn open(
+        window: &[f32],
+        target: &[[f32; 2]],
+        first: &Self::Source,
+    ) -> Result<Self, Self::Error> {
+        crate::platform::windows::d3d12_dcf::D3d12Dcf::new(window, target, first).map(Self)
+    }
+
+    fn describe(&self) -> String {
+        "D3D12".to_owned()
+    }
+
+    fn source(frame: &ffmpeg::frame::Video) -> Option<Self::Source> {
+        crate::platform::windows::d3d12_dcf::D3d12DcfSource::of(frame)
+    }
+
+    /// What wrote a picture is waited for on the GPU, where it is read.
     fn ready(&self) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -462,7 +526,6 @@ mod tests {
             return;
         };
         let target: Vec<[f32; 2]> = target().iter().map(|c| [c.re, c.im]).collect();
-        let mut gpu = MetalLooks::open(window(), &target).expect("the kernels compile");
         let block = [100u32, 80, 40, 60];
         let moved = [105u32, 83, 40, 60];
         let (first_grey, first) = scene(&device, block);
@@ -475,6 +538,7 @@ mod tests {
         let centre = (tlwh[0] + tlwh[2] / 2.0, tlwh[1] + tlwh[3] / 2.0);
         let (ww, wh) = window_of((tlwh[2], tlwh[3]));
         let source = MetalLooks::source(first).expect("an NV12 VideoToolbox picture");
+        let mut gpu = MetalLooks::open(window(), &target, &source).expect("the kernels compile");
         gpu.reserve_slots(1).expect("a slot");
         for (scale, rate) in FIRST_LOOKS {
             let job = [
@@ -534,6 +598,157 @@ mod tests {
         assert!(
             (found.0 - cpu_centre.0).abs() < 0.5 && (found.1 - cpu_centre.1).abs() < 0.5,
             "metal {found:?}, cpu {cpu_centre:?}"
+        );
+        assert!(
+            *psr > 8.0 && (psr - on_cpu.psr).abs() < 1.0,
+            "psr {psr} against {}",
+            on_cpu.psr
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "windows", feature = "d3d12"))]
+mod d3d12_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::buffer::MediaBuffer;
+    use crate::element::{RawSink, SrcPads};
+    use crate::elements::{AppSink, D3d12Upload};
+    use crate::test_support::try_d3d12_gpu;
+
+    use super::super::dcf::Dcf;
+    use super::super::luma::SystemLuma;
+
+    fn noise(x: u32, y: u32, seed: u32) -> u8 {
+        let mut h = x.wrapping_mul(374_761_393) ^ y.wrapping_mul(668_265_263) ^ seed;
+        h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+        ((h ^ (h >> 16)) & 0xff) as u8
+    }
+
+    /// A 320 by 240 picture of noise with a brighter textured block at
+    /// `block`, its texture moving with it: in system memory as grey, and
+    /// uploaded as an NV12 D3D12 picture.
+    fn scene(upload: &mut D3d12Upload, block: [u32; 4]) -> (ffmpeg::frame::Video, MediaBuffer) {
+        let (w, h) = (320u32, 240u32);
+        let mut grey = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, w, h);
+        let mut nv12 = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, w, h);
+        let [bx, by, bw, bh] = block;
+        let (gs, ns) = (grey.stride(0), nv12.stride(0));
+        for y in 0..h {
+            for x in 0..w {
+                let inside = x >= bx && x < bx + bw && y >= by && y < by + bh;
+                let value = if inside {
+                    100 + noise((x - bx) / 3, (y - by) / 3, 7) / 2
+                } else {
+                    noise(x, y, 1) / 4
+                };
+                grey.data_mut(0)[y as usize * gs + x as usize] = value;
+                nv12.data_mut(0)[y as usize * ns + x as usize] = value;
+            }
+        }
+        nv12.data_mut(1).fill(128);
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&kept);
+        upload.src_pads()[0].link(Box::new(AppSink::new("kept", move |buf| {
+            sink.lock().unwrap().push(buf);
+            Ok(())
+        })));
+        upload.consume(MediaBuffer::video(nv12)).expect("uploaded");
+        let on_gpu = kept.lock().unwrap().remove(0);
+        (grey, on_gpu)
+    }
+
+    /// Learned on one picture and looked for on the next, where the block
+    /// moved 5 pixels right and 3 down, D3D12's filters find it where the
+    /// CPU's do — the same filter, sampled, transformed and correlated on
+    /// the GPU instead — and are as sure of it. Proves the kernels compile
+    /// and run, which the tracker would otherwise quietly fall back from.
+    #[test]
+    fn d3d12_filters_find_what_the_cpu_filters_find() {
+        let Some(gpu) = try_d3d12_gpu() else {
+            return;
+        };
+        let Ok(mut upload) = D3d12Upload::new("upload", &gpu) else {
+            eprintln!("skipping: FFmpeg could not create a D3D12VA frames context");
+            return;
+        };
+        let target: Vec<[f32; 2]> = target().iter().map(|c| [c.re, c.im]).collect();
+        let block = [100u32, 80, 40, 60];
+        let moved = [105u32, 83, 40, 60];
+        let (first_grey, first) = scene(&mut upload, block);
+        let (second_grey, second) = scene(&mut upload, moved);
+        let (MediaBuffer::Video(first), MediaBuffer::Video(second)) = (&first, &second) else {
+            panic!("pictures");
+        };
+
+        let tlwh = block.map(f64::from);
+        let centre = (tlwh[0] + tlwh[2] / 2.0, tlwh[1] + tlwh[3] / 2.0);
+        let (ww, wh) = window_of((tlwh[2], tlwh[3]));
+        let source = D3d12Looks::source(first).expect("an NV12 D3D12 picture");
+        let mut gpu = D3d12Looks::open(window(), &target, &source).expect("the kernels compile");
+        gpu.reserve_slots(1).expect("a slot");
+        for (scale, rate) in FIRST_LOOKS {
+            let job = [
+                centre.0 as f32,
+                centre.1 as f32,
+                (ww * scale) as f32,
+                (wh * scale) as f32,
+            ];
+            gpu.sample(&source, &[job]).expect("sampled");
+            gpu.learn(&[0], rate).expect("learned");
+        }
+        gpu.finish().expect("finished");
+        let source = D3d12Looks::source(second).expect("an NV12 D3D12 picture");
+        let jobs: Vec<DcfJob> = SCALES
+            .iter()
+            .map(|scale| {
+                [
+                    centre.0 as f32,
+                    centre.1 as f32,
+                    (ww * scale) as f32,
+                    (wh * scale) as f32,
+                ]
+            })
+            .collect();
+        gpu.sample(&source, &jobs).expect("sampled");
+        let peaks = gpu.find(&[0, 0, 0], REGULARISER).expect("found");
+        gpu.finish().expect("finished");
+        eprintln!("peaks {peaks:?}");
+        let (scale, [px, py, _, psr]) = SCALES
+            .iter()
+            .zip(&peaks)
+            .max_by(|a, b| a.1[2].total_cmp(&b.1[2]))
+            .expect("three scales");
+        let half = (SIZE / 2) as f32;
+        let shift = |at: f32| {
+            let d = at - half;
+            if d > half { d - SIZE as f32 } else { d }
+        };
+        let found = (
+            centre.0 + f64::from(shift(*px)) * ww * scale / SIZE as f64,
+            centre.1 + f64::from(shift(*py)) * wh * scale / SIZE as f64,
+        );
+
+        let cpu = Dcf::new(&mut SystemLuma::of(&first_grey).unwrap(), tlwh).expect("a filter");
+        let on_cpu = cpu
+            .find(&mut SystemLuma::of(&second_grey).unwrap(), centre)
+            .expect("found");
+        let cpu_centre = (
+            on_cpu.tlwh[0] + on_cpu.tlwh[2] / 2.0,
+            on_cpu.tlwh[1] + on_cpu.tlwh[3] / 2.0,
+        );
+        eprintln!(
+            "d3d12 {found:?} psr {psr}, cpu {cpu_centre:?} psr {}",
+            on_cpu.psr
+        );
+        assert!(
+            (found.0 - 125.0).abs() < 1.5 && (found.1 - 113.0).abs() < 1.5,
+            "found at {found:?}"
+        );
+        assert!(
+            (found.0 - cpu_centre.0).abs() < 0.5 && (found.1 - cpu_centre.1).abs() < 0.5,
+            "d3d12 {found:?}, cpu {cpu_centre:?}"
         );
         assert!(
             *psr > 8.0 && (psr - on_cpu.psr).abs() < 1.0,
