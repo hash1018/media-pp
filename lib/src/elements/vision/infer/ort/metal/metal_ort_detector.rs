@@ -906,21 +906,26 @@ mod tests {
         let Some(device) = try_videotoolbox_device() else {
             return;
         };
-        // A picture with something on it to compare, wherever in the clip.
-        let Some(&n) = crate::test_support::pictures_with_objects(&model, &video, 1).first() else {
-            eprintln!("skipping: nothing in {video} that the CPU is sure of");
-            return;
-        };
+        // A picture with something on it the CPU is well sure of, wherever
+        // in the clip, and only that compared. Where it is barely sure — a
+        // person cut off by the picture's edge — two boxes of one object
+        // score alike, and the slightest difference in how the picture was
+        // scaled to the model's input picks the other: the same model, and
+        // a box of another width.
+        const SURE: f32 = 0.8;
         let mut cpu =
             SwOrtDetector::new("cpu", &model, OrtDetectorOptions::default()).expect("loads");
-        let expected = found(
-            &mut cpu,
-            MediaBuffer::video(nth_picture(&video, n, ffmpeg::format::Pixel::NV12)),
-        );
-        assert!(
-            expected.items.iter().any(|found| found.score > 0.5),
-            "picture {n} has something in it"
-        );
+        let Some((n, expected)) = crate::test_support::pictures_with_objects(&model, &video, 10)
+            .into_iter()
+            .map(|n| {
+                let picture = nth_picture(&video, n, ffmpeg::format::Pixel::NV12);
+                (n, found(&mut cpu, MediaBuffer::video(picture)))
+            })
+            .find(|(_, found)| found.items.iter().any(|found| found.score > SURE))
+        else {
+            eprintln!("skipping: nothing in {video} that the CPU is well sure of");
+            return;
+        };
 
         // Wherever Core ML is let run it, the same objects: NV12 and BGRA
         // where it chooses, NV12 held to the GPU and to the Neural Engine.
@@ -944,7 +949,7 @@ mod tests {
             )
             .expect("loads on Core ML");
             let actual = found(&mut gpu, upload(&device, nth_picture(&video, n, format)));
-            for wanted in expected.items.iter().filter(|found| found.score > 0.5) {
+            for wanted in expected.items.iter().filter(|found| found.score > SURE) {
                 let best = actual
                     .items
                     .iter()
