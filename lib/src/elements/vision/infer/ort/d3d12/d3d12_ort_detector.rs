@@ -809,6 +809,156 @@ mod tests {
         }
     }
 
+    /// `buf` as the `index`th of a batch of `size` a mux handed on.
+    fn in_batch(buf: MediaBuffer, index: usize, size: usize) -> MediaBuffer {
+        use crate::buffer::Metadata;
+        use crate::elements::vision::batch::{StreamId, StreamOrigin};
+        buf.with_metadata(
+            Metadata::default()
+                .with(StreamOrigin {
+                    id: StreamId(index as u64),
+                    name: Arc::from(format!("camera {index}")),
+                    generation: 0,
+                })
+                .with(BatchSlot {
+                    batch: 0,
+                    index,
+                    size,
+                }),
+        )
+    }
+
+    /// The pictures of a batch are held until its last has come, then run
+    /// through the model at once and handed on in order, each carrying what
+    /// one picture at a time finds in it; a batch cut short by the end of
+    /// the stream is run as it is. A model fixed to one picture runs each
+    /// as it comes, finding the same. Needs a model and a video, as above.
+    #[test]
+    fn a_batch_finds_what_one_picture_at_a_time_finds() {
+        let (Ok(model), Ok(video)) = (
+            std::env::var("MEDIA_PP_TEST_YOLO"),
+            std::env::var("MEDIA_PP_TEST_VIDEO"),
+        ) else {
+            eprintln!("skipping: set MEDIA_PP_TEST_YOLO and MEDIA_PP_TEST_VIDEO to run this");
+            return;
+        };
+        let Some(gpu) = try_d3d12_gpu() else {
+            return;
+        };
+        // Whether the model takes a batch: one fixed to a picture at a time
+        // has nothing to hold one for.
+        let holds = Session::builder()
+            .and_then(|mut builder| builder.commit_from_file(&model))
+            .expect("loads")
+            .inputs()
+            .first()
+            .and_then(|input| input.dtype().tensor_shape())
+            .and_then(|shape| shape.iter().next().copied())
+            .is_some_and(|batch| batch <= 0);
+        let pictures = pictures_with_objects(&model, &video, 3);
+        if pictures.len() < 3 {
+            eprintln!("skipping: fewer than three pictures in {video} with something on them");
+            return;
+        }
+        let options = |max_batch| D3d12OrtDetectorOptions {
+            max_batch,
+            ..D3d12OrtDetectorOptions::default()
+        };
+        let mut uploaded = Vec::new();
+        for (index, n) in pictures.iter().copied().enumerate() {
+            let Some(buf) = on_gpu(&gpu, nth_picture(&video, n, ffmpeg::format::Pixel::NV12))
+            else {
+                return;
+            };
+            uploaded.push(in_batch(buf, index, pictures.len()));
+        }
+        let found_in = |buf: &MediaBuffer| -> Vec<(usize, f32, f32)> {
+            buf.metadata()
+                .and_then(|metadata| metadata.get::<Detections>())
+                .expect("carries Detections")
+                .items
+                .iter()
+                .filter(|item| item.score > 0.5)
+                .map(|item| (item.class_id, item.x, item.y))
+                .collect()
+        };
+
+        let mut alone =
+            D3d12OrtDetector::new("alone", &gpu, &model, options(1)).expect("loads on DirectML");
+        let one_at_a_time = capture(&mut alone);
+        for (index, buf) in uploaded.iter().enumerate() {
+            alone.consume(buf.clone()).expect("detects");
+            assert_eq!(
+                one_at_a_time.lock().unwrap().len(),
+                index + 1,
+                "one at a time, each goes on at once"
+            );
+        }
+
+        let mut batched =
+            D3d12OrtDetector::new("batched", &gpu, &model, options(4)).expect("loads on DirectML");
+        let together = capture(&mut batched);
+        for (index, buf) in uploaded.iter().enumerate() {
+            batched.consume(buf.clone()).expect("detects");
+            let last = index + 1 == uploaded.len();
+            let expected = match (holds, last) {
+                (false, _) => index + 1,
+                (true, true) => uploaded.len(),
+                (true, false) => 0,
+            };
+            assert_eq!(
+                together.lock().unwrap().len(),
+                expected,
+                "held to the last where the model takes a batch"
+            );
+        }
+        let one_at_a_time = one_at_a_time.lock().unwrap();
+        let together = together.lock().unwrap();
+        for (index, (alone, batched)) in one_at_a_time.iter().zip(together.iter()).enumerate() {
+            assert_eq!(
+                batched
+                    .metadata()
+                    .and_then(|m| m.get::<BatchSlot>())
+                    .map(|s| s.index),
+                Some(index),
+                "in the order they came"
+            );
+            let (alone, batched) = (found_in(alone), found_in(batched));
+            assert!(!alone.is_empty(), "picture {index} has something in it");
+            assert_eq!(alone.len(), batched.len(), "picture {index}");
+            for (a, b) in alone.iter().zip(&batched) {
+                assert_eq!(a.0, b.0, "picture {index}");
+                assert!(
+                    (a.1 - b.1).abs() < 0.01 && (a.2 - b.2).abs() < 0.01,
+                    "picture {index}: {a:?} against {b:?}"
+                );
+            }
+        }
+        drop(together);
+
+        if !holds {
+            return;
+        }
+        // Two of a batch of three, then the end: both go on, looked at.
+        let mut cut = D3d12OrtDetector::new("cut short", &gpu, &model, options(4)).expect("loads");
+        let ended = capture(&mut cut);
+        for buf in uploaded.iter().take(2) {
+            let index = buf
+                .metadata()
+                .and_then(|m| m.get::<BatchSlot>())
+                .unwrap()
+                .index;
+            cut.consume(in_batch(buf.clone(), index, 3))
+                .expect("detects");
+        }
+        assert!(ended.lock().unwrap().is_empty(), "waiting for the third");
+        cut.stream_event(&crate::stream::StreamEvent::Eos)
+            .expect("drained");
+        let ended = ended.lock().unwrap();
+        assert_eq!(ended.len(), 2);
+        assert!(ended.iter().all(|buf| !found_in(buf).is_empty()));
+    }
+
     /// A picture in system memory is refused as not one this reads, the
     /// detector left to read the next; and no batch is no detector. Needs
     /// a model, but no video.
