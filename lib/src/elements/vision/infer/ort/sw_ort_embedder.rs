@@ -11,7 +11,7 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::{Detections, Embedding},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -78,8 +78,9 @@ impl SwOrtEmbedder {
             .commit_from_file(model_path)
             .map_err(OrtError::from)?;
         let input = image_input(&session, 112)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwOrtEmbedder, &name, None);
+        let identity = Identity::new(ElementType::SwOrtEmbedder, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "model loaded: path={path}, input={}x{}, batch={:?}, {:?}, {:?}",
@@ -89,16 +90,19 @@ impl SwOrtEmbedder {
             options.input,
             options.align
         );
-        Ok(Self(FilterStage::new(Embedder {
-            name,
-            pp_log,
-            session,
-            options,
-            input,
-            memory: Memory::default(),
-            converting: ToRgb::default(),
-            orientations: Orientations::default(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Embedder {
+                name,
+                pp_log,
+                session,
+                options,
+                input,
+                memory: Memory::default(),
+                converting: ToRgb::default(),
+                orientations: Orientations::default(),
+            },
+        )))
     }
 }
 
@@ -197,24 +201,6 @@ fn warp_into(
     }
 }
 
-impl Element for Embedder {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwOrtEmbedder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Embedder {
     /// Decoded video in system memory, any pixel layout.
     fn input_contract(&self) -> InputContract {
@@ -288,6 +274,10 @@ impl Filter for Embedder {
     /// A seek or a flush: the objects after it are numbered anew.
     fn reset(&mut self) {
         self.memory.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

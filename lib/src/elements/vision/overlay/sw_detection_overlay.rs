@@ -15,7 +15,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::Detections,
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -83,7 +83,6 @@ filter_stage!(SwDetectionOverlay);
 
 /// What a [`SwDetectionOverlay`] does with each picture.
 struct Overlaying {
-    name: Arc<str>,
     pp_log: PpLog,
     options: DetectionOverlayOptions,
     font: Option<ab_glyph::FontArc>,
@@ -111,7 +110,8 @@ impl SwDetectionOverlay {
     ) -> std::result::Result<Self, SwDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
         options.check()?;
-        let pp_log = element_pp_log(ElementType::SwDetectionOverlay, &name, None);
+        let identity = Identity::new(ElementType::SwDetectionOverlay, &*name);
+        let pp_log = identity.pp_log().clone();
         // Read once at any size: each label is rasterized at its own.
         let font = options
             .font
@@ -125,15 +125,17 @@ impl SwDetectionOverlay {
             options.others,
             font.is_some()
         );
-        Ok(Self(FilterStage::new(Overlaying {
-            name,
-            pp_log,
-            options,
-            font,
-            masks: HashMap::new(),
-            warned_names: false,
-            orientations: Orientations::default(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Overlaying {
+                pp_log,
+                options,
+                font,
+                masks: HashMap::new(),
+                warned_names: false,
+                orientations: Orientations::default(),
+            },
+        )))
     }
 }
 
@@ -635,24 +637,6 @@ impl Overlaying {
     }
 }
 
-impl Element for Overlaying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwDetectionOverlay
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Overlaying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -704,6 +688,10 @@ impl Filter for Overlaying {
     }
 
     fn reset(&mut self) {}
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -717,7 +705,7 @@ mod tests {
     };
     use super::*;
     use crate::buffer::Metadata;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::elements::{AppSink, Detection};
 
     /// Everything `stage` hands on, kept.
@@ -1018,7 +1006,6 @@ mod tests {
             .transpose()
             .unwrap();
         let mut overlaying = Overlaying {
-            name: Arc::from("overlay"),
             pp_log: element_pp_log(ElementType::SwDetectionOverlay, "overlay", None),
             options,
             font,

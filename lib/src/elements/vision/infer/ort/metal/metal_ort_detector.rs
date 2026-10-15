@@ -16,7 +16,7 @@ use crate::{
     buffer::{MediaBuffer, Metadata},
     bus::BusEvent,
     contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
-    element::{Context, Element, ElementType, element_pp_log},
+    element::{Attached, Context, ElementType, Identity},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
 };
@@ -162,8 +162,8 @@ impl MetalOrtDetector {
         model_path: impl AsRef<Path>,
         options: MetalOrtDetectorOptions,
     ) -> Result<Self> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MetalOrtDetector, &name, None);
+        let identity = Identity::new(ElementType::MetalOrtDetector, name);
+        let pp_log = identity.pp_log().clone();
         let path = model_path.as_ref().display().to_string();
         if options.max_batch == 0 {
             return Err(OrtError::ZeroMaxBatch.into());
@@ -272,22 +272,25 @@ impl MetalOrtDetector {
             );
         }
         let interval = Interval::new(options.detector.interval);
-        Ok(Self(FilterStage::new(Detecting {
-            name,
-            pp_log,
-            runs,
-            values: options.detector.model.input(),
-            decoder: options.detector.model.decoder(model),
-            options: options.detector,
-            labels,
-            interval,
-            max_batch,
-            held: Vec::new(),
-            context: None,
-            fitting,
-            orientations: Orientations::default(),
-            best: BestClass::new()?,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Detecting {
+                name,
+                pp_log,
+                runs,
+                values: options.detector.model.input(),
+                decoder: options.detector.model.decoder(model),
+                options: options.detector,
+                labels,
+                interval,
+                max_batch,
+                held: Vec::new(),
+                context: None,
+                fitting,
+                orientations: Orientations::default(),
+                best: BestClass::new()?,
+            },
+        )))
     }
 }
 
@@ -586,28 +589,6 @@ impl Detecting {
     }
 }
 
-impl Element for Detecting {
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.context = Some(Arc::clone(context));
-    }
-
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MetalOrtDetector
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Detecting {
     /// Decoded NV12, BGRA or HDR P010 video in VideoToolbox pixel buffers.
     fn input_contract(&self) -> InputContract {
@@ -680,6 +661,11 @@ impl Filter for Detecting {
     fn reset(&mut self) {
         self.held.clear();
         self.interval.restart();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.context = Some(Arc::clone(cx.context()));
     }
 }
 

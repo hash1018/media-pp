@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::vision::batch::PerStream,
     elements::{Analytics, Crossing, Detection, Detections, LineCount, SceneCut, ZoneCount},
     error::Result,
@@ -105,7 +105,6 @@ struct Watch {
 
 /// What an [`ObjectAnalytics`] does with each picture.
 struct Analysing {
-    name: Arc<str>,
     pp_log: PpLog,
     /// The zones and lines of every stream not given its own.
     rules: Arc<Rules>,
@@ -230,8 +229,8 @@ impl ObjectAnalytics {
             }
         }
 
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::ObjectAnalytics, &name, None);
+        let identity = Identity::new(ElementType::ObjectAnalytics, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "opened: {} zones, {} lines, {} streams with their own",
@@ -239,14 +238,16 @@ impl ObjectAnalytics {
             rules.lines.len(),
             by_stream.len()
         );
-        Ok(Self(FilterStage::new(Analysing {
-            name,
-            pp_log,
-            rules: Arc::new(rules),
-            by_stream,
-            streams: PerStream::default(),
-            orientations: Orientations::default(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Analysing {
+                pp_log,
+                rules: Arc::new(rules),
+                by_stream,
+                streams: PerStream::default(),
+                orientations: Orientations::default(),
+            },
+        )))
     }
 }
 
@@ -415,24 +416,6 @@ impl Watch {
     }
 }
 
-impl Element for Analysing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::ObjectAnalytics
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Analysing {
     /// Pictures wherever they live: only their metadata is read.
     fn input_contract(&self) -> InputContract {
@@ -481,6 +464,10 @@ impl Filter for Analysing {
         for watch in self.streams.values_mut() {
             watch.last.clear();
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

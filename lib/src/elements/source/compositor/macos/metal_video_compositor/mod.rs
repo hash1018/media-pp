@@ -32,8 +32,8 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, Context, Element, ElementType, Flow, Identity, Produced, RawSink, Source,
+        SourceStage, Wait, element_pp_log,
     },
     elements::{VideoToolboxDevice, VideoToolboxFrameFormat},
     error::Result,
@@ -830,8 +830,9 @@ impl MetalVideoCompositor {
     ) -> std::result::Result<(Self, MetalVideoCompositorHandle), MetalVideoCompositorError> {
         crate::ensure_ffmpeg();
         validate_output_options(options, format)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MetalVideoCompositor, &name, None);
+        let identity = Identity::new(ElementType::MetalVideoCompositor, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         // SAFETY: `create_frames_ctx`'s contract is a live device context,
         // which the device's own reference is for the length of the call.
         let hw_frames_ctx = unsafe {
@@ -873,29 +874,32 @@ impl MetalVideoCompositor {
             gpu.device.name()
         );
         Ok((
-            Self(SourceStage::new(Compositing {
-                name,
-                pp_log,
-                shared: shared.clone(),
-                options,
-                frame_index: 0,
-                gpu,
-                hw_frames_ctx,
-                format,
-                canvas,
-                kernels,
-                masks: HashMap::new(),
-                composed: None,
-                output_pool: UnboundObjectPool::new(
-                    OUTPUT_POOL_SIZE,
-                    ffmpeg::frame::Video::empty,
-                    // A wrapper that held its reference while pooled would
-                    // keep a pixel buffer out of the pool for nothing.
-                    release_picture,
-                ),
-                ticks: None,
-                schedule: LiveSchedule::default(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Compositing {
+                    name,
+                    pp_log,
+                    shared: shared.clone(),
+                    options,
+                    frame_index: 0,
+                    gpu,
+                    hw_frames_ctx,
+                    format,
+                    canvas,
+                    kernels,
+                    masks: HashMap::new(),
+                    composed: None,
+                    output_pool: UnboundObjectPool::new(
+                        OUTPUT_POOL_SIZE,
+                        ffmpeg::frame::Video::empty,
+                        // A wrapper that held its reference while pooled would
+                        // keep a pixel buffer out of the pool for nothing.
+                        release_picture,
+                    ),
+                    ticks: None,
+                    schedule: LiveSchedule::default(),
+                },
+            )),
             MetalVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -1353,28 +1357,6 @@ impl Compositing {
     }
 }
 
-impl Element for Compositing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MetalVideoCompositor
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.ticks = Some(context.source_ticks());
-    }
-}
-
 impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
@@ -1392,6 +1374,11 @@ impl Source for Compositing {
             RenderMode::Live => self.produce_live(wait),
             RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.ticks = Some(cx.context().source_ticks());
     }
 }
 
@@ -1433,6 +1420,10 @@ impl TimedInput for VideoInput {
 
 impl OfflineCompositor for Compositing {
     type Input = VideoInput;
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
 
     fn inputs(&self) -> Vec<Arc<VideoInput>> {
         self.shared

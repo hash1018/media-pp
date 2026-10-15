@@ -10,7 +10,7 @@ use super::scale_graph::CudaScaleGraph;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     frame_size::OutputSize,
     platform::{
@@ -161,7 +161,6 @@ filter_stage!(CudaScaler);
 /// framework makes the filter.
 struct Scaling {
     pp_log: PpLog,
-    name: Arc<str>,
     /// This element's own reference to the shared context, released in
     /// `Drop`. Held for `device_ctx`'s sake: the pointer below stays valid
     /// only as long as this reference does.
@@ -264,8 +263,8 @@ impl CudaScaler {
         interp: CudaScalerInterp,
         format: Option<CudaFrameFormat>,
     ) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaScaler, &name, None);
+        let identity = Identity::new(ElementType::CudaScaler, name);
+        let pp_log = identity.pp_log().clone();
 
         let hw_device_ctx = device.retain();
         // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
@@ -285,15 +284,17 @@ impl CudaScaler {
                 "created: dst=the input's own size, interp={interp:?}, format={format:?}"
             ),
         }
-        Self(FilterStage::new(Scaling {
-            name,
-            pp_log,
-            _hw_device_ctx: hw_device_ctx,
-            device_ctx,
-            size,
-            format,
-            graph: CudaScaleGraph::converting(interp, format),
-        }))
+        Self(FilterStage::new(
+            identity,
+            Scaling {
+                pp_log,
+                _hw_device_ctx: hw_device_ctx,
+                device_ctx,
+                size,
+                format,
+                graph: CudaScaleGraph::converting(interp, format),
+            },
+        ))
     }
 }
 
@@ -356,24 +357,6 @@ impl Scaling {
     }
 }
 
-impl Element for Scaling {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaScaler
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Scaling {
     /// Resizes on the device; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
@@ -418,6 +401,10 @@ impl Filter for Scaling {
                 cuda_video.with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
             ),
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

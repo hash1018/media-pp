@@ -13,7 +13,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, Element, ElementType, Identity, element_pp_log},
     elements::vision::batch::PerStream,
     error::Result,
     platform::macos::{
@@ -104,21 +104,25 @@ impl MetalCutDetector {
         options: CutDetectorOptions,
     ) -> std::result::Result<Self, MetalCutDetectorError> {
         options.check()?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MetalCutDetector, &name, None);
+        let identity = Identity::new(ElementType::MetalCutDetector, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let gpu = MetalGpu::new()?;
         let [means_kernel] = gpu.precise_kernel_array(REDACT, ["cell_means"])?;
         let means = gpu.shared_buffer(MEANS * 4 * size_of::<f32>())?;
         pp_info!(pp_log: &pp_log, "opened: {options:?}");
-        Ok(Self(FilterStage::new(Detecting {
-            name,
-            pp_log,
-            options,
-            judges: PerStream::default(),
-            gpu,
-            means_kernel,
-            means,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Detecting {
+                name,
+                pp_log,
+                options,
+                judges: PerStream::default(),
+                gpu,
+                means_kernel,
+                means,
+            },
+        )))
     }
 }
 
@@ -204,24 +208,6 @@ impl Detecting {
     }
 }
 
-impl Element for Detecting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MetalCutDetector
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Detecting {
     /// NV12 or P010 VideoToolbox pictures.
     fn input_contract(&self) -> InputContract {
@@ -268,6 +254,10 @@ impl Filter for Detecting {
     /// A seek or a flush: what was held is let go of.
     fn reset(&mut self) {
         self.judges.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

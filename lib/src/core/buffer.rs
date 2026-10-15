@@ -95,6 +95,31 @@ impl MediaBuffer {
         MediaBuffer::Audio(Arc::new(frame).into())
     }
 
+    /// When it is to be shown or heard, in [`Self::time_base`]'s units —
+    /// a packet's, a picture's or a sound's presentation timestamp alike.
+    /// `None` where it carries none.
+    pub fn pts(&self) -> Option<i64> {
+        match self {
+            MediaBuffer::Packet(packet) => packet.pts(),
+            MediaBuffer::Video(frame) => frame.pts(),
+            MediaBuffer::Audio(frame) => frame.pts(),
+        }
+    }
+
+    /// The unit its timestamps count in: a packet's own, or what was set
+    /// on a picture or a sound as it was made (see [`time_base`]). `None`
+    /// where none is.
+    pub fn time_base(&self) -> Option<ffmpeg::Rational> {
+        match self {
+            MediaBuffer::Packet(packet) => {
+                let unit = packet.time_base();
+                (unit.numerator() > 0 && unit.denominator() > 0).then_some(unit)
+            }
+            MediaBuffer::Video(frame) => time_base(frame),
+            MediaBuffer::Audio(frame) => time_base(frame),
+        }
+    }
+
     /// Stable, human-readable variant name for diagnostics emitted when
     /// elements are wired to an incompatible media type.
     pub fn kind(&self) -> &'static str {
@@ -495,6 +520,43 @@ mod tests {
         assert_eq!(ids.0, (0x1000, 0));
     }
     use super::*;
+
+    /// A packet, a picture and a sound say their timestamp and its unit
+    /// through the buffer alike; one with neither says `None` for both.
+    #[test]
+    fn every_kind_says_its_timestamp_and_unit() {
+        let unit = ffmpeg::Rational::new(1, 90_000);
+        let mut packet = ffmpeg::Packet::new(4);
+        packet.set_pts(Some(3_000));
+        packet.set_time_base(unit);
+        let mut picture = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 16, 16);
+        picture.set_pts(Some(3_000));
+        set_time_base(&mut picture, unit);
+        let mut sound = ffmpeg::frame::Audio::new(
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+            480,
+            ffmpeg::ChannelLayout::MONO,
+        );
+        sound.set_pts(Some(3_000));
+        set_time_base(&mut sound, unit);
+        for buf in [
+            MediaBuffer::packet(packet),
+            MediaBuffer::video(picture),
+            MediaBuffer::audio(sound),
+        ] {
+            assert_eq!(buf.pts(), Some(3_000), "{}", buf.kind());
+            assert_eq!(buf.time_base(), Some(unit), "{}", buf.kind());
+        }
+
+        let bare = MediaBuffer::packet(ffmpeg::Packet::new(4));
+        assert_eq!((bare.pts(), bare.time_base()), (None, None));
+        let bare = MediaBuffer::video(ffmpeg::frame::Video::new(
+            ffmpeg::format::Pixel::YUV420P,
+            16,
+            16,
+        ));
+        assert_eq!((bare.pts(), bare.time_base()), (None, None));
+    }
 
     /// A hand-made frame goes in as it is: the same picture and timing, as
     /// a `Video` buffer, with no pool of the caller's own behind it.

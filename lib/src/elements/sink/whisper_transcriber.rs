@@ -1,7 +1,5 @@
 //! Speech to timed text, through whisper.cpp.
 
-use std::sync::Arc;
-
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use whisper_rs::{
@@ -12,7 +10,7 @@ use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Attached, ElementType, Identity, Sink},
     error::Result,
     render::{SinkStage, sink_stage},
 };
@@ -585,7 +583,6 @@ sink_stage!(WhisperTranscriber<F> where F: FnMut(&Segment) -> Result<()> + Send 
 /// makes the terminal.
 struct Transcribing<F> {
     pp_log: PpLog,
-    name: Arc<str>,
     /// Made once and reused for every chunk.
     ///
     /// Creating one allocates the model's working buffers and, on a GPU
@@ -639,8 +636,8 @@ where
         on_segment: F,
     ) -> std::result::Result<Self, WhisperTranscriberError> {
         let path = model_path.as_ref().display().to_string();
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::WhisperTranscriber, &name, None);
+        let identity = Identity::new(ElementType::WhisperTranscriber, name);
+        let pp_log = identity.pp_log().clone();
 
         // Settled before loading, because whisper.cpp builds the alignment
         // into the context it loads rather than into each run.
@@ -689,17 +686,19 @@ where
             .map_err(WhisperTranscriberError::State)?;
         let end_of_text = context.token_eot();
 
-        Ok(Self(SinkStage::new(Transcribing {
-            pp_log,
-            name,
-            state,
-            chunker: Chunker::new(policy),
-            language: None,
-            aligned: heads.is_some(),
-            end_of_text,
-            on_segment,
-            reported_zero_length: false,
-        })))
+        Ok(Self(SinkStage::new(
+            identity,
+            Transcribing {
+                pp_log,
+                state,
+                chunker: Chunker::new(policy),
+                language: None,
+                aligned: heads.is_some(),
+                end_of_text,
+                on_segment,
+                reported_zero_length: false,
+            },
+        )))
     }
 
     /// Says which language the speech is in, as whisper.cpp names it — a
@@ -831,27 +830,6 @@ where
     }
 }
 
-impl<F> Element for Transcribing<F>
-where
-    F: FnMut(&Segment) -> Result<()> + Send + 'static,
-{
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::WhisperTranscriber
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl<F> Sink for Transcribing<F>
 where
     F: FnMut(&Segment) -> Result<()> + Send + 'static,
@@ -900,6 +878,10 @@ where
     fn reset(&mut self) -> Result<()> {
         self.chunker.reset();
         Ok(())
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

@@ -55,8 +55,8 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, Context, Element, ElementType, Flow, Identity, Produced, RawSink, Source,
+        SourceStage, Wait, element_pp_log,
     },
     elements::VideoCompositorOptions,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
@@ -957,8 +957,9 @@ impl D3d11VideoCompositor {
         // Every input arrives from another thread, and the compositor draws
         // through the same immediate context those producers write with.
         protect_shared_device(device)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11VideoCompositor, &name, None);
+        let identity = Identity::new(ElementType::D3d11VideoCompositor, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let shared = Arc::new(D3d11CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
@@ -991,39 +992,42 @@ impl D3d11VideoCompositor {
             options.frame_rate
         );
         Ok((
-            Self(SourceStage::new(Compositing {
-                name,
-                pp_log,
-                shared: shared.clone(),
-                options,
-                frame_index: 0,
-                device: device.clone(),
-                context,
-                vertex_shader,
-                bgra_pixel_shader,
-                nv12_pixel_shader,
-                sampler,
-                blend_state,
-                premultiplied_blend_state,
-                rasterizer_state,
-                layer_buffer,
-                output_pool: UnboundObjectPool::new(
-                    OUTPUT_POOL_SIZE,
-                    ffmpeg::frame::Video::empty,
-                    |_| {},
-                ),
-                repeat_pool: UnboundObjectPool::new(
-                    0,
-                    ffmpeg::frame::Video::empty,
-                    release_picture,
-                ),
-                composed: None,
-                retired: Vec::new(),
-                output_views: HashMap::new(),
-                ticks: None,
-                bus: Bus::new().0,
-                schedule: LiveSchedule::default(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Compositing {
+                    name,
+                    pp_log,
+                    shared: shared.clone(),
+                    options,
+                    frame_index: 0,
+                    device: device.clone(),
+                    context,
+                    vertex_shader,
+                    bgra_pixel_shader,
+                    nv12_pixel_shader,
+                    sampler,
+                    blend_state,
+                    premultiplied_blend_state,
+                    rasterizer_state,
+                    layer_buffer,
+                    output_pool: UnboundObjectPool::new(
+                        OUTPUT_POOL_SIZE,
+                        ffmpeg::frame::Video::empty,
+                        |_| {},
+                    ),
+                    repeat_pool: UnboundObjectPool::new(
+                        0,
+                        ffmpeg::frame::Video::empty,
+                        release_picture,
+                    ),
+                    composed: None,
+                    retired: Vec::new(),
+                    output_views: HashMap::new(),
+                    ticks: None,
+                    bus: Bus::new().0,
+                    schedule: LiveSchedule::default(),
+                },
+            )),
             D3d11VideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -1436,29 +1440,6 @@ impl Compositing {
     }
 }
 
-impl Element for Compositing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d11VideoCompositor
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.ticks = Some(context.source_ticks());
-        self.bus = context.bus.for_element(context.source_id);
-    }
-}
-
 impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
@@ -1476,6 +1457,12 @@ impl Source for Compositing {
             RenderMode::Live => self.produce_live(wait),
             RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.ticks = Some(cx.context().source_ticks());
+        self.bus = cx.context().bus.for_element(cx.context().source_id);
     }
 }
 
@@ -1517,6 +1504,10 @@ impl TimedInput for GpuVideoInput {
 
 impl OfflineCompositor for Compositing {
     type Input = GpuVideoInput;
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
 
     fn inputs(&self) -> Vec<Arc<GpuVideoInput>> {
         self.shared

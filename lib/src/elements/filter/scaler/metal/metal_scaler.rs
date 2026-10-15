@@ -11,7 +11,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::VideoToolboxDevice,
     error::Result,
     frame_size::ForSize,
@@ -132,7 +132,6 @@ filter_stage!(MetalScaler);
 /// framework makes the filter.
 struct Scaling {
     pp_log: PpLog,
-    name: Arc<str>,
     gpu: MetalGpu,
     hw_device_ctx: Arc<AvBufferRef>,
     width: u32,
@@ -168,8 +167,8 @@ impl MetalScaler {
         if width == 0 || height == 0 {
             return Err(MetalScalerError::EmptySize { width, height });
         }
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MetalScaler, &name, None);
+        let identity = Identity::new(ElementType::MetalScaler, name);
+        let pp_log = identity.pp_log().clone();
         let gpu = MetalGpu::new()?;
         let mut kernels = gpu.kernels(SHADER, &["across", "down"])?.into_iter();
         let (across, down) = (
@@ -177,22 +176,24 @@ impl MetalScaler {
             kernels.next().expect("one kernel for each name"),
         );
         pp_info!(pp_log: &pp_log, "opened: to {width}x{height}, {interp:?}");
-        Ok(Self(FilterStage::new(Scaling {
-            pp_log,
-            name,
-            gpu,
-            hw_device_ctx: device.retain(),
-            width,
-            height,
-            interp,
-            across,
-            down,
-            nv12_frames: None,
-            bgra_frames: None,
-            between: ForSize::new(),
-            wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-            repeated: RepeatedOutput::new(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Scaling {
+                pp_log,
+                gpu,
+                hw_device_ctx: device.retain(),
+                width,
+                height,
+                interp,
+                across,
+                down,
+                nv12_frames: None,
+                bgra_frames: None,
+                between: ForSize::new(),
+                wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                repeated: RepeatedOutput::new(),
+            },
+        )))
     }
 }
 
@@ -365,24 +366,6 @@ impl PerFrameTransform for Scaling {
     }
 }
 
-impl Element for Scaling {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MetalScaler
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Scaling {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -422,6 +405,10 @@ impl Filter for Scaling {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
                 .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

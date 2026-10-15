@@ -18,7 +18,7 @@ use crate::{
     buffer::MediaBuffer,
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::{D3d11SharedDeviceError, Result},
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
@@ -219,7 +219,6 @@ filter_stage!(D3d11ChromaKey);
 /// framework makes the filter.
 struct Keying {
     pp_log: PpLog,
-    name: Arc<str>,
     device: ID3D11Device,
     context: Arc<Mutex<ID3D11DeviceContext>>,
     /// What this element is keying by right now, refreshed from `control`
@@ -280,8 +279,8 @@ impl D3d11ChromaKey {
         options: ChromaKeyOptions,
     ) -> std::result::Result<(Self, ChromaKeyHandle), D3d11ChromaKeyError> {
         let (device, context) = (gpu.device(), gpu.context());
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11ChromaKey, &name, None);
+        let identity = Identity::new(ElementType::D3d11ChromaKey, name);
+        let pp_log = identity.pp_log().clone();
         // This element sits behind a `Queue` more often than not, so the
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
@@ -304,18 +303,20 @@ impl D3d11ChromaKey {
         );
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self(FilterStage::new(Keying {
-            name,
-            pp_log,
-            device: device.clone(),
-            context,
-            options,
-            control,
-            enabled: true,
-            pass,
-            pool,
-            repeated: RepeatedOutput::new(),
-        }));
+        let element = Self(FilterStage::new(
+            identity,
+            Keying {
+                pp_log,
+                device: device.clone(),
+                context,
+                options,
+                control,
+                enabled: true,
+                pass,
+                pool,
+                repeated: RepeatedOutput::new(),
+            },
+        ));
         Ok((element, handle))
     }
 }
@@ -530,24 +531,6 @@ impl PerFrameTransform for Keying {
     }
 }
 
-impl Element for Keying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d11ChromaKey
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Keying {
     /// Keying happens on the GPU; a system-memory frame belongs in SwChromaKey.
     fn input_contract(&self) -> InputContract {
@@ -594,6 +577,10 @@ impl Filter for Keying {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

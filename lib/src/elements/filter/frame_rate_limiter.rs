@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::{MediaBuffer, release_picture},
     contract::{InputContract, MediaKind, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     pool::UnboundObjectPool,
     transform::{FilterStage, filter_stage},
@@ -87,7 +87,6 @@ filter_stage!(FrameRateLimiter);
 /// the framework makes the filter.
 struct Limiting {
     pp_log: PpLog,
-    name: Arc<str>,
     /// Frames per second out.
     rate: ffmpeg::Rational,
     /// The next output tick that has not been filled, in `1/rate`. `None`
@@ -114,16 +113,18 @@ impl FrameRateLimiter {
     /// element that made it put it — see [`crate::buffer::time_base`] — so
     /// there is no second value here to disagree with the stream.
     pub fn new(name: impl Into<String>, rate: ffmpeg::Rational) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::FrameRateLimiter, &name, None);
-        Self(FilterStage::new(Limiting {
-            pp_log,
-            name,
-            rate,
-            next_tick: None,
-            forwarded: 0,
-            wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
-        }))
+        let identity = Identity::new(ElementType::FrameRateLimiter, name);
+        let pp_log = identity.pp_log().clone();
+        Self(FilterStage::new(
+            identity,
+            Limiting {
+                pp_log,
+                rate,
+                next_tick: None,
+                forwarded: 0,
+                wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
+            },
+        ))
     }
 
     /// The unit this element's output `pts` are in, which is what an encoder
@@ -153,24 +154,6 @@ impl Limiting {
         // wrong way would let two frames share a tick.
         let tick = numerator.div_euclid(denominator.max(1));
         tick.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
-    }
-}
-
-impl Element for Limiting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::FrameRateLimiter
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -263,6 +246,10 @@ impl Filter for Limiting {
         self.next_tick = None;
         self.forwarded = 0;
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -272,7 +259,7 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::{RawSink, RawSinkExt, SrcPads};
+    use crate::element::{RawSink, RawSinkExt, SrcPads, element_pp_log};
 
     fn capture(element: &mut FrameRateLimiter) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

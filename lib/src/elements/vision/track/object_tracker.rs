@@ -10,7 +10,7 @@ use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::vision::batch::PerStream,
     elements::{Detection, Detections, SceneCut},
     error::Result,
@@ -119,7 +119,6 @@ struct Stream {
 
 /// What an [`ObjectTracker`] does with each picture.
 struct Tracking {
-    name: Arc<str>,
     pp_log: PpLog,
     options: TrackerOptions,
     /// Each stream's objects, apart: the pictures of a mux's streams come
@@ -411,39 +410,23 @@ fn follow_by_look(
 impl ObjectTracker {
     /// A tracker deciding as `options` say.
     pub fn new(name: impl Into<String>, options: TrackerOptions) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::ObjectTracker, &name, None);
+        let identity = Identity::new(ElementType::ObjectTracker, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "opened: {options:?}");
-        Self(FilterStage::new(Tracking {
-            name,
-            pp_log,
-            options,
-            streams: PerStream::default(),
-            numbers: Arc::default(),
-            filters: HashMap::new(),
-            #[cfg(feature = "cuda")]
-            driver: None,
-            unreadable_said: false,
-            gpus: Gpus::default(),
-        }))
-    }
-}
-
-impl Element for Tracking {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::ObjectTracker
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
+        Self(FilterStage::new(
+            identity,
+            Tracking {
+                pp_log,
+                options,
+                streams: PerStream::default(),
+                numbers: Arc::default(),
+                filters: HashMap::new(),
+                #[cfg(feature = "cuda")]
+                driver: None,
+                unreadable_said: false,
+                gpus: Gpus::default(),
+            },
+        ))
     }
 }
 
@@ -641,6 +624,10 @@ impl Filter for Tracking {
         self.streams.clear();
         self.filters.clear();
         self.gpus.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

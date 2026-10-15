@@ -14,14 +14,14 @@ use std::{
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
+    bus::Bus,
     contract::OutputContract,
     control::{ChannelGone, ControlMsg, ControlReceiver, RequestKind, handle_request},
     element::{
-        Context, Element, ElementType, RawSource, ReversibleSource, SeekableSource, SrcPads,
+        Attached, Context, Element, ElementType, Identity, Named, RawSource, ReversibleSource,
+        SeekableSource, SrcPads,
     },
     error::Result,
-    graph::ElementId,
     pad::SrcPad,
     parking::Parking,
     playback_state::PlaybackState,
@@ -46,7 +46,7 @@ use crate::{
 /// [`IntoSource`]). One output by default; a source with several — a
 /// stream each, as a demuxer has — says what they are in
 /// [`Self::outputs`] and which each buffer is for in [`Produced::On`].
-pub trait Source: Element {
+pub trait Source: Send {
     /// Whether it makes what it makes at a rate of its own — a camera, a
     /// clock of its own — rather than as fast as it is asked: see
     /// [`RawSource::is_live`].
@@ -58,8 +58,8 @@ pub trait Source: Element {
     /// An `Err` ends the source, as one [`RawSource::run`] returns
     /// does. What goes wrong with one part of what it makes and not the
     /// rest — a compositor's layer it cannot draw — is posted on the bus
-    /// its [`Context`] carries, kept from
-    /// [`attach_context`](Element::attach_context), and it goes on.
+    /// its [`Context`] carries, kept from [`Self::attached`], and it goes
+    /// on.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced>;
 
     /// What it hands on — see [`SrcPad::with_contract`]. Nothing said by
@@ -69,14 +69,11 @@ pub trait Source: Element {
     }
 
     /// The pads it hands on through, in the order [`Produced::On`] numbers
-    /// them — asked once, as the framework makes it a source. One by
-    /// default, named for the source and declaring
+    /// them — asked once, as the framework makes it a source. `None`, the
+    /// default, is one, named for the source and declaring
     /// [`Self::output_contract`].
-    fn outputs(&self) -> Vec<SrcPad> {
-        vec![SrcPad::with_contract(
-            format!("{}_src", self.name()),
-            self.output_contract(),
-        )]
+    fn outputs(&self) -> Option<Vec<SrcPad>> {
+        None
     }
 
     /// Stops what it reads from while the pipeline is paused — see
@@ -120,6 +117,22 @@ pub trait Source: Element {
     /// failed. What fails here is the source's own to log. Nothing by
     /// default.
     fn stopping(&mut self) {}
+
+    /// Told who it is in the pipeline it is being added to, and that
+    /// pipeline, before it is asked for anything. Keep
+    /// [`Attached::pp_log`] to log; take from [`Attached::context`] what is
+    /// needed of the pipeline — its bus, to post what fails for one part
+    /// of what it makes. Nothing by default.
+    fn attached(&mut self, _cx: &Attached<'_>) {}
+
+    /// This source, going by `name` — to tell two of it apart in the log
+    /// and on the bus. One not named goes by its type's name.
+    fn named(self, name: impl Into<String>) -> Named<Self>
+    where
+        Self: Sized,
+    {
+        Named::new(name, self)
+    }
 }
 
 /// What a [`Source`] made when asked.
@@ -309,6 +322,9 @@ pub enum ProduceError {
 /// it, with the pads and the loop. Nothing to call on it — it is what
 /// [`IntoSource`] hands a pipeline, and what the pipeline's wiring is given.
 pub struct SourceStage<P> {
+    /// Who it is — the source's name and log identity, which it does not
+    /// keep itself.
+    identity: Identity,
     inner: P,
     pads: Vec<SrcPad>,
     /// Time spent paused so far, which [`Wait::now`] leaves out.
@@ -345,10 +361,16 @@ enum Ending {
 const HELD_POLL: Duration = Duration::from_millis(1);
 
 impl<P: Source> SourceStage<P> {
-    pub(crate) fn new(inner: P) -> Self {
-        let pads = inner.outputs();
+    pub(crate) fn new(identity: Identity, inner: P) -> Self {
+        let pads = inner.outputs().unwrap_or_else(|| {
+            vec![SrcPad::with_contract(
+                format!("{}_src", identity.name()),
+                inner.output_contract(),
+            )]
+        });
         Self {
             parking: Parking::new(pads.len()),
+            identity,
             inner,
             pads,
             paused: Duration::ZERO,
@@ -382,44 +404,41 @@ impl<P: Source> SourceStage<P> {
     }
 }
 
-/// Reports what went wrong downstream of `inner` on `bus`, as its own.
-fn reporter<'a, P: Source>(inner: &'a P, bus: &'a Bus) -> impl FnMut(crate::error::Error) + 'a {
+/// Reports on `bus` what went wrong downstream of the source `identity`
+/// is: as the element it traces back to, where it does — a decoder's
+/// refusal is the decoder's — and as the source's own where it does not.
+fn reporter<'a>(identity: &'a Identity, bus: &'a Bus) -> impl FnMut(crate::error::Error) + 'a {
     move |error| {
-        bus.post(
-            inner.pp_log(),
-            BusEvent::Error {
-                element_type: inner.element_type(),
-                name: inner.name(),
-                error,
-            },
+        bus.post_downstream_error(
+            identity.pp_log(),
+            identity.element_type(),
+            identity.name(),
+            error,
         );
     }
 }
 
 impl<P: Source> Element for SourceStage<P> {
     fn name(&self) -> Arc<str> {
-        self.inner.name()
+        self.identity.name()
     }
 
     fn element_type(&self) -> ElementType {
-        self.inner.element_type()
-    }
-
-    fn graph_id(&self) -> Option<ElementId> {
-        self.inner.graph_id()
+        self.identity.element_type()
     }
 
     fn pp_log(&self) -> &PpLog {
-        self.inner.pp_log()
+        self.identity.pp_log()
     }
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
-        self.inner.pp_log_mut()
+        self.identity.pp_log_mut()
     }
 
     fn attach_context(&mut self, context: &Arc<Context>) {
         self.state = Some(Arc::clone(&context.state));
-        self.inner.attach_context(context);
+        self.inner
+            .attached(&Attached::new(self.identity.pp_log(), context));
     }
 }
 
@@ -452,7 +471,7 @@ impl<P: Source> RawSource for SourceStage<P> {
     /// here last, however the loop ended ([`Source::starting`],
     /// [`Source::stopping`]).
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(pp_log: self.inner.pp_log(), "started");
+        pp_info!(pp_log: self.identity.pp_log(), "started");
         self.linked = self.pads.iter().map(SrcPad::is_linked).collect();
         self.inner.starting()?;
         let ended = self.ask(control, bus);
@@ -488,7 +507,7 @@ impl<P: Source> RawSource for SourceStage<P> {
     /// makes where a queue is full.
     fn finishing(&mut self, backwards: bool, bus: &Bus) -> Result<()> {
         self.parking
-            .deliver_all(&mut self.pads, &mut reporter(&self.inner, bus));
+            .deliver_all(&mut self.pads, &mut reporter(&self.identity, bus));
         if !backwards {
             return Ok(());
         }
@@ -514,7 +533,7 @@ impl<P: Source> RawSource for SourceStage<P> {
                 .get_mut(index)
                 .ok_or(ProduceError::NoOutput { index, outputs })?;
             if let Err(error) = pad.push(buf) {
-                reporter(&self.inner, bus)(error);
+                reporter(&self.identity, bus)(error);
             }
         }
         Ok(())
@@ -543,7 +562,7 @@ impl<P: Source> SourceStage<P> {
                 let outcome = handle_request(control, self, bus, request, ack)?;
                 self.paused += outcome.paused_for;
                 if outcome.stopped {
-                    pp_info!(pp_log: self.inner.pp_log(), "stopped");
+                    pp_info!(pp_log: self.identity.pp_log(), "stopped");
                     return Ok(());
                 }
             }
@@ -552,7 +571,7 @@ impl<P: Source> SourceStage<P> {
             // What is held back goes on first, as its outputs take it; a
             // segment begun behind it goes once all of it has.
             self.parking
-                .drain(&mut self.pads, &mut reporter(&self.inner, bus));
+                .drain(&mut self.pads, &mut reporter(&self.identity, bus));
             if let Some((position, start)) = self.owed_segment {
                 if !self.parking.is_empty() {
                     self.wait_a_moment(control);
@@ -603,7 +622,7 @@ impl<P: Source> SourceStage<P> {
                     Ending::Sought => {}
                     Ending::Ended => {
                         pp_info!(
-                            pp_log: self.inner.pp_log(),
+                            pp_log: self.identity.pp_log(),
                             "event=eos phase=source_completed outcome=ok"
                         );
                         // The end of what it reads is not the end of
@@ -653,7 +672,7 @@ impl<P: Source> SourceStage<P> {
         if index >= outputs {
             return Err(ProduceError::NoOutput { index, outputs }.into());
         }
-        let mut report = reporter(&self.inner, bus);
+        let mut report = reporter(&self.identity, bus);
         if outputs > 1 {
             self.parking
                 .hand_on(&mut self.pads, index, buf, prerolling, &mut report);
@@ -688,11 +707,11 @@ impl<P: Source> SourceStage<P> {
     /// to them — and no output is handed a second end.
     fn end_every_output(&mut self, control: Option<&ControlReceiver>, bus: &Bus) -> Result<Ending> {
         self.sought = false;
-        let pp_log = self.inner.pp_log().clone();
+        let pp_log = self.identity.pp_log().clone();
         let mut owed = vec![true; self.pads.len()];
         loop {
             {
-                let mut report = reporter(&self.inner, bus);
+                let mut report = reporter(&self.identity, bus);
                 self.parking.drain(&mut self.pads, &mut report);
                 for (index, pad) in self.pads.iter_mut().enumerate() {
                     if owed[index]
@@ -712,7 +731,7 @@ impl<P: Source> SourceStage<P> {
             if let Some(control) = control {
                 while let Ok(Some((request, ack))) = control.try_take() {
                     if matches!(request, RequestKind::Finish) {
-                        let mut report = reporter(&self.inner, bus);
+                        let mut report = reporter(&self.identity, bus);
                         self.parking.deliver_all(&mut self.pads, &mut report);
                         for (index, pad) in self.pads.iter_mut().enumerate() {
                             if owed[index]
@@ -784,7 +803,7 @@ impl<P: Source> SourceStage<P> {
             show_from: None,
             backwards: state.backwards(),
         };
-        let mut report = reporter(&self.inner, bus);
+        let mut report = reporter(&self.identity, bus);
         if flushed {
             for pad in &mut self.pads {
                 if let Err(error) = pad.control(&ControlMsg::Flush) {
@@ -792,7 +811,7 @@ impl<P: Source> SourceStage<P> {
                 }
             }
         }
-        let pp_log = self.inner.pp_log().clone();
+        let pp_log = self.identity.pp_log().clone();
         if let Err(error) = crate::stream::begin_segment(&mut self.pads, segment, &pp_log) {
             report(error);
         }
@@ -800,9 +819,10 @@ impl<P: Source> SourceStage<P> {
 }
 
 /// What can be put where a source is asked for: a [`RawSource`]
-/// itself, or a [`Source`], which the framework makes one of.
+/// itself, or a [`Source`], which the framework makes one of — going by
+/// its type's name, or by the one a [`Named`] gives it.
 ///
-/// `M` says which of the two a type is, and the compiler works it out:
+/// `M` says which a type is, and the compiler works it out:
 /// nothing names it. A type that is both is refused as ambiguous —
 /// implement one or the other.
 #[diagnostic::on_unimplemented(
@@ -825,6 +845,10 @@ pub enum AsRawSource {}
 /// Says a type goes in as the [`Source`] it is — see [`IntoSource`].
 pub enum AsSource {}
 
+/// Says a [`Named`] source goes in as the [`Source`] it holds, by its name
+/// — see [`IntoSource`].
+pub enum AsNamedSource {}
+
 impl<S: RawSource + 'static> IntoSource<AsRawSource> for S {
     type Raw = S;
 
@@ -837,18 +861,27 @@ impl<P: Source + 'static> IntoSource<AsSource> for P {
     type Raw = SourceStage<P>;
 
     fn into_source(self) -> SourceStage<P> {
-        SourceStage::new(self)
+        SourceStage::new(Identity::of::<P>(), self)
+    }
+}
+
+impl<P: Source + 'static> IntoSource<AsNamedSource> for Named<P> {
+    type Raw = SourceStage<P>;
+
+    fn into_source(self) -> SourceStage<P> {
+        SourceStage::new(Identity::other(self.name), self.inner)
     }
 }
 
 mod sealed {
-    use super::{AsRawSource, AsSource, RawSource, Source};
+    use super::{AsNamedSource, AsRawSource, AsSource, Named, RawSource, Source};
 
-    /// Keeps [`super::IntoSource`] to the two ways in it has.
+    /// Keeps [`super::IntoSource`] to the three ways in it has.
     pub trait Sealed<M> {}
 
     impl<S: RawSource + 'static> Sealed<AsRawSource> for S {}
     impl<P: Source + 'static> Sealed<AsSource> for P {}
+    impl<P: Source + 'static> Sealed<AsNamedSource> for Named<P> {}
 }
 
 /// Makes `$name`, a newtype over `SourceStage<_>`, the source it is —
@@ -936,7 +969,8 @@ mod tests {
     use ffmpeg_next as ffmpeg;
 
     use super::*;
-    use crate::element::{RawSink, element_pp_log};
+    use crate::bus::BusEvent;
+    use crate::element::{Filter, Output, RawSink, element_pp_log};
     use crate::pipeline::Pipeline;
 
     /// Makes `left` packets, one every `every` on the clock a pause does
@@ -956,21 +990,6 @@ mod tests {
                 left,
                 next: None,
             }
-        }
-    }
-
-    impl Element for Ticks {
-        fn name(&self) -> Arc<str> {
-            "ticks".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
         }
     }
 
@@ -994,6 +1013,63 @@ mod tests {
                 Arc::new(ffmpeg::Packet::copy(&[self.left as u8])).into(),
             )))
         }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.pp_log = cx.pp_log().clone();
+        }
+    }
+
+    /// A source of its own keeps no name: it goes by its type's, or by the
+    /// one it is given, and its one output is named for it.
+    #[test]
+    fn a_source_goes_by_its_type_s_name_or_the_one_it_is_given() {
+        let mut unnamed = Ticks::new(Duration::from_millis(1), 1).into_source();
+        assert_eq!(&*unnamed.name(), "Ticks");
+        assert_eq!(unnamed.src_pads()[0].name(), "Ticks_src");
+        let mut named = Ticks::new(Duration::from_millis(1), 1)
+            .named("ticks")
+            .into_source();
+        assert_eq!(&*named.name(), "ticks");
+        assert_eq!(named.src_pads()[0].name(), "ticks_src");
+    }
+
+    /// Refuses every buffer.
+    struct Refusing;
+
+    impl Filter for Refusing {
+        fn transform(&mut self, _buf: MediaBuffer, _out: &mut Output) -> Result<()> {
+            Err(crate::error::Error::Other("refused".into()))
+        }
+    }
+
+    /// What fails downstream of a source is reported as the element that
+    /// failed, not as the source that happened to be pushing to it.
+    #[test]
+    fn a_failure_downstream_is_reported_as_the_element_that_failed() {
+        let (pipeline, ()) = Pipeline::new(
+            "refusals",
+            Ticks::new(Duration::from_millis(1), 1).named("ticks"),
+            |ticks, ctx| {
+                let branch = ctx
+                    .branch()
+                    .pipe(Refusing.named("refusing"))
+                    .to(crate::elements::PacketCounter::new("counter").0)?;
+                ctx.attach(ticks, 0, branch)?;
+                Ok(())
+            },
+        )
+        .expect("wiring succeeds");
+        pipeline.run().expect("run");
+        let failed = pipeline
+            .bus()
+            .iter()
+            .find_map(|event| match event {
+                BusEvent::Error { name, .. } => Some(name),
+                _ => None,
+            })
+            .expect("the refusal is reported");
+        pipeline.stop();
+        assert_eq!(&*failed, "refusing");
     }
 
     /// When each buffer arrived, and whether the end did.
@@ -1135,21 +1211,6 @@ mod tests {
         }
     }
 
-    impl Element for Hooked {
-        fn name(&self) -> Arc<str> {
-            "hooked".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
     impl Source for Hooked {
         fn is_live(&self) -> bool {
             true
@@ -1178,6 +1239,10 @@ mod tests {
 
         fn stopping(&mut self) {
             self.note("stopping");
+        }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.pp_log = cx.pp_log().clone();
         }
     }
 
@@ -1253,30 +1318,19 @@ mod tests {
         script: std::collections::VecDeque<Produced>,
     }
 
-    impl Element for Scripted {
-        fn name(&self) -> Arc<str> {
-            "scripted".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
     impl Source for Scripted {
         fn is_live(&self) -> bool {
             true
         }
-        fn outputs(&self) -> Vec<SrcPad> {
-            vec![SrcPad::new("src_0"), SrcPad::new("src_1")]
+        fn outputs(&self) -> Option<Vec<SrcPad>> {
+            Some(vec![SrcPad::new("src_0"), SrcPad::new("src_1")])
         }
         fn produce(&mut self, _wait: &mut Wait<'_>) -> Result<Produced> {
             Ok(self.script.pop_front().unwrap_or(Produced::End))
+        }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.pp_log = cx.pp_log().clone();
         }
     }
 

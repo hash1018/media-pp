@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
@@ -131,7 +131,6 @@ filter_stage!(CudaConverter);
 /// framework makes the filter.
 struct Converting {
     pp_log: PpLog,
-    name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
     hw_device_ctx: Arc<AvBufferRef>,
     /// The last conversion and the surface it was made from, so a producer
@@ -171,8 +170,8 @@ impl CudaConverter {
         device: &CudaDevice,
         output: CudaFrameFormat,
     ) -> std::result::Result<Self, CudaConverterError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaConverter, &name, None);
+        let identity = Identity::new(ElementType::CudaConverter, name);
+        let pp_log = identity.pp_log().clone();
         let output = match output {
             CudaFrameFormat::Nv12 => Produces::Nv12,
             CudaFrameFormat::Bgra => Produces::Bgra,
@@ -195,17 +194,19 @@ impl CudaConverter {
             output.input(),
             output.format()
         );
-        Ok(Self(FilterStage::new(Converting {
-            name,
-            pp_log,
-            hw_device_ctx,
-            hw_frames_ctx: ForSize::new(),
-            output,
-            device_ctx,
-            driver,
-            repeated: RepeatedOutput::new(),
-            pool,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Converting {
+                pp_log,
+                hw_device_ctx,
+                hw_frames_ctx: ForSize::new(),
+                output,
+                device_ctx,
+                driver,
+                repeated: RepeatedOutput::new(),
+                pool,
+            },
+        )))
     }
 }
 
@@ -412,24 +413,6 @@ impl PerFrameTransform for Converting {
     }
 }
 
-impl Element for Converting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaConverter
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Converting {
     /// Converts pixel layout on the device; the layout itself is a runtime value, not part of this.
     fn input_contract(&self) -> InputContract {
@@ -468,6 +451,10 @@ impl Filter for Converting {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
                 .with_layouts(self.output.format().layouts()),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

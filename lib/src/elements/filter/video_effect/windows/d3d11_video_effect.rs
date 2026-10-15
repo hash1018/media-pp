@@ -17,7 +17,7 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::{D3d11SharedDeviceError, Result},
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
@@ -178,7 +178,6 @@ filter_stage!(D3d11VideoEffect);
 /// framework makes the filter.
 struct Applying {
     pp_log: PpLog,
-    name: Arc<str>,
     device: ID3D11Device,
     context: Arc<Mutex<ID3D11DeviceContext>>,
     /// The effect in force and what it resolves to, refreshed from `control`
@@ -225,8 +224,8 @@ impl D3d11VideoEffect {
         effect: VideoEffect,
     ) -> std::result::Result<(Self, VideoEffectHandle), D3d11VideoEffectError> {
         let (device, context) = (gpu.device(), gpu.context());
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11VideoEffect, &name, None);
+        let identity = Identity::new(ElementType::D3d11VideoEffect, name);
+        let pp_log = identity.pp_log().clone();
         // Usually behind a `Queue`, so the device has to be usable from
         // another thread before any command is issued.
         protect_shared_device(device)?;
@@ -242,19 +241,21 @@ impl D3d11VideoEffect {
         pp_info!(pp_log: &pp_log, "created: {} {effect:?}", effect.name());
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self(FilterStage::new(Applying {
-            name,
-            pp_log,
-            device: device.clone(),
-            context,
-            effect,
-            params: effect.params(),
-            control,
-            enabled: true,
-            pass,
-            pool,
-            repeated: RepeatedOutput::new(),
-        }));
+        let element = Self(FilterStage::new(
+            identity,
+            Applying {
+                pp_log,
+                device: device.clone(),
+                context,
+                effect,
+                params: effect.params(),
+                control,
+                enabled: true,
+                pass,
+                pool,
+                repeated: RepeatedOutput::new(),
+            },
+        ));
         Ok((element, handle))
     }
 }
@@ -440,24 +441,6 @@ impl PerFrameTransform for Applying {
     }
 }
 
-impl Element for Applying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d11VideoEffect
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Applying {
     /// Drawn on the GPU; a system-memory frame belongs in SwVideoEffect.
     fn input_contract(&self) -> InputContract {
@@ -499,6 +482,10 @@ impl Filter for Applying {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

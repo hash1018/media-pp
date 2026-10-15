@@ -13,9 +13,8 @@ use crate::{
     buffer::MediaBuffer,
     contract::InputContract,
     control::ControlMsg,
-    element::{Context, Element, ElementType, Flow, RawSink},
+    element::{Attached, Context, Element, ElementType, Flow, Identity, Named, RawSink},
     error::Result,
-    graph::ElementId,
     pp_log::PpLog,
     stream::StreamEvent,
 };
@@ -35,7 +34,12 @@ use crate::{
 /// `Sink` as it takes a [`RawSink`] (see [`IntoTerminal`]). A terminal that
 /// routes the stream itself — a muxer with several tracks, a compositor's
 /// input — is written the direct way.
-pub trait Sink: Element {
+///
+/// A terminal is not an [`Element`]: the stage the framework makes of it
+/// keeps its name and log identity. It goes by its type's name, or by the
+/// one [`Self::named`] gives it, and is told who it is through
+/// [`Self::attached`].
+pub trait Sink: Send {
     /// Does with `buf` what this terminal is for. Never handed the end of
     /// the stream: that is `drain`'s.
     fn render(&mut self, buf: MediaBuffer) -> Result<()>;
@@ -82,45 +86,60 @@ pub trait Sink: Element {
     fn accepts_seek(&self) -> bool {
         true
     }
+
+    /// Told who it is in the pipeline it is being wired into, and that
+    /// pipeline, before any buffer — and again if it is wired anew. Keep
+    /// [`Attached::pp_log`] to log; take from [`Attached::context`] what is
+    /// needed of the pipeline. Nothing by default.
+    fn attached(&mut self, _cx: &Attached<'_>) {}
+
+    /// This terminal, going by `name` — to tell two of it apart in the log
+    /// and on the bus. One not named goes by its type's name.
+    fn named(self, name: impl Into<String>) -> Named<Self>
+    where
+        Self: Sized,
+    {
+        Named::new(name, self)
+    }
 }
 
 /// What a [`Sink`] is in a pipeline: the terminal the framework makes of
 /// it, keeping the rules it does not keep itself.
 pub(crate) struct SinkStage<R> {
+    /// Who it is — the terminal's name and log identity, which it does not
+    /// keep itself.
+    identity: Identity,
     /// The terminal itself — open to the element of this crate that is a
     /// newtype over its stage, to reach what it is made of.
     pub(crate) inner: R,
 }
 
 impl<R: Sink> SinkStage<R> {
-    pub(crate) fn new(inner: R) -> Self {
-        Self { inner }
+    pub(crate) fn new(identity: Identity, inner: R) -> Self {
+        Self { identity, inner }
     }
 }
 
 impl<R: Sink> Element for SinkStage<R> {
     fn name(&self) -> Arc<str> {
-        self.inner.name()
+        self.identity.name()
     }
 
     fn element_type(&self) -> ElementType {
-        self.inner.element_type()
-    }
-
-    fn graph_id(&self) -> Option<ElementId> {
-        self.inner.graph_id()
+        self.identity.element_type()
     }
 
     fn pp_log(&self) -> &PpLog {
-        self.inner.pp_log()
+        self.identity.pp_log()
     }
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
-        self.inner.pp_log_mut()
+        self.identity.pp_log_mut()
     }
 
     fn attach_context(&mut self, context: &Arc<Context>) {
-        self.inner.attach_context(context);
+        self.inner
+            .attached(&Attached::new(self.identity.pp_log(), context));
     }
 }
 
@@ -158,7 +177,8 @@ impl<R: Sink> RawSink for SinkStage<R> {
 }
 
 /// What can be put where a terminal is asked for: a [`Sink`], which the
-/// framework makes one of, a [`RawSink`] itself, or a [`BoxSink`] holding
+/// framework makes one of — going by its type's name, or by the one a
+/// [`Named`] gives it — a [`RawSink`] itself, or a [`BoxSink`] holding
 /// either.
 ///
 /// `M` says which a type is, and the compiler works it out: nothing names
@@ -180,6 +200,10 @@ pub enum AsRawSink {}
 /// Says a type goes in as the [`Sink`] it is — see [`IntoTerminal`].
 pub enum AsSink {}
 
+/// Says a [`Named`] terminal goes in as the [`Sink`] it holds, by its name
+/// — see [`IntoTerminal`].
+pub enum AsNamedSink {}
+
 /// Says a [`BoxSink`] goes in as the terminal it holds — see
 /// [`IntoTerminal`].
 pub enum AsBoxSink {}
@@ -192,7 +216,16 @@ impl<S: RawSink + 'static> IntoTerminal<AsRawSink> for S {
 
 impl<R: Sink + 'static> IntoTerminal<AsSink> for R {
     fn into_terminal(self) -> BoxSink {
-        BoxSink(Box::new(SinkStage::new(self)))
+        BoxSink(Box::new(SinkStage::new(Identity::of::<R>(), self)))
+    }
+}
+
+impl<R: Sink + 'static> IntoTerminal<AsNamedSink> for Named<R> {
+    fn into_terminal(self) -> BoxSink {
+        BoxSink(Box::new(SinkStage::new(
+            Identity::other(self.name),
+            self.inner,
+        )))
     }
 }
 
@@ -203,13 +236,14 @@ impl IntoTerminal<AsBoxSink> for BoxSink {
 }
 
 mod sealed {
-    use super::{AsBoxSink, AsRawSink, AsSink, BoxSink, RawSink, Sink};
+    use super::{AsBoxSink, AsNamedSink, AsRawSink, AsSink, BoxSink, Named, RawSink, Sink};
 
-    /// Keeps [`super::IntoTerminal`] to the three ways in it has.
+    /// Keeps [`super::IntoTerminal`] to the four ways in it has.
     pub trait Sealed<M> {}
 
     impl<S: RawSink + 'static> Sealed<AsRawSink> for S {}
     impl<R: Sink + 'static> Sealed<AsSink> for R {}
+    impl<R: Sink + 'static> Sealed<AsNamedSink> for Named<R> {}
     impl Sealed<AsBoxSink> for BoxSink {}
 }
 
@@ -359,21 +393,6 @@ mod tests {
         }
     }
 
-    impl Element for Noting {
-        fn name(&self) -> Arc<str> {
-            "noting".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
     impl Sink for Noting {
         fn render(&mut self, _buf: MediaBuffer) -> Result<()> {
             self.note("render");
@@ -399,26 +418,15 @@ mod tests {
             self.note("resuming");
             Ok(())
         }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.pp_log = cx.pp_log().clone();
+        }
     }
 
     /// Tells a stop from a seek's flush, as a device that deactivates for a
     /// stop does.
     struct Stopping(Noting);
-
-    impl Element for Stopping {
-        fn name(&self) -> Arc<str> {
-            self.0.name()
-        }
-        fn element_type(&self) -> ElementType {
-            self.0.element_type()
-        }
-        fn pp_log(&self) -> &PpLog {
-            self.0.pp_log()
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            self.0.pp_log_mut()
-        }
-    }
 
     impl Sink for Stopping {
         fn render(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -433,6 +441,22 @@ mod tests {
         }
     }
 
+    /// A terminal of its own keeps no name: it goes by its type's, or by
+    /// the one it is given where it is wired.
+    #[test]
+    fn a_terminal_goes_by_its_type_s_name_or_the_one_it_is_given() {
+        let noting = || Noting {
+            pp_log: element_pp_log(ElementType::Other, "noting", None),
+            seen: Arc::default(),
+        };
+        let unnamed = noting().into_terminal();
+        assert_eq!(&*unnamed.name(), "Noting");
+        let named = noting().named("seen").into_terminal();
+        assert_eq!(&*named.name(), "seen");
+        assert_eq!(named.element_type(), ElementType::Other);
+        assert_eq!(named.pp_log().name(), "seen");
+    }
+
     /// A flush lets go of what a seek left and a stop of what a stopped
     /// stream leaves, which a terminal may tell apart: a stop is
     /// `stopping`, which is `reset` where it says nothing of its own.
@@ -445,13 +469,13 @@ mod tests {
             seen: Arc::clone(seen),
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut telling = SinkStage::new(Stopping(noting(&seen)));
+        let mut telling = SinkStage::new(Identity::other("sink"), Stopping(noting(&seen)));
         telling.control(&ControlMsg::Flush).unwrap();
         telling.control(&ControlMsg::Stop).unwrap();
         assert_eq!(*seen.lock().unwrap(), ["reset", "stopping"]);
 
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut plain = SinkStage::new(noting(&seen));
+        let mut plain = SinkStage::new(Identity::other("sink"), noting(&seen));
         plain.control(&ControlMsg::Flush).unwrap();
         plain.control(&ControlMsg::Stop).unwrap();
         assert_eq!(*seen.lock().unwrap(), ["reset", "reset"]);

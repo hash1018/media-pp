@@ -16,8 +16,8 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        BoxSink, Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, BoxSink, Context, Element, ElementType, Flow, Identity, Produced, RawSink,
+        Source, SourceStage, Wait, element_pp_log,
     },
     elements::AudioFormat,
     elements::filter::audio::audio_resampler::AudioFrameResampler,
@@ -720,7 +720,6 @@ source_stage!(AudioMixer);
 /// it is owed. All of its work, which the framework makes the source.
 struct Mixing {
     pp_log: PpLog,
-    name: Arc<str>,
     shared: Arc<MixerShared>,
     /// Cumulative sample count across every emitted frame — see
     /// [`AudioMixer::time_base`].
@@ -748,8 +747,8 @@ impl AudioMixer {
     /// chains of its own for a handle to build).
     pub fn new(name: impl Into<String>, options: AudioMixerOptions) -> (Self, MixerHandle) {
         crate::ensure_ffmpeg();
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::AudioMixer, &name, None);
+        let identity = Identity::new(ElementType::AudioMixer, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "created: {}Hz, {} channel(s), mode={:?}",
@@ -772,18 +771,20 @@ impl AudioMixer {
             fed: AtomicBool::new(false),
         });
         (
-            Self(SourceStage::new(Mixing {
-                name,
-                pp_log,
-                shared: shared.clone(),
-                samples_emitted: 0,
-                anchor: MixAnchor {
-                    format,
-                    elapsed: Duration::ZERO,
-                    samples: 0,
+            Self(SourceStage::new(
+                identity,
+                Mixing {
+                    pp_log,
+                    shared: shared.clone(),
+                    samples_emitted: 0,
+                    anchor: MixAnchor {
+                        format,
+                        elapsed: Duration::ZERO,
+                        samples: 0,
+                    },
+                    started: None,
                 },
-                started: None,
-            })),
+            )),
             MixerHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -894,24 +895,6 @@ impl Mixing {
     }
 }
 
-impl Element for Mixing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AudioMixer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Mixing {
     fn is_live(&self) -> bool {
         self.shared.mode.is_live()
@@ -929,6 +912,10 @@ impl Source for Mixing {
             RenderMode::Live => self.produce_live(wait),
             RenderMode::Offline { end } => self.produce_offline(wait, end),
         })
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

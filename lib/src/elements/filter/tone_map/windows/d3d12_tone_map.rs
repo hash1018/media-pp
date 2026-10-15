@@ -22,7 +22,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     frame_size::ForSize,
     platform::ffmpeg::AvBufferRef,
@@ -127,7 +127,6 @@ struct Work {
 /// framework makes the filter.
 struct Mapping {
     pp_log: PpLog,
-    name: Arc<str>,
     device: ID3D12Device,
     /// `tone_map.hlsl`'s `hdr_to_nv12`.
     kernel: Kernel,
@@ -171,8 +170,8 @@ impl D3d12ToneMap {
         name: impl Into<String>,
         gpu: &D3d12Gpu,
     ) -> std::result::Result<Self, D3d12ToneMapError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12ToneMap, &name, None);
+        let identity = Identity::new(ElementType::D3d12ToneMap, name);
+        let pp_log = identity.pp_log().clone();
         let device = gpu.device().clone();
         // SAFETY: a live device, and a description built here.
         let (kernel, heap, heap_step) = unsafe {
@@ -194,21 +193,23 @@ impl D3d12ToneMap {
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(&device) }.map_err(D3d12ToneMapError::HwDeviceInit)?;
         pp_info!(pp_log: &pp_log, "created");
-        Ok(Self(FilterStage::new(Mapping {
-            pp_log,
-            name,
-            device,
-            kernel,
-            commands,
-            heap,
-            heap_step,
-            work: None,
-            hw_device_ctx,
-            frames: ForSize::new(),
-            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-            repeated: RepeatedOutput::new(),
-            reading: None,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Mapping {
+                pp_log,
+                device,
+                kernel,
+                commands,
+                heap,
+                heap_step,
+                work: None,
+                hw_device_ctx,
+                frames: ForSize::new(),
+                pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                repeated: RepeatedOutput::new(),
+                reading: None,
+            },
+        )))
     }
 }
 
@@ -477,24 +478,6 @@ impl PerFrameTransform for Mapping {
     }
 }
 
-impl Element for Mapping {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12ToneMap
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Mapping {
     /// P010 or NV12 D3D12 pictures.
     fn input_contract(&self) -> InputContract {
@@ -529,6 +512,10 @@ impl Filter for Mapping {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
                 .with_layouts(PixelLayoutSet::NV12),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

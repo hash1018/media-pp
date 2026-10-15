@@ -9,7 +9,7 @@ use crate::color::{ColorDescription, HdrMetadata};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::filter::is_codec_drain_boundary,
     error::Result,
     platform::cuda::{
@@ -177,7 +177,6 @@ filter_stage!(CudaEncoder);
 /// framework makes the filter.
 struct Encoding {
     pp_log: PpLog,
-    name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
     _hw_device_ctx: Arc<AvBufferRef>,
     _hw_frames_ctx: AvBufferRef,
@@ -277,8 +276,8 @@ impl CudaEncoder {
         color: Option<ColorDescription>,
         hdr: &HdrMetadata,
     ) -> std::result::Result<Self, CudaEncoderError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaEncoder, &name, None);
+        let identity = Identity::new(ElementType::CudaEncoder, name);
+        let pp_log = identity.pp_log().clone();
 
         // NVENC has no 10-bit H.264; HEVC is Main 10 from P010 by itself.
         if options.input_format == CudaFrameFormat::P010 && options.codec != CudaCodec::H265 {
@@ -367,18 +366,20 @@ impl CudaEncoder {
         if !hdr.is_empty() {
             pp_info!(pp_log: &pp_log, "keeps the source's HDR10 mastering display and light levels");
         }
-        Ok(Self(FilterStage::new(Encoding {
-            name,
-            pp_log,
-            encoder,
-            _hw_device_ctx: hw_device_ctx,
-            _hw_frames_ctx: hw_frames_ctx,
-            device_ctx,
-            input_format: options.input_format,
-            width: options.width,
-            height: options.height,
-            packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Encoding {
+                pp_log,
+                encoder,
+                _hw_device_ctx: hw_device_ctx,
+                _hw_frames_ctx: hw_frames_ctx,
+                device_ctx,
+                input_format: options.input_format,
+                width: options.width,
+                height: options.height,
+                packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
+            },
+        )))
     }
 
     /// The encoded stream's parameters, for
@@ -467,24 +468,6 @@ impl From<&CudaEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for Encoding {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaEncoder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
@@ -521,6 +504,10 @@ impl Filter for Encoding {
         // `send_frame` calls. A caller needing a hard encoded-stream
         // discontinuity rebuilds the encoder.
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 impl Drop for Encoding {
@@ -535,7 +522,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::{
         elements::{CudaDecoder, CudaUpload, FileDemuxer, PacketCounter},
         pipeline::Pipeline,

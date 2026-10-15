@@ -17,8 +17,8 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
     element::{
-        Element, ElementType, Produced, ReversibleSource, SeekableSource, Source, SourceStage,
-        Wait, element_pp_log,
+        Attached, ElementType, Identity, Produced, ReversibleSource, SeekableSource, Source,
+        SourceStage, Wait,
     },
     pad::SrcPad,
     produce::source_stage,
@@ -524,8 +524,9 @@ impl FileDemuxer {
             })
             .collect();
 
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::FileDemuxer, &name, None);
+        let identity = Identity::new(ElementType::FileDemuxer, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "opened: path={}, {} stream(s)",
@@ -539,23 +540,26 @@ impl FileDemuxer {
             );
         }
         Ok((
-            Self(SourceStage::new(Demuxing {
-                name,
-                pp_log,
-                input,
-                streams: streams.clone(),
-                contracts,
-                ahead: VecDeque::new(),
-                linked: None,
-                bus: None,
-                looping: Arc::new(AtomicBool::new(false)),
-                backwards: None,
-                published_offset: Arc::new(AtomicI64::new(0)),
-                published_lap: Arc::new(AtomicI64::new(0)),
-                loop_offset: 0,
-                lap_end: 0,
-                lap_length: 0,
-            })),
+            Self(SourceStage::new(
+                identity,
+                Demuxing {
+                    name,
+                    pp_log,
+                    input,
+                    streams: streams.clone(),
+                    contracts,
+                    ahead: VecDeque::new(),
+                    linked: None,
+                    bus: None,
+                    looping: Arc::new(AtomicBool::new(false)),
+                    backwards: None,
+                    published_offset: Arc::new(AtomicI64::new(0)),
+                    published_lap: Arc::new(AtomicI64::new(0)),
+                    loop_offset: 0,
+                    lap_end: 0,
+                    lap_length: 0,
+                },
+            )),
             streams,
         ))
     }
@@ -606,40 +610,20 @@ impl FileDemuxer {
     }
 }
 
-impl Element for Demuxing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::FileDemuxer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &std::sync::Arc<crate::element::Context>) {
-        self.bus = Some(context.bus.for_element(context.source_id));
-    }
-}
-
 impl Source for Demuxing {
     fn is_live(&self) -> bool {
         false
     }
 
     /// One per stream in the file, at the stream's own index.
-    fn outputs(&self) -> Vec<SrcPad> {
-        self.contracts
-            .iter()
-            .enumerate()
-            .map(|(index, contract)| SrcPad::with_contract(format!("src_{index}"), *contract))
-            .collect()
+    fn outputs(&self) -> Option<Vec<SrcPad>> {
+        Some(
+            self.contracts
+                .iter()
+                .enumerate()
+                .map(|(index, contract)| SrcPad::with_contract(format!("src_{index}"), *contract))
+                .collect(),
+        )
     }
 
     /// The next packet of the file, on its stream's output — read forwards,
@@ -714,6 +698,11 @@ impl Source for Demuxing {
         } else {
             None
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.bus = Some(cx.context().bus.for_element(cx.context().source_id));
     }
 }
 
@@ -1469,6 +1458,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::element::{Element, element_pp_log};
 
     /// A video stream says what its pictures decode to in software; a
     /// sound stream says nothing.

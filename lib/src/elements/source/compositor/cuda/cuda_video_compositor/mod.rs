@@ -30,8 +30,8 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, Context, Element, ElementType, Flow, Identity, Produced, RawSink, Source,
+        SourceStage, Wait, element_pp_log,
     },
     elements::{CudaScalerInterp, filter::scaler::cuda::scale_graph::CudaScaleGraph},
     error::Result,
@@ -792,7 +792,6 @@ source_stage!(CudaVideoCompositor);
 /// composition. All of its work, which the framework makes the source.
 struct Compositing {
     pp_log: PpLog,
-    name: Arc<str>,
     shared: Arc<CompositorShared>,
     options: VideoCompositorOptions,
     frame_index: i64,
@@ -869,8 +868,8 @@ impl CudaVideoCompositor {
     ) -> std::result::Result<(Self, CudaVideoCompositorHandle), CudaVideoCompositorError> {
         crate::ensure_ffmpeg();
         validate_output_options(options, format)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaVideoCompositor, &name, None);
+        let identity = Identity::new(ElementType::CudaVideoCompositor, name);
+        let pp_log = identity.pp_log().clone();
 
         let driver = Arc::new(CudaDriver::retain_primary()?);
         let hw_device_ctx = device.retain();
@@ -912,36 +911,38 @@ impl CudaVideoCompositor {
             options.frame_rate
         );
         Ok((
-            Self(SourceStage::new(Compositing {
-                name,
-                pp_log,
-                shared: shared.clone(),
-                options,
-                frame_index: 0,
-                driver,
-                hw_device_ctx,
-                hw_frames_ctx,
-                format,
-                scalers: HashMap::new(),
-                overlays: HashMap::new(),
-                canvas_scratch: HashMap::new(),
-                crops: HashMap::new(),
-                composed: None,
-                output_pool: UnboundObjectPool::new(
-                    OUTPUT_POOL_SIZE,
-                    ffmpeg::frame::Video::empty,
-                    // `release_picture` rather than a no-op: a wrapper that
-                    // held its reference while sitting in the pool would keep
-                    // a surface out of `hw_frames_ctx`'s own pool for no
-                    // reason, forcing an allocation the next composite should
-                    // have been able to reuse. Both users unref before taking
-                    // a new surface anyway, so this only moves that release
-                    // to the moment the wrapper comes back.
-                    release_picture,
-                ),
-                ticks: None,
-                schedule: LiveSchedule::default(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Compositing {
+                    pp_log,
+                    shared: shared.clone(),
+                    options,
+                    frame_index: 0,
+                    driver,
+                    hw_device_ctx,
+                    hw_frames_ctx,
+                    format,
+                    scalers: HashMap::new(),
+                    overlays: HashMap::new(),
+                    canvas_scratch: HashMap::new(),
+                    crops: HashMap::new(),
+                    composed: None,
+                    output_pool: UnboundObjectPool::new(
+                        OUTPUT_POOL_SIZE,
+                        ffmpeg::frame::Video::empty,
+                        // `release_picture` rather than a no-op: a wrapper that
+                        // held its reference while sitting in the pool would keep
+                        // a surface out of `hw_frames_ctx`'s own pool for no
+                        // reason, forcing an allocation the next composite should
+                        // have been able to reuse. Both users unref before taking
+                        // a new surface anyway, so this only moves that release
+                        // to the moment the wrapper comes back.
+                        release_picture,
+                    ),
+                    ticks: None,
+                    schedule: LiveSchedule::default(),
+                },
+            )),
             CudaVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -1434,28 +1435,6 @@ impl Compositing {
     }
 }
 
-impl Element for Compositing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaVideoCompositor
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.ticks = Some(context.source_ticks());
-    }
-}
-
 impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
@@ -1473,6 +1452,11 @@ impl Source for Compositing {
             RenderMode::Live => self.produce_live(wait),
             RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.ticks = Some(cx.context().source_ticks());
     }
 }
 
@@ -1514,6 +1498,10 @@ impl TimedInput for VideoInput {
 
 impl OfflineCompositor for Compositing {
     type Input = VideoInput;
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
 
     fn inputs(&self) -> Vec<Arc<VideoInput>> {
         self.shared

@@ -9,7 +9,7 @@ use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     transform::{FilterStage, filter_stage},
 };
@@ -211,7 +211,6 @@ filter_stage!(AudioCompressor);
 /// framework makes the filter.
 struct Compressing {
     pp_log: PpLog,
-    name: Arc<str>,
     control: Arc<Tuning<AudioCompressorOptions>>,
     applied: Option<(u64, u32)>,
     rates: Rates,
@@ -232,20 +231,22 @@ impl AudioCompressor {
         options: AudioCompressorOptions,
     ) -> std::result::Result<(Self, AudioCompressorHandle), AudioCompressorError> {
         let options = options.validate()?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::AudioCompressor, &name, None);
+        let identity = Identity::new(ElementType::AudioCompressor, name);
+        let pp_log = identity.pp_log().clone();
         let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
-            Self(FilterStage::new(Compressing {
-                name: name.clone(),
-                pp_log,
-                control: control.clone(),
-                applied: None,
-                // Replaced before the first sample is looked at.
-                rates: Rates::new(options, 48_000),
-                level: 0.0,
-            })),
+            Self(FilterStage::new(
+                identity,
+                Compressing {
+                    pp_log,
+                    control: control.clone(),
+                    applied: None,
+                    // Replaced before the first sample is looked at.
+                    rates: Rates::new(options, 48_000),
+                    level: 0.0,
+                },
+            )),
             AudioCompressorHandle { control },
         ))
     }
@@ -280,24 +281,6 @@ impl Compressing {
     }
 }
 
-impl Element for Compressing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AudioCompressor
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Compressing {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
@@ -329,6 +312,10 @@ impl Filter for Compressing {
     fn reset(&mut self) {
         self.level = 0.0;
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -339,7 +326,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;

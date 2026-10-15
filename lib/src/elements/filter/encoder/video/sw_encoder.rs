@@ -12,7 +12,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     transform::{FilterStage, filter_stage},
 };
@@ -257,7 +257,6 @@ filter_stage!(SwEncoder);
 /// framework makes the filter.
 struct Encoding {
     pp_log: PpLog,
-    name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
     /// Nominal frame duration in `encoder.time_base()` ticks. Some codecs
     /// (notably `libopenh264`) leave `AVPacket::duration` at zero; muxers
@@ -415,8 +414,8 @@ impl SwEncoder {
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
         let packet_duration = nominal_packet_duration(time_base, options.frame_rate);
 
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwEncoder, &name, None);
+        let identity = Identity::new(ElementType::SwEncoder, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}x{}, bit_rate={}",
@@ -427,16 +426,18 @@ impl SwEncoder {
         if !hdr.is_empty() {
             pp_info!(pp_log: &pp_log, "keeps the source's HDR10 mastering display and light levels");
         }
-        Ok(Self(FilterStage::new(Encoding {
-            name,
-            pp_log,
-            encoder,
-            packet_duration,
-            time_base,
-            pixel_format: options.pixel_format,
-            width: options.width,
-            height: options.height,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Encoding {
+                pp_log,
+                encoder,
+                packet_duration,
+                time_base,
+                pixel_format: options.pixel_format,
+                width: options.width,
+                height: options.height,
+            },
+        )))
     }
 
     /// This encoder's own codec parameters — what you need to construct
@@ -493,24 +494,6 @@ impl Encoding {
 impl From<&SwEncoder> for crate::elements::TrackFormat {
     fn from(encoder: &SwEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base())
-    }
-}
-
-impl Element for Encoding {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwEncoder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -581,6 +564,10 @@ impl Filter for Encoding {
         // implementation does not promise that boundary. `Stop` abandons
         // the codec context without flushing it.
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -588,7 +575,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{Element, RawSink, SrcPads, element_pp_log};
 
     #[test]
     fn nominal_frame_duration_is_expressed_in_encoder_time_base_ticks() {

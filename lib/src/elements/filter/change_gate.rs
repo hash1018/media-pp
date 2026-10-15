@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::{MediaBuffer, picture_id},
     contract::InputContract,
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     pool::UnboundObjectPoolRef,
     transform::{FilterStage, filter_stage},
@@ -73,7 +73,6 @@ filter_stage!(ChangeGate);
 /// framework makes the filter.
 struct Gating {
     pp_log: PpLog,
-    name: Arc<str>,
     min_interval: Duration,
     forwarded: Option<Forwarded>,
 }
@@ -95,15 +94,17 @@ impl ChangeGate {
     /// `min_interval` is the shortest time between two forwarded frames.
     /// [`Duration::ZERO`] forwards every change as it arrives.
     pub fn new(name: impl Into<String>, min_interval: Duration) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::ChangeGate, &name, None);
+        let identity = Identity::new(ElementType::ChangeGate, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "created: at most one frame per {min_interval:?}");
-        Self(FilterStage::new(Gating {
-            pp_log,
-            name,
-            min_interval,
-            forwarded: None,
-        }))
+        Self(FilterStage::new(
+            identity,
+            Gating {
+                pp_log,
+                min_interval,
+                forwarded: None,
+            },
+        ))
     }
 }
 
@@ -146,24 +147,6 @@ impl Gating {
     }
 }
 
-impl Element for Gating {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::ChangeGate
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Gating {
     /// Whatever arrives, wherever its pixels live: this compares pointers and
     /// reads nothing, so it passes the upstream contract straight through.
@@ -192,6 +175,10 @@ impl Filter for Gating {
         // reset, or is about to stop.
         self.forwarded = None;
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -201,8 +188,7 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::RawSink;
-    use crate::element::RawSinkExt;
+    use crate::element::{RawSink, RawSinkExt};
     use crate::pool::UnboundObjectPool;
 
     /// One frame with its own picture. System memory, because what this gate

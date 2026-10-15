@@ -18,7 +18,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     platform::{
         ffmpeg::AvBufferRef,
@@ -168,7 +168,6 @@ filter_stage!(D3d12Scaler);
 /// framework makes the filter.
 struct Scaling {
     pp_log: PpLog,
-    name: Arc<str>,
     device: ID3D12Device,
     processor: D3d12VideoProcessor,
     _hw_device_ctx: AvBufferRef,
@@ -199,8 +198,8 @@ impl D3d12Scaler {
     ) -> std::result::Result<Self, D3d12ScalerError> {
         let device = gpu.device();
         validate_dimensions(width, height)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12Scaler, &name, None);
+        let identity = Identity::new(ElementType::D3d12Scaler, name);
+        let pp_log = identity.pp_log().clone();
 
         let processor = D3d12VideoProcessor::new(device, width, height)?;
 
@@ -221,18 +220,20 @@ impl D3d12Scaler {
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: NV12 -> {width}x{height} NV12");
-        Ok(Self(FilterStage::new(Scaling {
-            pp_log,
-            name,
-            device: device.clone(),
-            processor,
-            _hw_device_ctx: hw_device_ctx,
-            hw_frames_ctx,
-            width,
-            height,
-            pool,
-            repeated: RepeatedOutput::new(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Scaling {
+                pp_log,
+                device: device.clone(),
+                processor,
+                _hw_device_ctx: hw_device_ctx,
+                hw_frames_ctx,
+                width,
+                height,
+                pool,
+                repeated: RepeatedOutput::new(),
+            },
+        )))
     }
 }
 
@@ -384,21 +385,6 @@ impl Scaling {
     }
 }
 
-impl Element for Scaling {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12Scaler
-    }
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Scaling {
     /// Scales on the GPU; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
@@ -441,6 +427,10 @@ impl Filter for Scaling {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
                 .with_layouts(crate::contract::PixelLayoutSet::NV12),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 
@@ -511,7 +501,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::elements::{D3d12Download, D3d12Upload};
     use crate::test_support::try_d3d12_gpu as try_device;
 

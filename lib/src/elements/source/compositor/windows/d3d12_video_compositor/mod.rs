@@ -38,8 +38,8 @@ use crate::{
     },
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, Context, Element, ElementType, Flow, Identity, Produced, RawSink, Source,
+        SourceStage, Wait, element_pp_log,
     },
     error::Result,
     platform::ffmpeg::AvBufferRef,
@@ -673,7 +673,6 @@ source_stage!(D3d12VideoCompositor);
 /// What a [`D3d12VideoCompositor`] does when asked: the next frame.
 struct Compositing {
     pp_log: PpLog,
-    name: Arc<str>,
     shared: Arc<CompositorShared>,
     options: VideoCompositorOptions,
     frame_index: i64,
@@ -729,8 +728,8 @@ impl D3d12VideoCompositor {
     ) -> std::result::Result<(Self, D3d12VideoCompositorHandle), D3d12VideoCompositorError> {
         crate::ensure_ffmpeg();
         validate_output_options(options)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12VideoCompositor, &name, None);
+        let identity = Identity::new(ElementType::D3d12VideoCompositor, name);
+        let pp_log = identity.pp_log().clone();
         let device = gpu.device().clone();
         let mut supported = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
         // SAFETY: a live device, and a correctly sized out-parameter of the
@@ -798,35 +797,37 @@ impl D3d12VideoCompositor {
             options.frame_rate
         );
         Ok((
-            Self(SourceStage::new(Compositing {
-                pp_log,
-                name,
-                shared: shared.clone(),
-                options,
-                frame_index: 0,
-                device,
-                fill,
-                layer_luma,
-                layer_chroma,
-                text_luma,
-                text_chroma,
-                commands,
-                heap: None,
-                heap_step,
-                canvas,
-                _hw_device_ctx: hw_device_ctx,
-                hw_frames_ctx,
-                composed: None,
-                output_pool: UnboundObjectPool::new(
-                    4,
-                    ffmpeg::frame::Video::empty,
-                    release_picture,
-                ),
-                reading: Vec::new(),
-                ticks: None,
-                schedule: LiveSchedule::default(),
-                bus: None,
-            })),
+            Self(SourceStage::new(
+                identity,
+                Compositing {
+                    pp_log,
+                    shared: shared.clone(),
+                    options,
+                    frame_index: 0,
+                    device,
+                    fill,
+                    layer_luma,
+                    layer_chroma,
+                    text_luma,
+                    text_chroma,
+                    commands,
+                    heap: None,
+                    heap_step,
+                    canvas,
+                    _hw_device_ctx: hw_device_ctx,
+                    hw_frames_ctx,
+                    composed: None,
+                    output_pool: UnboundObjectPool::new(
+                        4,
+                        ffmpeg::frame::Video::empty,
+                        release_picture,
+                    ),
+                    reading: Vec::new(),
+                    ticks: None,
+                    schedule: LiveSchedule::default(),
+                    bus: None,
+                },
+            )),
             D3d12VideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -1528,29 +1529,6 @@ impl Compositing {
     }
 }
 
-impl Element for Compositing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12VideoCompositor
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.ticks = Some(context.source_ticks());
-        self.bus = Some(context.bus.clone());
-    }
-}
-
 impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
@@ -1569,6 +1547,12 @@ impl Source for Compositing {
             RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.ticks = Some(cx.context().source_ticks());
+        self.bus = Some(cx.context().bus.clone());
+    }
 }
 
 impl TimedInput for VideoInput {
@@ -1583,6 +1567,10 @@ impl TimedInput for VideoInput {
 
 impl OfflineCompositor for Compositing {
     type Input = VideoInput;
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
 
     fn inputs(&self) -> Vec<Arc<VideoInput>> {
         self.shared

@@ -72,14 +72,19 @@ choosing the public API.
 
 ## Implement the data path
 
-- Store the name as `Arc<str>` and a `PpLog` from `element_pp_log`; pipeline
-  wiring stamps the identity through `pp_log_mut`.
+- A `Source`, `Filter` or `Sink` keeps no identity of its own: the
+  constructor makes `Identity::new(ElementType::…, name)`, logs through it,
+  and hands it to the stage; the element keeps `cx.pp_log()` from `attached`
+  (called again on each re-wiring) for its records, `Drop`'s included. A
+  `RawSink`/`SrcPads` element stores its name as `Arc<str>` and a `PpLog`
+  from `element_pp_log`, which wiring stamps through `pp_log_mut`.
 - Match the buffer variant before reading it; validate format, dimensions,
   bounds, device ownership and backend handles before FFI or GPU calls.
 - Preserve PTS, duration, time base and colour metadata unless the element
   deliberately starts a new timeline, and then set the new time base.
 - Read the phase — paused, prerolling, which timeline — from the
-  `PlaybackState` given in `attach_context`, never from the messages. Hold
+  `PlaybackState` given in `attach_context` (`attached`'s context for a
+  `Source`, `Filter` or `Sink`), never from the messages. Hold
   back during a phase only what the framework does not already hold
   (`OutputStash`), and hand it on as soon as the phase is over.
 - One buffer's or one input's failure is posted to the bus and the element

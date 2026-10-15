@@ -9,7 +9,7 @@ use super::options::{EffectParams, VideoEffect, apply};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -71,7 +71,6 @@ filter_stage!(SwVideoEffect);
 /// framework makes the filter.
 struct Applying {
     pp_log: PpLog,
-    name: Arc<str>,
     /// The effect in force and what it resolves to, refreshed from `control`
     /// once per frame.
     effect: VideoEffect,
@@ -92,22 +91,24 @@ impl SwVideoEffect {
     /// Creates a software video-effect filter, and the handle that retunes
     /// it while it runs.
     pub fn new(name: impl Into<String>, effect: VideoEffect) -> (Self, VideoEffectHandle) {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwVideoEffect, &name, None);
+        let identity = Identity::new(ElementType::SwVideoEffect, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "created: {} {effect:?}", effect.name());
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self(FilterStage::new(Applying {
-            name,
-            pp_log,
-            effect,
-            params: effect.params(),
-            control,
-            enabled: true,
-            dims: None,
-            pool: None,
-            repeated: RepeatedOutput::new(),
-        }));
+        let element = Self(FilterStage::new(
+            identity,
+            Applying {
+                pp_log,
+                effect,
+                params: effect.params(),
+                control,
+                enabled: true,
+                dims: None,
+                pool: None,
+                repeated: RepeatedOutput::new(),
+            },
+        ));
         (element, handle)
     }
 }
@@ -143,24 +144,6 @@ impl Applying {
             |_| {},
         ));
         self.dims = Some((width, height));
-    }
-}
-
-impl Element for Applying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwVideoEffect
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -206,6 +189,10 @@ impl Filter for Applying {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 
@@ -276,7 +263,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::elements::{ColorCorrection, LumaKey};
 
     fn new_effect(

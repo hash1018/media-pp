@@ -255,10 +255,7 @@ mod example {
                 };
                 // The file's own colours, written into the recording's
                 // headers; nothing is converted.
-                let encoder = match stream.color() {
-                    Some(color) => D3d12VideoEncoder::with_color("encoder", &gpu, options, color)?,
-                    None => D3d12VideoEncoder::new("encoder", &gpu, options)?,
-                };
+                let encoder = D3d12VideoEncoder::for_stream("encoder", &gpu, options, &stream)?;
                 let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
                 let track = muxer.add_stream(
                     "video",

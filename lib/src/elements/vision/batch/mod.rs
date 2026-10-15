@@ -23,7 +23,10 @@ use thiserror::Error as ThisError;
 use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
-    element::{BoxSink, Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{
+        Attached, BoxSink, ElementType, Identity, Produced, Source, SourceStage, Wait,
+        element_pp_log,
+    },
     elements::source::render_mode::RenderMode,
     error::Result,
     playback_state::{Bell, PlaybackState},
@@ -264,7 +267,6 @@ source_stage!(StreamMux);
 /// What a [`StreamMux`] does when asked: the next picture of a batch.
 struct Muxing {
     pp_log: PpLog,
-    name: Arc<str>,
     shared: Arc<MuxShared>,
     /// The rest of the batch being handed on.
     pending: VecDeque<MediaBuffer>,
@@ -292,8 +294,8 @@ impl StreamMux {
         if options.queue == 0 {
             return Err(StreamMuxError::InvalidOptions("queue must be at least 1"));
         }
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::StreamMux, &name, None);
+        let identity = Identity::new(ElementType::StreamMux, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "created: max_batch={}, batch_timeout={:?}, queue={}, mode={:?}",
@@ -314,35 +316,19 @@ impl StreamMux {
             shared: Arc::downgrade(&shared),
         };
         Ok((
-            Self(SourceStage::new(Muxing {
-                pp_log,
-                name,
-                shared,
-                pending: VecDeque::new(),
-                next_batch: 0,
-                cursor: 0,
-                gathering_since: None,
-            })),
+            Self(SourceStage::new(
+                identity,
+                Muxing {
+                    pp_log,
+                    shared,
+                    pending: VecDeque::new(),
+                    next_batch: 0,
+                    cursor: 0,
+                    gathering_since: None,
+                },
+            )),
             handle,
         ))
-    }
-}
-
-impl Element for Muxing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::StreamMux
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -419,6 +405,10 @@ impl Source for Muxing {
     /// A stop abandons the batch being handed on.
     fn stopping(&mut self) {
         self.pending.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

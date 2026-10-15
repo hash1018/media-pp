@@ -22,7 +22,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::AudioFormat,
     error::Result,
     platform::windows::wasapi::{
@@ -165,7 +165,6 @@ source_stage!(WasapiCaptureSource);
 /// framework makes the source.
 struct Capturing {
     pp_log: PpLog,
-    name: Arc<str>,
     audio_client: IAudioClient,
     capture_client: IAudioCaptureClient,
     sample_rate: u32,
@@ -223,8 +222,8 @@ impl WasapiCaptureSource {
         name: impl Into<String>,
         options: WasapiCaptureOptions,
     ) -> std::result::Result<(Self, AudioFormat), WasapiCaptureSourceError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::WasapiCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::WasapiCaptureSource, name);
+        let pp_log = identity.pp_log().clone();
         let _apartment = ComApartment::new()?;
 
         // SAFETY: COM is initialized on this thread. Every activated interface
@@ -270,7 +269,7 @@ impl WasapiCaptureSource {
                 audio_format.sample_format
             );
             Ok((
-                Self::assemble(name, pp_log, audio_client, capture_client, audio_format),
+                Self::assemble(identity, audio_client, capture_client, audio_format),
                 audio_format,
             ))
         }
@@ -312,8 +311,8 @@ impl WasapiCaptureSource {
         name: impl Into<String>,
         process_id: u32,
     ) -> std::result::Result<(Self, AudioFormat), WasapiCaptureSourceError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::WasapiCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::WasapiCaptureSource, name);
+        let pp_log = identity.pp_log().clone();
         let _apartment = ComApartment::new()?;
 
         let audio_client = activate_process_loopback(process_id)?;
@@ -354,32 +353,34 @@ impl WasapiCaptureSource {
             audio_format.sample_format
         );
         Ok((
-            Self::assemble(name, pp_log, audio_client, capture_client, audio_format),
+            Self::assemble(identity, audio_client, capture_client, audio_format),
             audio_format,
         ))
     }
 
     /// The parts every open ends with, whichever kind of capture it was.
     fn assemble(
-        name: Arc<str>,
-        pp_log: PpLog,
+        identity: Identity,
         audio_client: IAudioClient,
         capture_client: IAudioCaptureClient,
         audio_format: AudioFormat,
     ) -> Self {
-        Self(SourceStage::new(Capturing {
-            name,
-            pp_log,
-            audio_client,
-            capture_client,
-            sample_rate: audio_format.sample_rate,
-            format: audio_format.sample_format,
-            channel_layout: audio_format.channel_layout(),
-            samples_emitted: 0,
-            apartment: None,
-            started: None,
-            next_look: None,
-        }))
+        let pp_log = identity.pp_log().clone();
+        Self(SourceStage::new(
+            identity,
+            Capturing {
+                pp_log,
+                audio_client,
+                capture_client,
+                sample_rate: audio_format.sample_rate,
+                format: audio_format.sample_format,
+                channel_layout: audio_format.channel_layout(),
+                samples_emitted: 0,
+                apartment: None,
+                started: None,
+                next_look: None,
+            },
+        ))
     }
 
     /// The unit each emitted frame's `pts` is expressed in.
@@ -504,24 +505,6 @@ impl Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::WasapiCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -606,6 +589,10 @@ impl Source for Capturing {
             pp_error!(self, "Stop failed: {error}");
         }
         self.apartment = None;
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

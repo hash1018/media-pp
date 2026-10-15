@@ -14,7 +14,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::{CudaDriverError, CudaUploadError, Detections},
     error::Result,
     frame_size::ForSize,
@@ -113,7 +113,6 @@ filter_stage!(CudaDetectionOverlay);
 /// The masks come before the driver: fields drop in order, and the masks
 /// are freed in the driver's context, which the driver releases.
 struct Overlaying {
-    name: Arc<str>,
     pp_log: PpLog,
     options: DetectionOverlayOptions,
     font: Option<ab_glyph::FontArc>,
@@ -168,7 +167,8 @@ impl CudaDetectionOverlay {
     ) -> std::result::Result<Self, CudaDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
         options.check()?;
-        let pp_log = element_pp_log(ElementType::CudaDetectionOverlay, &name, None);
+        let identity = Identity::new(ElementType::CudaDetectionOverlay, &*name);
+        let pp_log = identity.pp_log().clone();
         // Read once at any size: each label is rasterized at its own.
         let font = options
             .font
@@ -198,23 +198,25 @@ impl CudaDetectionOverlay {
             options.others,
             font.is_some()
         );
-        Ok(Self(FilterStage::new(Overlaying {
-            name,
-            pp_log,
-            options,
-            font,
-            masks: HashMap::new(),
-            warned_names: false,
-            orientations: Orientations::default(),
-            cells,
-            driver,
-            hw_device_ctx,
-            device_ctx,
-            nv12_frames: ForSize::new(),
-            bgra_frames: ForSize::new(),
-            p010_frames: ForSize::new(),
-            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Overlaying {
+                pp_log,
+                options,
+                font,
+                masks: HashMap::new(),
+                warned_names: false,
+                orientations: Orientations::default(),
+                cells,
+                driver,
+                hw_device_ctx,
+                device_ctx,
+                nv12_frames: ForSize::new(),
+                bgra_frames: ForSize::new(),
+                p010_frames: ForSize::new(),
+                pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+            },
+        )))
     }
 }
 
@@ -613,24 +615,6 @@ impl Overlaying {
     }
 }
 
-impl Element for Overlaying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaDetectionOverlay
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Overlaying {
     /// Device-resident frames; which of the two layouts is a runtime value.
     fn input_contract(&self) -> InputContract {
@@ -689,6 +673,10 @@ impl Filter for Overlaying {
     }
 
     fn reset(&mut self) {}
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 impl Drop for Overlaying {

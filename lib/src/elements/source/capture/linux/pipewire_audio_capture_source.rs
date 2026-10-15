@@ -23,7 +23,10 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{
+        Attached, Element, ElementType, Identity, Produced, Source, SourceStage, Wait,
+        element_pp_log,
+    },
     elements::AudioFormat,
     error::Result,
     platform::linux::pipewire::{
@@ -338,7 +341,8 @@ impl PipeWireAudioCaptureSource {
         target: Target,
         described: String,
     ) -> std::result::Result<(Self, AudioFormat), PipeWireAudioCaptureSourceError> {
-        let pp_log = element_pp_log(ElementType::PipeWireAudioCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::PipeWireAudioCaptureSource, &*name);
+        let pp_log = identity.pp_log().clone();
 
         let (packet_tx, packet_rx) = crossbeam_channel::bounded(PACKET_QUEUE_CAPACITY);
         let dropped_frames = Arc::new(AtomicU64::new(0));
@@ -395,16 +399,19 @@ impl PipeWireAudioCaptureSource {
         );
 
         Ok((
-            Self(SourceStage::new(Capturing {
-                name: name.into(),
-                pp_log,
-                format,
-                bus: None,
-                packets: packet_rx,
-                dropped_frames,
-                commands: Some(command_tx),
-                worker: Some(worker),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    name: name.into(),
+                    pp_log,
+                    format,
+                    bus: None,
+                    packets: packet_rx,
+                    dropped_frames,
+                    commands: Some(command_tx),
+                    worker: Some(worker),
+                },
+            )),
             format,
         ))
     }
@@ -500,28 +507,6 @@ impl Drop for Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::PipeWireAudioCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.bus = Some(context.bus.for_element(context.source_id));
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -590,6 +575,11 @@ impl Source for Capturing {
 
         let frame = build_frame(&self.format, &packet);
         Ok(Produced::Buffer(MediaBuffer::Audio(Arc::new(frame).into())))
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.bus = Some(cx.context().bus.for_element(cx.context().source_id));
     }
 }
 

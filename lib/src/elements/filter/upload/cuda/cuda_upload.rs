@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::filter::upload::nv12,
     error::Result,
     frame_size::ForSize,
@@ -128,7 +128,6 @@ filter_stage!(CudaUpload);
 /// framework makes the filter.
 struct Uploading {
     pp_log: PpLog,
-    name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
     hw_device_ctx: Arc<AvBufferRef>,
     /// The pool uploaded frames are allocated from. A frames context's
@@ -161,23 +160,25 @@ impl CudaUpload {
     /// this pipeline was built from. This element takes its own FFmpeg
     /// reference, so `device` itself need not outlive the call.
     pub fn new(name: impl Into<String>, device: &CudaDevice, format: CudaFrameFormat) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaUpload, &name, None);
+        let identity = Identity::new(ElementType::CudaUpload, name);
+        let pp_log = identity.pp_log().clone();
 
         let hw_device_ctx = device.retain();
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {:?} -> CUDA", format.pixel());
-        Self(FilterStage::new(Uploading {
-            name,
-            pp_log,
-            hw_device_ctx,
-            hw_frames_ctx: ForSize::new(),
-            format,
-            pool,
-            staging: None,
-            repeated: RepeatedOutput::new(),
-        }))
+        Self(FilterStage::new(
+            identity,
+            Uploading {
+                pp_log,
+                hw_device_ctx,
+                hw_frames_ctx: ForSize::new(),
+                format,
+                pool,
+                staging: None,
+                repeated: RepeatedOutput::new(),
+            },
+        ))
     }
 }
 
@@ -290,24 +291,6 @@ impl PerFrameTransform for Uploading {
     }
 }
 
-impl Element for Uploading {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaUpload
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Uploading {
     /// CPU-readable planes: uploading is what this does, so a frame already in device memory has no work here.
     fn input_contract(&self) -> InputContract {
@@ -350,6 +333,10 @@ impl Filter for Uploading {
                 .with_layouts(self.format.layouts()),
         )
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 impl Drop for Uploading {
@@ -364,7 +351,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::test_support::try_cuda_device;
 
     fn nv12_frame(width: u32, height: u32, pts: i64) -> MediaBuffer {

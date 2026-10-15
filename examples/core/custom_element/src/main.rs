@@ -14,8 +14,11 @@
 //! Each declares what it takes and hands on, so a wrong link is refused
 //! before the pipeline starts. None of them sees a control message: the
 //! framework runs the source's loop, hands the end of the stream on after
-//! the filter's `drain`, and holds the terminal while paused. `main` checks
-//! that every picture arrived, in order, inverted.
+//! the filter's `drain`, and holds the terminal while paused. Nor does any
+//! of them keep a name: each goes by its type's, or by the one `named`
+//! gives it, and `Brightness` keeps the log identity it is handed as it is
+//! wired, to say in the log how many pictures it saw. `main` checks that
+//! every picture arrived, in order, inverted.
 //!
 //!     cargo run -p custom_element -- [pictures]
 //!
@@ -41,12 +44,10 @@ mod example {
             InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
             PortContract,
         },
-        element::{
-            Element, ElementType, Filter, Output, Produced, Sink, Source, Wait, element_pp_log,
-        },
+        element::{Attached, Filter, Output, Produced, Sink, Source, Wait},
         ffmpeg::{self, format::Pixel, frame::Video},
         pipeline::Pipeline,
-        pp_log::PpLog,
+        pp_log::{PpLog, pp_info},
     };
 
     const WIDTH: u32 = 320;
@@ -83,9 +84,14 @@ mod example {
             },
         };
 
-        let (brightness, seen) = Brightness::new("brightness");
-        let (pipeline, ()) = Pipeline::new("custom", Ramp::new("ramp", count), |ramp, ctx| {
-            let branch = ctx.branch().pipe(Invert::new("invert")).to(brightness)?;
+        let (brightness, seen) = Brightness::new();
+        let (pipeline, ()) = Pipeline::new("custom", Ramp::new(count), |ramp, ctx| {
+            // Each goes by its type's name — `Ramp`, `Invert` — unless
+            // named, which tells two of the same apart in the log.
+            let branch = ctx
+                .branch()
+                .pipe(Invert)
+                .to(brightness.named("brightness"))?;
             ctx.attach(ramp, 0, branch)?;
             Ok(())
         })?;
@@ -119,8 +125,6 @@ mod example {
 
     /// A source: `count` grey pictures at [`RATE`] a second.
     struct Ramp {
-        name: Arc<str>,
-        pp_log: PpLog,
         count: u64,
         next: u64,
         /// When the first picture was due, on the clock [`Wait::now`]
@@ -130,29 +134,12 @@ mod example {
     }
 
     impl Ramp {
-        fn new(name: &str, count: u64) -> Self {
+        fn new(count: u64) -> Self {
             Self {
-                name: name.into(),
-                pp_log: element_pp_log(ElementType::Other, name, None),
                 count,
                 next: 0,
                 start: None,
             }
-        }
-    }
-
-    impl Element for Ramp {
-        fn name(&self) -> Arc<str> {
-            self.name.clone()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
         }
     }
 
@@ -191,35 +178,9 @@ mod example {
         }
     }
 
-    /// A filter: each picture's negative.
-    struct Invert {
-        name: Arc<str>,
-        pp_log: PpLog,
-    }
-
-    impl Invert {
-        fn new(name: &str) -> Self {
-            Self {
-                name: name.into(),
-                pp_log: element_pp_log(ElementType::Other, name, None),
-            }
-        }
-    }
-
-    impl Element for Invert {
-        fn name(&self) -> Arc<str> {
-            self.name.clone()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
+    /// A filter: each picture's negative. It keeps nothing — not even a
+    /// name.
+    struct Invert;
 
     impl Filter for Invert {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
@@ -227,15 +188,13 @@ mod example {
             // a buffer is still checked before it is read.
             let MediaBuffer::Video(picture) = &buf else {
                 return Err(Error::Other(format!(
-                    "{} takes pictures, got {}",
-                    self.name,
+                    "Invert takes pictures, got {}",
                     buf.kind()
                 )));
             };
             if picture.format() != Pixel::YUV420P {
                 return Err(Error::Other(format!(
-                    "{} takes YUV420P, got {:?}",
-                    self.name,
+                    "Invert takes YUV420P, got {:?}",
                     picture.format()
                 )));
             }
@@ -282,35 +241,20 @@ mod example {
 
     /// A terminal: each picture's average luma.
     struct Brightness {
-        name: Arc<str>,
-        pp_log: PpLog,
+        /// Who it is in the pipeline, kept from [`Sink::attached`] for its
+        /// log records — `None` until it is wired.
+        pp_log: Option<PpLog>,
         seen: Seen,
     }
 
     impl Brightness {
-        fn new(name: &str) -> (Self, Seen) {
+        fn new() -> (Self, Seen) {
             let seen = Seen::default();
             let sink = Self {
-                name: name.into(),
-                pp_log: element_pp_log(ElementType::Other, name, None),
+                pp_log: None,
                 seen: seen.clone(),
             };
             (sink, seen)
-        }
-    }
-
-    impl Element for Brightness {
-        fn name(&self) -> Arc<str> {
-            self.name.clone()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
         }
     }
 
@@ -318,8 +262,7 @@ mod example {
         fn render(&mut self, buf: MediaBuffer) -> Result<()> {
             let MediaBuffer::Video(picture) = &buf else {
                 return Err(Error::Other(format!(
-                    "{} takes pictures, got {}",
-                    self.name,
+                    "Brightness takes pictures, got {}",
                     buf.kind()
                 )));
             };
@@ -338,6 +281,15 @@ mod example {
             Ok(())
         }
 
+        /// The end of the stream: said once, not a line a picture.
+        fn drain(&mut self) -> Result<()> {
+            if let Some(pp_log) = &self.pp_log {
+                let seen = self.seen.lock().unwrap().len();
+                pp_info!(pp_log: pp_log, "drained: {seen} pictures seen");
+            }
+            Ok(())
+        }
+
         /// A seek starts the stream again: what was seen before it is no
         /// longer what the pipeline shows.
         fn reset(&mut self) -> Result<()> {
@@ -353,6 +305,12 @@ mod example {
 
         fn input_contract(&self) -> InputContract {
             InputContract::Fixed(PICTURES)
+        }
+
+        /// Wired into a pipeline: keeps who it is there, which its log
+        /// records name — the pipeline, `Other`, and `brightness`.
+        fn attached(&mut self, cx: &Attached<'_>) {
+            self.pp_log = Some(cx.pp_log().clone());
         }
     }
 }

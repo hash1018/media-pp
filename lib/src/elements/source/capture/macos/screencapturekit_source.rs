@@ -32,7 +32,7 @@ use crate::rate::{FrameRate, FrameRateHandle};
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
     contract::{MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::{ScreenCaptureKitDisplay, ScreenCaptureKitWindow, VideoFormat},
     error::Result,
     platform::macos::{
@@ -331,7 +331,6 @@ enum Output {
 /// What a [`ScreenCaptureKitSource`] hands on, a picture a tick: all of its
 /// work, which the framework makes the source.
 struct Capturing {
-    name: Arc<str>,
     pp_log: PpLog,
     stream: Retained<SCStream>,
     /// Kept for as long as the stream delivers through them.
@@ -440,7 +439,8 @@ impl ScreenCaptureKitSource {
             return Err(ScreenCaptureKitSourceError::InvalidFrameRate(rate));
         }
         let name: Arc<str> = name.into();
-        let pp_log = element_pp_log(ElementType::ScreenCaptureKitSource, &name, None);
+        let identity = Identity::new(ElementType::ScreenCaptureKitSource, &*name);
+        let pp_log = identity.pp_log().clone();
         let content = shareable_content()?;
 
         // SAFETY: fresh content filters made of the content's own live
@@ -538,27 +538,29 @@ impl ScreenCaptureKitSource {
             options.include_cursor
         );
         Ok((
-            Self(SourceStage::new(Capturing {
-                name,
-                pp_log,
-                stream,
-                _delegate: delegate,
-                _queue: queue,
-                running: false,
-                latest,
-                output,
-                schedule: LiveSchedule::default(),
-                frame_rate: FrameRate::new(rate),
-                frame_index: 0,
-                wrapper_pool: UnboundObjectPool::new(
-                    0,
-                    ffmpeg::frame::Video::empty,
-                    release_picture,
-                ),
-                last_picture: None,
-                picture_captures: 0,
-                retired: Vec::new(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    pp_log,
+                    stream,
+                    _delegate: delegate,
+                    _queue: queue,
+                    running: false,
+                    latest,
+                    output,
+                    schedule: LiveSchedule::default(),
+                    frame_rate: FrameRate::new(rate),
+                    frame_index: 0,
+                    wrapper_pool: UnboundObjectPool::new(
+                        0,
+                        ffmpeg::frame::Video::empty,
+                        release_picture,
+                    ),
+                    last_picture: None,
+                    picture_captures: 0,
+                    retired: Vec::new(),
+                },
+            )),
             format,
         ))
     }
@@ -718,24 +720,6 @@ impl Drop for Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::ScreenCaptureKitSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -789,6 +773,10 @@ impl Source for Capturing {
 
     fn stopping(&mut self) {
         self.stop();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

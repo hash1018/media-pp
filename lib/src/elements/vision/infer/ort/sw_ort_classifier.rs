@@ -11,7 +11,7 @@ use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::{Classification, Detections},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -77,8 +77,9 @@ impl SwOrtClassifier {
             .map_err(OrtError::from)?;
         let input = classifier_input(&session)?;
         let labels = labels(options.labels.as_deref(), &session);
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwOrtClassifier, &name, None);
+        let identity = Identity::new(ElementType::SwOrtClassifier, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "model loaded: path={path}, input={}x{}, batch={:?}, {} labels, {:?}",
@@ -94,17 +95,20 @@ impl SwOrtClassifier {
                 "the model names no classes and none were given: answers carry class numbers only"
             );
         }
-        Ok(Self(FilterStage::new(Classifying {
-            name,
-            pp_log,
-            session,
-            options,
-            labels,
-            input,
-            memory: Memory::default(),
-            converting: ToRgb::default(),
-            orientations: Orientations::default(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Classifying {
+                name,
+                pp_log,
+                session,
+                options,
+                labels,
+                input,
+                memory: Memory::default(),
+                converting: ToRgb::default(),
+                orientations: Orientations::default(),
+            },
+        )))
     }
 }
 
@@ -222,24 +226,6 @@ fn cut(
     }
 }
 
-impl Element for Classifying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwOrtClassifier
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Classifying {
     /// Decoded video in system memory, any pixel layout.
     fn input_contract(&self) -> InputContract {
@@ -303,6 +289,10 @@ impl Filter for Classifying {
     /// A seek or a flush: the objects after it are numbered anew.
     fn reset(&mut self) {
         self.memory.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

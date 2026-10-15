@@ -20,7 +20,7 @@ use crate::{
     buffer::{MediaBuffer, Metadata},
     bus::BusEvent,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Context, Element, ElementType, element_pp_log},
+    element::{Attached, Context, ElementType, Identity},
     error::Result,
     platform::cuda::{
         CudaDevice,
@@ -266,8 +266,9 @@ impl CudaOrtDetector {
         model_path: impl AsRef<Path>,
         options: CudaOrtDetectorOptions,
     ) -> Result<Self> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaOrtDetector, &name, None);
+        let identity = Identity::new(ElementType::CudaOrtDetector, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let path = model_path.as_ref().display().to_string();
         if options.max_batch == 0 {
             return Err(OrtDetectorError::ZeroMaxBatch.into());
@@ -419,34 +420,37 @@ impl CudaOrtDetector {
             );
         }
         let interval = Interval::new(options.detector.interval);
-        Ok(Self(FilterStage::new(Detecting {
-            name,
-            pp_log,
-            session,
-            values: options.detector.model.input(),
-            decoder: options.detector.model.decoder(model),
-            faces: matches!(options.detector.model, DetectorModel::RetinaFace)
-                .then(|| (RetinaFace::new(model), None)),
-            options: options.detector,
-            labels,
-            model,
-            tensor,
-            kernels,
-            sdr: super::SdrCopy::default(),
-            driver,
-            memory,
-            device_ctx,
-            _hw_device_ctx: hw_device_ctx,
-            interval,
-            orientations: Orientations::default(),
-            max_batch,
-            held: Vec::new(),
-            context: None,
-            input_name,
-            output_names,
-            best: None,
-            host: Vec::new(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Detecting {
+                name,
+                pp_log,
+                session,
+                values: options.detector.model.input(),
+                decoder: options.detector.model.decoder(model),
+                faces: matches!(options.detector.model, DetectorModel::RetinaFace)
+                    .then(|| (RetinaFace::new(model), None)),
+                options: options.detector,
+                labels,
+                model,
+                tensor,
+                kernels,
+                sdr: super::SdrCopy::default(),
+                driver,
+                memory,
+                device_ctx,
+                _hw_device_ctx: hw_device_ctx,
+                interval,
+                orientations: Orientations::default(),
+                max_batch,
+                held: Vec::new(),
+                context: None,
+                input_name,
+                output_names,
+                best: None,
+                host: Vec::new(),
+            },
+        )))
     }
 }
 
@@ -855,28 +859,6 @@ impl Detecting {
     }
 }
 
-impl Element for Detecting {
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.context = Some(Arc::clone(context));
-    }
-
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaOrtDetector
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Detecting {
     /// Decoded NV12 or BGRA video on the GPU.
     fn input_contract(&self) -> InputContract {
@@ -950,6 +932,11 @@ impl Filter for Detecting {
     fn reset(&mut self) {
         self.held.clear();
         self.interval.restart();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.context = Some(Arc::clone(cx.context()));
     }
 }
 

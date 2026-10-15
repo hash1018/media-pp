@@ -14,7 +14,7 @@ use windows::Win32::Graphics::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::filter::upload::nv12,
     error::Result,
     platform::windows::{d3d11_gpu::D3d11Gpu, d3d11va::wrap_d3d11_texture},
@@ -118,7 +118,6 @@ filter_stage!(D3d11Upload);
 /// framework makes the filter.
 struct Uploading {
     pp_log: PpLog,
-    name: Arc<str>,
     device: ID3D11Device,
     /// Reused across every uploaded frame — see [`UnboundObjectPool`]'s
     /// docs. Only the small CPU-side `AVFrame` wrapper is actually reused
@@ -145,17 +144,19 @@ impl D3d11Upload {
     /// still alive downstream, needs it.
     pub fn new(name: impl Into<String>, gpu: &D3d11Gpu) -> Self {
         let device = gpu.device();
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11Upload, &name, None);
+        let identity = Identity::new(ElementType::D3d11Upload, name);
+        let pp_log = identity.pp_log().clone();
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened");
-        Self(FilterStage::new(Uploading {
-            name,
-            pp_log,
-            device: device.clone(),
-            pool,
-            repeated: RepeatedOutput::new(),
-        }))
+        Self(FilterStage::new(
+            identity,
+            Uploading {
+                pp_log,
+                device: device.clone(),
+                pool,
+                repeated: RepeatedOutput::new(),
+            },
+        ))
     }
 }
 
@@ -294,24 +295,6 @@ fn texture_format(format: ffmpeg::format::Pixel) -> Option<DXGI_FORMAT> {
     }
 }
 
-impl Element for Uploading {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d11Upload
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Uploading {
     /// CPU-readable planes specifically: uploading is what this element does, so a frame already on the device has no work here.
     fn input_contract(&self) -> InputContract {
@@ -360,6 +343,10 @@ impl Filter for Uploading {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
                 .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

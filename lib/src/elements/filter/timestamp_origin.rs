@@ -7,7 +7,7 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     transform::{FilterStage, filter_stage},
 };
@@ -88,7 +88,6 @@ filter_stage!(TimestampOrigin);
 /// the framework makes the filter.
 struct Rebasing {
     pp_log: PpLog,
-    name: Arc<str>,
     /// The first timestamp seen, subtracted from every packet after it.
     /// `None` until the first packet that carries one.
     origin: Option<i64>,
@@ -98,13 +97,15 @@ impl TimestampOrigin {
     /// A filter that starts its packets' timestamps from zero, from the
     /// first one it sees.
     pub fn new(name: impl Into<String>) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::TimestampOrigin, &name, None);
-        Self(FilterStage::new(Rebasing {
-            pp_log,
-            name,
-            origin: None,
-        }))
+        let identity = Identity::new(ElementType::TimestampOrigin, name);
+        let pp_log = identity.pp_log().clone();
+        Self(FilterStage::new(
+            identity,
+            Rebasing {
+                pp_log,
+                origin: None,
+            },
+        ))
     }
 }
 
@@ -133,24 +134,6 @@ impl Rebasing {
         self.origin = Some(first);
         pp_info!(self, "timeline starts at {first}");
         Some(first)
-    }
-}
-
-impl Element for Rebasing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::TimestampOrigin
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -201,6 +184,10 @@ impl Filter for Rebasing {
     fn stopping(&mut self) {
         self.origin = None;
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -210,7 +197,7 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::{RawSink, RawSinkExt, SrcPads};
+    use crate::element::{RawSink, RawSinkExt, SrcPads, element_pp_log};
 
     fn capture(element: &mut TimestampOrigin) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));

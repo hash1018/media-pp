@@ -10,7 +10,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract, check_link,
     },
-    element::{Element, ElementType, Filter, Output, RawSink, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output, RawSink},
     error::Result,
     frame_size::{ForSize, OutputSize},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -81,7 +81,6 @@ filter_stage!(SwScaler);
 /// framework makes the filter.
 struct Scaling {
     pp_log: PpLog,
-    name: Arc<str>,
     dst_format: ffmpeg::format::Pixel,
     /// What size each output frame is — see the two constructors.
     size: OutputSize,
@@ -209,8 +208,8 @@ impl SwScaler {
         size: OutputSize,
         flags: ffmpeg::software::scaling::Flags,
     ) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwScaler, &name, None);
+        let identity = Identity::new(ElementType::SwScaler, name);
+        let pp_log = identity.pp_log().clone();
         match size {
             OutputSize::Fixed { width, height } => pp_info!(
                 pp_log: &pp_log,
@@ -221,17 +220,19 @@ impl SwScaler {
                 "created: dst_format={dst_format:?}, dst=the input's own size"
             ),
         }
-        Self(FilterStage::new(Scaling {
-            name,
-            pp_log,
-            dst_format,
-            size,
-            flags,
-            context: None,
-            colour: None,
-            pool: ForSize::new(),
-            repeated: RepeatedOutput::new(),
-        }))
+        Self(FilterStage::new(
+            identity,
+            Scaling {
+                pp_log,
+                dst_format,
+                size,
+                flags,
+                context: None,
+                colour: None,
+                pool: ForSize::new(),
+                repeated: RepeatedOutput::new(),
+            },
+        ))
     }
 }
 
@@ -249,24 +250,6 @@ impl Scaling {
             }
             None => false,
         }
-    }
-}
-
-impl Element for Scaling {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwScaler
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -313,6 +296,10 @@ impl Filter for Scaling {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
                 .with_layouts(PixelLayoutSet::of(PixelLayout::of(self.dst_format))),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 
@@ -544,6 +531,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::element::{Element, element_pp_log};
 
     fn video_frame(
         format: ffmpeg::format::Pixel,

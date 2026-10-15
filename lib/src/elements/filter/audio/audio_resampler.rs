@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::AudioFormat,
     error::Result,
     time::{MediaTimestamp, TimeBase},
@@ -165,7 +165,6 @@ filter_stage!(AudioResampler);
 /// framework makes the filter.
 struct Resampling {
     pp_log: PpLog,
-    name: Arc<str>,
     target: AudioFormat,
     resampler: AudioFrameResampler,
     next_pts: Option<i64>,
@@ -176,8 +175,8 @@ impl AudioResampler {
     /// and the unit of its timestamps are read off each frame.
     pub fn new(name: impl Into<String>, target: AudioFormat) -> Self {
         crate::ensure_ffmpeg();
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::AudioResampler, &name, None);
+        let identity = Identity::new(ElementType::AudioResampler, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "created: {}Hz, {} channel(s), format={:?}",
@@ -185,13 +184,15 @@ impl AudioResampler {
             target.channels(),
             target.sample_format
         );
-        Self(FilterStage::new(Resampling {
-            name,
-            pp_log,
-            target,
-            resampler: AudioFrameResampler::new(target),
-            next_pts: None,
-        }))
+        Self(FilterStage::new(
+            identity,
+            Resampling {
+                pp_log,
+                target,
+                resampler: AudioFrameResampler::new(target),
+                next_pts: None,
+            },
+        ))
     }
 
     /// Returns the fixed output audio format.
@@ -248,24 +249,6 @@ impl Resampling {
     }
 }
 
-impl Element for Resampling {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AudioResampler
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Resampling {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
@@ -312,6 +295,10 @@ impl Filter for Resampling {
         self.resampler.reset();
         self.next_pts = None;
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -322,7 +309,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
 
     fn f32_packed_frame(rate: u32, channels: u16, samples: usize, pts: i64) -> MediaBuffer {
         let format = ffmpeg::format::Sample::F32(Type::Packed);

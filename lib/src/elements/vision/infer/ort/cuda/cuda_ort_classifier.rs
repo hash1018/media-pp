@@ -15,7 +15,7 @@ use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::{Classification, Detections},
     error::Result,
     platform::cuda::{
@@ -111,8 +111,9 @@ impl CudaOrtClassifier {
         model_path: impl AsRef<Path>,
         options: OrtClassifierOptions,
     ) -> Result<Self> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaOrtClassifier, &name, None);
+        let identity = Identity::new(ElementType::CudaOrtClassifier, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let path = model_path.as_ref().display().to_string();
 
         let model_path = model_path.as_ref();
@@ -154,24 +155,27 @@ impl CudaOrtClassifier {
                 "the model names no classes and none were given: answers carry class numbers only"
             );
         }
-        Ok(Self(FilterStage::new(Classifying {
-            name,
-            pp_log,
-            session,
-            options,
-            labels,
-            input,
-            capacity,
-            memory: Memory::default(),
-            tensor,
-            kernels,
-            sdr: super::SdrCopy::default(),
-            driver,
-            device_memory,
-            device_ctx,
-            _hw_device_ctx: hw_device_ctx,
-            orientations: Orientations::default(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Classifying {
+                name,
+                pp_log,
+                session,
+                options,
+                labels,
+                input,
+                capacity,
+                memory: Memory::default(),
+                tensor,
+                kernels,
+                sdr: super::SdrCopy::default(),
+                driver,
+                device_memory,
+                device_ctx,
+                _hw_device_ctx: hw_device_ctx,
+                orientations: Orientations::default(),
+            },
+        )))
     }
 }
 
@@ -307,24 +311,6 @@ impl Classifying {
     }
 }
 
-impl Element for Classifying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaOrtClassifier
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Classifying {
     /// Device-resident frames; which of the two layouts is a runtime value.
     fn input_contract(&self) -> InputContract {
@@ -385,6 +371,10 @@ impl Filter for Classifying {
     /// A seek or a flush: the objects after it are numbered anew.
     fn reset(&mut self) {
         self.memory.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

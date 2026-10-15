@@ -10,7 +10,7 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
@@ -83,7 +83,6 @@ filter_stage!(CudaVideoEffect);
 /// framework makes the filter.
 struct Applying {
     pp_log: PpLog,
-    name: Arc<str>,
     /// This element's own reference to the shared context, released in
     /// `Drop`.
     hw_device_ctx: Arc<AvBufferRef>,
@@ -127,8 +126,8 @@ impl CudaVideoEffect {
         device: &CudaDevice,
         effect: VideoEffect,
     ) -> std::result::Result<(Self, VideoEffectHandle), CudaVideoEffectError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaVideoEffect, &name, None);
+        let identity = Identity::new(ElementType::CudaVideoEffect, name);
+        let pp_log = identity.pp_log().clone();
 
         let driver = CudaDriver::retain_primary()?;
         let hw_device_ctx = device.retain();
@@ -143,20 +142,22 @@ impl CudaVideoEffect {
 
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
-        let element = Self(FilterStage::new(Applying {
-            name,
-            pp_log,
-            hw_device_ctx,
-            hw_frames_ctx: ForSize::new(),
-            device_ctx,
-            driver,
-            effect,
-            params: effect.params(),
-            control,
-            enabled: true,
-            repeated: RepeatedOutput::new(),
-            pool,
-        }));
+        let element = Self(FilterStage::new(
+            identity,
+            Applying {
+                pp_log,
+                hw_device_ctx,
+                hw_frames_ctx: ForSize::new(),
+                device_ctx,
+                driver,
+                effect,
+                params: effect.params(),
+                control,
+                enabled: true,
+                repeated: RepeatedOutput::new(),
+                pool,
+            },
+        ));
         Ok((element, handle))
     }
 }
@@ -286,24 +287,6 @@ impl PerFrameTransform for Applying {
     }
 }
 
-impl Element for Applying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaVideoEffect
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Applying {
     /// Device-resident frames; the surface layout it needs is a runtime
     /// value, not part of this.
@@ -344,6 +327,10 @@ impl Filter for Applying {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

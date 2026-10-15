@@ -28,7 +28,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::{AudioFormat, CoreAudioDevice, CoreAudioDeviceKind, CoreAudioProcess},
     error::Result,
     platform::macos::coreaudio::{self, HalUnit, OsStatusError, ProcessTap, Refcon, TapError},
@@ -512,7 +512,8 @@ impl CoreAudioCaptureSource {
         tap: Option<ProcessTap>,
     ) -> std::result::Result<(Self, AudioFormat), CoreAudioCaptureSourceError> {
         let name: Arc<str> = name.into();
-        let pp_log = element_pp_log(ElementType::CoreAudioCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::CoreAudioCaptureSource, &*name);
+        let pp_log = identity.pp_log().clone();
         let channels = coreaudio::input_channels(device_id)?;
         if channels == 0 {
             return Err(CoreAudioCaptureSourceError::NoInputChannels(device_name));
@@ -545,23 +546,26 @@ impl CoreAudioCaptureSource {
             format.sample_format
         );
         Ok((
-            Self(SourceStage::new(Capturing {
-                name,
-                pp_log,
-                format,
-                device_id,
-                device_name,
-                bus: None,
-                unit,
-                tap,
-                shared,
-                running: false,
-                heard_from: None,
-                started: None,
-                last_packet: None,
-                silence: 0,
-                next_pts: 0,
-            })),
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    name,
+                    pp_log,
+                    format,
+                    device_id,
+                    device_name,
+                    bus: None,
+                    unit,
+                    tap,
+                    shared,
+                    running: false,
+                    heard_from: None,
+                    started: None,
+                    last_packet: None,
+                    silence: 0,
+                    next_pts: 0,
+                },
+            )),
             format,
         ))
     }
@@ -730,28 +734,6 @@ impl Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CoreAudioCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.bus = Some(context.bus.for_element(context.source_id));
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -811,6 +793,11 @@ impl Source for Capturing {
         if let Err(error) = self.stop() {
             pp_error!(self, "stopping the device failed: {error}");
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.bus = Some(cx.context().bus.for_element(cx.context().source_id));
     }
 }
 

@@ -1,7 +1,6 @@
 //! [`MfVirtualCamera`]: a pipeline's pictures as a camera other
 //! applications can open.
 
-use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -32,7 +31,7 @@ use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Attached, ElementType, Identity, Sink},
     elements::filter::scaler::{is_rgb, matrix},
     error::Result,
     platform::windows::com::ComApartment,
@@ -121,7 +120,6 @@ pub enum MfVirtualCameraError {
 
 /// What an [`MfVirtualCamera`] does with each picture.
 struct Feeding {
-    name: Arc<str>,
     pp_log: PpLog,
     /// The thread keeping the camera registered; `None` only in tests,
     /// which play the camera's part themselves.
@@ -159,8 +157,8 @@ impl MfVirtualCamera {
     /// Virtual Camera" — for the current user, for as long as the element
     /// lives.
     pub fn new(name: impl Into<String>, friendly_name: &str) -> Result<Self> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MfVirtualCamera, &name, None);
+        let identity = Identity::new(ElementType::MfVirtualCamera, name);
+        let pp_log = identity.pp_log().clone();
         if !installed() {
             return Err(MfVirtualCameraError::NotInstalled {
                 clsid: protocol::CLSID,
@@ -170,34 +168,37 @@ impl MfVirtualCamera {
         let writer = Writer::claim(protocol::WRITER_NAME)?;
         let camera = Camera::start(friendly_name)?;
         pp_info!(pp_log: &pp_log, "created: camera \"{friendly_name}\" registered");
-        Ok(Self(SinkStage::new(Feeding {
-            name,
-            pp_log,
-            _camera: Some(camera),
-            _writer: Some(writer),
-            section_name: protocol::SECTION_NAME,
-            section: None,
-            looked_at: None,
-            conversion: None,
-        })))
+        Ok(Self(SinkStage::new(
+            identity,
+            Feeding {
+                pp_log,
+                _camera: Some(camera),
+                _writer: Some(writer),
+                section_name: protocol::SECTION_NAME,
+                section: None,
+                looked_at: None,
+                conversion: None,
+            },
+        )))
     }
 
     /// The element without a camera, writing to the section `section_name`
     /// that a test creates.
     #[cfg(test)]
     fn for_section(section_name: &'static str) -> Self {
-        let name: Arc<str> = "camera".into();
-        let pp_log = element_pp_log(ElementType::MfVirtualCamera, &name, None);
-        Self(SinkStage::new(Feeding {
-            name,
-            pp_log,
-            _camera: None,
-            _writer: None,
-            section_name,
-            section: None,
-            looked_at: None,
-            conversion: None,
-        }))
+        let identity = Identity::new(ElementType::MfVirtualCamera, "camera");
+        Self(SinkStage::new(
+            identity.clone(),
+            Feeding {
+                pp_log: identity.pp_log().clone(),
+                _camera: None,
+                _writer: None,
+                section_name,
+                section: None,
+                looked_at: None,
+                conversion: None,
+            },
+        ))
     }
 }
 
@@ -545,24 +546,6 @@ fn pack_nv12(frame: &ffmpeg::frame::Video, into: &mut [u8]) {
     }
 }
 
-impl Element for Feeding {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MfVirtualCamera
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Sink for Feeding {
     /// Decoded video in system memory, any pixel layout: each picture is
     /// converted to whatever the reading application asked for.
@@ -605,11 +588,15 @@ impl Sink for Feeding {
         }
         Ok(())
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, atomic::Ordering};
 
     use windows::Win32::{
         Foundation::INVALID_HANDLE_VALUE,

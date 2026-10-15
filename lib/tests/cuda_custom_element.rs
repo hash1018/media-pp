@@ -26,7 +26,7 @@ use media_pp::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Filter, Output, Produced, Sink, Source, Wait, element_pp_log},
+    element::{Filter, Output, Produced, Sink, Source, Wait},
     elements::{
         CudaDetectionOverlay, CudaDevice, CudaDownload, CudaFrameFormat, CudaFramePool,
         CudaSurfaceView, CudaUpload, Detection, DetectionOverlayOptions, Detections, Hiding,
@@ -34,7 +34,6 @@ use media_pp::{
     },
     ffmpeg::{self, ffi, format::Pixel, frame::Video},
     pipeline::Pipeline,
-    pp_log::PpLog,
 };
 
 const WIDTH: u32 = 64;
@@ -165,36 +164,10 @@ impl Drop for Driver {
     }
 }
 
-fn identity(name: &str) -> (Arc<str>, PpLog) {
-    (name.into(), element_pp_log(ElementType::Other, name, None))
-}
-
-macro_rules! element {
-    ($type:ty) => {
-        impl Element for $type {
-            fn name(&self) -> Arc<str> {
-                self.name.clone()
-            }
-            fn element_type(&self) -> ElementType {
-                ElementType::Other
-            }
-            fn pp_log(&self) -> &PpLog {
-                &self.pp_log
-            }
-            fn pp_log_mut(&mut self) -> &mut PpLog {
-                &mut self.pp_log
-            }
-        }
-    };
-}
-
 /// `PICTURES` grey NV12 pictures in system memory.
 struct Pictures {
-    name: Arc<str>,
-    pp_log: PpLog,
     next: i64,
 }
-element!(Pictures);
 
 impl Source for Pictures {
     /// Made as fast as they are asked for, as a file is read.
@@ -219,13 +192,10 @@ impl Source for Pictures {
 /// The application's own element: a copy of each picture with a black
 /// square on it, carrying a box for the overlay.
 struct Mark {
-    name: Arc<str>,
-    pp_log: PpLog,
     device: CudaDevice,
     driver: Driver,
     pool: Option<CudaFramePool>,
 }
-element!(Mark);
 
 impl Mark {
     fn mark(&mut self, picture: &Video) -> Result<MediaBuffer> {
@@ -291,7 +261,7 @@ impl Mark {
         // SAFETY: two live, distinct frames.
         unsafe { ffi::av_frame_copy_props(marked.as_mut_ptr(), picture.as_ptr()) };
         let found = Detections::new(
-            self.name.clone(),
+            Arc::from("mark"),
             Arc::from([Arc::from("thing")]),
             vec![Detection::new(0, 0.9, 0.5, 0.5, 0.25, 0.25)],
         );
@@ -330,11 +300,8 @@ impl Filter for Mark {
 type Seen = Arc<Mutex<Vec<(Option<i64>, Vec<u8>, usize)>>>;
 
 struct Collect {
-    name: Arc<str>,
-    pp_log: PpLog,
     seen: Seen,
 }
-element!(Collect);
 
 impl Sink for Collect {
     fn render(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -376,43 +343,34 @@ fn an_application_element_works_on_cuda_pictures_between_this_crates_own() {
         },
     )
     .expect("overlay");
-    let (name, pp_log) = identity("mark");
     let mark = Mark {
-        name,
-        pp_log,
         device: device.clone(),
         driver,
         pool: None,
     };
-    let (name, pp_log) = identity("pictures");
-    let pictures = Pictures {
-        name,
-        pp_log,
-        next: 0,
-    };
+    let pictures = Pictures { next: 0 };
     let seen = Seen::default();
-    let (name, pp_log) = identity("collect");
-    let collect = Collect {
-        name,
-        pp_log,
-        seen: seen.clone(),
-    };
+    let collect = Collect { seen: seen.clone() };
 
-    let (pipeline, ()) = Pipeline::new("custom-cuda", pictures, |pictures, ctx| {
-        let branch = ctx
-            .branch()
-            .pipe(CudaUpload::new("upload", &device, CudaFrameFormat::Nv12))
-            .pipe(mark)
-            .pipe(overlay)
-            .pipe(CudaDownload::new(
-                "download",
-                &device,
-                CudaFrameFormat::Nv12,
-            ))
-            .to(collect)?;
-        ctx.attach(pictures, 0, branch)?;
-        Ok(())
-    })
+    let (pipeline, ()) = Pipeline::new(
+        "custom-cuda",
+        pictures.named("pictures"),
+        |pictures, ctx| {
+            let branch = ctx
+                .branch()
+                .pipe(CudaUpload::new("upload", &device, CudaFrameFormat::Nv12))
+                .pipe(mark.named("mark"))
+                .pipe(overlay)
+                .pipe(CudaDownload::new(
+                    "download",
+                    &device,
+                    CudaFrameFormat::Nv12,
+                ))
+                .to(collect.named("collect"))?;
+            ctx.attach(pictures, 0, branch)?;
+            Ok(())
+        },
+    )
     .expect("a pipeline whose links agree");
     pipeline.run().expect("run");
     for event in pipeline.bus().iter() {

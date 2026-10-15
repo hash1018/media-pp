@@ -27,7 +27,7 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Attached, Element, ElementType, Identity, Sink},
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
     elements::{AudioFormat, CoreAudioDevice, CoreAudioDeviceKind},
@@ -484,8 +484,9 @@ impl CoreAudioRenderer {
         name: impl Into<String>,
         options: CoreAudioRendererOptions,
     ) -> std::result::Result<(Self, AudioFormat), CoreAudioRendererError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CoreAudioRenderer, &name, None);
+        let identity = Identity::new(ElementType::CoreAudioRenderer, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let device = options.device;
         if device.kind != CoreAudioDeviceKind::Output {
             return Err(CoreAudioRendererError::NotAnOutputDevice(device.name));
@@ -537,19 +538,22 @@ impl CoreAudioRenderer {
         );
 
         Ok((
-            Self(SinkStage::new(Rendering {
-                name,
-                pp_log,
-                format,
-                unit,
-                prime_bytes: (ring_frames / 2).max(1) * bytes_per_frame,
-                shared,
-                running: false,
-                paused: false,
-                clock_binding: PlaybackClockBinding::Unbound,
-                timeline: None,
-                stretcher: Stretcher::new(format),
-            })),
+            Self(SinkStage::new(
+                identity,
+                Rendering {
+                    name,
+                    pp_log,
+                    format,
+                    unit,
+                    prime_bytes: (ring_frames / 2).max(1) * bytes_per_frame,
+                    shared,
+                    running: false,
+                    paused: false,
+                    clock_binding: PlaybackClockBinding::Unbound,
+                    timeline: None,
+                    stretcher: Stretcher::new(format),
+                },
+            )),
             format,
         ))
     }
@@ -910,41 +914,6 @@ fn priming_trim_samples(frame_pts_ns: i64, target_ns: i64, sample_rate: u32) -> 
         .max(0) as usize
 }
 
-impl Element for Rendering {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CoreAudioRenderer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    /// Takes the pipeline's playback clock, and claims its audio-master slot
-    /// on the first frame rather than here.
-    ///
-    /// Deferred deliberately. Claiming it now would move the clock into
-    /// `AudioPriming` the moment this is wired, and video scheduled against
-    /// the same clock would then hold for audio that has not started — a
-    /// branch attached to a running `Tee` can sit behind a demuxer blocked on
-    /// a full video queue, which is exactly the deadlock this ordering
-    /// avoids. An exclusive-master conflict therefore surfaces from the first
-    /// `consume` rather than from wiring.
-    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        if !self.clock_binding.is_bound() {
-            self.clock_binding =
-                PlaybackClockBinding::Deferred(Arc::clone(&context.playback_clock));
-        }
-    }
-}
-
 impl Sink for Rendering {
     /// Writes samples into the ring the output unit plays from.
     fn input_contract(&self) -> InputContract {
@@ -999,6 +968,14 @@ impl Sink for Rendering {
     /// around it.
     fn reset(&mut self) -> Result<()> {
         self.stop_and_reset()
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        if !self.clock_binding.is_bound() {
+            self.clock_binding =
+                PlaybackClockBinding::Deferred(Arc::clone(&cx.context().playback_clock));
+        }
     }
 }
 

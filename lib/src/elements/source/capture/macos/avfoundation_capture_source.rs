@@ -36,7 +36,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::{AvFoundationCaptureFormat, AvFoundationDevice, VideoFormat},
     error::Result,
     platform::macos::{
@@ -363,7 +363,8 @@ impl AvFoundationCaptureSource {
     ) -> std::result::Result<(Self, VideoFormat), AvFoundationCaptureSourceError> {
         crate::ensure_ffmpeg();
         let name: Arc<str> = name.into();
-        let pp_log = element_pp_log(ElementType::AvFoundationCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::AvFoundationCaptureSource, &*name);
+        let pp_log = identity.pp_log().clone();
         let camera = options.device;
         match avfoundation::authorization() {
             Authorization::Authorized => {}
@@ -459,26 +460,29 @@ impl AvFoundationCaptureSource {
             if matches!(output, Output::System(_)) { "" } else { " in VideoToolbox frames" }
         );
         Ok((
-            Self(SourceStage::new(Capturing {
-                name,
-                pp_log,
-                bus: None,
-                session,
-                _output: output_object,
-                _delegate: delegate,
-                _queue: queue,
-                device,
-                mode,
-                device_name: camera.name,
-                pictures,
-                dropped,
-                output,
-                format,
-                frame_rate: mode.frame_rate,
-                timeline: Timeline::new(frame_interval),
-                running: false,
-                heard_from: None,
-            })),
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    name,
+                    pp_log,
+                    bus: None,
+                    session,
+                    _output: output_object,
+                    _delegate: delegate,
+                    _queue: queue,
+                    device,
+                    mode,
+                    device_name: camera.name,
+                    pictures,
+                    dropped,
+                    output,
+                    format,
+                    frame_rate: mode.frame_rate,
+                    timeline: Timeline::new(frame_interval),
+                    running: false,
+                    heard_from: None,
+                },
+            )),
             format,
         ))
     }
@@ -666,28 +670,6 @@ impl Drop for Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AvFoundationCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.bus = Some(context.bus.for_element(context.source_id));
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -754,6 +736,11 @@ impl Source for Capturing {
 
     fn stopping(&mut self) {
         self.stop();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.bus = Some(cx.context().bus.for_element(cx.context().source_id));
     }
 }
 

@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     frame_size::ForSize,
     platform::{
@@ -104,7 +104,6 @@ filter_stage!(D3d12Upload);
 /// framework makes the filter.
 struct Uploading {
     pp_log: PpLog,
-    name: Arc<str>,
     hw_device_ctx: AvBufferRef,
     /// The pool uploaded textures come from, made for the size of the
     /// frames actually arriving.
@@ -141,8 +140,8 @@ impl D3d12Upload {
         gpu: &D3d12Gpu,
     ) -> std::result::Result<Self, D3d12UploadError> {
         let device = gpu.device();
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12Upload, &name, None);
+        let identity = Identity::new(ElementType::D3d12Upload, name);
+        let pp_log = identity.pp_log().clone();
 
         // SAFETY: `device` is live and the helper transfers a cloned COM
         // reference into the returned FFmpeg device context.
@@ -151,32 +150,16 @@ impl D3d12Upload {
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened");
-        Ok(Self(FilterStage::new(Uploading {
-            name,
-            pp_log,
-            hw_device_ctx,
-            hw_frames_ctx: ForSize::new(),
-            pool,
-            repeated: RepeatedOutput::new(),
-        })))
-    }
-}
-
-impl Element for Uploading {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12Upload
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
+        Ok(Self(FilterStage::new(
+            identity,
+            Uploading {
+                pp_log,
+                hw_device_ctx,
+                hw_frames_ctx: ForSize::new(),
+                pool,
+                repeated: RepeatedOutput::new(),
+            },
+        )))
     }
 }
 
@@ -221,6 +204,10 @@ impl Filter for Uploading {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
                 .with_layouts(crate::contract::PixelLayoutSet::NV12),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

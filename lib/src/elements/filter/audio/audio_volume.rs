@@ -13,7 +13,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     transform::{FilterStage, filter_stage},
 };
@@ -193,7 +193,6 @@ filter_stage!(AudioVolume);
 /// framework makes the filter.
 struct Adjusting {
     pp_log: PpLog,
-    name: Arc<str>,
     control: Arc<VolumeControl>,
     ramp_duration: Duration,
     current_gain: f32,
@@ -216,8 +215,8 @@ impl AudioVolume {
         options: AudioVolumeOptions,
     ) -> std::result::Result<(Self, AudioVolumeHandle), AudioVolumeError> {
         validate_gain(options.gain)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::AudioVolume, &name, None);
+        let identity = Identity::new(ElementType::AudioVolume, name);
+        let pp_log = identity.pp_log().clone();
         let control = Arc::new(VolumeControl::new(options.gain, options.muted));
         let initial_gain = control.effective_gain();
         let handle = AudioVolumeHandle {
@@ -231,17 +230,19 @@ impl AudioVolume {
             options.ramp_duration
         );
         Ok((
-            Self(FilterStage::new(Adjusting {
-                name: name.clone(),
-                pp_log,
-                control,
-                ramp_duration: options.ramp_duration,
-                current_gain: initial_gain,
-                ramp_target: initial_gain,
-                ramp_step: 0.0,
-                ramp_remaining: 0,
-                gain_envelope: Vec::new(),
-            })),
+            Self(FilterStage::new(
+                identity,
+                Adjusting {
+                    pp_log,
+                    control,
+                    ramp_duration: options.ramp_duration,
+                    current_gain: initial_gain,
+                    ramp_target: initial_gain,
+                    ramp_step: 0.0,
+                    ramp_remaining: 0,
+                    gain_envelope: Vec::new(),
+                },
+            )),
             handle,
         ))
     }
@@ -322,24 +323,6 @@ impl Adjusting {
     }
 }
 
-impl Element for Adjusting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AudioVolume
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Adjusting {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
@@ -370,6 +353,10 @@ impl Filter for Adjusting {
 
     fn reset(&mut self) {
         self.snap_to_target();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 
@@ -482,7 +469,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
 
     fn new_volume(
         options: AudioVolumeOptions,

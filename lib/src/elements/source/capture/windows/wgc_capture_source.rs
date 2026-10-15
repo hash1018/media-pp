@@ -64,7 +64,7 @@ use crate::rate::{FrameRate, FrameRateHandle};
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     platform::windows::{
         d3d11::protect_shared_device,
@@ -224,7 +224,6 @@ source_stage!(WgcCaptureSource);
 /// next tick. All of its work, which the framework makes the source.
 struct Capturing {
     pp_log: PpLog,
-    name: Arc<str>,
     /// Raw HWND value. Stored as an integer because windows-rs deliberately
     /// does not mark borrowed Win32 handles `Send`; this element does not own
     /// the window, and reconstructs the by-value handle only on its source
@@ -357,8 +356,8 @@ impl WgcCaptureSource {
         device: ID3D11Device,
         context: ID3D11DeviceContext,
     ) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::WgcCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::WgcCaptureSource, name);
+        let pp_log = identity.pp_log().clone();
         if let Some(error) = target.owner_process_error {
             pp_warn!(
                 pp_log: &pp_log,
@@ -368,24 +367,26 @@ impl WgcCaptureSource {
             );
         }
 
-        Self(SourceStage::new(Capturing {
-            pp_log,
-            name,
-            hwnd: target.hwnd,
-            owner_pid: target.owner_pid,
-            owner_thread_id: target.owner_thread_id,
-            owner_process: target.owner_process,
-            target_watch: target.watch,
-            device,
-            context,
-            include_cursor: options.include_cursor,
-            frame_rate: FrameRate::new(options.frame_rate),
-            frame_index: 0,
-            frame_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-            session: None,
-            latest: None,
-            schedule: LiveSchedule::default(),
-        }))
+        Self(SourceStage::new(
+            identity,
+            Capturing {
+                pp_log,
+                hwnd: target.hwnd,
+                owner_pid: target.owner_pid,
+                owner_thread_id: target.owner_thread_id,
+                owner_process: target.owner_process,
+                target_watch: target.watch,
+                device,
+                context,
+                include_cursor: options.include_cursor,
+                frame_rate: FrameRate::new(options.frame_rate),
+                frame_index: 0,
+                frame_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                session: None,
+                latest: None,
+                schedule: LiveSchedule::default(),
+            },
+        ))
     }
 
     /// PTS unit of frames emitted by this source — the reciprocal of the
@@ -554,24 +555,6 @@ impl Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::WgcCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -675,6 +658,10 @@ impl Source for Capturing {
             .emit_frame(&latest, width, height)
             .inspect_err(|error| pp_error!(self, "emit frame failed: {error}"))?;
         Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into())))
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

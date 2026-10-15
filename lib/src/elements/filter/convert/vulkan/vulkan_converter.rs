@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::VulkanDevice,
     error::Result,
     platform::vulkan::{
@@ -72,7 +72,6 @@ filter_stage!(VulkanConverter);
 /// framework makes the filter.
 struct Converting {
     pp_log: PpLog,
-    name: Arc<str>,
     pass: BgraPass,
     repeated: RepeatedOutput,
 }
@@ -85,16 +84,18 @@ impl VulkanConverter {
         name: impl Into<String>,
         device: &VulkanDevice,
     ) -> std::result::Result<Self, VulkanConverterError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::VulkanConverter, &name, None);
+        let identity = Identity::new(ElementType::VulkanConverter, name);
+        let pp_log = identity.pp_log().clone();
         let pass = BgraPass::new(device, SHADER, c"main", 64, PassInput::Nv12)?;
         pp_info!(pp_log: &pp_log, "opened: NV12 -> BGRA on {}", device.name());
-        Ok(Self(FilterStage::new(Converting {
-            name,
-            pp_log,
-            pass,
-            repeated: RepeatedOutput::new(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Converting {
+                pp_log,
+                pass,
+                repeated: RepeatedOutput::new(),
+            },
+        )))
     }
 }
 
@@ -146,24 +147,6 @@ impl PerFrameTransform for Converting {
     }
 }
 
-impl Element for Converting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::VulkanConverter
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Converting {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -196,6 +179,10 @@ impl Filter for Converting {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

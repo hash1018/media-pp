@@ -21,7 +21,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::filter::is_codec_drain_boundary,
     error::{D3d11SharedDeviceError, Result},
     platform::{
@@ -364,7 +364,6 @@ filter_stage!(D3d11VideoEncoder);
 /// framework makes the filter.
 struct Encoding {
     pp_log: PpLog,
-    name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
     /// Kept so every incoming texture can be checked before a context copy.
     /// `CopySubresourceRegion` returns no error value for a foreign resource,
@@ -526,8 +525,8 @@ impl D3d11VideoEncoder {
         color: Option<ColorDescription>,
     ) -> std::result::Result<Self, D3d11VideoEncoderError> {
         let (device, context) = (gpu.device(), gpu.context());
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11VideoEncoder, &name, None);
+        let identity = Identity::new(ElementType::D3d11VideoEncoder, name);
+        let pp_log = identity.pp_log().clone();
         // This element sits behind a `Queue` more often than not, so the
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
@@ -605,19 +604,21 @@ impl D3d11VideoEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self(FilterStage::new(Encoding {
-            name,
-            pp_log,
-            encoder,
-            device: device.clone(),
-            context,
-            _hw_device_ctx: hw_device_ctx,
-            hw_frames_ctx,
-            width: options.width,
-            height: options.height,
-            input_format: options.input_format,
-            packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Encoding {
+                pp_log,
+                encoder,
+                device: device.clone(),
+                context,
+                _hw_device_ctx: hw_device_ctx,
+                hw_frames_ctx,
+                width: options.width,
+                height: options.height,
+                input_format: options.input_format,
+                packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
+            },
+        )))
     }
 
     /// This encoder's own codec parameters — what a
@@ -848,24 +849,6 @@ impl Drop for Encoding {
     }
 }
 
-impl Element for Encoding {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d11VideoEncoder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
@@ -902,12 +885,16 @@ impl Filter for Encoding {
         // caller needing a hard encoded-stream discontinuity rebuilds the
         // encoder.
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{Element, RawSink, SrcPads};
     use crate::test_support::try_d3d11_gpu as try_device;
 
     fn options(

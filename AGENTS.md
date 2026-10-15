@@ -145,6 +145,14 @@ final source of truth when documentation and implementation differ.
   input and an `AppSink` handing control to the application stay `RawSink`s.
   An element of this crate moved onto one keeps its public name as a
   newtype over `SinkStage` (`sink_stage!`).
+- A `Source`, `Filter` or `Sink` is not an `Element`: its stage keeps its
+  name and log identity (`Identity`), so an application's own element is its
+  media work alone and goes by its type's name or the one `named` gives it.
+  An element of this crate makes `Identity::new(ElementType::…, name)` in its
+  constructor, logs what the constructor says through it, hands it to the
+  stage, and keeps `cx.pp_log()` from `attached` for its own records —
+  those its `Drop` writes among them — so that each names the pipeline it
+  ran in. `attached` is called again whenever the element is wired anew.
 - Declare a new element's link contract through `RawSink::input_contract` and
   `SrcPad::with_contract` — a `Filter`'s own `input_contract` and
   `output_contract` — limited to what construction already settles:
@@ -266,7 +274,8 @@ final source of truth when documentation and implementation differ.
   a caller named: a looping file keeps the two a lap or more apart.
 - Where playback stands — paused, prerolling and for which seek, which
   timeline is current — is the pipeline's `PlaybackState`, given to every
-  element in `attach_context` and written only by the pipeline, before the
+  element in `attach_context` (to a `Source`, `Filter` or `Sink` in
+  `attached`) and written only by the pipeline, before the
   message that announces the change. An element that behaves differently
   while paused or while a preroll runs reads it there; it does not work the
   phase out from the `Pause`, `Resume` and `Preroll` it is handed, which

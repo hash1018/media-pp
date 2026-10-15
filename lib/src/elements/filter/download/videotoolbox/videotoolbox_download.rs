@@ -11,7 +11,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     platform::macos::videotoolbox::{NotVideoToolbox, sw_format_of},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -77,7 +77,6 @@ filter_stage!(VideoToolboxDownload);
 /// framework makes the filter.
 struct Downloading {
     pp_log: PpLog,
-    name: Arc<str>,
     /// CPU frames the transfer writes into, and the size and layout they are
     /// made for, made again when the frames arriving change either.
     pool: Option<(
@@ -94,15 +93,17 @@ struct Downloading {
 impl VideoToolboxDownload {
     /// A download of whatever VideoToolbox frames it is handed.
     pub fn new(name: impl Into<String>) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::VideoToolboxDownload, &name, None);
+        let identity = Identity::new(ElementType::VideoToolboxDownload, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "opened: VideoToolbox ->");
-        Self(FilterStage::new(Downloading {
-            name,
-            pp_log,
-            pool: None,
-            repeated: RepeatedOutput::new(),
-        }))
+        Self(FilterStage::new(
+            identity,
+            Downloading {
+                pp_log,
+                pool: None,
+                repeated: RepeatedOutput::new(),
+            },
+        ))
     }
 }
 
@@ -165,24 +166,6 @@ impl PerFrameTransform for Downloading {
     }
 }
 
-impl Element for Downloading {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::VideoToolboxDownload
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Downloading {
     /// Only device memory has anything to bring back.
     fn input_contract(&self) -> InputContract {
@@ -215,6 +198,10 @@ impl Filter for Downloading {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(LAYOUTS),
         )
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 impl Drop for Downloading {
@@ -228,7 +215,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::{
         elements::{VideoToolboxDevice, VideoToolboxUpload},
         test_support::{CapturingSink, try_videotoolbox_device},

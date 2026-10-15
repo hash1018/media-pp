@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::OutputContract,
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     error::Result,
     produce::{Received, source_stage},
 };
@@ -50,13 +50,6 @@ source_stage!(AppSource);
 /// too (see [`AppSource::receiving`]).
 pub(crate) struct Receiving {
     pp_log: PpLog,
-    name: Arc<str>,
-    /// Almost always [`ElementType::AppSource`]. An element built on this
-    /// one — [`crate::elements::D3d11SharedTextureSource`] is the case this
-    /// exists for — keeps its own identity in the log and on the bus
-    /// instead, since what a reader of either wants is the element the
-    /// caller actually constructed.
-    element_type: ElementType,
     /// What it declares its output to be — see [`AppSource::receiving`].
     contract: OutputContract,
     /// Whether what it is handed is made at a rate of its own — see
@@ -102,19 +95,21 @@ impl AppSource {
         contract: OutputContract,
         live: bool,
     ) -> (SourceStage<Receiving>, AppSourceHandle) {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(element_type, &name, None);
+        let identity = Identity::new(element_type, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "created: capacity={capacity}");
         let (data_tx, data_rx) = bounded(capacity);
         (
-            SourceStage::new(Receiving {
-                name: name.clone(),
-                pp_log,
-                element_type,
-                contract,
-                live,
-                data_rx,
-            }),
+            SourceStage::new(
+                identity,
+                Receiving {
+                    pp_log,
+                    contract,
+                    live,
+                    data_rx,
+                },
+            ),
             AppSourceHandle { name, data_tx },
         )
     }
@@ -157,24 +152,6 @@ impl AppSourceHandle {
     }
 }
 
-impl Element for Receiving {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        self.element_type
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Receiving {
     fn is_live(&self) -> bool {
         self.live
@@ -200,6 +177,10 @@ impl Source for Receiving {
             }
         })
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +192,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::element::{Element, element_pp_log};
     use crate::{bus::BusEvent, pipeline::Pipeline};
 
     struct CountingSink {

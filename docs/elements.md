@@ -163,8 +163,10 @@ saying to turn it. Every decoder hands that on with each picture
 
 ## Elements of your own
 
-An element of your own is a `Source`, a `Filter` or a `Sink`; the crate
-documentation's first page says what each is handed, and
+An element of your own is a `Source`, a `Filter` or a `Sink` — its work
+alone: the framework keeps its name (its type's, or the one `named` gives
+it) and hands it its log identity and the pipeline through `attached`. The
+crate documentation's first page says what each is handed, and
 [`custom_element`](../examples/core/custom_element) writes one of each.
 
 **On CUDA pictures**, one of your own can work with CUDA calls of its own

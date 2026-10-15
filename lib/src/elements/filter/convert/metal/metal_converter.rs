@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::VideoToolboxDevice,
     error::Result,
     platform::macos::{
@@ -81,7 +81,6 @@ filter_stage!(MetalConverter);
 /// framework makes the filter.
 struct Converting {
     pp_log: PpLog,
-    name: Arc<str>,
     pass: MetalPass,
     /// The SDR P010 pass, made at the first such frame.
     wide: Option<MetalPass>,
@@ -100,19 +99,21 @@ impl MetalConverter {
         name: impl Into<String>,
         device: &VideoToolboxDevice,
     ) -> std::result::Result<Self, MetalConverterError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MetalConverter, &name, None);
+        let identity = Identity::new(ElementType::MetalConverter, name);
+        let pp_log = identity.pp_log().clone();
         let pass = MetalPass::new(device, SHADER, "convert", PassInput::Nv12)?;
         pp_info!(pp_log: &pp_log, "opened: NV12 or P010 -> BGRA");
-        Ok(Self(FilterStage::new(Converting {
-            name,
-            pp_log,
-            pass,
-            wide: None,
-            tone_map: None,
-            device: device.clone(),
-            repeated: RepeatedOutput::new(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Converting {
+                pp_log,
+                pass,
+                wide: None,
+                tone_map: None,
+                device: device.clone(),
+                repeated: RepeatedOutput::new(),
+            },
+        )))
     }
 }
 
@@ -224,24 +225,6 @@ impl PerFrameTransform for Converting {
     }
 }
 
-impl Element for Converting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MetalConverter
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Converting {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -274,6 +257,10 @@ impl Filter for Converting {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     frame_size::ForSize,
     platform::{
@@ -85,7 +85,6 @@ filter_stage!(CudaDownload);
 /// framework makes the filter.
 struct Downloading {
     pp_log: PpLog,
-    name: Arc<str>,
     /// This element's own reference to the shared context, released in
     /// `Drop`. Held for `device_ctx`'s sake: the pointer below stays valid
     /// only as long as this reference does.
@@ -124,8 +123,8 @@ impl CudaDownload {
     /// The size of the frames comes from the frames themselves, same
     /// convention as `CudaUpload`/`D3d11Download`.
     pub fn new(name: impl Into<String>, device: &CudaDevice, format: CudaFrameFormat) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaDownload, &name, None);
+        let identity = Identity::new(ElementType::CudaDownload, name);
+        let pp_log = identity.pp_log().clone();
 
         let hw_device_ctx = device.retain();
         // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
@@ -136,15 +135,17 @@ impl CudaDownload {
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
         pp_info!(pp_log: &pp_log, "opened: CUDA -> {:?}", format.pixel());
-        Self(FilterStage::new(Downloading {
-            name,
-            pp_log,
-            _hw_device_ctx: hw_device_ctx,
-            device_ctx,
-            format,
-            pool: ForSize::new(),
-            repeated: RepeatedOutput::new(),
-        }))
+        Self(FilterStage::new(
+            identity,
+            Downloading {
+                pp_log,
+                _hw_device_ctx: hw_device_ctx,
+                device_ctx,
+                format,
+                pool: ForSize::new(),
+                repeated: RepeatedOutput::new(),
+            },
+        ))
     }
 }
 
@@ -215,24 +216,6 @@ impl PerFrameTransform for Downloading {
     }
 }
 
-impl Element for Downloading {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaDownload
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Downloading {
     /// The mirror of CudaUpload: only device memory has anything to bring back.
     fn input_contract(&self) -> InputContract {
@@ -268,6 +251,10 @@ impl Filter for Downloading {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
                 .with_layouts(self.format.layouts()),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

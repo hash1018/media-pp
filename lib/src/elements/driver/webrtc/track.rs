@@ -19,7 +19,10 @@ use str0m::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, RawSink, Source, SourceStage, Wait, element_pp_log},
+    element::{
+        Attached, Element, ElementType, Identity, Produced, RawSink, Source, SourceStage, Wait,
+        element_pp_log,
+    },
     error::Result,
     produce::{Received, source_stage},
 };
@@ -809,7 +812,6 @@ source_stage!(WebRtcTrackSource);
 struct Receiving {
     id: TrackId,
     pp_log: PpLog,
-    name: Arc<str>,
     /// Its one output's: encoded media of the track's kind, whichever
     /// codec is negotiated with the peer at runtime.
     contract: OutputContract,
@@ -834,21 +836,23 @@ impl WebRtcTrackSource {
         negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
         stream_info_rx: Receiver<WebRtcStreamInfo>,
     ) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::WebRtcPeer, &name, None);
-        Self(SourceStage::new(Receiving {
-            id,
-            name,
-            pp_log,
-            contract: OutputContract::Fixed(PortContract::packet(packet_kind(kind))),
-            data_rx,
-            codec,
-            negotiated_codecs,
-            stream_info: Mutex::new(StreamInfoState {
-                rx: stream_info_rx,
-                cached: None,
-            }),
-        }))
+        let identity = Identity::new(ElementType::WebRtcPeer, name);
+        let pp_log = identity.pp_log().clone();
+        Self(SourceStage::new(
+            identity,
+            Receiving {
+                id,
+                pp_log,
+                contract: OutputContract::Fixed(PortContract::packet(packet_kind(kind))),
+                data_rx,
+                codec,
+                negotiated_codecs,
+                stream_info: Mutex::new(StreamInfoState {
+                    rx: stream_info_rx,
+                    cached: None,
+                }),
+            },
+        ))
     }
 
     /// Blocks for at most `timeout` until actual RTP media confirms enough
@@ -913,24 +917,6 @@ impl WebRtcTrackSource {
     }
 }
 
-impl Element for Receiving {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::WebRtcPeer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Receiving {
     fn is_live(&self) -> bool {
         true
@@ -951,5 +937,9 @@ impl Source for Receiving {
                 Produced::End
             }
         })
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }

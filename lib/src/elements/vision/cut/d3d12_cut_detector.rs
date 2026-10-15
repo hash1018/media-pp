@@ -22,7 +22,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::vision::batch::PerStream,
     error::Result,
     platform::windows::{
@@ -127,8 +127,9 @@ impl D3d12CutDetector {
         options: CutDetectorOptions,
     ) -> std::result::Result<Self, D3d12CutDetectorError> {
         options.check()?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12CutDetector, &name, None);
+        let identity = Identity::new(ElementType::D3d12CutDetector, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let device = gpu.device().clone();
         let bytes = (SUMS * size_of::<f32>()) as u64;
         // SAFETY: every call is on a live device with descriptions built
@@ -164,20 +165,23 @@ impl D3d12CutDetector {
         };
         let commands = Commands::new(&device, gpu.queue())?;
         pp_info!(pp_log: &pp_log, "opened: {options:?}");
-        Ok(Self(FilterStage::new(Detecting {
-            name,
-            pp_log,
-            options,
-            judges: PerStream::default(),
-            device,
-            luma,
-            chroma,
-            heap,
-            heap_step,
-            commands,
-            sums,
-            readback,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Detecting {
+                name,
+                pp_log,
+                options,
+                judges: PerStream::default(),
+                device,
+                luma,
+                chroma,
+                heap,
+                heap_step,
+                commands,
+                sums,
+                readback,
+            },
+        )))
     }
 }
 
@@ -352,24 +356,6 @@ impl Drop for Detecting {
     }
 }
 
-impl Element for Detecting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12CutDetector
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Detecting {
     /// NV12 or P010 D3D12 pictures.
     fn input_contract(&self) -> InputContract {
@@ -416,6 +402,10 @@ impl Filter for Detecting {
     /// A seek or a flush: what was held is let go of.
     fn reset(&mut self) {
         self.judges.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

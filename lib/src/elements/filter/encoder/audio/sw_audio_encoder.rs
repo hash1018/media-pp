@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     transform::{FilterStage, filter_stage},
 };
@@ -148,7 +148,6 @@ filter_stage!(SwAudioEncoder);
 /// framework makes the filter.
 struct Encoding {
     pp_log: PpLog,
-    name: Arc<str>,
     encoder: ffmpeg::encoder::audio::Encoder,
     target_format: ffmpeg::format::Sample,
     target_layout: ffmpeg::ChannelLayout,
@@ -257,8 +256,8 @@ impl SwAudioEncoder {
         let encoder = audio.open_as(codec).map_err(SwAudioEncoderError::from)?;
         let frame_size = encoder.frame_size() as usize;
 
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwAudioEncoder, &name, None);
+        let identity = Identity::new(ElementType::SwAudioEncoder, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}Hz, {} channel(s), format={:?}, frame_size={}, bit_rate={}",
@@ -268,22 +267,24 @@ impl SwAudioEncoder {
             frame_size,
             options.bit_rate
         );
-        Ok(Self(FilterStage::new(Encoding {
-            name,
-            pp_log,
-            encoder,
-            target_format,
-            target_layout,
-            sample_rate: options.sample_rate,
-            frame_size,
-            resampler: AudioFrameResampler::new(AudioFormat {
-                sample_format: target_format,
+        Ok(Self(FilterStage::new(
+            identity,
+            Encoding {
+                pp_log,
+                encoder,
+                target_format,
+                target_layout,
                 sample_rate: options.sample_rate,
-                channels: options.channels,
-            }),
-            pending: (0..options.channels).map(|_| VecDeque::new()).collect(),
-            samples_emitted: 0,
-        })))
+                frame_size,
+                resampler: AudioFrameResampler::new(AudioFormat {
+                    sample_format: target_format,
+                    sample_rate: options.sample_rate,
+                    channels: options.channels,
+                }),
+                pending: (0..options.channels).map(|_| VecDeque::new()).collect(),
+                samples_emitted: 0,
+            },
+        )))
     }
 
     /// This encoder's own codec parameters — what a
@@ -508,24 +509,6 @@ impl From<&SwAudioEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for Encoding {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwAudioEncoder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::AudioPacket))
@@ -570,12 +553,16 @@ impl Filter for Encoding {
         // before the seek can still surface later), and `Stop` abandons it
         // without flushing.
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{Element, RawSink, SrcPads, element_pp_log};
 
     /// `SwAudioEncoder::new` should fail cleanly (not panic) when the
     /// linked ffmpeg build wasn't compiled with `aac` — vanishingly

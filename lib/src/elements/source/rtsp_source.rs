@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::{RtspOptions, rtsp::redact},
     error::Result,
     pad::SrcPad,
@@ -57,7 +57,6 @@ source_stage!(RtspSource);
 /// delivers it: all of its work, which the framework makes the source.
 struct Reading {
     pp_log: PpLog,
-    name: Arc<str>,
     input: ffmpeg::format::context::Input,
     /// What each stream's output declares, by stream index.
     contracts: Vec<OutputContract>,
@@ -90,8 +89,8 @@ impl RtspSource {
             })
             .collect();
 
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::RtspSource, &name, None);
+        let identity = Identity::new(ElementType::RtspSource, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "opened: url={}, transport={:?}, {} stream(s)",
@@ -101,12 +100,14 @@ impl RtspSource {
             streams.len()
         );
         Ok((
-            Self(SourceStage::new(Reading {
-                name,
-                pp_log,
-                input,
-                contracts,
-            })),
+            Self(SourceStage::new(
+                identity,
+                Reading {
+                    pp_log,
+                    input,
+                    contracts,
+                },
+            )),
             streams,
         ))
     }
@@ -135,36 +136,20 @@ impl Reading {
     }
 }
 
-impl Element for Reading {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::RtspSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Reading {
     fn is_live(&self) -> bool {
         true
     }
 
     /// One per stream the server advertised, at the stream's own index.
-    fn outputs(&self) -> Vec<SrcPad> {
-        self.contracts
-            .iter()
-            .enumerate()
-            .map(|(index, contract)| SrcPad::with_contract(format!("src_{index}"), *contract))
-            .collect()
+    fn outputs(&self) -> Option<Vec<SrcPad>> {
+        Some(
+            self.contracts
+                .iter()
+                .enumerate()
+                .map(|(index, contract)| SrcPad::with_contract(format!("src_{index}"), *contract))
+                .collect(),
+        )
     }
 
     /// The next packet the session delivers, on its stream's output, or
@@ -212,6 +197,10 @@ impl Source for Reading {
                 Err(RtspSourceError::Ffmpeg(error).into())
             }
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

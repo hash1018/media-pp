@@ -9,7 +9,7 @@ use super::audio_f32::{self, Unreadable};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     transform::{FilterStage, filter_stage},
 };
@@ -130,7 +130,6 @@ filter_stage!(NoiseSuppressor);
 /// framework makes the filter.
 struct Suppressing {
     pp_log: PpLog,
-    name: Arc<str>,
     channels: Vec<Channel>,
     /// Input frames not yet handed on, oldest first. Each goes out as it came
     /// in, with its samples replaced, once enough is ready.
@@ -143,16 +142,18 @@ struct Suppressing {
 impl NoiseSuppressor {
     /// Creates a suppressor. It takes its channel count from the first frame.
     pub fn new(name: impl Into<String>) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::NoiseSuppressor, &name, None);
+        let identity = Identity::new(ElementType::NoiseSuppressor, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "created");
-        Self(FilterStage::new(Suppressing {
-            name: name.clone(),
-            pp_log,
-            channels: Vec::new(),
-            waiting: VecDeque::new(),
-            lead_in: BLOCK,
-        }))
+        Self(FilterStage::new(
+            identity,
+            Suppressing {
+                pp_log,
+                channels: Vec::new(),
+                waiting: VecDeque::new(),
+                lead_in: BLOCK,
+            },
+        ))
     }
 }
 
@@ -262,24 +263,6 @@ impl Suppressing {
     }
 }
 
-impl Element for Suppressing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::NoiseSuppressor
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Suppressing {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
@@ -311,6 +294,10 @@ impl Filter for Suppressing {
         let channels = self.channels.len();
         self.restart(channels);
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -322,8 +309,7 @@ mod tests {
 
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::RawSinkExt;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, RawSinkExt, SrcPads, element_pp_log};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = NOISE_SUPPRESSOR_SAMPLE_RATE;

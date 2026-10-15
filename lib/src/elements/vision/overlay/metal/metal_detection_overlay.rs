@@ -14,7 +14,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::{Detections, VideoToolboxDevice},
     error::Result,
     frame_size::ForSize,
@@ -135,7 +135,6 @@ struct Kernels {
 
 /// What a [`MetalDetectionOverlay`] does with each picture.
 struct Overlaying {
-    name: Arc<str>,
     pp_log: PpLog,
     options: DetectionOverlayOptions,
     font: Option<ab_glyph::FontArc>,
@@ -192,7 +191,8 @@ impl MetalDetectionOverlay {
     ) -> std::result::Result<Self, MetalDetectionOverlayError> {
         let name: Arc<str> = name.into().into();
         options.check()?;
-        let pp_log = element_pp_log(ElementType::MetalDetectionOverlay, &name, None);
+        let identity = Identity::new(ElementType::MetalDetectionOverlay, &*name);
+        let pp_log = identity.pp_log().clone();
         // Read once at any size: each label is rasterized at its own.
         let font = options
             .font
@@ -226,30 +226,32 @@ impl MetalDetectionOverlay {
             options.others,
             font.is_some()
         );
-        Ok(Self(FilterStage::new(Overlaying {
-            name,
-            pp_log,
-            options,
-            font,
-            masks: HashMap::new(),
-            warned_names: false,
-            orientations: Orientations::default(),
-            gpu,
-            kernels: Kernels {
-                copy_nv12,
-                copy_bgra,
-                paint_nv12,
-                paint_bgra,
+        Ok(Self(FilterStage::new(
+            identity,
+            Overlaying {
+                pp_log,
+                options,
+                font,
+                masks: HashMap::new(),
+                warned_names: false,
+                orientations: Orientations::default(),
+                gpu,
+                kernels: Kernels {
+                    copy_nv12,
+                    copy_bgra,
+                    paint_nv12,
+                    paint_bgra,
+                },
+                cells,
+                means: None,
+                solid,
+                hw_device_ctx: device.retain(),
+                nv12_frames: ForSize::new(),
+                bgra_frames: ForSize::new(),
+                p010_frames: ForSize::new(),
+                pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
             },
-            cells,
-            means: None,
-            solid,
-            hw_device_ctx: device.retain(),
-            nv12_frames: ForSize::new(),
-            bgra_frames: ForSize::new(),
-            p010_frames: ForSize::new(),
-            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-        })))
+        )))
     }
 }
 
@@ -717,24 +719,6 @@ impl Overlaying {
     }
 }
 
-impl Element for Overlaying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MetalDetectionOverlay
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Overlaying {
     /// VideoToolbox frames; which of the two layouts is a runtime value.
     fn input_contract(&self) -> InputContract {
@@ -789,6 +773,10 @@ impl Filter for Overlaying {
     }
 
     fn reset(&mut self) {}
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]

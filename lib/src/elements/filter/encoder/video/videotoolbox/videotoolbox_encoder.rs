@@ -11,7 +11,7 @@ use crate::color::{ColorDescription, HdrMetadata};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::{VideoToolboxDevice, VideoToolboxFrameFormat, filter::is_codec_drain_boundary},
     error::Result,
     platform::{
@@ -181,7 +181,6 @@ filter_stage!(VideoToolboxEncoder);
 /// framework makes the filter.
 struct Encoding {
     pp_log: PpLog,
-    name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
     /// What the encoder was opened with: it reads the layout of its input
     /// from it.
@@ -329,8 +328,8 @@ impl VideoToolboxEncoder {
         color: Option<ColorDescription>,
         hdr: &HdrMetadata,
     ) -> std::result::Result<Self, VideoToolboxEncoderError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::VideoToolboxEncoder, &name, None);
+        let identity = Identity::new(ElementType::VideoToolboxEncoder, name);
+        let pp_log = identity.pp_log().clone();
         // Measured: VideoToolbox makes YUV of RGB with BT.709's matrix at
         // limited range, and goes on doing so whatever matrix or range the
         // session is told — only the headers follow what it is told.
@@ -416,20 +415,22 @@ impl VideoToolboxEncoder {
         if !hdr.is_empty() {
             pp_info!(pp_log: &pp_log, "keeps the source's HDR10 mastering display and light levels");
         }
-        Ok(Self(FilterStage::new(Encoding {
-            name,
-            pp_log,
-            encoder,
-            _hw_frames_ctx: hw_frames_ctx,
-            format: options.format,
-            width: options.width,
-            height: options.height,
-            packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
-            dating: options
-                .max_b_frames
-                .is_some_and(|frames| frames > 0)
-                .then(Dating::default),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Encoding {
+                pp_log,
+                encoder,
+                _hw_frames_ctx: hw_frames_ctx,
+                format: options.format,
+                width: options.width,
+                height: options.height,
+                packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
+                dating: options
+                    .max_b_frames
+                    .is_some_and(|frames| frames > 0)
+                    .then(Dating::default),
+            },
+        )))
     }
 
     /// The encoded stream's parameters, for
@@ -533,24 +534,6 @@ impl From<&VideoToolboxEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for Encoding {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::VideoToolboxEncoder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
@@ -585,6 +568,10 @@ impl Filter for Encoding {
         // Nothing to reset, as for every encoder here: a caller needing a
         // hard encoded-stream discontinuity rebuilds the encoder.
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 impl Drop for Encoding {
@@ -598,7 +585,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::{
         elements::{SwDecoder, VideoToolboxDecoder, VideoToolboxUpload},
         test_support::{CapturingSink, try_videotoolbox_device},

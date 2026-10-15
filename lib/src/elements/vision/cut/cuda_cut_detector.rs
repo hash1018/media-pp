@@ -12,7 +12,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::vision::batch::PerStream,
     elements::{CudaDevice, CudaDriverError, CudaFrameError, CudaSurfaces},
     error::Result,
@@ -110,24 +110,28 @@ impl CudaCutDetector {
         options: CutDetectorOptions,
     ) -> std::result::Result<Self, CudaCutDetectorError> {
         options.check()?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaCutDetector, &name, None);
+        let identity = Identity::new(ElementType::CudaCutDetector, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let driver = CudaDriver::retain_primary()?;
         let kernels = driver.redact_kernels()?;
         let means = driver.cell_means(MEANS)?;
         pp_info!(pp_log: &pp_log, "opened: {options:?}");
-        Ok(Self(FilterStage::new(Detecting {
-            name,
-            pp_log,
-            options,
-            judges: PerStream::default(),
-            kernels,
-            means,
-            read: vec![0.0; MEANS],
-            driver,
-            _hw_device_ctx: device.retain(),
-            device_ctx: device.device_ctx(),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Detecting {
+                name,
+                pp_log,
+                options,
+                judges: PerStream::default(),
+                kernels,
+                means,
+                read: vec![0.0; MEANS],
+                driver,
+                _hw_device_ctx: device.retain(),
+                device_ctx: device.device_ctx(),
+            },
+        )))
     }
 }
 
@@ -208,24 +212,6 @@ impl Detecting {
     }
 }
 
-impl Element for Detecting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaCutDetector
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Detecting {
     /// NV12 or P010 CUDA pictures.
     fn input_contract(&self) -> InputContract {
@@ -272,6 +258,10 @@ impl Filter for Detecting {
     /// A seek or a flush: what was held is let go of.
     fn reset(&mut self) {
         self.judges.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

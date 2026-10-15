@@ -10,7 +10,7 @@ use ffmpeg_next as ffmpeg;
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     error::Result,
     produce::source_stage,
 };
@@ -73,7 +73,6 @@ source_stage!(TestAudioSource);
 /// all of its work, which the framework makes the source.
 struct Generating {
     pp_log: PpLog,
-    name: Arc<str>,
     sample_rate: u32,
     channels: u16,
     format: ffmpeg::format::Sample,
@@ -98,8 +97,8 @@ unsafe impl Send for Generating {}
 impl TestAudioSource {
     /// Creates an unbounded synthetic sine-wave source with the requested output definition.
     pub fn new(name: impl Into<String>, options: TestAudioOptions) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::TestAudioSource, &name, None);
+        let identity = Identity::new(ElementType::TestAudioSource, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "created: {}Hz, {} channel(s), {}Hz tone",
@@ -107,17 +106,19 @@ impl TestAudioSource {
             options.channels,
             options.frequency
         );
-        Self(SourceStage::new(Generating {
-            name,
-            pp_log,
-            sample_rate: options.sample_rate,
-            channels: options.channels,
-            format: ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-            channel_layout: ffmpeg::ChannelLayout::default(options.channels as i32),
-            frequency: options.frequency,
-            samples_emitted: 0,
-            started: None,
-        }))
+        Self(SourceStage::new(
+            identity,
+            Generating {
+                pp_log,
+                sample_rate: options.sample_rate,
+                channels: options.channels,
+                format: ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                channel_layout: ffmpeg::ChannelLayout::default(options.channels as i32),
+                frequency: options.frequency,
+                samples_emitted: 0,
+                started: None,
+            },
+        ))
     }
 
     /// The unit each emitted frame's `pts` is expressed in.
@@ -174,24 +175,6 @@ impl Generating {
     }
 }
 
-impl Element for Generating {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::TestAudioSource
-    }
-
-    fn pp_log(&self) -> &crate::pp_log::PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut crate::pp_log::PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Generating {
     fn is_live(&self) -> bool {
         true
@@ -222,6 +205,10 @@ impl Source for Generating {
             Arc::new(self.generate_frame(needed)).into(),
         )))
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +218,7 @@ mod tests {
     use crate::pp_log::PpLog;
 
     use super::*;
+    use crate::element::{Element, element_pp_log};
     use crate::{
         element::{RawSink, RawSource},
         pipeline::Pipeline,

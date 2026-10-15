@@ -6,7 +6,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Context, Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::AudioFormat,
     error::Result,
     playback_clock::PlaybackClock,
@@ -67,7 +67,6 @@ filter_stage!(AudioTempo);
 /// framework makes the filter.
 struct Stretching {
     pp_log: PpLog,
-    name: Arc<str>,
     /// The pipeline's; `None` for one no pipeline wired, which passes
     /// everything as it came.
     playback_clock: Option<Arc<PlaybackClock>>,
@@ -81,14 +80,16 @@ impl AudioTempo {
     /// One that stretches to the rate of the pipeline it is wired into, and
     /// passes everything as it came in none.
     pub fn new(name: impl Into<String>) -> Self {
-        let name: Arc<str> = name.into().into();
-        Self(FilterStage::new(Stretching {
-            pp_log: element_pp_log(ElementType::AudioTempo, &name, None),
-            name,
-            playback_clock: None,
-            state: None,
-            stretcher: None,
-        }))
+        let identity = Identity::new(ElementType::AudioTempo, name);
+        Self(FilterStage::new(
+            identity.clone(),
+            Stretching {
+                pp_log: identity.pp_log().clone(),
+                playback_clock: None,
+                state: None,
+                stretcher: None,
+            },
+        ))
     }
 }
 
@@ -194,29 +195,6 @@ impl Stretching {
     }
 }
 
-impl Element for Stretching {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AudioTempo
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.playback_clock = Some(Arc::clone(&context.playback_clock));
-        self.state = Some(Arc::clone(&context.state));
-    }
-}
-
 impl Filter for Stretching {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
@@ -251,6 +229,12 @@ impl Filter for Stretching {
             stretcher.reset();
         }
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.playback_clock = Some(Arc::clone(&cx.context().playback_clock));
+        self.state = Some(Arc::clone(&cx.context().state));
+    }
 }
 
 #[cfg(test)]
@@ -260,8 +244,7 @@ mod tests {
     use super::*;
     use crate::clock::Clock;
     use crate::control::ControlMsg;
-    use crate::element::RawSinkExt;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{Context, Element, RawSink, RawSinkExt, SrcPads};
     use crate::elements::AppSink;
 
     const RATE: u32 = 48_000;

@@ -285,6 +285,20 @@
 //! hears a pause, a resume and a stop through its hooks, and a seek, and
 //! its stream's end, through [`RawSink::stream_event`](element::RawSink::stream_event).
 //!
+//! # Who an element of your own is
+//!
+//! None of the three is an [`Element`](element::Element): the stage the
+//! framework makes of it keeps its name and log identity, so an element is
+//! its work alone. It goes by its type's name — `Invert` — or by the one
+//! its `named` gives it, which tells two of the same apart:
+//! `.pipe(Invert.named("second"))`. As it is wired it is told who it is in
+//! that pipeline, and the pipeline itself, through its `attached`
+//! ([`element::Attached`]): an element that logs keeps
+//! [`Attached::pp_log`](element::Attached::pp_log) for its `pp_*!`
+//! records, which then say which pipeline and element they came from, and
+//! one that needs the pipeline's clock or bus takes it from
+//! [`Attached::context`](element::Attached::context).
+//!
 //! [`custom_element`] writes one of each — a source, a filter and a
 //! terminal — and runs them together.
 //!

@@ -20,7 +20,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::{Detections, Embedding},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -103,8 +103,9 @@ impl D3d12OrtEmbedder {
         model_path: impl AsRef<Path>,
         options: OrtEmbedderOptions,
     ) -> Result<Self> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12OrtEmbedder, &name, None);
+        let identity = Identity::new(ElementType::D3d12OrtEmbedder, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         let path = model_path.as_ref().display().to_string();
 
         let (session, input) = object_model_session(gpu, model_path.as_ref(), 112, &pp_log)?;
@@ -122,19 +123,22 @@ impl D3d12OrtEmbedder {
             options.input,
             options.align
         );
-        Ok(Self(FilterStage::new(Embedder {
-            name,
-            pp_log,
-            allocation,
-            session,
-            options,
-            input,
-            memory: Memory::default(),
-            fitting,
-            orientations: Orientations::default(),
-            on_gpu: directml_memory()?,
-            on_host: host_memory()?,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Embedder {
+                name,
+                pp_log,
+                allocation,
+                session,
+                options,
+                input,
+                memory: Memory::default(),
+                fitting,
+                orientations: Orientations::default(),
+                on_gpu: directml_memory()?,
+                on_host: host_memory()?,
+            },
+        )))
     }
 }
 
@@ -187,24 +191,6 @@ impl Embedder {
             ));
         }
         Ok(found)
-    }
-}
-
-impl Element for Embedder {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12OrtEmbedder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -278,6 +264,10 @@ impl Filter for Embedder {
     /// A seek or a flush: the objects after it are numbered anew.
     fn reset(&mut self) {
         self.memory.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

@@ -11,7 +11,7 @@ use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::{
     buffer::{MediaBuffer, Metadata},
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::filter::scaler::{is_rgb, matrix},
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -111,8 +111,9 @@ impl SwOrtDetector {
         let labels = options
             .model
             .labels(labels(options.labels.as_deref(), &session));
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwOrtDetector, &name, None);
+        let identity = Identity::new(ElementType::SwOrtDetector, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "model loaded: path={path}, input={}x{}, {} labels, conf_threshold={}, iou_threshold={}",
@@ -129,20 +130,23 @@ impl SwOrtDetector {
             );
         }
         let interval = Interval::new(options.interval);
-        Ok(Self(FilterStage::new(Detecting {
-            name,
-            pp_log,
-            session,
-            values: options.model.input(),
-            decoder: options.model.decoder(model),
-            options,
-            labels,
-            model,
-            fitting: Vec::new(),
-            orientations: Orientations::default(),
-            input: Array4::zeros((1, 3, model.1 as usize, model.0 as usize)),
-            interval,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Detecting {
+                name,
+                pp_log,
+                session,
+                values: options.model.input(),
+                decoder: options.model.decoder(model),
+                options,
+                labels,
+                model,
+                fitting: Vec::new(),
+                orientations: Orientations::default(),
+                input: Array4::zeros((1, 3, model.1 as usize, model.0 as usize)),
+                interval,
+            },
+        )))
     }
 }
 
@@ -449,24 +453,6 @@ pub(super) fn is_hardware(format: ffmpeg::format::Pixel) -> bool {
     crate::elements::vision::is_hardware(format)
 }
 
-impl Element for Detecting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwOrtDetector
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Detecting {
     /// Decoded video in system memory, any pixel layout.
     fn input_contract(&self) -> InputContract {
@@ -500,6 +486,10 @@ impl Filter for Detecting {
 
     fn reset(&mut self) {
         self.interval.restart();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

@@ -27,7 +27,7 @@ use media_pp::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Filter, Output, Produced, Sink, Source, Wait, element_pp_log},
+    element::{Filter, Output, Produced, Sink, Source, Wait},
     elements::{
         Detection, DetectionOverlayOptions, Detections, Hiding, MetalDetectionOverlay,
         MetalFramePlanes, MetalSurfaceView, MetalTexture, RedactStyle, Treatment,
@@ -36,7 +36,6 @@ use media_pp::{
     },
     ffmpeg::{self, ffi, format::Pixel, frame::Video},
     pipeline::Pipeline,
-    pp_log::PpLog,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
@@ -53,36 +52,10 @@ const GREY: u8 = 100;
 /// Where `Mark` puts black, in pixels: x and y from, and the side.
 const SQUARE: (usize, usize, usize) = (8, 8, 16);
 
-fn identity(name: &str) -> (Arc<str>, PpLog) {
-    (name.into(), element_pp_log(ElementType::Other, name, None))
-}
-
-macro_rules! element {
-    ($type:ty) => {
-        impl Element for $type {
-            fn name(&self) -> Arc<str> {
-                self.name.clone()
-            }
-            fn element_type(&self) -> ElementType {
-                ElementType::Other
-            }
-            fn pp_log(&self) -> &PpLog {
-                &self.pp_log
-            }
-            fn pp_log_mut(&mut self) -> &mut PpLog {
-                &mut self.pp_log
-            }
-        }
-    };
-}
-
 /// `PICTURES` grey NV12 pictures in system memory.
 struct Pictures {
-    name: Arc<str>,
-    pp_log: PpLog,
     next: i64,
 }
-element!(Pictures);
 
 impl Source for Pictures {
     /// Made as fast as they are asked for, as a file is read.
@@ -107,8 +80,6 @@ impl Source for Pictures {
 /// The application's own element: a copy of each picture with a black
 /// square on it, carrying a box for the overlay.
 struct Mark {
-    name: Arc<str>,
-    pp_log: PpLog,
     device: VideoToolboxDevice,
     metal: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -116,7 +87,6 @@ struct Mark {
     black: MetalTexture,
     pool: Option<VideoToolboxFramePool>,
 }
-element!(Mark);
 
 // SAFETY: a Metal device, its queue and a texture are thread-safe objects,
 // which Apple documents as usable from any thread.
@@ -165,10 +135,7 @@ impl Mark {
                 side,
             );
         }
-        let (name, pp_log) = identity("mark");
         Self {
-            name,
-            pp_log,
             device,
             metal,
             queue,
@@ -247,7 +214,7 @@ impl Mark {
         // Its pixel buffer says the same colour: an encoder reads it there.
         self.pool.as_ref().expect("made above").describe(&marked)?;
         let found = Detections::new(
-            self.name.clone(),
+            Arc::from("mark"),
             Arc::from([Arc::from("thing")]),
             vec![Detection::new(0, 0.9, 0.5, 0.5, 0.25, 0.25)],
         );
@@ -286,11 +253,8 @@ impl Filter for Mark {
 type Seen = Arc<Mutex<Vec<(Option<i64>, Vec<u8>, usize)>>>;
 
 struct Collect {
-    name: Arc<str>,
-    pp_log: PpLog,
     seen: Seen,
 }
-element!(Collect);
 
 impl Sink for Collect {
     fn render(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -336,31 +300,25 @@ fn an_application_element_works_on_videotoolbox_pictures_between_this_crates_own
     )
     .expect("overlay");
     let mark = Mark::new(device.clone(), metal);
-    let (name, pp_log) = identity("pictures");
-    let pictures = Pictures {
-        name,
-        pp_log,
-        next: 0,
-    };
+    let pictures = Pictures { next: 0 };
     let seen = Seen::default();
-    let (name, pp_log) = identity("collect");
-    let collect = Collect {
-        name,
-        pp_log,
-        seen: seen.clone(),
-    };
+    let collect = Collect { seen: seen.clone() };
 
-    let (pipeline, ()) = Pipeline::new("custom-metal", pictures, |pictures, ctx| {
-        let branch = ctx
-            .branch()
-            .pipe(VideoToolboxUpload::new("upload", &device))
-            .pipe(mark)
-            .pipe(overlay)
-            .pipe(VideoToolboxDownload::new("download"))
-            .to(collect)?;
-        ctx.attach(pictures, 0, branch)?;
-        Ok(())
-    })
+    let (pipeline, ()) = Pipeline::new(
+        "custom-metal",
+        pictures.named("pictures"),
+        |pictures, ctx| {
+            let branch = ctx
+                .branch()
+                .pipe(VideoToolboxUpload::new("upload", &device))
+                .pipe(mark.named("mark"))
+                .pipe(overlay)
+                .pipe(VideoToolboxDownload::new("download"))
+                .to(collect.named("collect"))?;
+            ctx.attach(pictures, 0, branch)?;
+            Ok(())
+        },
+    )
     .expect("a pipeline whose links agree");
     pipeline.run().expect("run");
     for event in pipeline.bus().iter() {

@@ -208,7 +208,8 @@ Everything that travels is a `MediaBuffer`:
 The media inside is shared, not copied: sending one picture to three
 branches costs three reference counts. Timestamps, time bases and colour
 information pass through every element that does not deliberately make a
-new timeline.
+new timeline; `buf.pts()` and `buf.time_base()` read them whichever variant
+a buffer is.
 
 A buffer also carries **metadata**: what a detector found in a picture
 (`Detections`), which stream of a batch it came from, a cut detected there.
@@ -288,9 +289,34 @@ Implement one trait:
 | Something that changes buffers | `Filter` | `transform`: take one buffer, push out what it becomes; `drain` for what it holds at the end |
 | Something buffers end in | `Sink` | `render`: do something with each buffer |
 
-The framework handles the rest: pausing, seeking, ending, threads. The
-[`custom_element`](../../examples/core/custom_element) example writes one of
-each and runs them together.
+The framework handles the rest: pausing, seeking, ending, threads — and who
+the element is. It keeps no name of its own: it goes by its type's name, or
+by one you give it where it is wired, which tells two of the same apart:
+
+```rust,ignore
+struct Invert;
+
+impl Filter for Invert {
+    fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
+        out.push(/* … what `buf` becomes … */);
+        Ok(())
+    }
+}
+
+ctx.branch().pipe(Invert).pipe(Invert.named("second")).to(sink)?;
+```
+
+An element that logs, or needs the pipeline's clock or bus, takes them in
+`attached`, which is called as it is wired:
+
+```rust,ignore
+fn attached(&mut self, cx: &Attached<'_>) {
+    self.pp_log = Some(cx.pp_log().clone()); // for pp_info!(pp_log: …)
+}
+```
+
+The [`custom_element`](../../examples/core/custom_element) example writes one
+of each and runs them together.
 
 ## Logging
 

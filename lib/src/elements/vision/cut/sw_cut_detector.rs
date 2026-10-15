@@ -10,7 +10,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::vision::batch::PerStream,
     error::Result,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -81,16 +81,20 @@ impl SwCutDetector {
         options: CutDetectorOptions,
     ) -> std::result::Result<Self, SwCutDetectorError> {
         options.check()?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwCutDetector, &name, None);
+        let identity = Identity::new(ElementType::SwCutDetector, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "opened: {options:?}");
-        Ok(Self(FilterStage::new(Detecting {
-            name,
-            pp_log,
-            options,
-            judges: PerStream::default(),
-            converting: None,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Detecting {
+                name,
+                pp_log,
+                options,
+                judges: PerStream::default(),
+                converting: None,
+            },
+        )))
     }
 }
 
@@ -184,24 +188,6 @@ impl Detecting {
     }
 }
 
-impl Element for Detecting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwCutDetector
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Detecting {
     /// Pictures in system memory, any layout.
     fn input_contract(&self) -> InputContract {
@@ -251,6 +237,10 @@ impl Filter for Detecting {
     /// A seek or a flush: what was held is let go of.
     fn reset(&mut self) {
         self.judges.clear();
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

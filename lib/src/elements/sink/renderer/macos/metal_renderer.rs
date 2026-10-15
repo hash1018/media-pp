@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Attached, ElementType, Identity, Sink},
     elements::SubmitError,
     error::Result,
     platform::macos::{
@@ -175,7 +175,6 @@ sink_stage!(MetalRenderer);
 /// hands them over.
 struct Submitting {
     pp_log: PpLog,
-    name: Arc<str>,
     inner: Box<dyn MetalFrameRenderer>,
     /// Read once from `inner`, where every texture is made.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -190,16 +189,18 @@ impl MetalRenderer {
     /// implementation is — already set up to draw by the time it gets
     /// here.
     pub fn new(name: impl Into<String>, renderer: Box<dyn MetalFrameRenderer>) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MetalRenderer, &name, None);
+        let identity = Identity::new(ElementType::MetalRenderer, name);
+        let pp_log = identity.pp_log().clone();
         let device = renderer.device();
         pp_info!(pp_log: &pp_log, "created");
-        Self(SinkStage::new(Submitting {
-            pp_log,
-            name,
-            inner: renderer,
-            device,
-        }))
+        Self(SinkStage::new(
+            identity,
+            Submitting {
+                pp_log,
+                inner: renderer,
+                device,
+            },
+        ))
     }
 
     /// Call when the target resizes.
@@ -255,24 +256,6 @@ impl Submitting {
     }
 }
 
-impl Element for Submitting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MetalRenderer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Sink for Submitting {
     /// VideoToolbox frames holding NV12 or BGRA — anything else has no
     /// surface to make a texture over.
@@ -295,6 +278,10 @@ impl Sink for Submitting {
             .inspect_err(|error| pp_error!(self, "submit failed: {error:?}"))
             .map_err(MetalRendererError::Submit)?;
         Ok(())
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

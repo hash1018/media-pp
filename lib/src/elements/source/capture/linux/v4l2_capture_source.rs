@@ -31,7 +31,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::VideoFormat,
     error::Result,
     platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device},
@@ -112,7 +112,6 @@ source_stage!(V4l2CaptureSource);
 /// camera delivers them: all of its work, which the framework makes the
 /// source.
 struct Capturing {
-    name: Arc<str>,
     pp_log: PpLog,
     input: ffmpeg::format::context::Input,
     stream: usize,
@@ -148,8 +147,8 @@ impl V4l2CaptureSource {
         options: V4l2CaptureOptions,
     ) -> std::result::Result<(Self, VideoFormat), V4l2CaptureSourceError> {
         crate::ensure_ffmpeg();
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::V4l2CaptureSource, &name, None);
+        let identity = Identity::new(ElementType::V4l2CaptureSource, name);
+        let pp_log = identity.pp_log().clone();
 
         // SAFETY: both calls are FFmpeg's own registration and lookup, which
         // take no arguments this side owns; the returned descriptor is
@@ -249,18 +248,20 @@ impl V4l2CaptureSource {
             decoder.format()
         );
         Ok((
-            Self(SourceStage::new(Capturing {
-                name,
-                pp_log,
-                input,
-                stream: index,
-                decoder,
-                scaler: None,
-                undecodable: 0,
-                format,
-                pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-                ready: VecDeque::new(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    pp_log,
+                    input,
+                    stream: index,
+                    decoder,
+                    scaler: None,
+                    undecodable: 0,
+                    format,
+                    pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                    ready: VecDeque::new(),
+                },
+            )),
             format,
         ))
     }
@@ -396,24 +397,6 @@ fn open_input(
     Ok(input)
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::V4l2CaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -455,6 +438,10 @@ impl Source for Capturing {
             }
         }
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -462,8 +449,7 @@ mod tests {
     use super::*;
     use crate::bus::Bus;
     use crate::control::{ControlMsg, channel};
-    use crate::element::RawSink;
-    use crate::element::{RawSource, SrcPads};
+    use crate::element::{Element, RawSink, RawSource, SrcPads, element_pp_log};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 

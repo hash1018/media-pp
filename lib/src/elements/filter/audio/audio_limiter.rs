@@ -9,7 +9,7 @@ use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     transform::{FilterStage, filter_stage},
 };
@@ -149,7 +149,6 @@ filter_stage!(AudioLimiter);
 /// framework makes the filter.
 struct Limiting {
     pp_log: PpLog,
-    name: Arc<str>,
     control: Arc<Tuning<AudioLimiterOptions>>,
     applied: Option<(u64, u32)>,
     /// The threshold as an amplitude, and how much of the way back to the
@@ -173,21 +172,23 @@ impl AudioLimiter {
         options: AudioLimiterOptions,
     ) -> std::result::Result<(Self, AudioLimiterHandle), AudioLimiterError> {
         let options = options.validate()?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::AudioLimiter, &name, None);
+        let identity = Identity::new(ElementType::AudioLimiter, name);
+        let pp_log = identity.pp_log().clone();
         let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
-            Self(FilterStage::new(Limiting {
-                name: name.clone(),
-                pp_log,
-                control: control.clone(),
-                applied: None,
-                // Both replaced before the first sample is looked at.
-                ceiling: 1.0,
-                release: 0.0,
-                reduction: 0.0,
-            })),
+            Self(FilterStage::new(
+                identity,
+                Limiting {
+                    pp_log,
+                    control: control.clone(),
+                    applied: None,
+                    // Both replaced before the first sample is looked at.
+                    ceiling: 1.0,
+                    release: 0.0,
+                    reduction: 0.0,
+                },
+            )),
             AudioLimiterHandle { control },
         ))
     }
@@ -245,24 +246,6 @@ impl Limiting {
     }
 }
 
-impl Element for Limiting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AudioLimiter
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Limiting {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
@@ -294,6 +277,10 @@ impl Filter for Limiting {
     fn reset(&mut self) {
         self.reduction = 0.0;
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -304,7 +291,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
     use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;

@@ -6,7 +6,7 @@ use ffmpeg_next as ffmpeg;
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     pool::UnboundObjectPool,
     produce::source_stage,
     schedule::LiveSchedule,
@@ -87,7 +87,6 @@ source_stage!(TestVideoSource);
 /// work, which the framework makes the source.
 struct Generating {
     pp_log: PpLog,
-    name: Arc<str>,
     options: TestVideoOptions,
     frame_index: i64,
     /// `1 / options.frame_rate`, precomputed once — how long to wait
@@ -109,8 +108,8 @@ struct Generating {
 impl TestVideoSource {
     /// Creates an unbounded synthetic video source with the requested output definition.
     pub fn new(name: impl Into<String>, options: TestVideoOptions) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::TestVideoSource, &name, None);
+        let identity = Identity::new(ElementType::TestVideoSource, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "created: {}x{}, frame_rate={}",
@@ -132,15 +131,17 @@ impl TestVideoSource {
         } else {
             Duration::ZERO
         };
-        Self(SourceStage::new(Generating {
-            name,
-            pp_log,
-            options,
-            frame_index: 0,
-            frame_interval,
-            pool,
-            schedule: LiveSchedule::default(),
-        }))
+        Self(SourceStage::new(
+            identity,
+            Generating {
+                pp_log,
+                options,
+                frame_index: 0,
+                frame_interval,
+                pool,
+                schedule: LiveSchedule::default(),
+            },
+        ))
     }
 
     /// The unit each generated frame's `pts` is expressed in — what you
@@ -196,24 +197,6 @@ impl Generating {
     }
 }
 
-impl Element for Generating {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::TestVideoSource
-    }
-
-    fn pp_log(&self) -> &crate::pp_log::PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut crate::pp_log::PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Generating {
     fn is_live(&self) -> bool {
         true
@@ -238,6 +221,10 @@ impl Source for Generating {
         self.schedule.made();
         Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into())))
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +238,7 @@ mod tests {
     use crate::pp_log::PpLog;
 
     use super::*;
+    use crate::element::{Element, element_pp_log};
     use crate::{
         element::{RawSink, RawSource},
         pipeline::Pipeline,

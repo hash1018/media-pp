@@ -14,9 +14,10 @@ use crate::{
     buffer::{MediaBuffer, Metadata},
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads},
+    element::{
+        Attached, Context, Element, ElementType, Flow, Identity, Named, RawFilter, RawSink, SrcPads,
+    },
     error::Result,
-    graph::ElementId,
     pad::SrcPad,
     pp_log::PpLog,
     stash::OutputStash,
@@ -57,7 +58,14 @@ use crate::{
 /// which input each came from carries it itself, as
 /// [`FrameRateLimiter`](crate::elements::FrameRateLimiter) does; one that
 /// sets its own on a buffer it pushes keeps that.
-pub trait Filter: Element {
+///
+/// # Who it is
+///
+/// A filter is not an [`Element`]: the stage the framework makes of it
+/// keeps its name and log identity. It goes by its type's name, or by the
+/// one [`Self::named`] gives it, and is told who it is in the pipeline —
+/// and which pipeline — through [`Self::attached`].
+pub trait Filter: Send {
     /// Makes what `buf` answers to, into `out` — nothing, one buffer, or
     /// several. Never handed the end of the stream: that is `drain`'s.
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()>;
@@ -97,6 +105,21 @@ pub trait Filter: Element {
     fn accepts_seek(&self) -> bool {
         true
     }
+
+    /// Told who it is in the pipeline it is being wired into, and that
+    /// pipeline, before any buffer — and again if it is wired anew. Keep
+    /// [`Attached::pp_log`] to log; take from [`Attached::context`] what is
+    /// needed of the pipeline. Nothing by default.
+    fn attached(&mut self, _cx: &Attached<'_>) {}
+
+    /// This filter, going by `name` — to tell two of it apart in the log
+    /// and on the bus. One not named goes by its type's name.
+    fn named(self, name: impl Into<String>) -> Named<Self>
+    where
+        Self: Sized,
+    {
+        Named::new(name, self)
+    }
 }
 
 /// Where a [`Filter`] puts what it makes, in the order it is to go on.
@@ -124,7 +147,7 @@ impl Output {
         for buf in &mut self.made {
             if std::mem::discriminant(buf) == input.sort
                 && input.pts.is_some()
-                && pts_of(buf) == input.pts
+                && buf.pts() == input.pts
                 && buf.metadata().is_none()
             {
                 buf.set_metadata(Some(Arc::clone(&input.metadata)));
@@ -146,24 +169,18 @@ impl Carried {
     fn of(buf: &MediaBuffer) -> Option<Self> {
         Some(Self {
             sort: std::mem::discriminant(buf),
-            pts: pts_of(buf),
+            pts: buf.pts(),
             metadata: Arc::clone(buf.metadata_arc()?),
         })
-    }
-}
-
-/// A buffer's presentation timestamp.
-fn pts_of(buf: &MediaBuffer) -> Option<i64> {
-    match buf {
-        MediaBuffer::Packet(packet) => packet.pts(),
-        MediaBuffer::Video(frame) => frame.pts(),
-        MediaBuffer::Audio(frame) => frame.pts(),
     }
 }
 
 /// What a [`Filter`] is in a pipeline: the filter the framework makes of
 /// it, with the pad and the rules it does not keep itself.
 pub(crate) struct FilterStage<T> {
+    /// Who it is — the filter's name and log identity, which it does not
+    /// keep itself.
+    identity: Identity,
     inner: T,
     pad: SrcPad,
     /// What it made that its pad could not take while a preroll held the
@@ -172,9 +189,11 @@ pub(crate) struct FilterStage<T> {
 }
 
 impl<T: Filter> FilterStage<T> {
-    pub(crate) fn new(inner: T) -> Self {
-        let pad = SrcPad::with_contract(format!("{}_src", inner.name()), inner.output_contract());
+    pub(crate) fn new(identity: Identity, inner: T) -> Self {
+        let pad =
+            SrcPad::with_contract(format!("{}_src", identity.name()), inner.output_contract());
         Self {
+            identity,
             inner,
             pad,
             stash: OutputStash::default(),
@@ -209,28 +228,25 @@ impl<T: Filter> FilterStage<T> {
 
 impl<T: Filter> Element for FilterStage<T> {
     fn name(&self) -> Arc<str> {
-        self.inner.name()
+        self.identity.name()
     }
 
     fn element_type(&self) -> ElementType {
-        self.inner.element_type()
-    }
-
-    fn graph_id(&self) -> Option<ElementId> {
-        self.inner.graph_id()
+        self.identity.element_type()
     }
 
     fn pp_log(&self) -> &PpLog {
-        self.inner.pp_log()
+        self.identity.pp_log()
     }
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
-        self.inner.pp_log_mut()
+        self.identity.pp_log_mut()
     }
 
     fn attach_context(&mut self, context: &Arc<Context>) {
         self.stash.attach(&context.state);
-        self.inner.attach_context(context);
+        self.inner
+            .attached(&Attached::new(self.identity.pp_log(), context));
     }
 }
 
@@ -306,8 +322,9 @@ impl<T: Filter> RawSink for FilterStage<T> {
 }
 
 /// What can be put where a filter is asked for: a [`Filter`], which the
-/// framework makes one of, a [`RawFilter`] itself, or a [`BoxFilter`]
-/// holding either.
+/// framework makes one of — going by its type's name, or by the one a
+/// [`Named`] gives it — a [`RawFilter`] itself, or a [`BoxFilter`] holding
+/// either.
 ///
 /// `M` says which a type is, and the compiler works it out: nothing names
 /// it. A type that is both a `Filter` and a `RawFilter` is refused as
@@ -327,6 +344,10 @@ pub enum AsRawFilter {}
 /// Says a type goes in as the [`Filter`] it is — see [`IntoFilter`].
 pub enum AsFilter {}
 
+/// Says a [`Named`] filter goes in as the [`Filter`] it holds, by its name
+/// — see [`IntoFilter`].
+pub enum AsNamedFilter {}
+
 /// Says a [`BoxFilter`] goes in as the filter it holds — see
 /// [`IntoFilter`].
 pub enum AsBoxFilter {}
@@ -339,7 +360,16 @@ impl<F: RawFilter + 'static> IntoFilter<AsRawFilter> for F {
 
 impl<T: Filter + 'static> IntoFilter<AsFilter> for T {
     fn into_filter(self) -> BoxFilter {
-        BoxFilter(Box::new(FilterStage::new(self)))
+        BoxFilter(Box::new(FilterStage::new(Identity::of::<T>(), self)))
+    }
+}
+
+impl<T: Filter + 'static> IntoFilter<AsNamedFilter> for Named<T> {
+    fn into_filter(self) -> BoxFilter {
+        BoxFilter(Box::new(FilterStage::new(
+            Identity::other(self.name),
+            self.inner,
+        )))
     }
 }
 
@@ -350,13 +380,16 @@ impl IntoFilter<AsBoxFilter> for BoxFilter {
 }
 
 mod sealed {
-    use super::{AsBoxFilter, AsFilter, AsRawFilter, BoxFilter, Filter, RawFilter};
+    use super::{
+        AsBoxFilter, AsFilter, AsNamedFilter, AsRawFilter, BoxFilter, Filter, Named, RawFilter,
+    };
 
-    /// Keeps [`super::IntoFilter`] to the three ways in it has.
+    /// Keeps [`super::IntoFilter`] to the four ways in it has.
     pub trait Sealed<M> {}
 
     impl<F: RawFilter + 'static> Sealed<AsRawFilter> for F {}
     impl<T: Filter + 'static> Sealed<AsFilter> for T {}
+    impl<T: Filter + 'static> Sealed<AsNamedFilter> for Named<T> {}
     impl Sealed<AsBoxFilter> for BoxFilter {}
 }
 
@@ -564,24 +597,6 @@ mod tests {
         }
     }
 
-    impl Element for Delay {
-        fn name(&self) -> Arc<str> {
-            "delay".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
     impl Filter for Delay {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
             if let Some(held) = self.held.replace(buf) {
@@ -616,13 +631,17 @@ mod tests {
         fn accepts_seek(&self) -> bool {
             false
         }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.pp_log = cx.pp_log().clone();
+        }
     }
 
     /// What it holds goes on before the end does, and the end once.
     #[test]
     fn what_a_transform_holds_goes_on_before_the_end() {
         let (delay, _) = Delay::new();
-        let mut stage = FilterStage::new(delay);
+        let mut stage = FilterStage::new(Identity::other("filter"), delay);
         let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
@@ -642,7 +661,7 @@ mod tests {
     #[test]
     fn a_flush_or_a_stop_lets_go_of_what_it_holds() {
         let (delay, resets) = Delay::new();
-        let mut stage = FilterStage::new(delay);
+        let mut stage = FilterStage::new(Identity::other("filter"), delay);
         let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
@@ -667,24 +686,6 @@ mod tests {
         told: Arc<Mutex<Vec<&'static str>>>,
     }
 
-    impl Element for Timeline {
-        fn name(&self) -> Arc<str> {
-            "timeline".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
     impl Filter for Timeline {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
             out.push(buf);
@@ -698,6 +699,10 @@ mod tests {
         fn stopping(&mut self) {
             self.told.lock().unwrap().push("stopping");
         }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.pp_log = cx.pp_log().clone();
+        }
     }
 
     /// A seek's `Flush` goes to `reset` and a `Stop` to `stopping` alone —
@@ -706,10 +711,13 @@ mod tests {
     #[test]
     fn a_flush_resets_and_a_stop_stops() {
         let told = Arc::new(Mutex::new(Vec::new()));
-        let mut stage = FilterStage::new(Timeline {
-            pp_log: element_pp_log(ElementType::Other, "timeline", None),
-            told: Arc::clone(&told),
-        });
+        let mut stage = FilterStage::new(
+            Identity::other("filter"),
+            Timeline {
+                pp_log: element_pp_log(ElementType::Other, "timeline", None),
+                told: Arc::clone(&told),
+            },
+        );
         stage.control(&ControlMsg::Pause).expect("nothing to do");
         stage.control(&ControlMsg::Flush).expect("reset");
         stage.control(&ControlMsg::Stop).expect("stopped");
@@ -722,7 +730,7 @@ mod tests {
     fn a_failed_drain_still_ends_the_stream() {
         let (mut delay, _) = Delay::new();
         delay.drain_fails = true;
-        let mut stage = FilterStage::new(delay);
+        let mut stage = FilterStage::new(Identity::other("filter"), delay);
         let heard = hear(&mut stage);
 
         stage.consume(packet(1)).expect("held");
@@ -736,24 +744,6 @@ mod tests {
     /// Makes two packets of each one: its own, and one tagged 100 more.
     struct Twice(PpLog);
 
-    impl Element for Twice {
-        fn name(&self) -> Arc<str> {
-            "twice".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.0
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.0
-        }
-    }
-
     impl Filter for Twice {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
             let [tag] = tags(std::slice::from_ref(&buf))[..] else {
@@ -762,6 +752,10 @@ mod tests {
             out.push(buf);
             out.push(packet(tag.expect("a packet") + 100));
             Ok(())
+        }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.0 = cx.pp_log().clone();
         }
     }
 
@@ -804,7 +798,10 @@ mod tests {
     /// after it from the same input; the refusal is still answered.
     #[test]
     fn every_buffer_made_goes_on_even_after_one_is_refused() {
-        let mut stage = FilterStage::new(Twice(element_pp_log(ElementType::Other, "twice", None)));
+        let mut stage = FilterStage::new(
+            Identity::other("filter"),
+            Twice(element_pp_log(ElementType::Other, "twice", None)),
+        );
         let received = Arc::new(Mutex::new(Vec::new()));
         stage.src_pads()[0].link(Box::new(Refusing {
             pp_log: element_pp_log(ElementType::Other, "refusing", None),
@@ -822,9 +819,16 @@ mod tests {
     fn a_transform_is_wired_by_what_it_says() {
         let (delay, _) = Delay::new();
         let mut filter = delay.into_filter();
-        assert_eq!(&*filter.name(), "delay");
+        assert_eq!(&*filter.name(), "Delay", "unnamed, it goes by its type's");
+        assert_eq!(filter.element_type(), ElementType::Other);
         assert_eq!(filter.src_pads().len(), 1, "one pad");
-        assert_eq!(filter.src_pads()[0].name(), "delay_src");
+        assert_eq!(filter.src_pads()[0].name(), "Delay_src");
+        let (delay, _) = Delay::new();
+        let named = delay.named("delay").into_filter();
+        assert_eq!(&*named.name(), "delay");
+        assert_eq!(named.pp_log().name(), "delay");
+        let mut named = named;
+        assert_eq!(named.src_pads()[0].name(), "delay_src");
         assert_eq!(
             filter.src_pads()[0].contract(),
             OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
@@ -891,7 +895,10 @@ mod tests {
             crate::graph::ElementId::for_test(1),
             Arc::new(crate::clock::Clock::new()),
         ));
-        let mut stage = FilterStage::new(Twice(element_pp_log(ElementType::Other, "twice", None)));
+        let mut stage = FilterStage::new(
+            Identity::other("filter"),
+            Twice(element_pp_log(ElementType::Other, "twice", None)),
+        );
         stage.attach_context(&context);
         let open = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -995,24 +1002,6 @@ mod tests {
         }
     }
 
-    impl Element for Remake {
-        fn name(&self) -> Arc<str> {
-            "remake".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
     impl Filter for Remake {
         fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()> {
             let MediaBuffer::Packet(packet) = &buf else {
@@ -1034,11 +1023,15 @@ mod tests {
             out.push(made);
             Ok(())
         }
+
+        fn attached(&mut self, cx: &crate::element::Attached<'_>) {
+            self.pp_log = cx.pp_log().clone();
+        }
     }
 
     #[test]
     fn what_a_buffer_carries_goes_on_to_what_is_made_from_it() {
-        let mut stage = FilterStage::new(Remake::new());
+        let mut stage = FilterStage::new(Identity::other("filter"), Remake::new());
         let kept = keep(&mut stage);
         stage.consume(marked(packet_at(1, 10), "found")).unwrap();
         stage.consume(packet_at(2, 11)).unwrap();
@@ -1051,14 +1044,14 @@ mod tests {
     fn nothing_is_carried_onto_another_timestamp_or_another_sort() {
         let mut later = Remake::new();
         later.shift = 1;
-        let mut stage = FilterStage::new(later);
+        let mut stage = FilterStage::new(Identity::other("filter"), later);
         let kept = keep(&mut stage);
         stage.consume(marked(packet_at(1, 10), "found")).unwrap();
         assert_eq!(seen(&kept.lock().unwrap()[0]), None, "another timestamp");
 
         let mut picture = Remake::new();
         picture.to_picture = true;
-        let mut stage = FilterStage::new(picture);
+        let mut stage = FilterStage::new(Identity::other("filter"), picture);
         let kept = keep(&mut stage);
         stage.consume(marked(packet_at(1, 10), "found")).unwrap();
         assert_eq!(seen(&kept.lock().unwrap()[0]), None, "another sort");
@@ -1069,7 +1062,7 @@ mod tests {
     #[test]
     fn a_buffer_held_from_earlier_is_not_given_what_the_next_carries() {
         let (delay, _) = Delay::new();
-        let mut stage = FilterStage::new(delay);
+        let mut stage = FilterStage::new(Identity::other("filter"), delay);
         let kept = keep(&mut stage);
         stage.consume(packet_at(1, 10)).unwrap();
         stage.consume(marked(packet_at(2, 11), "found")).unwrap();
@@ -1083,7 +1076,7 @@ mod tests {
     fn what_a_filter_puts_on_a_buffer_itself_is_kept() {
         let mut own = Remake::new();
         own.own = Some("own");
-        let mut stage = FilterStage::new(own);
+        let mut stage = FilterStage::new(Identity::other("filter"), own);
         let kept = keep(&mut stage);
         stage.consume(marked(packet_at(1, 10), "found")).unwrap();
         assert_eq!(seen(&kept.lock().unwrap()[0]), Some("own"));

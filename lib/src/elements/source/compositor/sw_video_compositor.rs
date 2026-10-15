@@ -29,8 +29,8 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, Context, Element, ElementType, Flow, Identity, Produced, RawSink, Source,
+        SourceStage, Wait, element_pp_log,
     },
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -792,7 +792,6 @@ source_stage!(SwVideoCompositor);
 /// composition. All of its work, which the framework makes the source.
 struct Compositing {
     pp_log: PpLog,
-    name: Arc<str>,
     shared: Arc<CompositorShared>,
     options: VideoCompositorOptions,
     frame_index: i64,
@@ -836,8 +835,8 @@ impl SwVideoCompositor {
     ) -> std::result::Result<(Self, SwVideoCompositorHandle), SwVideoCompositorError> {
         crate::ensure_ffmpeg();
         validate_output_options(options)?;
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwVideoCompositor, &name, None);
+        let identity = Identity::new(ElementType::SwVideoCompositor, name);
+        let pp_log = identity.pp_log().clone();
         let shared = Arc::new(CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
@@ -862,24 +861,26 @@ impl SwVideoCompositor {
             options.mode
         );
         Ok((
-            Self(SourceStage::new(Compositing {
-                name,
-                pp_log,
-                shared: shared.clone(),
-                options,
-                frame_index: 0,
-                scalers: HashMap::new(),
-                output_pool,
-                repeat_pool: UnboundObjectPool::new(
-                    0,
-                    ffmpeg::frame::Video::empty,
-                    release_picture,
-                ),
-                composed: None,
-                retired: Vec::new(),
-                ticks: None,
-                schedule: LiveSchedule::default(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Compositing {
+                    pp_log,
+                    shared: shared.clone(),
+                    options,
+                    frame_index: 0,
+                    scalers: HashMap::new(),
+                    output_pool,
+                    repeat_pool: UnboundObjectPool::new(
+                        0,
+                        ffmpeg::frame::Video::empty,
+                        release_picture,
+                    ),
+                    composed: None,
+                    retired: Vec::new(),
+                    ticks: None,
+                    schedule: LiveSchedule::default(),
+                },
+            )),
             SwVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
@@ -1082,28 +1083,6 @@ impl Compositing {
     }
 }
 
-impl Element for Compositing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwVideoCompositor
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<Context>) {
-        self.ticks = Some(context.source_ticks());
-    }
-}
-
 impl Source for Compositing {
     fn is_live(&self) -> bool {
         self.options.mode.is_live()
@@ -1121,6 +1100,11 @@ impl Source for Compositing {
             RenderMode::Live => self.produce_live(wait),
             RenderMode::Offline { end } => produce_offline(self, wait, end),
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.ticks = Some(cx.context().source_ticks());
     }
 }
 
@@ -1163,6 +1147,10 @@ impl TimedInput for VideoInput {
 
 impl OfflineCompositor for Compositing {
     type Input = VideoInput;
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
 
     fn inputs(&self) -> Vec<Arc<VideoInput>> {
         self.shared
@@ -1393,8 +1381,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::element::RawSinkExt;
-    use crate::element::RawSource;
+    use crate::element::{RawSinkExt, RawSource};
     use crate::elements::{SwTextLayerError, TextLayer};
 
     fn options(width: u32, height: u32) -> VideoCompositorOptions {

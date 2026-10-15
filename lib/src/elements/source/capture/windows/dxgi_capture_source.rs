@@ -32,7 +32,7 @@ use windows::{
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::VideoFormat,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     platform::windows::{
@@ -438,7 +438,6 @@ source_stage!(DxgiCaptureSource);
 /// the desktop. All of its work, which the framework makes the source.
 struct Capturing {
     pp_log: PpLog,
-    name: Arc<str>,
     /// Only used by [`CaptureMode::Gpu`]'s [`Capturing::emit_frame`]
     /// path, to build each tick's fresh per-emission composite texture —
     /// unused after construction in [`CaptureMode::Cpu`], but harmless to
@@ -651,8 +650,8 @@ impl DxgiCaptureSource {
         if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
             return Err(DxgiCaptureSourceError::InvalidFrameRate(frame_rate));
         }
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::DxgiCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::DxgiCaptureSource, name);
+        let pp_log = identity.pp_log().clone();
 
         // SAFETY: creates the documented DXGI factory interface without
         // borrowing caller-owned storage.
@@ -837,39 +836,41 @@ impl DxgiCaptureSource {
         );
 
         Ok((
-            Self(SourceStage::new(Capturing {
-                name,
-                pp_log,
-                device,
-                context,
-                units,
-                width,
-                height,
-                gpu_mode,
-                include_cursor,
-                cursor_shape: None,
-                cursor_position: POINT::default(),
-                cursor_visible: false,
-                staging,
-                frame_rate: FrameRate::new(frame_rate),
-                frame_index: 0,
-                pool,
-                wrapper_pool: UnboundObjectPool::new(
-                    0,
-                    ffmpeg::frame::Video::empty,
-                    release_picture,
-                ),
-                composite: None,
-                spare_composites: Vec::new(),
-                last_picture: None,
-                retired: Vec::new(),
-                picture_cursor: CursorState::default(),
-                cursor_shape_version: 0,
-                metadata: Vec::new(),
-                direct,
-                captured_since_picture: false,
-                schedule: LiveSchedule::default(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    pp_log,
+                    device,
+                    context,
+                    units,
+                    width,
+                    height,
+                    gpu_mode,
+                    include_cursor,
+                    cursor_shape: None,
+                    cursor_position: POINT::default(),
+                    cursor_visible: false,
+                    staging,
+                    frame_rate: FrameRate::new(frame_rate),
+                    frame_index: 0,
+                    pool,
+                    wrapper_pool: UnboundObjectPool::new(
+                        0,
+                        ffmpeg::frame::Video::empty,
+                        release_picture,
+                    ),
+                    composite: None,
+                    spare_composites: Vec::new(),
+                    last_picture: None,
+                    retired: Vec::new(),
+                    picture_cursor: CursorState::default(),
+                    cursor_shape_version: 0,
+                    metadata: Vec::new(),
+                    direct,
+                    captured_since_picture: false,
+                    schedule: LiveSchedule::default(),
+                },
+            )),
             VideoFormat {
                 width,
                 height,
@@ -1720,24 +1721,6 @@ impl Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::DxgiCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -1793,6 +1776,10 @@ impl Source for Capturing {
                 Err(error.into())
             }
         }
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

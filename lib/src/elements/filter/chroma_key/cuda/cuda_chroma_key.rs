@@ -10,7 +10,7 @@ use super::super::options::{ChromaKeyOptions, feather_band};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
     frame_size::ForSize,
@@ -102,7 +102,6 @@ filter_stage!(CudaChromaKey);
 /// framework makes the filter.
 struct Keying {
     pp_log: PpLog,
-    name: Arc<str>,
     /// This element's own reference to the shared context, released in
     /// `Drop`.
     hw_device_ctx: Arc<AvBufferRef>,
@@ -159,8 +158,8 @@ impl CudaChromaKey {
         device: &CudaDevice,
         options: ChromaKeyOptions,
     ) -> std::result::Result<(Self, ChromaKeyHandle), CudaChromaKeyError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::CudaChromaKey, &name, None);
+        let identity = Identity::new(ElementType::CudaChromaKey, name);
+        let pp_log = identity.pp_log().clone();
 
         let driver = CudaDriver::retain_primary()?;
         let hw_device_ctx = device.retain();
@@ -182,19 +181,21 @@ impl CudaChromaKey {
 
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self(FilterStage::new(Keying {
-            name,
-            pp_log,
-            hw_device_ctx,
-            hw_frames_ctx: ForSize::new(),
-            device_ctx,
-            driver,
-            options,
-            control,
-            enabled: true,
-            repeated: RepeatedOutput::new(),
-            pool,
-        }));
+        let element = Self(FilterStage::new(
+            identity,
+            Keying {
+                pp_log,
+                hw_device_ctx,
+                hw_frames_ctx: ForSize::new(),
+                device_ctx,
+                driver,
+                options,
+                control,
+                enabled: true,
+                repeated: RepeatedOutput::new(),
+                pool,
+            },
+        ));
         Ok((element, handle))
     }
 }
@@ -345,24 +346,6 @@ impl PerFrameTransform for Keying {
     }
 }
 
-impl Element for Keying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::CudaChromaKey
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Keying {
     /// Writes alpha into a device-resident frame; the surface layout it
     /// requires is a runtime value, not part of this.
@@ -404,6 +387,10 @@ impl Filter for Keying {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

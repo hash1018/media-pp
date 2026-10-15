@@ -18,7 +18,7 @@ use crate::{
     buffer::MediaBuffer,
     color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::filter::is_codec_drain_boundary,
     error::Result,
     platform::{
@@ -165,7 +165,6 @@ filter_stage!(D3d12VideoEncoder);
 /// the framework makes the filter.
 struct Encoding {
     pp_log: PpLog,
-    name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
     _hw_device_ctx: AvBufferRef,
     _hw_frames_ctx: AvBufferRef,
@@ -223,14 +222,38 @@ impl D3d12VideoEncoder {
         Self::open(name, gpu, options, Some(color))
     }
 
+    /// As [`Self::new`], for re-encoding the pictures of `stream`, as
+    /// decoded and still in its colour: the stream says what `stream` says
+    /// of it — its [`StreamInfo::color`] — as
+    /// [`SwEncoder::for_stream`](crate::elements::SwEncoder::for_stream)
+    /// and [`CudaEncoder`](crate::elements)'s do. Where `stream` names no
+    /// colour this is [`Self::new`]. It encodes NV12, eight bits, so an
+    /// HDR10 stream's mastering display and light levels have nothing here
+    /// to go with.
+    ///
+    /// Not for pictures made into other colour on the way — HDR mapped to
+    /// SDR by a [`D3d12ToneMap`](crate::elements::D3d12ToneMap), say — which
+    /// [`Self::with_color`] names as they are.
+    ///
+    /// [`StreamInfo::color`]: crate::elements::StreamInfo::color
+    pub fn for_stream(
+        name: impl Into<String>,
+        gpu: &D3d12Gpu,
+        options: D3d12VideoEncoderOptions,
+        stream: &crate::elements::StreamInfo,
+    ) -> std::result::Result<Self, D3d12VideoEncoderError> {
+        crate::ensure_ffmpeg();
+        Self::open(name, gpu, options, stream.color())
+    }
+
     fn open(
         name: impl Into<String>,
         gpu: &D3d12Gpu,
         options: D3d12VideoEncoderOptions,
         color: Option<ColorDescription>,
     ) -> std::result::Result<Self, D3d12VideoEncoderError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12VideoEncoder, &name, None);
+        let identity = Identity::new(ElementType::D3d12VideoEncoder, name);
+        let pp_log = identity.pp_log().clone();
         let encoder_name = options.codec.encoder_name();
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
             .ok_or(D3d12VideoEncoderError::CodecNotFound(encoder_name))?;
@@ -294,17 +317,19 @@ impl D3d12VideoEncoder {
             options.bit_rate,
             options.gop_size
         );
-        Ok(Self(FilterStage::new(Encoding {
-            name,
-            pp_log,
-            encoder,
-            _hw_device_ctx: hw_device_ctx,
-            _hw_frames_ctx: hw_frames_ctx,
-            device: gpu.device().clone(),
-            width: options.width,
-            height: options.height,
-            packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Encoding {
+                pp_log,
+                encoder,
+                _hw_device_ctx: hw_device_ctx,
+                _hw_frames_ctx: hw_frames_ctx,
+                device: gpu.device().clone(),
+                width: options.width,
+                height: options.height,
+                packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
+            },
+        )))
     }
 
     /// The encoded stream's parameters, for
@@ -416,24 +441,6 @@ impl From<&D3d12VideoEncoder> for crate::elements::TrackFormat {
     }
 }
 
-impl Element for Encoding {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12VideoEncoder
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Encoding {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
@@ -467,6 +474,10 @@ impl Filter for Encoding {
     fn reset(&mut self) {
         // Nothing to reset, as for every encoder here: a caller needing a
         // hard encoded-stream discontinuity rebuilds the encoder.
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 
@@ -593,6 +604,61 @@ mod tests {
             let mean = apart as f64 / count as f64;
             assert!(mean < 6.0, "picture {index}: luma {mean} apart on average");
         }
+    }
+
+    /// Re-encoding a stream says the stream's colour, and one that names
+    /// none says nothing of its own.
+    #[test]
+    fn for_a_stream_it_says_the_stream_s_colour() {
+        use crate::test_support::hdr10_source;
+        let _session = crate::test_support::encoder_session();
+        let Some(gpu) = try_d3d12_gpu() else {
+            return;
+        };
+        let source = hdr10_source(false);
+        let said = source.stream.color().expect("the source names its colour");
+        let encoder = match D3d12VideoEncoder::for_stream(
+            "encoder",
+            &gpu,
+            options(D3d12VideoCodec::H265),
+            &source.stream,
+        ) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: {error}");
+                return;
+            }
+        };
+        let parameters = encoder.parameters();
+        // SAFETY: plain fields of parameters held above.
+        let raw = unsafe { &*parameters.as_ptr() };
+        assert_eq!(ffmpeg::color::Space::from(raw.color_space), said.space);
+        assert_eq!(
+            ffmpeg::color::Primaries::from(raw.color_primaries),
+            said.primaries
+        );
+        assert_eq!(
+            ffmpeg::color::TransferCharacteristic::from(raw.color_trc),
+            said.transfer
+        );
+
+        let mut plain = source.stream.clone();
+        // SAFETY: a plain field of parameters this test owns.
+        unsafe {
+            (*plain.parameters.as_mut_ptr()).color_space =
+                ffmpeg::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED
+        };
+        assert!(plain.color().is_none());
+        let encoder =
+            D3d12VideoEncoder::for_stream("encoder", &gpu, options(D3d12VideoCodec::H265), &plain)
+                .expect("opened once already");
+        let parameters = encoder.parameters();
+        // SAFETY: plain fields of parameters held above.
+        let raw = unsafe { &*parameters.as_ptr() };
+        assert_eq!(
+            ffmpeg::color::Space::from(raw.color_space),
+            ffmpeg::color::Space::Unspecified
+        );
     }
 
     /// HEVC from D3D12 goes into an MP4 as `hvc1`, which an iPhone plays,

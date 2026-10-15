@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use crate::pp_log::{PpLog, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Attached, ElementType, Identity, Sink},
     elements::CounterHandle,
     error::Result,
     render::{SinkStage, sink_stage},
@@ -22,7 +20,6 @@ sink_stage!(PacketCounter);
 /// the packets it counts.
 struct Counting {
     pp_log: PpLog,
-    name: Arc<str>,
     count: CounterHandle,
 }
 
@@ -31,35 +28,19 @@ impl PacketCounter {
     /// counted.
     pub fn new(name: impl Into<String>) -> (Self, CounterHandle) {
         let count = CounterHandle::new();
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::PacketCounter, &name, None);
+        let identity = Identity::new(ElementType::PacketCounter, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "created");
         (
-            Self(SinkStage::new(Counting {
-                name,
-                pp_log,
-                count: count.clone(),
-            })),
+            Self(SinkStage::new(
+                identity,
+                Counting {
+                    pp_log,
+                    count: count.clone(),
+                },
+            )),
             count,
         )
-    }
-}
-
-impl Element for Counting {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::PacketCounter
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
     }
 }
 
@@ -74,5 +55,9 @@ impl Sink for Counting {
             self.count.increment();
         }
         Ok(())
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }

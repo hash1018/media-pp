@@ -12,6 +12,26 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A `Source`, `Filter` or `Sink` is no longer an `Element`.** The stage
+  the framework makes of one keeps its name and log identity, so an element
+  of your own is its work alone: delete its `impl Element` — `name`,
+  `element_type`, `pp_log`, `pp_log_mut` — and the `name` and `pp_log`
+  fields only that impl read. It goes by its type's name, or by the one
+  its new `named` gives it where it is wired:
+
+  ```rust
+  ctx.branch().pipe(Invert.named("invert")).to(Seen.named("seen"))?;
+  ```
+
+  What its `attach_context` did goes into its new `attached`, which is
+  handed the same `Context` (`cx.context()`) and its log identity in that
+  pipeline (`cx.pp_log()`), to keep for its `pp_*!` records. `IntoFilter`,
+  `IntoTerminal` and `IntoSource` take the `Named` one as they take the
+  element. `Source::outputs` returns `Option<Vec<SrcPad>>`: `None`, the
+  default, is the one output named for the source, which a source no
+  longer has a name to make itself. `SeekableSource` asks only `Send` of
+  what implements it.
+
 - **`ReplayBufferError` has a `Replace` variant**: a clip written whole
   that could not take the place of the file at its path — see Fixed. A
   `match` on `ReplayBufferError` needs an arm for it.
@@ -281,6 +301,15 @@ compile error with no explanation.
   | `SegmentedFileMuxer::create(policy, naming)` | `SegmentedFileMuxer::create(policy, Mp4Layout::Standard, naming)` |
 
 ### Added
+
+- **`MediaBuffer::pts` and `MediaBuffer::time_base`** say a buffer's
+  timestamp and the unit it counts in, a packet's, a picture's or a
+  sound's alike, without matching on which it is.
+
+- **`D3d12VideoEncoder::for_stream`** says the colour of the stream it
+  re-encodes, as `SwEncoder`'s, `CudaEncoder`'s and
+  `VideoToolboxEncoder`'s do, in place of choosing between `new` and
+  `with_color` by hand.
 
 - **`scripts/setup-ffmpeg` builds the FFmpeg media-pp needs.** FFmpeg 8.0
   exactly, through vcpkg at the revision CI uses, on Windows
@@ -1523,6 +1552,13 @@ compile error with no explanation.
   writes `hvc1` with them in the sample entry, as for every other encoder
   of this crate; a stream copied from elsewhere with its sets in band stays
   `hev1`. `SegmentedFileMuxer` and `ReplayBuffer` follow.
+
+- **A failure downstream of a `Source` is reported as the element that
+  failed.** The framework's source loop posted what a decoder or a filter
+  behind it refused under the source's own name, so `BusEvent::Error`
+  named a `FileDemuxer` or a WebRTC track for a decoder's error; it now
+  names the element the error traces back to, as the control path
+  already did.
 
 - **A GPU compositor's input says once that its compositor stopped.** An
   input of `CudaVideoCompositor`, `VulkanVideoCompositor`,

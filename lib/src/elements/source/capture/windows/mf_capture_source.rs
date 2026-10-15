@@ -14,7 +14,7 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::VideoFormat,
     error::Result,
     platform::windows::{
@@ -169,7 +169,6 @@ source_stage!(MfCaptureSource);
 /// All of its work, which the framework makes the source.
 struct Capturing {
     pp_log: PpLog,
-    name: Arc<str>,
     /// Held for this element's whole life: the reader and the source below
     /// are only valid while Media Foundation is up.
     _runtime: MfRuntime,
@@ -273,8 +272,7 @@ impl MfCaptureSource {
         name: impl Into<String>,
         options: MfCaptureOptions,
     ) -> std::result::Result<(Self, VideoFormat), MfCaptureSourceError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::MfCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::MfCaptureSource, name);
         let _apartment = ComApartment::new()?;
         let runtime = MfRuntime::new()?;
 
@@ -292,7 +290,7 @@ impl MfCaptureSource {
         }
 
         let source = open_device_source(&options.device.id)?;
-        match Self::configure(&name, pp_log, runtime, &source, &options) {
+        match Self::configure(identity, runtime, &source, &options) {
             Ok(opened) => Ok(opened),
             Err(error) => {
                 // The camera is held from `open_device_source` onward, so
@@ -310,12 +308,12 @@ impl MfCaptureSource {
     /// The half of `open` that runs with the camera already held, split out
     /// so one `Shutdown` covers every way it can fail.
     fn configure(
-        name: &Arc<str>,
-        pp_log: PpLog,
+        identity: Identity,
         runtime: MfRuntime,
         source: &IMFMediaSource,
         options: &MfCaptureOptions,
     ) -> std::result::Result<(Self, VideoFormat), MfCaptureSourceError> {
+        let pp_log = identity.pp_log().clone();
         let reader = open_reader(source)?;
         let native = Self::select_native_type(&reader, options)?;
         // Ask for the mode first, so the camera runs at the shape that was
@@ -365,28 +363,32 @@ impl MfCaptureSource {
         );
 
         Ok((
-            Self(SourceStage::new(Capturing {
-                pp_log,
-                name: name.clone(),
-                _runtime: runtime,
-                source: source.clone(),
-                reader,
-                width,
-                height,
-                color_space,
-                color_range,
-                frame_rate: framerate,
-                frame_interval,
-                origin: None,
-                last_sample_time: None,
-                rebase: false,
-                pool: UnboundObjectPool::new(
-                    0,
-                    move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
-                    |_| {},
-                ),
-                apartment: None,
-            })),
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    pp_log,
+                    _runtime: runtime,
+                    source: source.clone(),
+                    reader,
+                    width,
+                    height,
+                    color_space,
+                    color_range,
+                    frame_rate: framerate,
+                    frame_interval,
+                    origin: None,
+                    last_sample_time: None,
+                    rebase: false,
+                    pool: UnboundObjectPool::new(
+                        0,
+                        move || {
+                            ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height)
+                        },
+                        |_| {},
+                    ),
+                    apartment: None,
+                },
+            )),
             VideoFormat {
                 width,
                 height,
@@ -612,24 +614,6 @@ impl Capturing {
     }
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::MfCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -684,6 +668,10 @@ impl Source for Capturing {
         frame.set_pts(Some(self.stamp(sample_time)));
         crate::buffer::set_time_base(&mut frame, self.time_base());
         Ok(Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into())))
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

@@ -10,7 +10,7 @@ use crate::{
     buffer::MediaBuffer,
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -69,7 +69,6 @@ filter_stage!(SwChromaKey);
 /// framework makes the filter.
 struct Keying {
     pp_log: PpLog,
-    name: Arc<str>,
     /// What this element is keying by right now, refreshed from `control`
     /// once per frame. Kept alongside it so a change can be recognized —
     /// see `refresh_options`.
@@ -103,8 +102,8 @@ impl SwChromaKey {
     /// Creates a software chroma-key filter, and the handle that retunes it
     /// while it runs.
     pub fn new(name: impl Into<String>, options: ChromaKeyOptions) -> (Self, ChromaKeyHandle) {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::SwChromaKey, &name, None);
+        let identity = Identity::new(ElementType::SwChromaKey, name);
+        let pp_log = identity.pp_log().clone();
         let key_color = options.method.key_color();
         pp_info!(
             pp_log: &pp_log,
@@ -114,16 +113,18 @@ impl SwChromaKey {
         );
         let control = Arc::new(ChromaKeyControl::new(options));
         let handle = ChromaKeyHandle::new(control.clone());
-        let element = Self(FilterStage::new(Keying {
-            name,
-            pp_log,
-            options,
-            control,
-            enabled: true,
-            dims: None,
-            pool: None,
-            repeated: RepeatedOutput::new(),
-        }));
+        let element = Self(FilterStage::new(
+            identity,
+            Keying {
+                pp_log,
+                options,
+                control,
+                enabled: true,
+                dims: None,
+                pool: None,
+                repeated: RepeatedOutput::new(),
+            },
+        ));
         (element, handle)
     }
 }
@@ -175,24 +176,6 @@ impl Keying {
     }
 }
 
-impl Element for Keying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::SwChromaKey
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Keying {
     /// Keys pixel by pixel on the CPU; the GPU counterpart is D3d11ChromaKey.
     fn input_contract(&self) -> InputContract {
@@ -240,6 +223,10 @@ impl Filter for Keying {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 
@@ -349,7 +336,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{super::options::ChromaKeyMethod, *};
-    use crate::element::{RawSink, SrcPads};
+    use crate::element::{RawSink, SrcPads, element_pp_log};
 
     fn new_chroma_key(
         options: ChromaKeyOptions,

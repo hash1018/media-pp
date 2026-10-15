@@ -18,12 +18,12 @@ use ffmpeg_next as ffmpeg;
 
 use crate::{
     buffer::{self, MediaBuffer},
-    element::{Element, Produced, Wait},
+    element::{Produced, Wait},
     elements::source::render_mode::MediaTime,
     error::Result,
     playback_state::{Bell, PlaybackState},
     pool::UnboundObjectPoolRef,
-    pp_log::pp_info,
+    pp_log::{PpLog, pp_info},
 };
 
 pub(crate) type Picture = Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>;
@@ -247,7 +247,10 @@ pub(crate) trait TimedInput {
 
 /// What [`produce_offline`] needs of a compositor. The backends differ in
 /// how they draw, and in nothing this does.
-pub(crate) trait OfflineCompositor: Element {
+pub(crate) trait OfflineCompositor {
+    /// Its log identity, for what it says of a render as a whole.
+    fn pp_log(&self) -> &PpLog;
+
     type Input: TimedInput;
     /// Every input registered now.
     fn inputs(&self) -> Vec<Arc<Self::Input>>;

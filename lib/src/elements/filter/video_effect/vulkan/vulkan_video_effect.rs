@@ -10,7 +10,7 @@ use super::super::options::{EffectParams, VideoEffect};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::VulkanDevice,
     error::Result,
     platform::vulkan::{
@@ -73,7 +73,6 @@ filter_stage!(VulkanVideoEffect);
 /// framework makes the filter.
 struct Applying {
     pp_log: PpLog,
-    name: Arc<str>,
     pass: BgraPass,
     /// The last output and the picture it was made from — see
     /// [`RepeatedOutput`]. Cleared when the effect changes.
@@ -95,23 +94,25 @@ impl VulkanVideoEffect {
         device: &VulkanDevice,
         effect: VideoEffect,
     ) -> std::result::Result<(Self, VideoEffectHandle), VulkanVideoEffectError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::VulkanVideoEffect, &name, None);
+        let identity = Identity::new(ElementType::VulkanVideoEffect, name);
+        let pp_log = identity.pp_log().clone();
         let pass = BgraPass::new(device, SHADER, c"main", 96, PassInput::Bgra)?;
         pp_info!(pp_log: &pp_log, "opened: BGRA, {} {effect:?}", effect.name());
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
         Ok((
-            Self(FilterStage::new(Applying {
-                name,
-                pp_log,
-                pass,
-                repeated: RepeatedOutput::new(),
-                effect,
-                params: effect.params(),
-                control,
-                enabled: true,
-            })),
+            Self(FilterStage::new(
+                identity,
+                Applying {
+                    pp_log,
+                    pass,
+                    repeated: RepeatedOutput::new(),
+                    effect,
+                    params: effect.params(),
+                    control,
+                    enabled: true,
+                },
+            )),
             handle,
         ))
     }
@@ -187,24 +188,6 @@ impl PerFrameTransform for Applying {
     }
 }
 
-impl Element for Applying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::VulkanVideoEffect
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Applying {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
@@ -243,6 +226,10 @@ impl Filter for Applying {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Vulkan)
                 .with_layouts(crate::contract::PixelLayoutSet::BGRA),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

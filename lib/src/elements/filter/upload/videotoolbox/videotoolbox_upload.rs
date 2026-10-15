@@ -11,7 +11,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     elements::{VideoToolboxDevice, filter::upload::nv12},
     error::Result,
     platform::{
@@ -104,7 +104,6 @@ filter_stage!(VideoToolboxUpload);
 /// framework makes the filter.
 struct Uploading {
     pp_log: PpLog,
-    name: Arc<str>,
     /// This element's own reference to the device, which frames are made on.
     hw_device_ctx: Arc<AvBufferRef>,
     /// The pool uploaded frames come from, and the size and layout it was
@@ -131,18 +130,20 @@ impl VideoToolboxUpload {
     /// VideoToolbox elements share. This element takes its own reference, so
     /// `device` itself need not outlive the call.
     pub fn new(name: impl Into<String>, device: &VideoToolboxDevice) -> Self {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::VideoToolboxUpload, &name, None);
+        let identity = Identity::new(ElementType::VideoToolboxUpload, name);
+        let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "opened: -> VideoToolbox");
-        Self(FilterStage::new(Uploading {
-            name,
-            pp_log,
-            hw_device_ctx: device.retain(),
-            frames: None,
-            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-            staging: None,
-            repeated: RepeatedOutput::new(),
-        }))
+        Self(FilterStage::new(
+            identity,
+            Uploading {
+                pp_log,
+                hw_device_ctx: device.retain(),
+                frames: None,
+                pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                staging: None,
+                repeated: RepeatedOutput::new(),
+            },
+        ))
     }
 }
 
@@ -258,24 +259,6 @@ impl PerFrameTransform for Uploading {
     }
 }
 
-impl Element for Uploading {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::VideoToolboxUpload
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Uploading {
     /// CPU-readable planes, in a layout that goes up — see the type's docs.
     fn input_contract(&self) -> InputContract {
@@ -314,6 +297,10 @@ impl Filter for Uploading {
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::VideoToolbox)
                 .with_layouts(LAYOUTS),
         )
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 

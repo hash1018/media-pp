@@ -12,7 +12,10 @@
 //!
 //! [`Element`] itself is the identity half — an element's type and its
 //! caller-chosen name, which every log record and every
-//! [`BusEvent`](crate::bus::BusEvent) is attributed to.
+//! [`BusEvent`](crate::bus::BusEvent) is attributed to. A [`Source`],
+//! [`Filter`] or [`Sink`] does not implement it: the stage the framework
+//! makes of one keeps its identity, gives it its type's name or the one
+//! [`Named`] carries, and tells it who it is through [`Attached`].
 
 use std::{
     sync::{Arc, Mutex},
@@ -36,11 +39,12 @@ use crate::{
 };
 
 pub use crate::produce::{
-    AsRawSource, AsSource, IntoSource, ProduceError, Produced, Source, SourceStage, Wait,
+    AsNamedSource, AsRawSource, AsSource, IntoSource, ProduceError, Produced, Source, SourceStage,
+    Wait,
 };
-pub use crate::render::{AsBoxSink, AsRawSink, AsSink, BoxSink, IntoTerminal, Sink};
+pub use crate::render::{AsBoxSink, AsNamedSink, AsRawSink, AsSink, BoxSink, IntoTerminal, Sink};
 pub use crate::transform::{
-    AsBoxFilter, AsFilter, AsRawFilter, BoxFilter, Filter, IntoFilter, Output,
+    AsBoxFilter, AsFilter, AsNamedFilter, AsRawFilter, BoxFilter, Filter, IntoFilter, Output,
 };
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
@@ -456,6 +460,115 @@ pub fn element_pp_log(element_type: ElementType, name: &str, pipeline_id: Option
     // one place FFmpeg is readied before any of them reaches it.
     crate::ensure_ffmpeg();
     PpLog::new(&format!("{element_type:?}"), name, pipeline_id)
+}
+
+/// Who a [`Source`], [`Filter`] or [`Sink`] is in a pipeline — its kind, its
+/// name, and the log identity those make — kept by the stage the framework
+/// makes of it, not by the element: an element of its own is its media work
+/// alone, and is handed this as it is wired ([`Attached`]).
+#[derive(Debug, Clone)]
+pub(crate) struct Identity {
+    element_type: ElementType,
+    name: Arc<str>,
+    pp_log: PpLog,
+}
+
+impl Identity {
+    /// An element of this crate's: `element_type`, called `name`.
+    pub(crate) fn new(element_type: ElementType, name: impl Into<String>) -> Self {
+        let name: Arc<str> = name.into().into();
+        Self {
+            element_type,
+            pp_log: element_pp_log(element_type, &name, None),
+            name,
+        }
+    }
+
+    /// An element of the application's own, called `name`.
+    pub(crate) fn other(name: impl Into<String>) -> Self {
+        Self::new(ElementType::Other, name)
+    }
+
+    /// An element of the application's own given no name: called what its
+    /// type is called, without its path or parameters — `Invert` for
+    /// `my_app::Invert<u8>`.
+    pub(crate) fn of<T>() -> Self {
+        let full = std::any::type_name::<T>();
+        let bare = full.split('<').next().unwrap_or(full);
+        Self::other(bare.rsplit("::").next().unwrap_or(bare))
+    }
+
+    pub(crate) fn name(&self) -> Arc<str> {
+        Arc::clone(&self.name)
+    }
+
+    pub(crate) fn element_type(&self) -> ElementType {
+        self.element_type
+    }
+
+    pub(crate) fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    pub(crate) fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+/// What a [`Source`], [`Filter`] or [`Sink`] is told as it is wired into a
+/// pipeline: who it is there, and the pipeline it runs in.
+///
+/// Handed to its `attached`, before any buffer and again whenever it is
+/// wired anew — into a [`Rack`](crate::elements::Rack)'s line, say. An
+/// element that logs keeps [`Self::pp_log`] for its `pp_*!` records, so
+/// that each says which pipeline and which element it came from; one that
+/// needs the pipeline's clock, playback clock or bus takes them from
+/// [`Self::context`], and lets the rest go — see
+/// [`Element::attach_context`] for why.
+pub struct Attached<'a> {
+    pp_log: &'a PpLog,
+    context: &'a Arc<Context>,
+}
+
+impl<'a> Attached<'a> {
+    pub(crate) fn new(pp_log: &'a PpLog, context: &'a Arc<Context>) -> Self {
+        Self { pp_log, context }
+    }
+
+    /// The element's log identity in this pipeline — what `pp_info!(pp_log:
+    /// …)` and its kind take, and what a `pp_log` field of its own is set to
+    /// for `pp_info!(self, …)`.
+    pub fn pp_log(&self) -> &'a PpLog {
+        self.pp_log
+    }
+
+    /// The name it goes by — the one [`Named`] gave it, or its type's.
+    pub fn name(&self) -> &'a str {
+        self.pp_log.name()
+    }
+
+    /// The pipeline it is wired into.
+    pub fn context(&self) -> &'a Arc<Context> {
+        self.context
+    }
+}
+
+/// A [`Source`], [`Filter`] or [`Sink`] of the application's own with the
+/// name it is to go by in the pipeline's log and on its bus — made by its
+/// `named`. One given no name goes by its type's, which is enough until the
+/// same element is wired twice.
+pub struct Named<T> {
+    pub(crate) name: String,
+    pub(crate) inner: T,
+}
+
+impl<T> Named<T> {
+    pub(crate) fn new(name: impl Into<String>, inner: T) -> Self {
+        Self {
+            name: name.into(),
+            inner,
+        }
+    }
 }
 
 /// Builds the [`PpLog`] used for records a [`crate::pipeline::Pipeline`]
@@ -916,7 +1029,7 @@ pub trait RawSource: SrcPads {
 /// A [`Source`] says it is one through [`Source::as_seekable`]; the
 /// framework takes each seek on the source's thread, between one thing made
 /// and the next.
-pub trait SeekableSource: Element {
+pub trait SeekableSource: Send {
     /// Repositions this source to `target`, an absolute position from the
     /// start of the media (e.g. `av_seek_frame` for
     /// [`crate::elements::FileDemuxer`]). Called on the source's own thread

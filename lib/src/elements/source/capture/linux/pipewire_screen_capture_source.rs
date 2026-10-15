@@ -33,7 +33,7 @@ use crate::{
 use crate::{
     buffer::{MediaBuffer, picture_is_referenced, release_picture},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
-    element::{Element, ElementType, Produced, Source, SourceStage, Wait, element_pp_log},
+    element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
     elements::VideoFormat,
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -517,7 +517,6 @@ source_stage!(PipeWireScreenCaptureSource);
 /// What a [`PipeWireScreenCaptureSource`] hands on, a picture a tick: all of
 /// its work, which the framework makes the source.
 struct Capturing {
-    name: Arc<str>,
     pp_log: PpLog,
     /// What its one output declares: CPU frames from `open`, CUDA-resident
     /// ones from `open_gpu` — settled at construction, so a downstream
@@ -659,7 +658,8 @@ impl PipeWireScreenCaptureSource {
             ));
         }
         let name = name.into();
-        let pp_log = element_pp_log(ElementType::PipeWireScreenCaptureSource, &name, None);
+        let identity = Identity::new(ElementType::PipeWireScreenCaptureSource, &*name);
+        let pp_log = identity.pp_log().clone();
 
         let mut cast = portal_handshake(&options)?;
         let restore_token = cast.restore_token.clone();
@@ -775,61 +775,72 @@ impl PipeWireScreenCaptureSource {
         );
 
         Ok((
-            Self(SourceStage::new(Capturing {
-                // `open` emits CPU frames and `open_gpu` CUDA-resident
-                // ones, and which of the two is settled here — so a
-                // downstream filter can be checked against it.
-                contract: OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, memory)),
-                schedule: LiveSchedule::default(),
-                name: name.into(),
-                pp_log,
-                width,
-                height,
-                frame_rate: FrameRate::new(frame_rate),
-                frame_index: 0,
-                // GPU mode pools only the small `AVFrame` wrapper: the
-                // surface it references comes from the CUDA frames context
-                // the PipeWire thread allocates from. Same split as
-                // `CudaUpload`.
-                #[cfg(feature = "cuda")]
-                pool: if gpu {
-                    // `release_picture` rather than a no-op: an idle wrapper
-                    // that kept its reference would pin a CUDA surface out of
-                    // the frames context the PipeWire thread allocates the
-                    // *next* capture from, for as long as it sat unused.
-                    UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture)
-                } else {
-                    UnboundObjectPool::new(
+            Self(SourceStage::new(
+                identity,
+                Capturing {
+                    // `open` emits CPU frames and `open_gpu` CUDA-resident
+                    // ones, and which of the two is settled here — so a
+                    // downstream filter can be checked against it.
+                    contract: OutputContract::Fixed(PortContract::frame(
+                        MediaKind::VideoFrame,
+                        memory,
+                    )),
+                    schedule: LiveSchedule::default(),
+                    pp_log,
+                    width,
+                    height,
+                    frame_rate: FrameRate::new(frame_rate),
+                    frame_index: 0,
+                    // GPU mode pools only the small `AVFrame` wrapper: the
+                    // surface it references comes from the CUDA frames context
+                    // the PipeWire thread allocates from. Same split as
+                    // `CudaUpload`.
+                    #[cfg(feature = "cuda")]
+                    pool: if gpu {
+                        // `release_picture` rather than a no-op: an idle wrapper
+                        // that kept its reference would pin a CUDA surface out of
+                        // the frames context the PipeWire thread allocates the
+                        // *next* capture from, for as long as it sat unused.
+                        UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture)
+                    } else {
+                        UnboundObjectPool::new(
+                            0,
+                            move || {
+                                ffmpeg::frame::Video::new(
+                                    ffmpeg::format::Pixel::BGRA,
+                                    width,
+                                    height,
+                                )
+                            },
+                            |_| {},
+                        )
+                    },
+                    #[cfg(not(feature = "cuda"))]
+                    pool: UnboundObjectPool::new(
                         0,
                         move || {
                             ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height)
                         },
                         |_| {},
-                    )
+                    ),
+                    wrapper_pool: UnboundObjectPool::new(
+                        0,
+                        ffmpeg::frame::Video::empty,
+                        release_picture,
+                    ),
+                    last_picture: None,
+                    picture_captures: 0,
+                    retired: Vec::new(),
+                    latest,
+                    terminate: Some(terminate_tx),
+                    worker: Some(worker),
+                    watching,
+                    session_watcher,
+                    session,
+                    #[cfg(feature = "cuda")]
+                    gpu,
                 },
-                #[cfg(not(feature = "cuda"))]
-                pool: UnboundObjectPool::new(
-                    0,
-                    move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
-                    |_| {},
-                ),
-                wrapper_pool: UnboundObjectPool::new(
-                    0,
-                    ffmpeg::frame::Video::empty,
-                    release_picture,
-                ),
-                last_picture: None,
-                picture_captures: 0,
-                retired: Vec::new(),
-                latest,
-                terminate: Some(terminate_tx),
-                worker: Some(worker),
-                watching,
-                session_watcher,
-                session,
-                #[cfg(feature = "cuda")]
-                gpu,
-            })),
+            )),
             VideoFormat {
                 width,
                 height,
@@ -1160,24 +1171,6 @@ fn close_session(
     })
 }
 
-impl Element for Capturing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::PipeWireScreenCaptureSource
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Source for Capturing {
     fn is_live(&self) -> bool {
         true
@@ -1231,6 +1224,10 @@ impl Source for Capturing {
         Ok(self.emit_frame().map_or(Produced::Nothing, |frame| {
             Produced::Buffer(MediaBuffer::Video(Arc::new(frame).into()))
         }))
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
     }
 }
 
@@ -2123,6 +2120,7 @@ fn serialize_object(object: spa::pod::Object) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::element_pp_log;
 
     use crate::buffer::picture_id;
 
@@ -2653,7 +2651,6 @@ mod tests {
     fn offline_source(width: u32, height: u32) -> Capturing {
         let name = "offline";
         Capturing {
-            name: name.into(),
             pp_log: element_pp_log(ElementType::PipeWireScreenCaptureSource, name, None),
             contract: OutputContract::Fixed(PortContract::frame(
                 MediaKind::VideoFrame,

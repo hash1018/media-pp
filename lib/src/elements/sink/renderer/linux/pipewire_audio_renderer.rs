@@ -22,7 +22,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Attached, Element, ElementType, Identity, Sink},
     elements::AudioFormat,
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
@@ -471,7 +471,8 @@ impl PipeWireAudioRenderer {
             ));
         }
         let name = name.into();
-        let pp_log = element_pp_log(ElementType::PipeWireAudioRenderer, &name, None);
+        let identity = Identity::new(ElementType::PipeWireAudioRenderer, &*name);
+        let pp_log = identity.pp_log().clone();
 
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(QUEUE_CAPACITY);
         let (startup_tx, startup_rx) = mpsc::channel::<Startup>();
@@ -553,20 +554,23 @@ impl PipeWireAudioRenderer {
         );
 
         Ok((
-            Self(SinkStage::new(Rendering {
-                name: name.into(),
-                pp_log,
-                format,
-                frames: frame_tx,
-                playback,
-                clock_binding: PlaybackClockBinding::Unbound,
-                primed: false,
-                handed: false,
-                timeline: None,
-                stretcher: Stretcher::new(format),
-                commands: Some(command_tx),
-                worker: Some(worker),
-            })),
+            Self(SinkStage::new(
+                identity,
+                Rendering {
+                    name: name.into(),
+                    pp_log,
+                    format,
+                    frames: frame_tx,
+                    playback,
+                    clock_binding: PlaybackClockBinding::Unbound,
+                    primed: false,
+                    handed: false,
+                    timeline: None,
+                    stretcher: Stretcher::new(format),
+                    commands: Some(command_tx),
+                    worker: Some(worker),
+                },
+            )),
             format,
         ))
     }
@@ -931,41 +935,6 @@ impl Drop for Rendering {
     }
 }
 
-impl Element for Rendering {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::PipeWireAudioRenderer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    /// Takes the pipeline's playback clock, and claims its audio-master slot
-    /// on the first frame rather than here.
-    ///
-    /// Deferred deliberately. Claiming it now would move the clock into
-    /// `AudioPriming` the moment this is wired, and video scheduled against
-    /// the same clock would then hold for audio that has not started — a
-    /// branch attached to a running `Tee` can sit behind a demuxer blocked on
-    /// a full video queue, which is exactly the deadlock this ordering
-    /// avoids. An exclusive-master conflict therefore surfaces from the first
-    /// `consume` rather than from wiring.
-    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        if !self.clock_binding.is_bound() {
-            self.clock_binding =
-                PlaybackClockBinding::Deferred(Arc::clone(&context.playback_clock));
-        }
-    }
-}
-
 impl Sink for Rendering {
     /// Writes samples into the PipeWire stream buffer.
     fn input_contract(&self) -> InputContract {
@@ -1029,6 +998,14 @@ impl Sink for Rendering {
         self.primed = false;
         self.handed = false;
         position_result
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        if !self.clock_binding.is_bound() {
+            self.clock_binding =
+                PlaybackClockBinding::Deferred(Arc::clone(&cx.context().playback_clock));
+        }
     }
 }
 

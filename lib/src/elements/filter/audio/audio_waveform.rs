@@ -13,7 +13,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, Filter, Output, element_pp_log},
+    element::{Attached, ElementType, Filter, Identity, Output},
     error::Result,
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_info},
@@ -113,7 +113,6 @@ filter_stage!(AudioWaveform);
 /// framework makes the filter.
 struct Drawing {
     pp_log: PpLog,
-    name: Arc<str>,
     options: AudioWaveformOptions,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// The most recent sound, channels averaged, at most a picture's worth
@@ -155,22 +154,24 @@ impl AudioWaveform {
                 frame_rate: rate,
             });
         }
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::AudioWaveform, &name, None);
+        let identity = Identity::new(ElementType::AudioWaveform, name);
+        let pp_log = identity.pp_log().clone();
         let (width, height) = (options.width, options.height);
         pp_info!(pp_log: &pp_log, "created: {width}x{height} at {rate}");
-        Ok(Self(FilterStage::new(Drawing {
-            pp_log,
-            name,
-            options,
-            pool: UnboundObjectPool::new(
-                0,
-                move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
-                |_| {},
-            ),
-            samples: VecDeque::new(),
-            clock: None,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Drawing {
+                pp_log,
+                options,
+                pool: UnboundObjectPool::new(
+                    0,
+                    move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
+                    |_| {},
+                ),
+                samples: VecDeque::new(),
+                clock: None,
+            },
+        )))
     }
 }
 
@@ -294,24 +295,6 @@ impl Drawing {
     }
 }
 
-impl Element for Drawing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::AudioWaveform
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Drawing {
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(
@@ -340,14 +323,17 @@ impl Filter for Drawing {
         self.samples.clear();
         self.clock = None;
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::control::ControlMsg;
-    use crate::element::RawSink;
-    use crate::element::RawSinkExt;
+    use crate::element::{RawSink, RawSinkExt};
     use crate::test_support::capture;
 
     const RATE: u32 = 48_000;

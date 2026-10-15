@@ -1,8 +1,6 @@
 //! [`V4l2VirtualCamera`]: a pipeline's pictures as a camera other
 //! applications open, through a v4l2loopback device.
 
-use std::sync::Arc;
-
 use crate::ffmpeg;
 use crate::platform::linux::v4l2::{
     LoopbackError, LoopbackOutput, V4l2Device, list_loopback_devices,
@@ -11,7 +9,7 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Attached, ElementType, Identity, Sink},
     elements::filter::scaler::{is_rgb, matrix},
     error::Result,
     render::{SinkStage, sink_stage},
@@ -102,7 +100,6 @@ pub enum V4l2VirtualCameraError {
 
 /// What a [`V4l2VirtualCamera`] does with each picture.
 struct Writing {
-    name: Arc<str>,
     pp_log: PpLog,
     output: LoopbackOutput,
     size: (u32, u32),
@@ -140,8 +137,8 @@ impl V4l2VirtualCamera {
         height: u32,
         frame_rate: ffmpeg::Rational,
     ) -> Result<Self> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::V4l2VirtualCamera, &name, None);
+        let identity = Identity::new(ElementType::V4l2VirtualCamera, name);
+        let pp_log = identity.pp_log();
         if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return Err(V4l2VirtualCameraError::OddSize { width, height }.into());
         }
@@ -160,12 +157,12 @@ impl V4l2VirtualCamera {
             }
         })?;
         pp_info!(
-            pp_log: &pp_log,
+            pp_log: pp_log,
             "created: {device} shows {width}x{height} I420 at {}/{} fps",
             frame_rate.numerator(),
             frame_rate.denominator()
         );
-        Ok(Self::writing(name, pp_log, output, (width, height)))
+        Ok(Self::writing(identity, output, (width, height)))
     }
 
     /// Every v4l2loopback device there is to write to now, in node order —
@@ -176,27 +173,26 @@ impl V4l2VirtualCamera {
         list_loopback_devices()
     }
 
-    fn writing(name: Arc<str>, pp_log: PpLog, output: LoopbackOutput, size: (u32, u32)) -> Self {
+    fn writing(identity: Identity, output: LoopbackOutput, size: (u32, u32)) -> Self {
         let packed = vec![0; output.frame_bytes()];
-        Self(SinkStage::new(Writing {
-            name,
-            pp_log,
-            output,
-            size,
-            conversion: None,
-            packed,
-        }))
+        Self(SinkStage::new(
+            identity.clone(),
+            Writing {
+                pp_log: identity.pp_log().clone(),
+                output,
+                size,
+                conversion: None,
+                packed,
+            },
+        ))
     }
 
     /// The element writing into `file` rather than a device, for a test to
     /// read back what a reader would.
     #[cfg(test)]
     fn for_file(file: std::fs::File, width: u32, height: u32) -> Self {
-        let name: Arc<str> = "camera".into();
-        let pp_log = element_pp_log(ElementType::V4l2VirtualCamera, &name, None);
         Self::writing(
-            name,
-            pp_log,
+            Identity::new(ElementType::V4l2VirtualCamera, "camera"),
             LoopbackOutput::for_file(file, width, height),
             (width, height),
         )
@@ -301,24 +297,6 @@ fn pack_i420(frame: &ffmpeg::frame::Video, into: &mut [u8]) {
     }
 }
 
-impl Element for Writing {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::V4l2VirtualCamera
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Sink for Writing {
     /// Decoded video in system memory, any pixel layout: each picture is
     /// converted to the camera's.
@@ -344,6 +322,10 @@ impl Sink for Writing {
             .map_err(V4l2VirtualCameraError::Write)?;
         Ok(())
     }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +334,7 @@ mod tests {
 
     use super::*;
     use crate::element::RawSink;
+    use std::sync::Arc;
 
     /// A flat picture in `format`, `width` by `height`.
     fn picture(format: ffmpeg::format::Pixel, width: u32, height: u32, fill: u8) -> MediaBuffer {

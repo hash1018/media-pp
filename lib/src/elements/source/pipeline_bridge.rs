@@ -17,8 +17,8 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        BoxSink, Element, ElementType, Flow, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, BoxSink, Element, ElementType, Flow, Identity, Produced, RawSink, Source,
+        SourceStage, Wait, element_pp_log,
     },
     error::Result,
     produce::source_stage,
@@ -252,8 +252,9 @@ impl PipelineBridge {
         name: impl Into<String>,
         options: PipelineBridgeOptions,
     ) -> (Self, PipelineBridgeHandle) {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::Other, &name, None);
+        let identity = Identity::new(ElementType::Other, name);
+        let name = identity.name();
+        let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "created: depth={}, policy={:?}",
@@ -282,16 +283,19 @@ impl PipelineBridge {
             name: name.clone(),
         };
         (
-            Self(SourceStage::new(Bridging {
-                pp_log,
-                name,
-                shared,
-                bell: rung,
-                bus: None,
-                reported_drops: 0,
-                handing_on: None,
-                owed: VecDeque::new(),
-            })),
+            Self(SourceStage::new(
+                identity,
+                Bridging {
+                    pp_log,
+                    name,
+                    shared,
+                    bell: rung,
+                    bus: None,
+                    reported_drops: 0,
+                    handing_on: None,
+                    owed: VecDeque::new(),
+                },
+            )),
             handle,
         )
     }
@@ -514,28 +518,6 @@ impl RawSink for PipelineBridgeSink {
     }
 }
 
-impl Element for Bridging {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::Other
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-
-    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.bus = Some(context.bus.for_element(context.source_id));
-    }
-}
-
 impl Bridging {
     /// Says on the bus how many buffers the feeding side dropped since it
     /// last said so — same visibility a `Queue` gives its own drops, from
@@ -550,7 +532,7 @@ impl Bridging {
             bus.post(
                 &self.pp_log,
                 BusEvent::Dropped {
-                    element_type: self.element_type(),
+                    element_type: ElementType::Other,
                     name: self.name.clone(),
                 },
             );
@@ -623,6 +605,11 @@ impl Source for Bridging {
         // asks.
         wait.recv(&self.bell);
         Ok(Produced::Nothing)
+    }
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+        self.bus = Some(cx.context().bus.for_element(cx.context().source_id));
     }
 }
 

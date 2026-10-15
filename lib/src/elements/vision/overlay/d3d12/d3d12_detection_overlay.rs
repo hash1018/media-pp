@@ -26,7 +26,7 @@ use crate::{
     contract::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayoutSet, PortContract,
     },
-    element::{Element, ElementType, element_pp_log},
+    element::{Attached, ElementType, Identity},
     elements::Detections,
     error::Result,
     frame_size::ForSize,
@@ -184,7 +184,6 @@ struct CellsDispatch {
 /// What a [`D3d12DetectionOverlay`] does with each picture. The resources
 /// the GPU may still be reading are kept until `Drop` has waited for it.
 struct Overlaying {
-    name: Arc<str>,
     pp_log: PpLog,
     options: DetectionOverlayOptions,
     font: Option<ab_glyph::FontArc>,
@@ -255,7 +254,8 @@ impl D3d12DetectionOverlay {
     ) -> std::result::Result<Self, D3d12DetectionOverlayError> {
         let name: Arc<str> = name.into().into();
         options.check()?;
-        let pp_log = element_pp_log(ElementType::D3d12DetectionOverlay, &name, None);
+        let identity = Identity::new(ElementType::D3d12DetectionOverlay, &*name);
+        let pp_log = identity.pp_log().clone();
         // Read once at any size: each label is rasterized at its own.
         let font = options
             .font
@@ -302,32 +302,34 @@ impl D3d12DetectionOverlay {
             options.others,
             font.is_some()
         );
-        Ok(Self(FilterStage::new(Overlaying {
-            name,
-            pp_log,
-            options,
-            font,
-            masks: HashMap::new(),
-            warned_names: false,
-            orientations: Orientations::default(),
-            device,
-            paint,
-            means1,
-            means2,
-            paint1,
-            paint2,
-            commands,
-            heap: None,
-            heap_step,
-            work: None,
-            means: None,
-            table: None,
-            hw_device_ctx,
-            nv12_frames: ForSize::new(),
-            p010_frames: ForSize::new(),
-            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-            reading: None,
-        })))
+        Ok(Self(FilterStage::new(
+            identity,
+            Overlaying {
+                pp_log,
+                options,
+                font,
+                masks: HashMap::new(),
+                warned_names: false,
+                orientations: Orientations::default(),
+                device,
+                paint,
+                means1,
+                means2,
+                paint1,
+                paint2,
+                commands,
+                heap: None,
+                heap_step,
+                work: None,
+                means: None,
+                table: None,
+                hw_device_ctx,
+                nv12_frames: ForSize::new(),
+                p010_frames: ForSize::new(),
+                pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                reading: None,
+            },
+        )))
     }
 }
 
@@ -999,24 +1001,6 @@ impl Drop for Overlaying {
     }
 }
 
-impl Element for Overlaying {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::D3d12DetectionOverlay
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
 impl Filter for Overlaying {
     /// NV12 D3D12 pictures, or P010 ones where nothing is drawn.
     fn input_contract(&self) -> InputContract {
@@ -1071,6 +1055,10 @@ impl Filter for Overlaying {
     }
 
     fn reset(&mut self) {}
+
+    fn attached(&mut self, cx: &Attached<'_>) {
+        self.pp_log = cx.pp_log().clone();
+    }
 }
 
 #[cfg(test)]
