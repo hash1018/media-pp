@@ -10,7 +10,7 @@ Each type's own documentation says what it accepts, owns and how it fails.
 | | Software | D3D11 | D3D12 | CUDA | Vulkan | VideoToolbox, Metal |
 |---|---|---|---|---|---|---|
 | Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` | `VulkanDecoder` | `VideoToolboxDecoder` |
-| Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` | `VulkanEncoder` | `VideoToolboxEncoder` |
+| Encode | `SwEncoder` | `D3d11VideoEncoder` | `D3d12VideoEncoder` | `CudaEncoder` | `VulkanEncoder` | `VideoToolboxEncoder` |
 | Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` | `VulkanScaler`, `VulkanConverter` | `MetalScaler`, `MetalConverter` |
 | HDR to SDR | | `D3d11ToneMap` | `D3d12ToneMap` | `CudaConverter` | | `MetalConverter` |
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` | `MetalVideoCompositor` |

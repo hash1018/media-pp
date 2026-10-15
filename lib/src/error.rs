@@ -748,6 +748,11 @@ pub enum Error {
     #[error(transparent)]
     D3d12ToneMapError(#[from] crate::elements::D3d12ToneMapError),
 
+    /// Encoding D3D12 frames failed.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12VideoEncoderError(#[from] crate::elements::D3d12VideoEncoderError),
+
     /// A D3D11-backed NVENC operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]

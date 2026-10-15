@@ -13,9 +13,10 @@ compile error with no explanation.
 ### Breaking
 
 - **`ElementType` has `D3d12OrtDetector`, `D3d12OrtClassifier`,
-  `D3d12OrtEmbedder`, `D3d12CutDetector`, `D3d12DetectionOverlay` and
-  `D3d12ToneMap` variants**, for the D3D12 detector, classifier, embedder,
-  cut detector, overlay and tone map — see Added. A `match` on `ElementType` needs an arm for
+  `D3d12OrtEmbedder`, `D3d12CutDetector`, `D3d12DetectionOverlay`,
+  `D3d12ToneMap` and `D3d12VideoEncoder` variants**, for the D3D12
+  detector, classifier, embedder, cut detector, overlay, tone map and
+  encoder — see Added. A `match` on `ElementType` needs an arm for
   each.
 
 - **`MetalOrtEmbedder::new` takes `MetalOrtEmbedderOptions`, and Core ML
@@ -276,6 +277,15 @@ compile error with no explanation.
   | `SegmentedFileMuxer::create(policy, naming)` | `SegmentedFileMuxer::create(policy, Mp4Layout::Standard, naming)` |
 
 ### Added
+
+- **`D3d12VideoEncoder` encodes D3D12 pictures through D3D12 Video**, with
+  the `d3d12` feature, on any vendor's encode block: NV12 frames — a
+  decoder's, an upload's, an overlay's or a tone map's — handed to FFmpeg's
+  `hevc_d3d12va` as they are, so a D3D12 pipeline decodes, detects, hides
+  and encodes without a picture leaving the GPU. H.264 (`h264_d3d12va`)
+  opens where the linked FFmpeg has it, which 8.0 does not. No B-frames
+  unless asked for: FFmpeg's default inserts them, and NVIDIA's D3D12
+  encode fails at the first frame given them.
 
 - **`D3d12ToneMap` brings HDR D3D12 pictures to SDR**, with the `d3d12`
   feature: what `D3d11ToneMap` draws on D3D11, by `core/tone_map.rs`'s

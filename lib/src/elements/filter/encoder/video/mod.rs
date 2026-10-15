@@ -17,14 +17,14 @@ pub use videotoolbox::{
 mod vulkan;
 #[cfg(feature = "vulkan")]
 pub use vulkan::{VulkanCodec, VulkanEncoder, VulkanEncoderError, VulkanEncoderOptions};
-#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 mod windows;
 
 pub use sw_encoder::{SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec};
 pub use video_encode_bin::{
     EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
 };
-#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 pub use windows::*;
 
 /// The unit a video encoder here counts its output in, unless its codec

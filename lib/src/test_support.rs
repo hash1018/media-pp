@@ -450,6 +450,7 @@ pub(crate) fn try_single_threaded_d3d11_device()
     feature = "cuda",
     feature = "vulkan",
     all(target_os = "windows", feature = "d3d11"),
+    all(target_os = "windows", feature = "d3d12"),
     all(target_os = "macos", feature = "videotoolbox")
 ))]
 pub(crate) fn encoder_session() -> std::sync::MutexGuard<'static, ()> {
