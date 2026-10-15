@@ -129,6 +129,7 @@ The models are not included; each README says which to download.
 | [`detect`](../examples/vision/detect) | Objects found on the CPU and their boxes drawn | All |
 | [`cuda_detect`](../examples/vision/cuda_detect) | Detection without leaving the GPU, through TensorRT | Linux, Windows |
 | [`cuda_track`](../examples/vision/cuda_track) | Objects followed between pictures, the detector looking at only some | Linux, Windows |
+| [`d3d12_detect`](../examples/vision/d3d12_detect) | Detection and tracking on any vendor's GPU through DirectML, boxed or hidden in an HEVC recording | Windows |
 | [`cuda_multi_detect`](../examples/vision/cuda_multi_detect) | Several files batched through one detector with `StreamMux` | Linux, Windows |
 | [`metal_detect`](../examples/vision/metal_detect) | Detection through Core ML on VideoToolbox pictures | macOS |
 | [`metal_multi_detect`](../examples/vision/metal_multi_detect) | Several files batched through one detector | macOS |

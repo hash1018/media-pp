@@ -149,6 +149,8 @@ Examples: [`detect`](../../examples/vision/detect) (CPU, boxes drawn),
 [`cuda_detect`](../../examples/vision/cuda_detect),
 [`cuda_track`](../../examples/vision/cuda_track),
 [`cuda_multi_detect`](../../examples/vision/cuda_multi_detect),
+[`d3d12_detect`](../../examples/vision/d3d12_detect) (any GPU on Windows,
+tracked, boxed or hidden and recorded),
 [`metal_detect`](../../examples/vision/metal_detect) and
 [`cut_detect`](../../examples/vision/cut_detect) (where each shot of an
 edit begins). The models are not included; each example's README says

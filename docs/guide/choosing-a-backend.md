@@ -65,7 +65,8 @@ vendor's GPU: detection, classification and embedding through ONNX
 Runtime's DirectML, tracking, drawing and hiding detections, finding scene
 cuts. Also compositing, HDR to SDR, rendering and HEVC encoding through
 D3D12 Video. Models should be fp16 and exported at ONNX opset 20 or lower —
-see [D3D12 inference](../d3d12-inference.md).
+see [D3D12 inference](../d3d12-inference.md);
+[`d3d12_detect`](../../examples/vision/d3d12_detect) runs the whole path.
 
 **CUDA** (Windows, Linux; NVIDIA). NVDEC and NVENC, scaling and converting,
 compositing, and the fastest detection: ONNX Runtime with CUDA or TensorRT,
