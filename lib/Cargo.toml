@@ -421,6 +421,8 @@ mf-virtual-camera = [
     "windows/Win32_System_Memory",
     "windows/Win32_System_Registry",
     "windows/Win32_System_SystemInformation",
+    "windows/Win32_System_Threading",
+    "windows/Win32_Security",
 ]
 v4l2-capture = ["dep:libc"]
 # The pipeline's pictures as a camera other applications open, written into

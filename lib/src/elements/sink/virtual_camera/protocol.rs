@@ -31,6 +31,10 @@ pub const CLSID_U128: u128 = 0x51BEF1F3_9256_49A2_B965_EAA4D87CC2E6;
 /// session 0 and the element in the user's session.
 pub const SECTION_NAME: &str = "Global\\MediaPpVirtualCamera";
 
+/// What the one side writing to [`SECTION_NAME`] holds open while it may:
+/// the section has room for one picture and one writer.
+pub const WRITER_NAME: &str = "Global\\MediaPpVirtualCamera.Writer";
+
 /// What a section begins with, so a stale or foreign one is not misread.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"MPVC");
 

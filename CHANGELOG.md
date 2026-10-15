@@ -1395,6 +1395,13 @@ compile error with no explanation.
 
 ### Changed
 
+- **One `MfVirtualCamera` feeds the camera at a time.** Two at once — in
+  one process or two, for one user or two — wrote over each other's
+  pictures in the one section the camera reads. The second
+  `MfVirtualCamera::new` now answers `MfVirtualCameraError::InUse`, a new
+  variant of that `non_exhaustive` enum, until the first is dropped or its
+  process ends.
+
 - **The API documentation on GitHub Pages covers CUDA and the GPU
   inference providers.** The Windows pages were built without `cuda`,
   `cuda-visual-tracking`, `ort-cuda`, `ort-tensorrt` and `ort-directml`,

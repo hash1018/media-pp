@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows::Win32::{
-    Foundation::{CloseHandle, HANDLE},
+    Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE},
     Media::MediaFoundation::{
         IMFVirtualCamera, MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
         MFVirtualCameraAccess, MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime,
@@ -22,6 +22,7 @@ use windows::Win32::{
         },
         Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW},
         SystemInformation::GetTickCount64,
+        Threading::CreateMutexW,
     },
 };
 use windows::core::{GUID, HRESULT, HSTRING, Interface, PCWSTR};
@@ -66,6 +67,14 @@ const LOOK_AGAIN_AFTER: Duration = Duration::from_millis(500);
 /// [`MfVirtualCamera::new`] says which of the two is missing rather than
 /// creating a camera that shows nothing.
 ///
+/// # One at a time
+///
+/// There is one camera on the machine, with room for one picture, so one
+/// `MfVirtualCamera` feeds it at a time: while one lives — in any process,
+/// for any user — another's [`MfVirtualCamera::new`] answers
+/// [`MfVirtualCameraError::InUse`]. One whose process ended, however it
+/// ended, leaves the camera free.
+///
 /// # Threads
 ///
 /// The camera is created and removed on a thread of the element's own, in
@@ -93,6 +102,11 @@ pub enum MfVirtualCameraError {
         /// The CLSID the DLL registers.
         clsid: &'static str,
     },
+    /// Another `MfVirtualCamera` — in this process or another, for this user
+    /// or another — is feeding the camera already. It has room for one
+    /// picture, so one writer at a time; the other must be dropped first.
+    #[error("the virtual camera is in use by another MfVirtualCamera")]
+    InUse,
     /// Windows refused to create or start the camera — for one, camera
     /// access is denied in Privacy settings.
     #[error("the virtual camera could not be started: {0}")]
@@ -112,6 +126,9 @@ struct Feeding {
     /// The thread keeping the camera registered; `None` only in tests,
     /// which play the camera's part themselves.
     _camera: Option<Camera>,
+    /// The claim to be the one feeding the camera, held for as long as this
+    /// is; `None` in tests, as the camera is. Dropped after the camera.
+    _writer: Option<Writer>,
     section_name: &'static str,
     section: Option<Mapping>,
     looked_at: Option<Instant>,
@@ -150,12 +167,14 @@ impl MfVirtualCamera {
             }
             .into());
         }
+        let writer = Writer::claim(protocol::WRITER_NAME)?;
         let camera = Camera::start(friendly_name)?;
         pp_info!(pp_log: &pp_log, "created: camera \"{friendly_name}\" registered");
         Ok(Self(SinkStage::new(Feeding {
             name,
             pp_log,
             _camera: Some(camera),
+            _writer: Some(writer),
             section_name: protocol::SECTION_NAME,
             section: None,
             looked_at: None,
@@ -173,11 +192,47 @@ impl MfVirtualCamera {
             name,
             pp_log,
             _camera: None,
+            _writer: None,
             section_name,
             section: None,
             looked_at: None,
             conversion: None,
         }))
+    }
+}
+
+/// The claim to be the one writing to the camera: a named object that is
+/// there for as long as a handle to it is open, which Windows closes with
+/// the process however it ends — so a writer that crashed leaves no claim
+/// behind.
+struct Writer(HANDLE);
+
+// SAFETY: a mutex handle may be closed from any thread; this one is never
+// waited on, only held open.
+unsafe impl Send for Writer {}
+
+impl Writer {
+    /// Claims `name`, unless it is claimed already — or by another user,
+    /// whose object this one may not open.
+    fn claim(name: &str) -> std::result::Result<Self, MfVirtualCameraError> {
+        // SAFETY: creates or opens a named mutex with default security; the
+        // handle is closed in `Drop`, or here when it was there already.
+        unsafe {
+            let handle = CreateMutexW(None, false, &HSTRING::from(name))
+                .map_err(|_| MfVirtualCameraError::InUse)?;
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                let _ = CloseHandle(handle);
+                return Err(MfVirtualCameraError::InUse);
+            }
+            Ok(Self(handle))
+        }
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        // SAFETY: this claim's own handle.
+        let _ = unsafe { CloseHandle(self.0) };
     }
 }
 
@@ -631,6 +686,20 @@ mod tests {
             frame.data_mut(plane).fill(fill);
         }
         MediaBuffer::video(frame)
+    }
+
+    /// One writer at a time: a second claim is refused while the first is
+    /// held, and taken once it is let go of.
+    #[test]
+    fn the_camera_is_fed_by_one_writer_at_a_time() {
+        let name = "Local\\media-pp-mf-virtual-camera-test-writer";
+        let first = Writer::claim(name).expect("nothing holds it yet");
+        assert!(matches!(
+            Writer::claim(name),
+            Err(MfVirtualCameraError::InUse)
+        ));
+        drop(first);
+        Writer::claim(name).expect("let go of, it is free again");
     }
 
     #[test]
