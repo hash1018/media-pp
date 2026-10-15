@@ -299,7 +299,7 @@ impl Detecting {
         }
         // A GPU-side wait for whatever wrote the picture: sharing a device
         // does not order this queue after the decoder's.
-        self.commands.submit(&[(&fence, fence_value)])?;
+        self.commands.submit(&[(&fence, fence_value)], &[])?;
         self.commands.wait_idle()?;
         // SAFETY: the read-back buffer holds `SUMS` floats, of which the
         // copy just waited for wrote the first `floats`; it is unmapped
@@ -658,7 +658,14 @@ mod tests {
             MediaBuffer::Packet(Arc::new(packet).into())
         };
 
-        let mut decoder = D3d12Decoder::new("decoder", parameters.clone(), &gpu).expect("opens");
+        let mut decoder = match D3d12Decoder::new("decoder", parameters.clone(), &gpu) {
+            Ok(decoder) => decoder,
+            Err(crate::elements::D3d12DecoderError::HwDeviceInit(code)) => {
+                eprintln!("skipping: this device does not do video decoding (code {code})");
+                return;
+            }
+            Err(error) => panic!("the fixture did not open: {error}"),
+        };
         let mut detector = D3d12CutDetector::new("cuts", &gpu, options).unwrap();
         let kept = capture(&mut detector);
         decoder.src_pads()[0].link(Box::new(detector));
