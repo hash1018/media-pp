@@ -24,11 +24,9 @@ scripts/setup-ffmpeg.sh && . ~/.local/share/media-pp/ffmpeg/env.sh
 cargo run -p doctor
 ```
 
-What the script does, by hand:
-
-With VideoToolbox and AudioToolbox, and OpenH264 for the test fixture. The
-quickest way is vcpkg at the tag CI pins, which enables VideoToolbox on
-macOS by itself:
+By hand: FFmpeg with VideoToolbox and AudioToolbox, and OpenH264 for the
+test fixture. The quickest way is vcpkg at the tag CI pins, which enables
+VideoToolbox on macOS by itself:
 
 ```sh
 git clone --branch 2026.01.16 https://github.com/microsoft/vcpkg.git

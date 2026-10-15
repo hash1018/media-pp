@@ -28,11 +28,9 @@ scripts/setup-ffmpeg.sh && . ~/.local/share/media-pp/ffmpeg/env.sh
 cargo run -p doctor
 ```
 
-What the script does, by hand:
-
-vcpkg at the tag CI pins, into a dynamic tree — the default `x64-linux`
-triplet links statically, and would need every library FFmpeg's port pulls
-in linked by hand:
+By hand, the way CI does it: vcpkg at the tag CI pins, into a dynamic tree —
+the default `x64-linux` triplet links statically, and would need every
+library FFmpeg's port pulls in linked by hand:
 
 ```sh
 git clone --branch 2026.01.16 https://github.com/microsoft/vcpkg.git

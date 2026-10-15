@@ -1,8 +1,26 @@
 # Features
 
-The library has no default features. Backend-specific types carry their
-backend's prefix and exist only where their feature is enabled; an
-unprefixed type works the same on every platform.
+The library has no default features: the software elements are always
+there, and each GPU backend, capture API and output is a feature you turn
+on. Backend-specific types carry their backend's prefix and exist only where
+their feature is enabled; an unprefixed type works the same on every
+platform.
+
+## Which to turn on
+
+| To | Windows | Linux | macOS |
+|---|---|---|---|
+| Play a file with `Player` | `d3d11`, `wasapi-renderer` | `vulkan`, `pipewire-audio-renderer` | `metal`, `coreaudio-renderer` |
+| Decode and encode on the GPU | `d3d11` or `d3d12`; `cuda` on NVIDIA | `vulkan`; `cuda` on NVIDIA | `videotoolbox` |
+| Record the screen and its sound | `dxgi-capture`, `wasapi-capture` | `pipewire-screen-capture`, `pipewire-audio-capture` | `screencapturekit-capture`, `coreaudio-capture` |
+| Capture a camera | `mf-capture` | `v4l2-capture` | `avfoundation-capture` |
+| Detect objects on the GPU | `ort-directml` (any GPU), `ort-tensorrt` (NVIDIA) | `ort-tensorrt` (NVIDIA) | `ort-coreml` |
+| Detect objects on the CPU | `ort` | `ort` | `ort` |
+
+[Choosing a backend](guide/choosing-a-backend.md) says more about the GPU
+choice.
+
+## Every feature
 
 | Feature | Adds | Platform |
 |---|---|---|
@@ -37,14 +55,11 @@ unprefixed type works the same on every platform.
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All |
 
-`Player` needs a window renderer and an audio output: `d3d11` and
-`wasapi-renderer` on Windows, `vulkan` and `pipewire-audio-renderer` on
-Linux, `metal` and `coreaudio-renderer` on macOS.
-
 ## What a feature needs
 
-Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
-[building](building/):
+Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see building on
+[Windows](building/windows.md), [Linux](building/linux.md) or
+[macOS](building/macos.md):
 
 - **Hardware decoding**: an FFmpeg build, driver and GPU that support it.
 - **`pipewire-*`**: PipeWire 0.3.50 or newer development files.

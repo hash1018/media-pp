@@ -282,6 +282,23 @@ compile error with no explanation.
 
 ### Added
 
+- **`scripts/setup-ffmpeg` builds the FFmpeg media-pp needs.** FFmpeg 8.0
+  exactly, through vcpkg at the revision CI uses, on Windows
+  (`setup-ffmpeg.ps1`), Linux and macOS (`setup-ffmpeg.sh`), and points
+  `FFMPEG_DIR` and the loader's path at it — since no prebuilt 8.0 is
+  published any more and 8.1's headers do not build.
+
+- **The `doctor` example says what a machine gives media-pp**: the FFmpeg
+  a build finds and whether it is 8.0, its encoders and hardware device
+  types, and whether each GPU backend opens a device there, each problem
+  with what to do about it — `cargo run -p doctor`.
+
+- **A user's guide**: [`docs/README.md`](docs/README.md) indexes the
+  documentation, and `docs/guide/` explains how a pipeline works, which
+  backend to choose, what to use for a common job, and how to fix what
+  goes wrong. Getting started, the element list, the features and the
+  examples were rewritten to be read in that order.
+
 - **`D3d12VideoCompositor` composites D3D12 pictures**, with the `d3d12`
   feature: what the CUDA, Metal and Vulkan compositors do, on any
   vendor's GPU, through the same `VideoLayer`, text layers, handles and

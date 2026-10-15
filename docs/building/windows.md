@@ -24,9 +24,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-ffmpeg.ps1 -Persist
 cargo run -p doctor
 ```
 
-What the script does, by hand:
-
-vcpkg at the tag CI pins, into a dynamic tree:
+By hand, the way CI does it: vcpkg at the tag CI pins, into a dynamic tree:
 
 ```powershell
 git clone --branch 2026.01.16 https://github.com/microsoft/vcpkg.git

@@ -402,7 +402,9 @@ final source of truth when documentation and implementation differ.
 - Update the documentation when public API, feature flags, requirements, or
   examples change: the element inventory in `docs/elements.md`, feature flags
   and their requirements in `docs/features.md`, examples in
-  `docs/examples.md`, platform setup in `docs/building/`. `README.md` stays a
+  `docs/examples.md`, platform setup in `docs/building/`, and the user's
+  guide in `docs/guide/` where a concept, recipe or fix it describes
+  changes. `docs/README.md` indexes them all. `README.md` stays a
   short overview with a table of those files; detail goes into `docs/`. Keep volatile roadmap ideas out of agent instruction files.
 - Doc comments should explain invariants, ownership, thread/error behavior, and
   non-obvious rationale. Do not repeat claims that can be read directly from a
