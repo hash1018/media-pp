@@ -92,6 +92,10 @@ pub enum D3d12DetectionOverlayError {
     /// writable view, which every D3D12 GPU of feature level 12 can.
     #[error("the GPU cannot load R8, R8G8, R16 and R16G16 through a typed UAV")]
     NoTypedUavLoads,
+    /// FFmpeg could not take the device for the frames the copies are
+    /// drawn on — a device without D3D12 Video, as a software adapter is.
+    #[error("failed to create the D3D12VA device context (code {0})")]
+    HwDeviceInit(i32),
     /// Making the frames the copies are drawn on failed.
     #[error("could not make the frames to draw on (code {0})")]
     Frames(i32),
@@ -289,8 +293,8 @@ impl D3d12DetectionOverlay {
         };
         let commands = Commands::new(&device, gpu.queue())?;
         // SAFETY: a live device, whose context owns its own reference.
-        let hw_device_ctx =
-            unsafe { create_hw_device_ctx(&device) }.map_err(D3d12DetectionOverlayError::Frames)?;
+        let hw_device_ctx = unsafe { create_hw_device_ctx(&device) }
+            .map_err(D3d12DetectionOverlayError::HwDeviceInit)?;
         pp_info!(
             pp_log: &pp_log,
             "opened: NV12, or P010 to hide in, {} rules, others {:?}, font={}",
@@ -1108,6 +1112,19 @@ mod tests {
         }
     }
 
+    /// An overlay on `gpu`, or `None`, saying why, where FFmpeg cannot take
+    /// the device for its frames — a software adapter's, as CI's is.
+    fn open(gpu: &D3d12Gpu, options: DetectionOverlayOptions) -> Option<D3d12DetectionOverlay> {
+        match D3d12DetectionOverlay::new("overlay", gpu, options) {
+            Ok(overlay) => Some(overlay),
+            Err(D3d12DetectionOverlayError::HwDeviceInit(code)) => {
+                eprintln!("skipping: FFmpeg could not take this device for D3D12 frames ({code})");
+                None
+            }
+            Err(error) => panic!("did not open: {error}"),
+        }
+    }
+
     /// The picture `buf` holds, copied to system memory.
     fn download(buf: &MediaBuffer) -> ffmpeg::frame::Video {
         let MediaBuffer::Video(frame) = buf else {
@@ -1218,7 +1235,9 @@ mod tests {
             }),
             ..DetectionOverlayOptions::default()
         };
-        let mut overlay = D3d12DetectionOverlay::new("overlay", &gpu, options).expect("opens");
+        let Some(mut overlay) = open(&gpu, options) else {
+            return;
+        };
         let kept = capture(&mut overlay);
         let Some(input) = upload(&gpu, &grey(64, 32)) else {
             return;
@@ -1251,9 +1270,9 @@ mod tests {
         let Some(gpu) = try_d3d12_gpu() else {
             return;
         };
-        let mut overlay =
-            D3d12DetectionOverlay::new("overlay", &gpu, DetectionOverlayOptions::default())
-                .expect("opens");
+        let Some(mut overlay) = open(&gpu, DetectionOverlayOptions::default()) else {
+            return;
+        };
         let kept = capture(&mut overlay);
         let Some(bare) = upload(&gpu, &grey(64, 32)) else {
             return;
@@ -1276,9 +1295,9 @@ mod tests {
         let Some(gpu) = try_d3d12_gpu() else {
             return;
         };
-        let mut overlay =
-            D3d12DetectionOverlay::new("overlay", &gpu, DetectionOverlayOptions::default())
-                .expect("opens");
+        let Some(mut overlay) = open(&gpu, DetectionOverlayOptions::default()) else {
+            return;
+        };
         let kept = capture(&mut overlay);
         let error = overlay
             .consume(MediaBuffer::video(grey(64, 32)).with_metadata(Metadata::new().with(found())))
@@ -1317,7 +1336,9 @@ mod tests {
             }),
             ..DetectionOverlayOptions::default()
         };
-        let mut overlay = D3d12DetectionOverlay::new("overlay", &gpu, options).expect("opens");
+        let Some(mut overlay) = open(&gpu, options) else {
+            return;
+        };
         let kept = capture(&mut overlay);
         let mut detections = found();
         detections.items[0].y = 0.5;

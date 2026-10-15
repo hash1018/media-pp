@@ -79,6 +79,10 @@ pub enum D3d12ToneMapError {
         /// The texture's.
         texture: (u32, u32),
     },
+    /// FFmpeg could not take the device for the frames the SDR pictures are
+    /// written to — a device without D3D12 Video, as a software adapter is.
+    #[error("failed to create the D3D12VA device context (code {0})")]
+    HwDeviceInit(i32),
     /// Making the frames the SDR pictures are written to failed.
     #[error("could not make the frames to write to (code {0})")]
     Frames(i32),
@@ -188,7 +192,7 @@ impl D3d12ToneMap {
         let commands = Commands::new(&device, gpu.queue())?;
         // SAFETY: a live device, whose context owns its own reference.
         let hw_device_ctx =
-            unsafe { create_hw_device_ctx(&device) }.map_err(D3d12ToneMapError::Frames)?;
+            unsafe { create_hw_device_ctx(&device) }.map_err(D3d12ToneMapError::HwDeviceInit)?;
         pp_info!(pp_log: &pp_log, "created");
         Ok(Self(FilterStage::new(Mapping {
             pp_log,
@@ -704,7 +708,14 @@ mod tests {
         let Some(gpu) = try_d3d12_gpu() else {
             return;
         };
-        let mut mapping = D3d12ToneMap::new("tone map", &gpu).expect("opens");
+        let mut mapping = match D3d12ToneMap::new("tone map", &gpu) {
+            Ok(mapping) => mapping,
+            Err(D3d12ToneMapError::HwDeviceInit(code)) => {
+                eprintln!("skipping: FFmpeg could not take this device for D3D12 frames ({code})");
+                return;
+            }
+            Err(error) => panic!("did not open: {error}"),
+        };
         let kept = capture(&mut mapping);
         let Some(sdr) = upload(&gpu, &p010(ffmpeg::color::TransferCharacteristic::BT709)) else {
             return;
