@@ -22,7 +22,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Attached, Element, ElementType, Identity, Sink},
+    element::{Attached, ElementType, Identity, Sink},
     elements::AudioFormat,
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
@@ -408,7 +408,6 @@ sink_stage!(PipeWireAudioRenderer);
 /// the PipeWire thread to play: all of its work, which the framework makes
 /// the terminal.
 struct Rendering {
-    name: Arc<str>,
     pp_log: PpLog,
     format: AudioFormat,
     frames: Sender<Vec<u8>>,

@@ -24,8 +24,7 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     element::{
-        Attached, Element, ElementType, Identity, Produced, Source, SourceStage, Wait,
-        element_pp_log,
+        Attached, ElementType, Identity, Produced, Source, SourceStage, Wait, element_pp_log,
     },
     elements::AudioFormat,
     error::Result,
