@@ -57,7 +57,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `MfVirtualCamera` on Windows, `V4l2VirtualCamera` on Linux.
 - **Flow and timing**: `Queue`, `Tee`, `Rack`, `Pacer`, `VideoSynchronizer`,
   `ChangeGate`, `FrameRateLimiter`, `PauseGate`, `TimestampOrigin`.
-- **Analysis**: `SwOrtDetector`, `CudaOrtDetector` and `MetalOrtDetector`,
+- **Analysis**: `SwOrtDetector`, `CudaOrtDetector`, `MetalOrtDetector` and
+  `D3d12OrtDetector` (DirectML, any vendor's GPU on Windows),
   filters that put what a YOLO model, a RetinaFace face detector — whose
   faces carry their eyes, nose and mouth as landmarks — a DETR-family
   detector (D-FINE, RT-DETR, RF-DETR, `DetectorModel::Detr`) or a model of the

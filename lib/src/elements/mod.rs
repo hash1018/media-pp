@@ -331,6 +331,8 @@ pub use vision::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
     CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
+#[cfg(all(target_os = "windows", feature = "ort-directml"))]
+pub use vision::{D3d12OrtDetector, D3d12OrtDetectorOptions};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use vision::{
     MetalCutDetector, MetalCutDetectorError, MetalDetectionOverlay, MetalDetectionOverlayError,

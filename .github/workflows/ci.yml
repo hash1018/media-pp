@@ -107,6 +107,22 @@ jobs:
           DOCS_RS: "1"
         run: cargo check -p media-pp --all-targets --features ort,webrtc
 
+      # The D3D12 detector, through DirectML: linted and documented, not run,
+      # for the same reason as the step above, and because a hosted runner
+      # has no GPU. Its tests skip without a D3D12 device and a model.
+      - name: Lint (ONNX Runtime on DirectML)
+        shell: pwsh
+        env:
+          DOCS_RS: "1"
+        run: cargo clippy -p media-pp --all-targets --features ort-directml -- -D warnings
+
+      - name: Check API documentation (ONNX Runtime on DirectML)
+        shell: pwsh
+        env:
+          DOCS_RS: "1"
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p media-pp --no-deps --features ort-directml
+
       # Run rustdoc against the same isolated feature sets as Clippy. A link
       # to a type from another optional backend only breaks while that backend
       # is absent, so one all-features documentation build cannot catch it.

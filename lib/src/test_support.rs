@@ -1133,7 +1133,11 @@ pub(crate) fn one_frame(
 
 /// The `n`th picture of `video`, from 1, as `format` in system memory,
 /// stamped `n`.
-#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+#[cfg(any(
+    feature = "ort-cuda",
+    all(target_os = "macos", feature = "ort-coreml"),
+    all(target_os = "windows", feature = "ort-directml")
+))]
 pub(crate) fn nth_picture(
     video: &str,
     n: usize,
@@ -1152,7 +1156,11 @@ pub(crate) fn nth_picture(
 /// `2 * every`th, counted from 1 as [`nth_picture`] counts — as `format` in
 /// system memory, stamped with its number, until `visit` answers `false`.
 /// The file is decoded once, and only the pictures handed over converted.
-#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+#[cfg(any(
+    feature = "ort-cuda",
+    all(target_os = "macos", feature = "ort-coreml"),
+    all(target_os = "windows", feature = "ort-directml")
+))]
 pub(crate) fn each_picture(
     video: &str,
     every: usize,
@@ -1207,14 +1215,22 @@ pub(crate) fn each_picture(
 /// 0.5. A clip may begin on an empty scene, and a test that needs objects to
 /// compare finds the pictures that have them rather than counting on one by
 /// its number. Fewer than `count` where the clip has fewer.
-#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+#[cfg(any(
+    feature = "ort-cuda",
+    all(target_os = "macos", feature = "ort-coreml"),
+    all(target_os = "windows", feature = "ort-directml")
+))]
 pub(crate) fn pictures_with_objects(model: &str, video: &str, count: usize) -> Vec<usize> {
     pictures_found_on(model, video, count, Default::default())
 }
 
 /// [`pictures_with_objects`] for a detector told `options`: a model of
 /// another kind.
-#[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+#[cfg(any(
+    feature = "ort-cuda",
+    all(target_os = "macos", feature = "ort-coreml"),
+    all(target_os = "windows", feature = "ort-directml")
+))]
 pub(crate) fn pictures_found_on(
     model: &str,
     video: &str,

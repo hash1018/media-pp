@@ -20,6 +20,8 @@ use crate::ffmpeg;
 mod classify;
 #[cfg(feature = "ort-cuda")]
 mod cuda;
+#[cfg(all(target_os = "windows", feature = "ort-directml"))]
+mod d3d12;
 mod detr;
 mod embed;
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
@@ -39,6 +41,8 @@ pub use cuda::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
     CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
+#[cfg(all(target_os = "windows", feature = "ort-directml"))]
+pub use d3d12::{D3d12OrtDetector, D3d12OrtDetectorOptions};
 pub use embed::{Alignment, OrtEmbedderOptions};
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use metal::{
@@ -281,7 +285,11 @@ pub enum OrtError {
     #[error("a CUDA picture has no surface")]
     MissingSurface,
     /// A detector asked to take no pictures at a time.
-    #[cfg(any(feature = "ort-cuda", all(target_os = "macos", feature = "ort-coreml")))]
+    #[cfg(any(
+        feature = "ort-cuda",
+        all(target_os = "macos", feature = "ort-coreml"),
+        all(target_os = "windows", feature = "ort-directml")
+    ))]
     #[error("max_batch is 0: a detector takes one picture at a time or more")]
     ZeroMaxBatch,
     /// The driver is missing, or it, the CUDA runtime or cuDNN is too old
@@ -316,6 +324,33 @@ pub enum OrtError {
         picture: (u32, u32),
         /// The pixel buffer's.
         surface: (u32, u32),
+    },
+    /// Direct3D 12 or DirectML refused a device, a resource, a shader or a
+    /// submission.
+    #[cfg(all(target_os = "windows", feature = "ort-directml"))]
+    #[error("Direct3D 12 or DirectML refused: {0}")]
+    D3d12(#[from] windows::core::Error),
+    /// The ONNX Runtime the program runs with was built without DirectML.
+    #[cfg(all(target_os = "windows", feature = "ort-directml"))]
+    #[error("this ONNX Runtime has no DirectML provider")]
+    DirectMlUnavailable,
+    /// Not a D3D12 picture this element reads: what it is.
+    #[cfg(all(target_os = "windows", feature = "ort-directml"))]
+    #[error("takes NV12 D3D12 pictures, got {0}")]
+    UnsupportedD3d12Picture(String),
+    /// A D3D12 picture made on another device than the element's: every
+    /// D3D12 element of a pipeline shares one `D3d12Gpu`.
+    #[cfg(all(target_os = "windows", feature = "ort-directml"))]
+    #[error("a D3D12 picture belongs to another device than this element's")]
+    D3d12DeviceMismatch,
+    /// A D3D12 picture larger than the texture behind it.
+    #[cfg(all(target_os = "windows", feature = "ort-directml"))]
+    #[error("a {picture:?} picture is larger than its {texture:?} texture")]
+    PictureOutsideTexture {
+        /// The picture's size.
+        picture: (u32, u32),
+        /// The texture's.
+        texture: (u32, u32),
     },
 }
 

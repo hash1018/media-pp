@@ -12,6 +12,9 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`ElementType` has a `D3d12OrtDetector` variant**, for the D3D12
+  detector — see Added. A `match` on `ElementType` needs an arm for it.
+
 - **`MetalOrtEmbedder::new` takes `MetalOrtEmbedderOptions`, and Core ML
   keeps what it compiles.** Beside the `OrtEmbedderOptions` every embedder
   takes, it says where the model Core ML compiles is kept (`model_cache`),
@@ -270,6 +273,17 @@ compile error with no explanation.
   | `SegmentedFileMuxer::create(policy, naming)` | `SegmentedFileMuxer::create(policy, Mp4Layout::Standard, naming)` |
 
 ### Added
+
+- **`D3d12OrtDetector` detects on D3D12 pictures through DirectML**, with
+  the `ort-directml` feature: object detection on the GPU of a Windows PC
+  without NVIDIA — any vendor's, through its own D3D12 driver. A compute
+  shader fits each NV12 picture, whole and in tiles, into a buffer on the
+  `D3d12Gpu` it is given, and ONNX Runtime's DirectML provider, handed that
+  GPU's own device and queue, reads it there; the outputs are decoded as
+  every detector's are. On an RTX 3050 a RetinaFace R50 in half precision
+  ran 6.7 ms an input, 1.2-1.4x TensorRT and many times the CPU. A model
+  runs fastest at opset 20 or lower with half-precision weights — see
+  `docs/d3d12-inference.md`.
 
 - **An MP4 or MOV file can be laid out fast-start or in fragments**
   (`Mp4Layout`, given to `FileMuxer::create` and, for every segment,

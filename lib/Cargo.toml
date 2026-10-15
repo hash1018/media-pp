@@ -549,6 +549,17 @@ cuda-visual-tracking = ["cuda"]
 # provider runs the model on the GPU or the Neural Engine. Its build is
 # fetched as the CPU one is; there is one for Apple silicon Macs only.
 ort-coreml = ["ort", "metal", "ort/coreml"]
+# Detection on D3D12 pictures, on Windows: `D3d12OrtDetector`. A compute
+# shader fits each picture into the model's input on the GPU, and ONNX
+# Runtime's DirectML provider runs the model there, on any vendor's D3D12
+# GPU — the way to the GPU without NVIDIA. Its build is fetched as the CPU
+# one is; with `ort-tensorrt` too, the one build that has both.
+ort-directml = [
+    "ort",
+    "d3d12",
+    "ort/directml",
+    "windows/Win32_AI_MachineLearning_DirectML",
+]
 # Noise suppression for speech, through RNNoise. Pure Rust and no model file:
 # the network's weights are part of the crate.
 rnnoise = ["dep:nnnoiseless"]

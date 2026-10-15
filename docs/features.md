@@ -32,6 +32,7 @@ unprefixed type works the same on every platform.
 | `ort-tensorrt` | `CudaOrtDetector`, `CudaOrtClassifier` and `CudaOrtEmbedder` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
 | `cuda-visual-tracking` | `ObjectTracker`'s following by look on the GPU for CUDA pictures; links cuFFT; enables `cuda` | Linux, Windows |
 | `ort-coreml` | Object detection, classification and embedding on VideoToolbox pictures, `MetalOrtDetector`, `MetalOrtClassifier` and `MetalOrtEmbedder`, through ONNX Runtime's Core ML provider; enables `ort` and `metal` | macOS (Apple silicon) |
+| `ort-directml` | Object detection on D3D12 pictures, `D3d12OrtDetector`, through ONNX Runtime's DirectML provider on any vendor's GPU; enables `ort` and `d3d12` | Windows |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All |
@@ -62,6 +63,11 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see
 - **`ort-coreml`**: an Apple silicon Mac. ONNX Runtime's build with Core
   ML is fetched as the CPU one is, and there is none for Intel Macs; Core ML
   itself is part of macOS.
+- **`ort-directml`**: a D3D12 GPU of any vendor. ONNX Runtime's build with
+  DirectML is fetched as the CPU one is — with `ort-tensorrt`, the one build
+  that has both — and `DirectML.dll` goes beside the program. A model runs
+  fastest at opset 20 or lower and with half-precision weights; see
+  [d3d12-inference.md](d3d12-inference.md).
 - **`ort-cuda`, `ort-tensorrt`**: CUDA 13's runtime, cuBLAS and cuRAND,
   and cuDNN 9 — and with `ort-tensorrt`, TensorRT 10 — are linked into the
   program, which does not start without them, as it does not without

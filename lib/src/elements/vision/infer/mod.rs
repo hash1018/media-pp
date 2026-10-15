@@ -22,3 +22,5 @@ pub use self::ort::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
     CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
+#[cfg(all(target_os = "windows", feature = "ort-directml"))]
+pub use self::ort::{D3d12OrtDetector, D3d12OrtDetectorOptions};

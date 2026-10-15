@@ -302,6 +302,9 @@ pub enum ElementType {
     /// ONNX Runtime embedder of detected objects on VideoToolbox pictures,
     /// through Core ML.
     MetalOrtEmbedder,
+    /// ONNX Runtime object-detection filter on D3D12 pictures, through
+    /// DirectML.
+    D3d12OrtDetector,
     /// Draws a detector's boxes and labels onto pictures in system memory.
     SwDetectionOverlay,
     /// Draws a detector's boxes and labels onto CUDA pictures.
