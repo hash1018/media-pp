@@ -11,7 +11,7 @@ mod sw_video_compositor;
 mod text_layer;
 mod timed_inputs;
 mod video_layer;
-#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 mod windows;
 
 pub use control::{
@@ -42,5 +42,5 @@ pub(in crate::elements) use text_layer::{
 pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect};
 #[cfg(feature = "vulkan")]
 pub use vulkan::*;
-#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 pub use windows::*;

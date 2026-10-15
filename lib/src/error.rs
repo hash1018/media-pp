@@ -753,6 +753,11 @@ pub enum Error {
     #[error(transparent)]
     D3d12VideoEncoderError(#[from] crate::elements::D3d12VideoEncoderError),
 
+    /// A D3D12 compositor operation failed.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12VideoCompositorError(#[from] crate::elements::D3d12VideoCompositorError),
+
     /// A D3D11-backed NVENC operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]

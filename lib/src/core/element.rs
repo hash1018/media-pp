@@ -227,6 +227,8 @@ pub enum ElementType {
     D3d12ToneMap,
     /// D3D12 Video hardware encoder.
     D3d12VideoEncoder,
+    /// D3D12 video compositor source.
+    D3d12VideoCompositor,
     /// Dynamic one-to-many branch filter.
     Tee,
     /// A stretch of chain whose contents are replaced while it runs.

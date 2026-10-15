@@ -18,9 +18,9 @@ compile error with no explanation.
 
 - **`ElementType` has `D3d12OrtDetector`, `D3d12OrtClassifier`,
   `D3d12OrtEmbedder`, `D3d12CutDetector`, `D3d12DetectionOverlay`,
-  `D3d12ToneMap` and `D3d12VideoEncoder` variants**, for the D3D12
-  detector, classifier, embedder, cut detector, overlay, tone map and
-  encoder — see Added. A `match` on `ElementType` needs an arm for
+  `D3d12ToneMap`, `D3d12VideoEncoder` and `D3d12VideoCompositor`
+  variants**, for the D3D12 detector, classifier, embedder, cut detector,
+  overlay, tone map, encoder and compositor — see Added. A `match` on `ElementType` needs an arm for
   each.
 
 - **`MetalOrtEmbedder::new` takes `MetalOrtEmbedderOptions`, and Core ML
@@ -281,6 +281,17 @@ compile error with no explanation.
   | `SegmentedFileMuxer::create(policy, naming)` | `SegmentedFileMuxer::create(policy, Mp4Layout::Standard, naming)` |
 
 ### Added
+
+- **`D3d12VideoCompositor` composites D3D12 pictures**, with the `d3d12`
+  feature: what the CUDA, Metal and Vulkan compositors do, on any
+  vendor's GPU, through the same `VideoLayer`, text layers, handles and
+  `VideoCompositorControl` traits, live or offline. Each layer is sampled
+  from its NV12 picture straight into its place by compute shaders of this
+  crate's own — scaled, cropped, read in its own colour and mixed at its
+  opacity in one pass a plane — onto an NV12 BT.709 canvas, handed on as
+  an ordinary D3D12VA frame; an unchanged scene hands its last frame on
+  again. A layer it cannot draw is said on the bus under its own name,
+  and the rest of the frame is drawn.
 
 - **`ObjectTracker` follows D3D12 pictures by look on the GPU**, with the
   `d3d12` feature: what `cuda-visual-tracking` does for CUDA pictures and

@@ -95,6 +95,12 @@ pub use compositor::{
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,
 };
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use compositor::{
+    D3d12TextLayerHandle, D3d12VideoCompositor, D3d12VideoCompositorError,
+    D3d12VideoCompositorHandle, D3d12VideoCompositorInput, D3d12VideoCompositorInputSink,
+    D3d12VideoLayerHandle,
+};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use compositor::{
     MetalTextLayerHandle, MetalVideoCompositor, MetalVideoCompositorError,
