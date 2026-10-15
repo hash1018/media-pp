@@ -865,6 +865,11 @@ pub enum Error {
     #[error(transparent)]
     MetalCutDetectorError(#[from] crate::elements::MetalCutDetectorError),
 
+    /// Finding cuts in D3D12 pictures failed.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12CutDetectorError(#[from] crate::elements::D3d12CutDetectorError),
+
     /// Drawing detections onto a CUDA picture failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]

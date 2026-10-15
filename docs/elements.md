@@ -79,8 +79,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   following by look, saying on each box how sure the look was
   (`Detection::look`);
   `ObjectAnalytics`, which counts the objects in zones of the picture and
-  across lines; `SwCutDetector`, `CudaCutDetector` and `MetalCutDetector`,
-  which mark the first picture of each shot of an edited video with a
+  across lines; `SwCutDetector`, `CudaCutDetector`, `MetalCutDetector` and
+  `D3d12CutDetector`, which mark the first picture of each shot of an edited video with a
   `SceneCut`, where a tracker starts over; `StreamMux`, which gathers a picture of each of several
   streams into a batch for a model to take at once, and the demux its
   handle makes, which splits the streams out again; `SwDetectionOverlay`,

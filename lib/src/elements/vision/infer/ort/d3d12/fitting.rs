@@ -4,24 +4,14 @@
 //! is. An HDR picture is first brought to SDR by a shader of its own, as the
 //! CUDA and Metal detectors look at one.
 
-use std::mem::ManuallyDrop;
-
 use windows::{
-    Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        Graphics::{
-            Direct3D::{
-                Fxc::{D3D_BLOB_ROOT_SIGNATURE, D3DGetBlobPart},
-                ID3DBlob,
-            },
-            Direct3D12::*,
-            Dxgi::Common::{
-                DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R8_UNORM,
-                DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16_UNORM,
-                DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
-            },
+    Win32::Graphics::{
+        Direct3D12::*,
+        Dxgi::Common::{
+            DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R8_UNORM,
+            DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16_UNORM,
+            DXGI_FORMAT_R16G16_UNORM,
         },
-        System::Threading::{CreateEventW, INFINITE, WaitForSingleObject},
     },
     core::{Interface, s},
 };
@@ -30,7 +20,12 @@ use crate::color::ColorDescription;
 use crate::ffmpeg;
 use crate::orientation::Orientation;
 use crate::platform::windows::{
-    d3d12_gpu::D3d12Gpu, d3d12va::d3d12va_texture, hlsl::compile_shader,
+    d3d12_compute::{
+        Commands, Kernel, buffer, plane_view, plane_write_view, transition, uav_barrier,
+        writable_texture,
+    },
+    d3d12_gpu::D3d12Gpu,
+    d3d12va::d3d12va_texture,
 };
 use crate::tone_map::ToneMap;
 
@@ -173,7 +168,6 @@ pub(super) struct Fitting {
     pub(super) model: (u32, u32),
     capacity: usize,
     device: ID3D12Device,
-    queue: ID3D12CommandQueue,
     /// `fit.hlsl`'s, for a detector or a classifier: an NV12 picture's, and
     /// an SDR copy's under the same root signature.
     fit: Kernel,
@@ -191,12 +185,7 @@ pub(super) struct Fitting {
     /// making its SDR copy — luma, chroma, the copy — after `2 * capacity`.
     heap: ID3D12DescriptorHeap,
     heap_step: usize,
-    allocator: ID3D12CommandAllocator,
-    list: ID3D12GraphicsCommandList,
-    /// Signalled at `submitted` once the last fit has run.
-    fence: ID3D12Fence,
-    event: HANDLE,
-    submitted: u64,
+    commands: Commands,
     /// The inputs, each three planes of `f32`, which the shader writes and
     /// DirectML reads.
     tensor: ID3D12Resource,
@@ -243,33 +232,18 @@ impl Fitting {
             let heap_step = device
                 .GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
                 as usize;
-            let allocator: ID3D12CommandAllocator =
-                device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
-            let list: ID3D12GraphicsCommandList =
-                device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)?;
-            // Created recording; closed so the first fit's `Reset` finds it
-            // as it expects.
-            list.Close()?;
-            let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
-            let event = CreateEventW(None, false, false, None)?;
-            let tensor = match buffer(
+            let commands = Commands::new(&device, gpu.queue())?;
+            let tensor = buffer(
                 &device,
                 (capacity * Self::floats(model) * size_of::<f32>()) as u64,
                 D3D12_HEAP_TYPE_DEFAULT,
                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            ) {
-                Ok(tensor) => tensor,
-                Err(error) => {
-                    let _ = CloseHandle(event);
-                    return Err(error.into());
-                }
-            };
+            )?;
             Ok(Self {
                 model,
                 capacity,
                 device,
-                queue: gpu.queue().clone(),
                 fit,
                 fit_rgba,
                 warp,
@@ -278,11 +252,7 @@ impl Fitting {
                 copies: Vec::new(),
                 heap,
                 heap_step,
-                allocator,
-                list,
-                fence,
-                event,
-                submitted: 0,
+                commands,
                 tensor,
                 readback: None,
             })
@@ -309,21 +279,6 @@ impl Fitting {
         &self.tensor
     }
 
-    /// Waits for the last fit to have run, so its list, allocator and views
-    /// can be used again.
-    fn wait_idle(&self) -> Result<(), OrtError> {
-        // SAFETY: a live fence and event; the wait is for a value this
-        // fitting signals.
-        unsafe {
-            if self.fence.GetCompletedValue() < self.submitted {
-                self.fence
-                    .SetEventOnCompletion(self.submitted, self.event)?;
-                WaitForSingleObject(self.event, INFINITE);
-            }
-        }
-        Ok(())
-    }
-
     /// Fits each picture's cuts into their inputs, into the values a model
     /// wants — its planes in its own order, each then times its scale plus
     /// its bias — in one submission to the queue, after whatever wrote each
@@ -347,15 +302,12 @@ impl Fitting {
             self.capacity
         );
         let ModelInput { scale, bias, order } = values;
-        self.wait_idle()?;
-        // SAFETY: the list and allocator are idle (waited for above) and
-        // recorded by this thread alone; every view and barrier names a
-        // live resource the pictures or this fitting hold until the queue
-        // has run what reads them.
+        let list = self.commands.begin(Some(&self.fit.pipeline))?;
+        // SAFETY: the list is open, the GPU idle on this fitting's work
+        // (`begin` waited); every view and barrier names a live resource the
+        // pictures or this fitting hold until the queue has run what reads
+        // them.
         unsafe {
-            self.allocator.Reset()?;
-            self.list.Reset(&self.allocator, &self.fit.pipeline)?;
-            let list = self.list.clone();
             list.SetDescriptorHeaps(&[Some(self.heap.clone())]);
             let only: Vec<&Picture> = pictures.iter().map(|&(picture, _)| picture).collect();
             let copies = self.record_copies(&list, &only)?;
@@ -379,17 +331,12 @@ impl Fitting {
                 release(&list, picture, copy.as_ref());
             }
             uav_barrier(&list, &self.tensor);
-            list.Close()?;
-            // A GPU-side wait for whatever wrote each picture: sharing a
-            // device does not order this queue after the decoder's.
-            for &(picture, _) in pictures {
-                self.queue.Wait(&picture.fence, picture.fence_value)?;
-            }
-            self.queue
-                .ExecuteCommandLists(&[Some(self.list.cast::<ID3D12CommandList>()?)]);
-            self.submitted += 1;
-            self.queue.Signal(&self.fence, self.submitted)?;
         }
+        let waits: Vec<(&ID3D12Fence, u64)> = pictures
+            .iter()
+            .map(|&(picture, _)| (&picture.fence, picture.fence_value))
+            .collect();
+        self.commands.submit(&waits)?;
         Ok(())
     }
 
@@ -487,7 +434,11 @@ impl Fitting {
                         copy.clone()
                     }
                     _ => {
-                        let made = rgba_texture(&self.device, picture.size)?;
+                        let made = writable_texture(
+                            &self.device,
+                            DXGI_FORMAT_R8G8B8A8_UNORM,
+                            picture.size,
+                        )?;
                         self.copies[index] = Some((made.clone(), picture.size));
                         made
                     }
@@ -514,16 +465,7 @@ impl Fitting {
                 self.device.CreateUnorderedAccessView(
                     &copy,
                     None,
-                    Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
-                        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                        ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
-                        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                            Texture2D: D3D12_TEX2D_UAV {
-                                MipSlice: 0,
-                                PlaneSlice: 0,
-                            },
-                        },
-                    }),
+                    Some(&plane_write_view(DXGI_FORMAT_R8G8B8A8_UNORM, 0)),
                     handle(2),
                 );
                 transition(
@@ -648,12 +590,9 @@ impl Fitting {
             self.capacity
         );
         let ModelInput { scale, bias, order } = values;
-        self.wait_idle()?;
+        let list = self.commands.begin(Some(&self.warp.pipeline))?;
         // SAFETY: as in `fit_each`.
         unsafe {
-            self.allocator.Reset()?;
-            self.list.Reset(&self.allocator, &self.warp.pipeline)?;
-            let list = self.list.clone();
             list.SetDescriptorHeaps(&[Some(self.heap.clone())]);
             let copy = self.record_copies(&list, &[picture])?.remove(0);
             list.SetComputeRootSignature(&self.warp.root_signature);
@@ -696,13 +635,9 @@ impl Fitting {
             }
             release(&list, picture, copy.as_ref());
             uav_barrier(&list, &self.tensor);
-            list.Close()?;
-            self.queue.Wait(&picture.fence, picture.fence_value)?;
-            self.queue
-                .ExecuteCommandLists(&[Some(self.list.cast::<ID3D12CommandList>()?)]);
-            self.submitted += 1;
-            self.queue.Signal(&self.fence, self.submitted)?;
         }
+        self.commands
+            .submit(&[(&picture.fence, picture.fence_value)])?;
         Ok(())
     }
 
@@ -717,7 +652,7 @@ impl Fitting {
         assert!(inputs <= self.capacity, "{inputs} of {}", self.capacity);
         let floats = inputs * Self::floats(self.model);
         let bytes = (floats * size_of::<f32>()) as u64;
-        self.wait_idle()?;
+        self.commands.wait_idle()?;
         // SAFETY: as in `fit_each`; the read-back buffer is mapped only once
         // the copy into it has run, and unmapped before this returns.
         unsafe {
@@ -734,16 +669,10 @@ impl Fitting {
                     self.readback.insert(made).clone()
                 }
             };
-            self.allocator.Reset()?;
-            self.list.Reset(&self.allocator, None)?;
-            self.list
-                .CopyBufferRegion(&readback, 0, &self.tensor, 0, bytes);
-            self.list.Close()?;
-            self.queue
-                .ExecuteCommandLists(&[Some(self.list.cast::<ID3D12CommandList>()?)]);
-            self.submitted += 1;
-            self.queue.Signal(&self.fence, self.submitted)?;
-            self.wait_idle()?;
+            let list = self.commands.begin(None)?;
+            list.CopyBufferRegion(&readback, 0, &self.tensor, 0, bytes);
+            self.commands.submit(&[])?;
+            self.commands.wait_idle()?;
             let mut mapped = std::ptr::null_mut();
             readback.Map(0, None, Some(&mut mapped))?;
             let values = std::slice::from_raw_parts(mapped.cast::<f32>(), floats).to_vec();
@@ -753,131 +682,12 @@ impl Fitting {
     }
 }
 
-/// A compute shader and the root signature it declares.
-struct Kernel {
-    root_signature: ID3D12RootSignature,
-    pipeline: ID3D12PipelineState,
-}
-
-impl Kernel {
-    /// `entry` of `source`, compiled and made a pipeline on `device`.
-    unsafe fn new(
-        device: &ID3D12Device,
-        source: &[u8],
-        file: windows::core::PCSTR,
-        entry: windows::core::PCSTR,
-    ) -> Result<Self, OrtError> {
-        // SAFETY: a live device and descriptions built here; the shader's
-        // blob outlives the calls that read it.
-        unsafe {
-            let shader = compile_shader(source, file, entry, s!("cs_5_1"))?;
-            let root = D3DGetBlobPart(
-                shader.GetBufferPointer(),
-                shader.GetBufferSize(),
-                D3D_BLOB_ROOT_SIGNATURE,
-                0,
-            )?;
-            let root_signature: ID3D12RootSignature =
-                device.CreateRootSignature(0, blob_bytes(&root))?;
-            let pipeline = pipeline(device, &shader, &root_signature);
-            Ok(Self {
-                root_signature,
-                pipeline: pipeline?,
-            })
-        }
-    }
-
-    /// `entry` of `source` made a pipeline under this kernel's root
-    /// signature, which it declares alike, so a list can change from one to
-    /// the other keeping what is bound.
-    unsafe fn sibling(
-        &self,
-        device: &ID3D12Device,
-        source: &[u8],
-        file: windows::core::PCSTR,
-        entry: windows::core::PCSTR,
-    ) -> Result<ID3D12PipelineState, OrtError> {
-        // SAFETY: as in `new`.
-        unsafe {
-            let shader = compile_shader(source, file, entry, s!("cs_5_1"))?;
-            Ok(pipeline(device, &shader, &self.root_signature)?)
-        }
-    }
-}
-
-/// `shader` made a compute pipeline under `root_signature`.
-unsafe fn pipeline(
-    device: &ID3D12Device,
-    shader: &ID3DBlob,
-    root_signature: &ID3D12RootSignature,
-) -> windows::core::Result<ID3D12PipelineState> {
-    // SAFETY: a live device and blob; the description's reference to the
-    // root signature is released once the pipeline is made.
-    unsafe {
-        let mut desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-            pRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
-            CS: D3D12_SHADER_BYTECODE {
-                pShaderBytecode: shader.GetBufferPointer(),
-                BytecodeLength: shader.GetBufferSize(),
-            },
-            ..Default::default()
-        };
-        let pipeline = device.CreateComputePipelineState(&desc);
-        ManuallyDrop::drop(&mut desc.pRootSignature);
-        pipeline
-    }
-}
-
 impl Drop for Fitting {
     fn drop(&mut self) {
         // What is queued still reads the views and writes the buffer: it
         // runs out before they go.
-        let _ = self.wait_idle();
-        // SAFETY: the event was made by `new` and is closed once, here.
-        unsafe {
-            let _ = CloseHandle(self.event);
-        }
+        let _ = self.commands.wait_idle();
     }
-}
-
-/// A buffer of `bytes` on `heap`.
-unsafe fn buffer(
-    device: &ID3D12Device,
-    bytes: u64,
-    heap: D3D12_HEAP_TYPE,
-    flags: D3D12_RESOURCE_FLAGS,
-    state: D3D12_RESOURCE_STATES,
-) -> windows::core::Result<ID3D12Resource> {
-    let mut resource: Option<ID3D12Resource> = None;
-    // SAFETY: descriptions built here, and a correctly typed out-parameter.
-    unsafe {
-        device.CreateCommittedResource(
-            &D3D12_HEAP_PROPERTIES {
-                Type: heap,
-                ..Default::default()
-            },
-            D3D12_HEAP_FLAG_NONE,
-            &D3D12_RESOURCE_DESC {
-                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-                Alignment: 0,
-                Width: bytes.max(1),
-                Height: 1,
-                DepthOrArraySize: 1,
-                MipLevels: 1,
-                Format: DXGI_FORMAT_UNKNOWN,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-                Flags: flags,
-            },
-            state,
-            None,
-            &mut resource,
-        )?;
-    }
-    Ok(resource.expect("CreateCommittedResource succeeded without a resource"))
 }
 
 /// Records `picture` — or its SDR `copy` — no longer read: the picture back
@@ -904,119 +714,6 @@ unsafe fn release(
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             ),
         }
-    }
-}
-
-/// An RGBA texture of `size` a shader writes, for an HDR picture's SDR copy.
-unsafe fn rgba_texture(
-    device: &ID3D12Device,
-    (width, height): (u32, u32),
-) -> windows::core::Result<ID3D12Resource> {
-    let mut resource: Option<ID3D12Resource> = None;
-    // SAFETY: descriptions built here, and a correctly typed out-parameter.
-    unsafe {
-        device.CreateCommittedResource(
-            &D3D12_HEAP_PROPERTIES {
-                Type: D3D12_HEAP_TYPE_DEFAULT,
-                ..Default::default()
-            },
-            D3D12_HEAP_FLAG_NONE,
-            &D3D12_RESOURCE_DESC {
-                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-                Alignment: 0,
-                Width: u64::from(width),
-                Height: height,
-                DepthOrArraySize: 1,
-                MipLevels: 1,
-                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
-                Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            },
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            None,
-            &mut resource,
-        )?;
-    }
-    Ok(resource.expect("CreateCommittedResource succeeded without a resource"))
-}
-
-/// One plane of an NV12 texture: the format picks which, the plane slice
-/// says where.
-fn plane_view(format: DXGI_FORMAT, plane_slice: u32) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
-    D3D12_SHADER_RESOURCE_VIEW_DESC {
-        Format: format,
-        ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
-        Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-        Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-            Texture2D: D3D12_TEX2D_SRV {
-                MostDetailedMip: 0,
-                MipLevels: 1,
-                PlaneSlice: plane_slice,
-                ResourceMinLODClamp: 0.0,
-            },
-        },
-    }
-}
-
-/// Records `resource` going from `before` to `after`.
-unsafe fn transition(
-    list: &ID3D12GraphicsCommandList,
-    resource: &ID3D12Resource,
-    before: D3D12_RESOURCE_STATES,
-    after: D3D12_RESOURCE_STATES,
-) {
-    let mut barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: ManuallyDrop::new(Some(resource.clone())),
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: before,
-                StateAfter: after,
-            }),
-        },
-    };
-    // SAFETY: records one barrier on an open list, then releases the
-    // resource reference the barrier description took.
-    unsafe {
-        list.ResourceBarrier(std::slice::from_ref(&barrier));
-        let transition = &mut *barrier.Anonymous.Transition;
-        ManuallyDrop::drop(&mut transition.pResource);
-    }
-}
-
-/// Records a barrier between the shader's writes to `resource` and what
-/// reads it after them.
-unsafe fn uav_barrier(list: &ID3D12GraphicsCommandList, resource: &ID3D12Resource) {
-    let mut barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            UAV: ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
-                pResource: ManuallyDrop::new(Some(resource.clone())),
-            }),
-        },
-    };
-    // SAFETY: records one barrier on an open list, then releases the
-    // resource reference the barrier description took.
-    unsafe {
-        list.ResourceBarrier(std::slice::from_ref(&barrier));
-        let uav = &mut *barrier.Anonymous.UAV;
-        ManuallyDrop::drop(&mut uav.pResource);
-    }
-}
-
-/// The bytes a blob holds.
-unsafe fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
-    // SAFETY: a blob owns `GetBufferSize()` readable bytes at
-    // `GetBufferPointer()` for as long as it lives.
-    unsafe {
-        std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize())
     }
 }
 

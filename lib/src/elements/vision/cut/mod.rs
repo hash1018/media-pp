@@ -21,10 +21,13 @@
 //! pictures live, so it is here; each backend's element only makes them:
 //! [`SwCutDetector`] in system memory, `CudaCutDetector` on the GPU, where
 //! the cells are averaged by the kernel a CUDA overlay's mosaic is, and
-//! only the thumbnail comes down.
+//! only the thumbnail comes down; `MetalCutDetector` and `D3d12CutDetector`
+//! likewise on theirs.
 
 #[cfg(feature = "cuda")]
 mod cuda_cut_detector;
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+mod d3d12_cut_detector;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 mod metal_cut_detector;
 mod sw_cut_detector;
@@ -41,6 +44,8 @@ use crate::transform::Output;
 
 #[cfg(feature = "cuda")]
 pub use cuda_cut_detector::{CudaCutDetector, CudaCutDetectorError};
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use d3d12_cut_detector::{D3d12CutDetector, D3d12CutDetectorError};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metal_cut_detector::{MetalCutDetector, MetalCutDetectorError};
 pub use sw_cut_detector::{SwCutDetector, SwCutDetectorError};

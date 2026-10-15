@@ -331,6 +331,8 @@ pub use vision::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
     CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use vision::{D3d12CutDetector, D3d12CutDetectorError};
 #[cfg(all(target_os = "windows", feature = "ort-directml"))]
 pub use vision::{D3d12OrtClassifier, D3d12OrtDetector, D3d12OrtDetectorOptions, D3d12OrtEmbedder};
 #[cfg(all(target_os = "macos", feature = "metal"))]

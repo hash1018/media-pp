@@ -326,6 +326,8 @@ pub enum ElementType {
     /// Finds where one shot ends and the next begins, in VideoToolbox
     /// pictures.
     MetalCutDetector,
+    /// The same in D3D12 pictures.
+    D3d12CutDetector,
     /// Numbers a detector's objects across pictures, and fills in the
     /// pictures it let by.
     ObjectTracker,
