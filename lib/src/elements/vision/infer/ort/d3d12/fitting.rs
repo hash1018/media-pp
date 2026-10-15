@@ -34,6 +34,7 @@ use crate::platform::windows::{
 use super::super::{ChannelOrder, ModelInput, OrtError};
 
 const SHADER: &[u8] = include_bytes!("../../../../../shaders/d3d12/fit.hlsl");
+const WARP_SHADER: &[u8] = include_bytes!("../../../../../shaders/d3d12/warp.hlsl");
 
 /// Each run of the shader is 16 by 16 pixels of the input.
 const GROUP: u32 = 16;
@@ -134,8 +135,10 @@ pub(super) struct Fitting {
     capacity: usize,
     device: ID3D12Device,
     queue: ID3D12CommandQueue,
-    root_signature: ID3D12RootSignature,
-    pipeline: ID3D12PipelineState,
+    /// `fit.hlsl`'s, for a detector.
+    fit: Kernel,
+    /// `warp.hlsl`'s, for an embedder.
+    warp: Kernel,
     /// Two views — luma, chroma — for each picture of a fit, shader-visible.
     heap: ID3D12DescriptorHeap,
     heap_step: usize,
@@ -148,6 +151,9 @@ pub(super) struct Fitting {
     /// The inputs, each three planes of `f32`, which the shader writes and
     /// DirectML reads.
     tensor: ID3D12Resource,
+    /// What the inputs are copied into for the CPU to read, made the first
+    /// time they are.
+    readback: Option<ID3D12Resource>,
 }
 
 // SAFETY: the D3D12 objects are free-threaded; the command list, allocator
@@ -166,28 +172,10 @@ impl Fitting {
         let device = gpu.device().clone();
         let capacity = capacity.max(1);
         // SAFETY: every call below is on a live device with descriptions
-        // built here; the shader's blob outlives the calls that read it.
+        // built here.
         unsafe {
-            let shader = compile_shader(SHADER, s!("fit.hlsl"), s!("fit_nv12"), s!("cs_5_1"))?;
-            let root = D3DGetBlobPart(
-                shader.GetBufferPointer(),
-                shader.GetBufferSize(),
-                D3D_BLOB_ROOT_SIGNATURE,
-                0,
-            )?;
-            let root_signature: ID3D12RootSignature =
-                device.CreateRootSignature(0, blob_bytes(&root))?;
-            let mut desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-                pRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
-                CS: D3D12_SHADER_BYTECODE {
-                    pShaderBytecode: shader.GetBufferPointer(),
-                    BytecodeLength: shader.GetBufferSize(),
-                },
-                ..Default::default()
-            };
-            let pipeline = device.CreateComputePipelineState(&desc);
-            ManuallyDrop::drop(&mut desc.pRootSignature);
-            let pipeline: ID3D12PipelineState = pipeline?;
+            let fit = Kernel::new(&device, SHADER, s!("fit.hlsl"), s!("fit_nv12"))?;
+            let warp = Kernel::new(&device, WARP_SHADER, s!("warp.hlsl"), s!("warp_nv12"))?;
             let heap: ID3D12DescriptorHeap =
                 device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
@@ -225,8 +213,8 @@ impl Fitting {
                 capacity,
                 device,
                 queue: gpu.queue().clone(),
-                root_signature,
-                pipeline,
+                fit,
+                warp,
                 heap,
                 heap_step,
                 allocator,
@@ -235,6 +223,7 @@ impl Fitting {
                 event,
                 submitted: 0,
                 tensor,
+                readback: None,
             })
         }
     }
@@ -304,9 +293,9 @@ impl Fitting {
         // has run what reads them.
         unsafe {
             self.allocator.Reset()?;
-            self.list.Reset(&self.allocator, &self.pipeline)?;
+            self.list.Reset(&self.allocator, &self.fit.pipeline)?;
             let list = &self.list;
-            list.SetComputeRootSignature(&self.root_signature);
+            list.SetComputeRootSignature(&self.fit.root_signature);
             list.SetDescriptorHeaps(&[Some(self.heap.clone())]);
             list.SetComputeRootUnorderedAccessView(2, self.tensor.GetGPUVirtualAddress());
             let cpu_start = self.heap.GetCPUDescriptorHandleForHeapStart();
@@ -428,23 +417,135 @@ impl Fitting {
         words
     }
 
-    /// The first `inputs` inputs as the shader left them, waited for and
-    /// read back: what a test checks the shader by.
-    #[cfg(test)]
+    /// Reads each of `maps` of `picture` into the input of its index, in the
+    /// model's `values`, in one submission to the queue after whatever wrote
+    /// the picture: input pixel `(u, v)` from `(m[0] u + m[1] v + m[2], m[3]
+    /// u + m[4] v + m[5])` of the picture, between the four pixels around
+    /// it, black outside it — what the CUDA and Metal embedders read. It
+    /// returns once the work is queued, as [`Self::fit_each`] does.
+    ///
+    /// # Panics
+    ///
+    /// If there are more maps than inputs: the caller's own arithmetic.
+    pub(super) fn warp(
+        &mut self,
+        picture: &Picture,
+        maps: &[[f32; 6]],
+        values: ModelInput,
+    ) -> Result<(), OrtError> {
+        assert!(
+            maps.len() <= self.capacity,
+            "{} maps for {} inputs",
+            maps.len(),
+            self.capacity
+        );
+        let ModelInput { scale, bias, order } = values;
+        self.wait_idle()?;
+        // SAFETY: as in `fit_each`.
+        unsafe {
+            self.allocator.Reset()?;
+            self.list.Reset(&self.allocator, &self.warp.pipeline)?;
+            let list = &self.list;
+            list.SetComputeRootSignature(&self.warp.root_signature);
+            list.SetDescriptorHeaps(&[Some(self.heap.clone())]);
+            list.SetComputeRootUnorderedAccessView(2, self.tensor.GetGPUVirtualAddress());
+            let cpu_start = self.heap.GetCPUDescriptorHandleForHeapStart();
+            for (plane, format) in [DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM]
+                .into_iter()
+                .enumerate()
+            {
+                let handle = D3D12_CPU_DESCRIPTOR_HANDLE {
+                    ptr: cpu_start.ptr + plane * self.heap_step,
+                };
+                self.device.CreateShaderResourceView(
+                    &picture.texture,
+                    Some(&plane_view(format, plane as u32)),
+                    handle,
+                );
+            }
+            transition(
+                list,
+                &picture.texture,
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+            list.SetComputeRootDescriptorTable(1, self.heap.GetGPUDescriptorHandleForHeapStart());
+            for (slot, map) in maps.iter().enumerate() {
+                let mut words = [0u32; 36];
+                words[..8].copy_from_slice(&[
+                    self.model.0,
+                    self.model.1,
+                    picture.size.0,
+                    picture.size.1,
+                    slot as u32,
+                    u32::from(order == ChannelOrder::Bgr),
+                    0,
+                    0,
+                ]);
+                let floats = [
+                    [map[0], map[1], map[2], 0.0],
+                    [map[3], map[4], map[5], 0.0],
+                    picture.rows[0],
+                    picture.rows[1],
+                    picture.rows[2],
+                    [scale[0], scale[1], scale[2], 1.0],
+                    [bias[0], bias[1], bias[2], 0.0],
+                ];
+                for (word, value) in words[8..].iter_mut().zip(floats.iter().flatten()) {
+                    *word = value.to_bits();
+                }
+                list.SetComputeRoot32BitConstants(0, 36, words.as_ptr().cast(), 0);
+                list.Dispatch(
+                    self.model.0.div_ceil(GROUP),
+                    self.model.1.div_ceil(GROUP),
+                    1,
+                );
+            }
+            transition(
+                list,
+                &picture.texture,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_COMMON,
+            );
+            uav_barrier(list, &self.tensor);
+            list.Close()?;
+            self.queue.Wait(&picture.fence, picture.fence_value)?;
+            self.queue
+                .ExecuteCommandLists(&[Some(self.list.cast::<ID3D12CommandList>()?)]);
+            self.submitted += 1;
+            self.queue.Signal(&self.fence, self.submitted)?;
+        }
+        Ok(())
+    }
+
+    /// The first `inputs` inputs as the last fit or warp left them, waited
+    /// for and read back: an embedder's cut-outs, and what a test checks the
+    /// shaders by. The buffer they come through is made the first time.
+    ///
+    /// # Panics
+    ///
+    /// If `inputs` is past the capacity.
     pub(super) fn read_back(&mut self, inputs: usize) -> Result<Vec<f32>, OrtError> {
+        assert!(inputs <= self.capacity, "{inputs} of {}", self.capacity);
         let floats = inputs * Self::floats(self.model);
         let bytes = (floats * size_of::<f32>()) as u64;
         self.wait_idle()?;
         // SAFETY: as in `fit_each`; the read-back buffer is mapped only once
-        // the copy into it has run, and unmapped before it is dropped.
+        // the copy into it has run, and unmapped before this returns.
         unsafe {
-            let readback = buffer(
-                &self.device,
-                bytes,
-                D3D12_HEAP_TYPE_READBACK,
-                D3D12_RESOURCE_FLAG_NONE,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-            )?;
+            let readback = match &self.readback {
+                Some(readback) => readback.clone(),
+                None => {
+                    let made = buffer(
+                        &self.device,
+                        (self.capacity * Self::floats(self.model) * size_of::<f32>()) as u64,
+                        D3D12_HEAP_TYPE_READBACK,
+                        D3D12_RESOURCE_FLAG_NONE,
+                        D3D12_RESOURCE_STATE_COPY_DEST,
+                    )?;
+                    self.readback.insert(made).clone()
+                }
+            };
             self.allocator.Reset()?;
             self.list.Reset(&self.allocator, None)?;
             self.list
@@ -460,6 +561,50 @@ impl Fitting {
             let values = std::slice::from_raw_parts(mapped.cast::<f32>(), floats).to_vec();
             readback.Unmap(0, None);
             Ok(values)
+        }
+    }
+}
+
+/// A compute shader and the root signature it declares.
+struct Kernel {
+    root_signature: ID3D12RootSignature,
+    pipeline: ID3D12PipelineState,
+}
+
+impl Kernel {
+    /// `entry` of `source`, compiled and made a pipeline on `device`.
+    unsafe fn new(
+        device: &ID3D12Device,
+        source: &[u8],
+        file: windows::core::PCSTR,
+        entry: windows::core::PCSTR,
+    ) -> Result<Self, OrtError> {
+        // SAFETY: a live device and descriptions built here; the shader's
+        // blob outlives the calls that read it.
+        unsafe {
+            let shader = compile_shader(source, file, entry, s!("cs_5_1"))?;
+            let root = D3DGetBlobPart(
+                shader.GetBufferPointer(),
+                shader.GetBufferSize(),
+                D3D_BLOB_ROOT_SIGNATURE,
+                0,
+            )?;
+            let root_signature: ID3D12RootSignature =
+                device.CreateRootSignature(0, blob_bytes(&root))?;
+            let mut desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
+                CS: D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: shader.GetBufferPointer(),
+                    BytecodeLength: shader.GetBufferSize(),
+                },
+                ..Default::default()
+            };
+            let pipeline = device.CreateComputePipelineState(&desc);
+            ManuallyDrop::drop(&mut desc.pRootSignature);
+            Ok(Self {
+                root_signature,
+                pipeline: pipeline?,
+            })
         }
     }
 }
@@ -822,5 +967,117 @@ pub(super) mod tests {
             fitting.picture(on_other),
             Err(OrtError::D3d12DeviceMismatch)
         ));
+    }
+
+    /// The four pixels around `p` in a plane `extent` in pixels, held inside
+    /// it, each weighted, naught outside — `warp.hlsl`'s `around`.
+    fn around(p: (f32, f32), extent: (usize, usize)) -> ([(usize, usize); 4], [f32; 4], f32) {
+        let (cx, cy) = (p.0.floor(), p.1.floor());
+        let (tx, ty) = (p.0 - cx, p.1 - cy);
+        let weights = [
+            (1.0 - tx) * (1.0 - ty),
+            tx * (1.0 - ty),
+            (1.0 - tx) * ty,
+            tx * ty,
+        ];
+        let mut at = [(0, 0); 4];
+        let mut weight = [0.0; 4];
+        let mut inside = 0.0;
+        for (i, (dx, dy)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+            let (qx, qy) = (cx as i64 + dx, cy as i64 + dy);
+            let within = qx >= 0 && qy >= 0 && qx < extent.0 as i64 && qy < extent.1 as i64;
+            at[i] = (
+                qx.clamp(0, extent.0 as i64 - 1) as usize,
+                qy.clamp(0, extent.1 as i64 - 1) as usize,
+            );
+            weight[i] = if within { weights[i] } else { 0.0 };
+            inside += weight[i];
+        }
+        (at, weight, inside)
+    }
+
+    /// What `warp.hlsl` is to write for `map` of `frame`, RGB 0 to 1.
+    fn warped(frame: &ffmpeg::frame::Video, map: [f32; 6], model: (u32, u32)) -> Vec<f32> {
+        let rows = ColorDescription::of(frame).yuv_to_rgb_rows(frame.height());
+        let size = (frame.width() as usize, frame.height() as usize);
+        let (luma, luma_stride) = (frame.data(0), frame.stride(0));
+        let (chroma, chroma_stride) = (frame.data(1), frame.stride(1));
+        let plane = (model.0 * model.1) as usize;
+        let mut tensor = vec![0.0; 3 * plane];
+        for v in 0..model.1 {
+            for u in 0..model.0 {
+                let (fu, fv) = (u as f32, v as f32);
+                let p = (
+                    map[0] * fu + map[1] * fv + map[2],
+                    map[3] * fu + map[4] * fv + map[5],
+                );
+                let (at, weight, inside) = around(p, size);
+                let mut rgb = [0.0f32; 3];
+                if inside > 0.0 {
+                    let y: f32 = (0..4)
+                        .map(|i| {
+                            f32::from(luma[at[i].1 * luma_stride + at[i].0]) / 255.0 * weight[i]
+                        })
+                        .sum::<f32>()
+                        / inside;
+                    let half = (size.0.div_ceil(2), size.1.div_ceil(2));
+                    let (cat, cweight, cinside) =
+                        around(((p.0 + 0.5) * 0.5 - 0.5, (p.1 + 0.5) * 0.5 - 0.5), half);
+                    let mut c = [0.5f32, 0.5];
+                    if cinside > 0.0 {
+                        c = [0.0, 0.0];
+                        for i in 0..4 {
+                            let base = cat[i].1 * chroma_stride + cat[i].0 * 2;
+                            c[0] += f32::from(chroma[base]) / 255.0 * cweight[i];
+                            c[1] += f32::from(chroma[base + 1]) / 255.0 * cweight[i];
+                        }
+                        c = [c[0] / cinside, c[1] / cinside];
+                    }
+                    let yuv = [y, c[0], c[1], 1.0];
+                    for (channel, row) in rows.iter().enumerate() {
+                        let value: f32 = row.iter().zip(yuv).map(|(r, x)| r * x).sum();
+                        rgb[channel] = value.clamp(0.0, 1.0) * inside;
+                    }
+                }
+                let index = (v * model.0 + u) as usize;
+                for (channel, value) in rgb.into_iter().enumerate() {
+                    tensor[channel * plane + index] = value;
+                }
+            }
+        }
+        tensor
+    }
+
+    /// The warp reads what the CPU works out for the same maps: one turned
+    /// and shrunk, and one hanging off the picture's edge, black past it.
+    #[test]
+    fn the_warp_reads_an_object_as_the_cpu_works_it_out() {
+        let Some(gpu) = try_d3d12_gpu() else {
+            return;
+        };
+        let Some((frame, uploaded)) = upload(&gpu, (96, 64)) else {
+            return;
+        };
+        let MediaBuffer::Video(on_gpu) = &uploaded else {
+            panic!("a picture goes on");
+        };
+        let model = (24, 24);
+        let mut fitting = Fitting::new(&gpu, model, 2).expect("the shaders compile");
+        let picture = fitting.picture(on_gpu).expect("reads the upload");
+        let (cos, sin) = (0.3f32.cos() * 1.7, 0.3f32.sin() * 1.7);
+        let maps = [
+            [cos, -sin, 30.5, sin, cos, 12.25],
+            [1.25, 0.0, 80.0, 0.0, 1.25, -6.0],
+        ];
+        fitting
+            .warp(&picture, &maps, ModelInput::default())
+            .expect("warps");
+        let tensor = fitting.read_back(2).expect("reads back");
+        let floats = Fitting::floats(model);
+        for (slot, map) in maps.into_iter().enumerate() {
+            let wanted = warped(&frame, map, model);
+            let off = largest_difference(&tensor[slot * floats..(slot + 1) * floats], &wanted);
+            assert!(off < 1e-3, "map {slot}: off by {off}");
+        }
     }
 }

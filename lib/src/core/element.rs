@@ -305,6 +305,9 @@ pub enum ElementType {
     /// ONNX Runtime object-detection filter on D3D12 pictures, through
     /// DirectML.
     D3d12OrtDetector,
+    /// ONNX Runtime embedder of detected objects on D3D12 pictures, through
+    /// DirectML.
+    D3d12OrtEmbedder,
     /// Draws a detector's boxes and labels onto pictures in system memory.
     SwDetectionOverlay,
     /// Draws a detector's boxes and labels onto CUDA pictures.

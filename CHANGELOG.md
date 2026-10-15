@@ -12,8 +12,9 @@ compile error with no explanation.
 
 ### Breaking
 
-- **`ElementType` has a `D3d12OrtDetector` variant**, for the D3D12
-  detector — see Added. A `match` on `ElementType` needs an arm for it.
+- **`ElementType` has `D3d12OrtDetector` and `D3d12OrtEmbedder`
+  variants**, for the D3D12 detector and embedder — see Added. A `match` on
+  `ElementType` needs an arm for each.
 
 - **`MetalOrtEmbedder::new` takes `MetalOrtEmbedderOptions`, and Core ML
   keeps what it compiles.** Beside the `OrtEmbedderOptions` every embedder
@@ -283,7 +284,10 @@ compile error with no explanation.
   every detector's are. On an RTX 3050 a RetinaFace R50 in half precision
   ran 6.7 ms an input, 1.2-1.4x TensorRT and many times the CPU. A model
   runs fastest at opset 20 or lower with half-precision weights — see
-  `docs/d3d12-inference.md`.
+  `docs/d3d12-inference.md`. `D3d12OrtEmbedder` beside it makes what a
+  detector found into vectors the same way, each object read through its
+  five points or its box by a second shader; on DirectML, SFace and OSNet
+  made vectors 0.9975 and 0.9999 alike the CPU's.
 
 - **An MP4 or MOV file can be laid out fast-start or in fragments**
   (`Mp4Layout`, given to `FileMuxer::create` and, for every segment,

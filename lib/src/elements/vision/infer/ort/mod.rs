@@ -42,7 +42,7 @@ pub use cuda::{
     CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
 };
 #[cfg(all(target_os = "windows", feature = "ort-directml"))]
-pub use d3d12::{D3d12OrtDetector, D3d12OrtDetectorOptions};
+pub use d3d12::{D3d12OrtDetector, D3d12OrtDetectorOptions, D3d12OrtEmbedder};
 pub use embed::{Alignment, OrtEmbedderOptions};
 #[cfg(all(target_os = "macos", feature = "ort-coreml"))]
 pub use metal::{

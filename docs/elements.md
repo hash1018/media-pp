@@ -67,7 +67,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   be found (`Tiles`, those worth looking in picked picture by picture by a
   `TileChooser`); `SwOrtClassifier`, `CudaOrtClassifier` and
   `MetalOrtClassifier`, which name each object found with a second model;
-  `SwOrtEmbedder`, `CudaOrtEmbedder` and `MetalOrtEmbedder`, which make
+  `SwOrtEmbedder`, `CudaOrtEmbedder`, `MetalOrtEmbedder` and
+  `D3d12OrtEmbedder`, which make
   each object found a vector — a face straightened by its five points, or
   a whole box — that lies near another's where the two look alike, and,
   asked (`OrtEmbedderOptions::cutouts`), the picture it was made from beside

@@ -6,6 +6,7 @@
 //! `docs/d3d12-inference.md` for the measurements this rests on.
 
 mod d3d12_ort_detector;
+mod d3d12_ort_embedder;
 mod fitting;
 
 use std::path::Path;
@@ -26,6 +27,7 @@ use super::OrtError;
 use crate::platform::windows::d3d12_gpu::D3d12Gpu;
 
 pub use d3d12_ort_detector::{D3d12OrtDetector, D3d12OrtDetectorOptions};
+pub use d3d12_ort_embedder::D3d12OrtEmbedder;
 
 /// What DirectML runs on: a DirectML device made on a [`D3d12Gpu`]'s
 /// device, and the GPU's queue it is handed beside it.

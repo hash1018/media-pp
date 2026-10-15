@@ -1,7 +1,8 @@
 # Detection on D3D12: DirectML
 
-Status: stages 0 and 1 done, 2026-10-15 — this document and its
-measurements, and `D3d12OrtDetector`. Stage 2 is under way.
+Status: stages 0 to 2 done, 2026-10-15 — this document and its
+measurements, `D3d12OrtDetector` and `D3d12OrtEmbedder`. Stage 3, gamchum
+on a GPU without NVIDIA, is set aside: gamchum stays on CUDA for now.
 
 Built as designed but for one thing found on the way: `ort`'s
 `TensorRefMut::from_raw` locates every tensor it makes in host memory
@@ -11,7 +12,10 @@ it were host memory — an access violation. The detector makes the input
 tensor through ONNX Runtime's own `CreateTensorWithDataAsOrtValue` instead.
 Through the element, RetinaFace R50 in fp16 ran a 1080p picture whole and
 in six tiles in 47 ms on the RTX 3050 — 6.7 ms an input — and found the
-same faces as the CPU's fp32 on the pictures compared.
+same faces as the CPU's fp32 on the pictures compared. The embedder's
+warp (`shaders/d3d12/warp.hlsl`) reads what the CPU works out for the same
+maps, and on DirectML gamchum's SFace and OSNet made vectors 0.9975 and
+0.9999 alike the CPU's of the same objects.
 
 ## Why
 
