@@ -27,7 +27,7 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    element::{Attached, Element, ElementType, Identity, Sink},
+    element::{Attached, ElementType, Identity, Sink},
     elements::filter::audio::stretcher::{Piece, Stretcher},
     elements::sink::renderer::audio_rate::PlayedMedia,
     elements::{AudioFormat, CoreAudioDevice, CoreAudioDeviceKind},
@@ -405,7 +405,6 @@ impl OutputUnit {
 /// What a [`CoreAudioRenderer`] does with each frame: plays it on the device.
 /// All of its work, which the framework makes the terminal.
 struct Rendering {
-    name: Arc<str>,
     pp_log: PpLog,
     format: AudioFormat,
     unit: OutputUnit,
@@ -485,7 +484,6 @@ impl CoreAudioRenderer {
         options: CoreAudioRendererOptions,
     ) -> std::result::Result<(Self, AudioFormat), CoreAudioRendererError> {
         let identity = Identity::new(ElementType::CoreAudioRenderer, name);
-        let name = identity.name();
         let pp_log = identity.pp_log().clone();
         let device = options.device;
         if device.kind != CoreAudioDeviceKind::Output {
@@ -541,7 +539,6 @@ impl CoreAudioRenderer {
             Self(SinkStage::new(
                 identity,
                 Rendering {
-                    name,
                     pp_log,
                     format,
                     unit,

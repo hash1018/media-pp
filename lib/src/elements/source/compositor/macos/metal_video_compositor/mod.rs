@@ -773,7 +773,6 @@ source_stage!(MetalVideoCompositor);
 /// composition. All of its work, which the framework makes the source.
 struct Compositing {
     pp_log: PpLog,
-    name: Arc<str>,
     shared: Arc<CompositorShared>,
     options: VideoCompositorOptions,
     frame_index: i64,
@@ -831,7 +830,6 @@ impl MetalVideoCompositor {
         crate::ensure_ffmpeg();
         validate_output_options(options, format)?;
         let identity = Identity::new(ElementType::MetalVideoCompositor, name);
-        let name = identity.name();
         let pp_log = identity.pp_log().clone();
         // SAFETY: `create_frames_ctx`'s contract is a live device context,
         // which the device's own reference is for the length of the call.
@@ -877,7 +875,6 @@ impl MetalVideoCompositor {
             Self(SourceStage::new(
                 identity,
                 Compositing {
-                    name,
                     pp_log,
                     shared: shared.clone(),
                     options,

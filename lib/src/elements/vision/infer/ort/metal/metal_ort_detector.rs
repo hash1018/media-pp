@@ -163,6 +163,7 @@ impl MetalOrtDetector {
         options: MetalOrtDetectorOptions,
     ) -> Result<Self> {
         let identity = Identity::new(ElementType::MetalOrtDetector, name);
+        let name = identity.name();
         let pp_log = identity.pp_log().clone();
         let path = model_path.as_ref().display().to_string();
         if options.max_batch == 0 {
