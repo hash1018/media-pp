@@ -556,7 +556,6 @@ impl PipeWireAudioRenderer {
             Self(SinkStage::new(
                 identity,
                 Rendering {
-                    name: name.into(),
                     pp_log,
                     format,
                     frames: frame_tx,
