@@ -8,7 +8,7 @@ use ort::{
     inputs,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
-    value::{Shape, TensorRefMut},
+    value::Shape,
 };
 
 use crate::pp_log::{PpLog, pp_info};
@@ -286,12 +286,12 @@ impl Embedder {
             // SAFETY: the pointer is this element's own device allocation of
             // `capacity` inputs, at least `rows` — exactly `shape` or more — in
             // the primary context ONNX Runtime's CUDA provider also runs in; it
-            // outlives the run, the view being dropped before this returns.
+            // outlives the run, the tensor being dropped before this returns.
             let input = unsafe {
-                TensorRefMut::<f32>::from_raw(
-                    self.device_memory.clone(),
+                super::super::device_tensor(
+                    &self.device_memory,
                     self.tensor.pointer() as usize as *mut _,
-                    shape,
+                    &shape,
                 )?
             };
             let outputs = self.session.run(inputs![input])?;

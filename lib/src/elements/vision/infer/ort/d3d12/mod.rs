@@ -98,44 +98,6 @@ fn directml_memory() -> Result<MemoryInfo<'static>, OrtError> {
     )?)
 }
 
-/// A tensor of `shape` floats in the DirectML allocation `data`, located
-/// as `memory` says — where DirectML reads it.
-///
-/// `ort`'s `TensorRefMut::from_raw` cannot make one: it locates every tensor
-/// it makes so in host memory (its `MemoryInfo::to_owned` makes a CPU one,
-/// whatever it is called on), and ONNX Runtime then copies the allocation
-/// up to the GPU as though it were host memory, which reads it as such —
-/// an access violation.
-///
-/// # Safety
-///
-/// `data` is a DirectML allocation of at least `shape`'s floats, which
-/// outlives the tensor.
-unsafe fn directml_tensor(
-    memory: &MemoryInfo<'_>,
-    data: *mut std::ffi::c_void,
-    shape: &[i64],
-) -> Result<ort::value::DynTensor, OrtError> {
-    let floats: i64 = shape.iter().product();
-    let mut value = std::ptr::null_mut();
-    // SAFETY: a live memory info, the caller's allocation of at least the
-    // bytes given, and a shape readable for its length; ONNX Runtime does
-    // not take the data, only views it.
-    unsafe {
-        ort::Error::result_from_status((ort::api().CreateTensorWithDataAsOrtValue)(
-            memory.ptr(),
-            data,
-            floats as usize * size_of::<f32>(),
-            shape.as_ptr(),
-            shape.len(),
-            ort::sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-            &mut value,
-        ))?;
-        let value = std::ptr::NonNull::new(value).expect("a tensor ONNX Runtime said it made");
-        Ok(ort::value::DynTensor::from_ptr(value, None))
-    }
-}
-
 /// Where outputs are copied for the CPU to read.
 fn host_memory() -> Result<MemoryInfo<'static>, OrtError> {
     Ok(MemoryInfo::new(

@@ -12,7 +12,7 @@ use ort::{
     ep::CUDA,
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
-    value::{DynTensorValueType, Shape, TensorRefMut},
+    value::{DynTensorValueType, Shape},
 };
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
@@ -635,12 +635,12 @@ impl Detecting {
         // `tensor.floats()` floats — room for `max_batch` inputs, of which
         // `shape` takes the first `pictures` — in the primary context ONNX
         // Runtime's CUDA provider also runs in; it outlives the run, the
-        // view being dropped before this returns.
+        // tensor being dropped before this returns.
         let input = unsafe {
-            TensorRefMut::<f32>::from_raw(
-                self.memory.clone(),
+            super::super::device_tensor(
+                &self.memory,
                 self.tensor.pointer() as usize as *mut _,
-                shape,
+                &shape,
             )?
         };
         // The outputs are left where the model wrote them, on the GPU. A

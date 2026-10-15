@@ -1404,6 +1404,16 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`CudaOrtDetector`, `CudaOrtClassifier` and `CudaOrtEmbedder` hand
+  the model their input where it is.** `ort`'s `TensorRefMut::from_raw`
+  locates every tensor it makes in host memory, whatever memory it is
+  told, so ONNX Runtime took the fitted input on the GPU for host memory
+  and copied the whole of it to the device once more every run — which
+  unified addressing let work, and hid. The input is now made a tensor
+  through ONNX Runtime itself, on the device it is on. RetinaFace R50
+  through TensorRT on an RTX 3050, seven inputs a picture: 37.5 ms a
+  picture before, 36.8 ms after.
+
 - **`SwDecoder` stamps a sound trimmed at its start where it plays.** A
   file cut out of a longer one, or whose edit list starts partway into a
   frame, has its demuxer say how many samples of the first frame not to

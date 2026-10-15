@@ -30,12 +30,13 @@ use crate::{
 
 use crate::elements::{BatchSlot, Detection, Detections};
 
+use super::super::device_tensor;
 use super::super::{
     DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorOptions, OrtError,
     decode_batch, labels, looks, merge_looks, model_input,
 };
 use super::fitting::{Cut, Fitting, Picture};
-use super::{DirectMl, directml_memory, directml_tensor, host_memory};
+use super::{DirectMl, directml_memory, host_memory};
 
 /// How a [`D3d12OrtDetector`] runs its model, beside what every detector is
 /// told.
@@ -448,9 +449,8 @@ impl Detecting {
         // SAFETY: the allocation is the fitting's buffer of `capacity`
         // inputs, of which the shape takes the first `rows`; it outlives
         // the run, the tensor being dropped before this returns.
-        let input = unsafe {
-            directml_tensor(&self.on_gpu, *self.input, &[rows as i64, 3, height, width])?
-        };
+        let input =
+            unsafe { device_tensor(&self.on_gpu, *self.input, &[rows as i64, 3, height, width])? };
         let names: Vec<String> = session
             .outputs()
             .iter()

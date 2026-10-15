@@ -357,6 +357,50 @@ pub enum OrtError {
 /// [`OrtError`]'s name from when the detectors were its only elements.
 pub type OrtDetectorError = OrtError;
 
+/// A tensor of `shape` floats at `data`, in the memory `memory` says — the
+/// GPU allocation a model reads its input from where an element fitted it.
+///
+/// `ort`'s `TensorRefMut::from_raw` cannot make one: it locates every tensor
+/// it makes in host memory (its `MemoryInfo::to_owned`, in 2.0.0-rc.13,
+/// makes a CPU one whatever it is called on). ONNX Runtime then copies the
+/// input to the device each run as though it were host memory: through
+/// CUDA, a copy of the whole input every run, which unified addressing lets
+/// work; through DirectML, an access violation.
+///
+/// # Safety
+///
+/// `data` is an allocation of `memory`'s device of at least `shape`'s
+/// floats, which outlives the tensor.
+#[cfg(any(
+    feature = "ort-cuda",
+    all(target_os = "windows", feature = "ort-directml")
+))]
+pub(crate) unsafe fn device_tensor(
+    memory: &ort::memory::MemoryInfo<'_>,
+    data: *mut std::ffi::c_void,
+    shape: &[i64],
+) -> Result<ort::value::DynTensor, OrtError> {
+    use ort::AsPointer;
+    let floats: i64 = shape.iter().product();
+    let mut value = std::ptr::null_mut();
+    // SAFETY: a live memory info, the caller's allocation of at least the
+    // bytes given, and a shape readable for its length; ONNX Runtime does
+    // not take the data, only views it.
+    unsafe {
+        ort::Error::result_from_status((ort::api().CreateTensorWithDataAsOrtValue)(
+            memory.ptr(),
+            data,
+            floats as usize * size_of::<f32>(),
+            shape.as_ptr(),
+            shape.len(),
+            ort::sys::ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+            &mut value,
+        ))?;
+        let value = std::ptr::NonNull::new(value).expect("a tensor ONNX Runtime said it made");
+        Ok(ort::value::DynTensor::from_ptr(value, None))
+    }
+}
+
 /// The model's input size, from its first input's `[1, 3, height, width]`;
 /// 640 for a side the model leaves open.
 pub(crate) fn model_input(session: &ort::session::Session) -> Result<(u32, u32), OrtDetectorError> {
@@ -450,5 +494,32 @@ mod tests {
     fn classes_named_only_by_their_numbers_are_unnamed() {
         assert!(named(parse_names("{0: '0', 1: '1', 2: '2'}")).is_empty());
         assert_eq!(named(vec!["person".into(), "1".into()]).len(), 2);
+    }
+
+    /// A tensor `device_tensor` makes is where its memory info says, which
+    /// `ort`'s own `from_raw` gets wrong: a GPU input located on the host is
+    /// copied to the device once more every run (or, through DirectML,
+    /// crashes it).
+    #[cfg(any(
+        feature = "ort-cuda",
+        all(target_os = "windows", feature = "ort-directml")
+    ))]
+    #[test]
+    fn a_device_tensor_stays_on_its_device() {
+        use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
+        #[cfg(feature = "ort-cuda")]
+        let device = AllocationDevice::CUDA;
+        #[cfg(not(feature = "ort-cuda"))]
+        let device = AllocationDevice::DIRECTML;
+        let memory =
+            MemoryInfo::new(device, 0, AllocatorType::Device, MemoryType::Default).unwrap();
+        // ONNX Runtime only views the data when making the tensor, so host
+        // floats stand in for the device's.
+        let mut floats = [0f32; 12];
+        // SAFETY: twelve floats, which outlive the tensor.
+        let tensor =
+            unsafe { device_tensor(&memory, floats.as_mut_ptr().cast(), &[1, 3, 2, 2]) }.unwrap();
+        assert_eq!(tensor.memory_info().allocation_device(), device);
+        assert_eq!(tensor.shape().iter().as_slice(), &[1, 3, 2, 2]);
     }
 }

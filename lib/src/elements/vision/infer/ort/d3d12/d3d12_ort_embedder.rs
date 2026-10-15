@@ -29,9 +29,10 @@ use crate::{
 
 use super::super::OrtError;
 use super::super::classify::{Input, Memory, Plan, apply_each, image_input};
+use super::super::device_tensor;
 use super::super::embed::{OrtEmbedderOptions, Warp, cutouts, embeddings, with_cutouts};
 use super::fitting::Fitting;
-use super::{DirectMl, directml_memory, directml_tensor, host_memory};
+use super::{DirectMl, directml_memory, host_memory};
 
 /// How many objects a model that takes any number at once is fixed to take
 /// for DirectML, which is fastest with every dimension fixed: a picture's
@@ -213,7 +214,7 @@ impl Embedder {
             // inputs, of which the shape takes the first `rows`; it outlives
             // the run, the tensor being dropped before this returns.
             let tensor = unsafe {
-                directml_tensor(
+                device_tensor(
                     &self.on_gpu,
                     *self.allocation,
                     &[rows as i64, 3, i64::from(height), i64::from(width)],
