@@ -85,46 +85,100 @@ impl DetectorDecoder for RetinaFace {
                 })
         };
         let (boxes, scores, points) = (of_width(4)?, of_width(2)?, of_width(10)?);
+        let found = (0..anchors)
+            .filter_map(|index| {
+                self.face_at(
+                    index,
+                    &scores[index * 2..index * 2 + 2],
+                    &boxes[index * 4..index * 4 + 4],
+                    &points[index * 10..index * 10 + 10],
+                    options,
+                )
+            })
+            .collect();
+        Ok(non_max_suppression(found, options.iou_threshold))
+    }
+}
+
+impl RetinaFace {
+    /// The face anchor `index` says is there — from its two `scores`, its
+    /// box's four `offsets` and its points' ten — or `None` where it is not
+    /// sure enough of one.
+    fn face_at(
+        &self,
+        index: usize,
+        scores: &[f32],
+        offsets: &[f32],
+        points: &[f32],
+        options: &OrtDetectorOptions,
+    ) -> Option<ModelBox> {
+        let score = face(scores);
+        if score < options.conf_threshold {
+            return None;
+        }
         let (width, height) = (self.input.0 as f32, self.input.1 as f32);
         let [centre, size] = VARIANCE;
-        let mut found = Vec::new();
-        for (index, anchor) in self.anchors.iter().enumerate() {
-            let score = face(&scores[index * 2..index * 2 + 2]);
-            if score < options.conf_threshold {
-                continue;
-            }
-            let &[ax, ay, aw, ah] = anchor;
-            let offsets = &boxes[index * 4..index * 4 + 4];
-            let cx = ax + offsets[0] * centre * aw;
-            let cy = ay + offsets[1] * centre * ah;
-            let w = aw * (offsets[2] * size).exp();
-            let h = ah * (offsets[3] * size).exp();
-            let landmarks = points[index * 10..index * 10 + 10]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&[dx, dy]| {
-                    (
-                        (ax + dx * centre * aw) * width,
-                        (ay + dy * centre * ah) * height,
-                    )
-                })
-                .collect();
-            found.push(
-                ModelBox::new(
-                    0,
-                    score,
-                    [
-                        (cx - w / 2.0) * width,
-                        (cy - h / 2.0) * height,
-                        (cx + w / 2.0) * width,
-                        (cy + h / 2.0) * height,
-                    ],
+        let [ax, ay, aw, ah] = self.anchors[index];
+        let cx = ax + offsets[0] * centre * aw;
+        let cy = ay + offsets[1] * centre * ah;
+        let w = aw * (offsets[2] * size).exp();
+        let h = ah * (offsets[3] * size).exp();
+        let landmarks = points
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[dx, dy]| {
+                (
+                    (ax + dx * centre * aw) * width,
+                    (ay + dy * centre * ah) * height,
                 )
-                .with_landmarks(landmarks),
-            );
-        }
-        Ok(non_max_suppression(found, options.iou_threshold))
+            })
+            .collect();
+        Some(
+            ModelBox::new(
+                0,
+                score,
+                [
+                    (cx - w / 2.0) * width,
+                    (cy - h / 2.0) * height,
+                    (cx + w / 2.0) * width,
+                    (cy + h / 2.0) * height,
+                ],
+            )
+            .with_landmarks(landmarks),
+        )
+    }
+
+    /// How many anchors a picture's outputs hold a row for.
+    #[cfg(feature = "ort-cuda")]
+    pub(crate) fn anchors(&self) -> usize {
+        self.anchors.len()
+    }
+
+    /// What the rows `keep_faces` kept of one picture's anchors — seventeen
+    /// floats each: the anchor's number, its two scores, its four offsets and
+    /// its ten points, in no particular order — come to: exactly what
+    /// [`DetectorDecoder::decode`] reads in every anchor, as they are put
+    /// back in the anchors' order and each decided again here. A row of an
+    /// anchor past the model's is no face.
+    #[cfg(feature = "ort-cuda")]
+    pub(crate) fn decode_kept(&self, rows: &[f32], options: &OrtDetectorOptions) -> Vec<ModelBox> {
+        let mut rows: Vec<&[f32; 17]> = rows.as_chunks::<17>().0.iter().collect();
+        rows.sort_by_key(|row| row[0].to_bits());
+        let found = rows
+            .into_iter()
+            .filter(|row| (row[0].to_bits() as usize) < self.anchors.len())
+            .filter_map(|row| {
+                self.face_at(
+                    row[0].to_bits() as usize,
+                    &row[1..3],
+                    &row[3..7],
+                    &row[7..17],
+                    options,
+                )
+            })
+            .collect();
+        non_max_suppression(found, options.iou_threshold)
     }
 }
 
@@ -316,5 +370,116 @@ mod tests {
             (0.0, 0.0),
             "clamped to the picture"
         );
+    }
+
+    /// The anchors `keep_faces` keeps on the GPU read to exactly what every
+    /// anchor read on the CPU does: two pictures of a 640 input, one of
+    /// probabilities — some a hair either side of the threshold — and one of
+    /// raw scores, a quarter of them faces. Needs a CUDA device; skipped,
+    /// saying so, without one.
+    #[cfg(feature = "ort-cuda")]
+    #[test]
+    fn faces_kept_on_the_gpu_read_as_every_anchor_does() {
+        use crate::platform::cuda::driver::{CUdeviceptr, CudaDriver, KEPT_FACE};
+        let Ok(driver) = CudaDriver::retain_primary() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let kernels = driver.fit_kernels().expect("the kernels load");
+        let decoder = RetinaFace::new((640, 640));
+        let anchors = decoder.anchors();
+        let pictures = 2;
+        let options = OrtDetectorOptions::default();
+        let threshold = options.conf_threshold;
+        let mut seed = 0x2545_f491u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1 << 24) as f32
+        };
+        let (mut boxes, mut scores, mut points) = (Vec::new(), Vec::new(), Vec::new());
+        for picture in 0..pictures {
+            for anchor in 0..anchors {
+                boxes.extend((0..4).map(|_| next() * 2.0 - 1.0));
+                points.extend((0..10).map(|_| next() * 2.0 - 1.0));
+                if picture == 0 {
+                    let face = match anchor % 400 {
+                        0 => threshold,
+                        1 => threshold - 1e-4,
+                        2 => threshold + 1e-4,
+                        _ => next().powi(8),
+                    };
+                    scores.extend([1.0 - face, face]);
+                } else {
+                    scores.extend([0.0, next() * 8.0 - 7.0]);
+                }
+            }
+        }
+        let on_gpu = |values: &[f32]| {
+            let tensor = driver.buffer(values.len()).expect("allocates");
+            driver.upload_floats(values, &tensor).expect("uploads");
+            tensor
+        };
+        let (boxes_gpu, scores_gpu, points_gpu) =
+            (on_gpu(&boxes), on_gpu(&scores), on_gpu(&points));
+        let kept = driver
+            .buffer(pictures * (1 + anchors * KEPT_FACE))
+            .expect("allocates");
+        // SAFETY: three buffers of every anchor's rows for both pictures, on
+        // this driver's context, alive until the copies below.
+        unsafe {
+            driver
+                .keep_faces(
+                    &kernels,
+                    (
+                        boxes_gpu.pointer(),
+                        scores_gpu.pointer(),
+                        points_gpu.pointer(),
+                    ),
+                    &kept,
+                    (pictures, anchors),
+                    options.conf_threshold - 1e-3,
+                )
+                .expect("keeps");
+        }
+        let mut counts = vec![0.0f32; pictures];
+        driver.download(&kept, &mut counts).expect("downloads");
+        let rows_at = kept.pointer() + (pictures * size_of::<u32>()) as CUdeviceptr;
+        for picture in 0..pictures {
+            let count = counts[picture].to_bits() as usize;
+            let mut rows = vec![0.0f32; count * KEPT_FACE];
+            // SAFETY: the first `count` rows of this picture's, inside `kept`.
+            unsafe {
+                driver
+                    .download_from(
+                        rows_at + (picture * anchors * KEPT_FACE * size_of::<f32>()) as CUdeviceptr,
+                        &mut rows,
+                    )
+                    .expect("downloads");
+            }
+            let mine = |values: &[f32], width: usize| {
+                values[picture * anchors * width..(picture + 1) * anchors * width].to_vec()
+            };
+            let data = [mine(&boxes, 4), mine(&scores, 2), mine(&points, 10)];
+            let shapes = [[anchors, 4], [anchors, 2], [anchors, 10]];
+            let outputs: Vec<ModelOutput<'_>> = (0..3)
+                .map(|which| ModelOutput {
+                    name: "output",
+                    shape: &shapes[which],
+                    data: &data[which],
+                })
+                .collect();
+            let whole = decoder
+                .decode(&outputs, (640, 640), &options)
+                .expect("reads");
+            assert!(!whole.is_empty(), "picture {picture} has faces");
+            assert!(count < anchors / 2, "picture {picture}: {count} kept");
+            assert_eq!(
+                decoder.decode_kept(&rows, &options),
+                whole,
+                "picture {picture}"
+            );
+        }
     }
 }

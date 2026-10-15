@@ -11,9 +11,13 @@ use super::ptx::FIT_PTX;
 use super::{
     BgraSurface, CUcontext, CUdeviceptr, CUfunction, CUmodule, CudaDriver, CudaDriverError,
     Nv12Surface, YuvToBgra, arg, check, cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cuMemAlloc_v2,
-    cuMemFree_v2, cuMemcpyDtoH_v2, cuModuleUnload, launch, load_module,
+    cuMemFree_v2, cuMemcpyDtoH_v2, cuMemsetD8_v2, cuModuleUnload, launch, load_module,
 };
 use crate::orientation::Orientation;
+
+/// The floats of a face `keep_faces` keeps: its anchor, two scores, four
+/// offsets and ten points.
+pub(crate) const KEPT_FACE: usize = 17;
 
 /// The fitting kernels, JIT-compiled into the driver's context. Dropped
 /// before the driver that made them, which is what keeps their context
@@ -26,6 +30,7 @@ pub(crate) struct FitKernels {
     scale: CUfunction,
     swap: CUfunction,
     best: CUfunction,
+    faces: CUfunction,
     warp_nv12: CUfunction,
     warp_bgra: CUfunction,
 }
@@ -115,7 +120,7 @@ impl CudaDriver {
         self.with_context(|| {
             // SAFETY: the context is current inside `with_context`, which is
             // `load_module`'s whole contract.
-            let (module, [nv12, bgra, scale, swap, best, warp_nv12, warp_bgra]) = unsafe {
+            let (module, [nv12, bgra, scale, swap, best, faces, warp_nv12, warp_bgra]) = unsafe {
                 load_module(
                     FIT_PTX,
                     [
@@ -124,6 +129,7 @@ impl CudaDriver {
                         "scale_planes",
                         "swap_planes",
                         "best_class",
+                        "keep_faces",
                         "warp_nv12",
                         "warp_bgra",
                     ],
@@ -137,6 +143,7 @@ impl CudaDriver {
                 scale,
                 swap,
                 best,
+                faces,
                 warp_nv12,
                 warp_bgra,
             })
@@ -541,6 +548,62 @@ impl CudaDriver {
             // each of `total` boxes into `dst`, which the check above holds it
             // to; the context is current inside `with_context`.
             unsafe { launch(kernels.best, (total.div_ceil(256), 1), 16, &mut params) }
+        })
+    }
+
+    /// Reads a RetinaFace batch's outputs where they are — `boxes`, `scores`
+    /// and `points`, `anchors` rows of 4, 2 and 10 floats a picture — and
+    /// keeps the anchors at least `threshold` sure of a face: `kept` takes,
+    /// as `u32`s, how many of each of the `pictures` were kept, then
+    /// `anchors` rows of seventeen floats a picture, the first `count` of
+    /// each written in no particular order — see `keep_faces`.
+    ///
+    /// # Safety
+    ///
+    /// The three outputs must hold that many floats for `pictures` in this
+    /// driver's context, written by work this call is ordered after, and
+    /// stay allocated until the next synchronous call on this context.
+    pub(crate) unsafe fn keep_faces(
+        &self,
+        kernels: &FitKernels,
+        (boxes, scores, points): (CUdeviceptr, CUdeviceptr, CUdeviceptr),
+        kept: &CudaTensor,
+        (pictures, anchors): (usize, usize),
+        threshold: f32,
+    ) -> Result<(), CudaDriverError> {
+        let total = pictures * anchors;
+        if total > u32::MAX as usize || pictures + total * KEPT_FACE > kept.floats {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "{pictures} pictures of {anchors} anchors do not fit {} floats",
+                kept.floats
+            )));
+        }
+        let (mut boxes, mut scores, mut points) = (boxes, scores, points);
+        let mut counts = kept.pointer;
+        let mut rows = kept.pointer + (pictures * size_of::<u32>()) as CUdeviceptr;
+        let (mut anchors, mut total, mut threshold) = (anchors as u32, total as u32, threshold);
+        self.with_context(|| {
+            // SAFETY: the counts are the first `pictures` words of `kept`,
+            // which the check above holds it to.
+            check("cuMemsetD8", unsafe {
+                cuMemsetD8_v2(counts, 0, pictures * size_of::<u32>())
+            })?;
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut boxes),
+                arg(&mut scores),
+                arg(&mut points),
+                arg(&mut counts),
+                arg(&mut rows),
+                arg(&mut anchors),
+                arg(&mut total),
+                arg(&mut threshold),
+            ];
+            // SAFETY: one pointer per parameter `keep_faces` declares, in
+            // that order, each at a live local. It reads the caller's outputs
+            // for `total` anchors and writes at most `total` rows of
+            // seventeen floats after the counts, which the check above holds
+            // `kept` to; the context is current inside `with_context`.
+            unsafe { launch(kernels.faces, (total.div_ceil(256), 1), 16, &mut params) }
         })
     }
 

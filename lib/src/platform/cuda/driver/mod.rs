@@ -37,7 +37,7 @@ mod redact;
 #[cfg(feature = "cuda-visual-tracking")]
 pub(crate) use dcf::{CudaDcf, DcfSource, cufft_version};
 #[cfg(feature = "ort-cuda")]
-pub(crate) use fit::{CudaTensor, Fit, FitKernels};
+pub(crate) use fit::{CudaTensor, Fit, FitKernels, KEPT_FACE};
 pub(crate) use redact::{CellMeans, CellPlane, RedactKernels};
 
 use ptx::{BLEND_PTX, CONVERT_PTX};
@@ -96,7 +96,7 @@ load::cuda_driver! {
     fn cuMemFree_v2(ptr: CUdeviceptr) -> CUresult;
     fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const c_void, size: usize) -> CUresult;
     fn cuMemcpyDtoH_v2(dst: *mut c_void, src: CUdeviceptr, size: usize) -> CUresult;
-    #[cfg(feature = "cuda-visual-tracking")]
+    #[cfg(any(feature = "cuda-visual-tracking", feature = "ort-cuda"))]
     fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, count: usize) -> CUresult;
     fn cuMemsetD2D8_v2(
         dst: CUdeviceptr,

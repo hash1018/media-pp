@@ -25,8 +25,8 @@ use crate::{
     platform::cuda::{
         CudaDevice,
         driver::{
-            BgraSurface, CUdeviceptr, CudaDriver, CudaTensor, Fit, FitKernels, Nv12Surface,
-            YuvToBgra,
+            BgraSurface, CUdeviceptr, CudaDriver, CudaTensor, Fit, FitKernels, KEPT_FACE,
+            Nv12Surface, YuvToBgra,
         },
         frame::{self, CudaSurfaces},
     },
@@ -34,8 +34,9 @@ use crate::{
     transform::{Filter, FilterStage, Output, filter_stage},
 };
 
-use crate::elements::{BatchSlot, Detection, Detections};
+use crate::elements::{BatchSlot, Detection, Detections, DetectorModel};
 
+use super::super::retinaface::RetinaFace;
 use super::super::{
     DetectorDecoder, Interval, Letterbox, ModelInput, ModelOutput, OrtDetectorError,
     OrtDetectorOptions, decode_batch, decode_best, labels, looks, merge_looks, model_input,
@@ -217,6 +218,9 @@ struct Detecting {
     /// Each box's best class, found on the GPU, made at the first
     /// `[batch, 4 + classes, boxes]` output.
     best: Option<CudaTensor>,
+    /// For a RetinaFace model, what reads the anchors kept on the GPU, and
+    /// where they are kept, made at the first run.
+    faces: Option<(RetinaFace, Option<CudaTensor>)>,
     /// What is copied down of each run's outputs, one for each.
     host: Vec<Vec<f32>>,
     kernels: FitKernels,
@@ -421,6 +425,8 @@ impl CudaOrtDetector {
             session,
             values: options.detector.model.input(),
             decoder: options.detector.model.decoder(model),
+            faces: matches!(options.detector.model, DetectorModel::RetinaFace)
+                .then(|| (RetinaFace::new(model), None)),
             options: options.detector,
             labels,
             model,
@@ -689,6 +695,66 @@ impl Detecting {
             host.resize(pictures * boxes * 6, 0.0);
             self.driver.download(best, host)?;
             return Ok(decode_best(host, boxes, letterboxes, &self.options));
+        }
+        // A RetinaFace model's outputs are a row for every anchor, 16,800 of
+        // a 640 input, of which a handful are faces: those it is sure enough
+        // of are kept there, and only they come down.
+        if let Some((faces, kept)) = &mut self.faces {
+            let anchors = faces.anchors();
+            let of_width = |columns: usize| {
+                found
+                    .iter()
+                    .find_map(|(_, shape, pointer)| match *shape.as_slice() {
+                        [batch, rows, width]
+                            if batch >= pictures && rows == anchors && width == columns =>
+                        {
+                            Some(*pointer)
+                        }
+                        _ => None,
+                    })
+            };
+            if let (Some(boxes), Some(scores), Some(points)) =
+                (of_width(4), of_width(2), of_width(10))
+            {
+                let room = self.max_batch * (1 + anchors * KEPT_FACE);
+                let kept = match kept {
+                    Some(kept) if kept.floats() >= room => kept,
+                    slot => slot.insert(self.driver.buffer(room)?),
+                };
+                // A little under the threshold: the GPU's exponent is not
+                // the CPU's, and each kept anchor is decided again below.
+                let threshold = self.options.conf_threshold - 1e-3;
+                // SAFETY: the three are the run's outputs on this device, a
+                // row of 4, 2 and 10 floats for each anchor of at least
+                // `pictures` pictures — the shapes matched above — written by
+                // a run that has finished, `synchronize_outputs`, and kept by
+                // `outputs` until the copies down below have returned.
+                unsafe {
+                    self.driver.keep_faces(
+                        &self.kernels,
+                        (boxes, scores, points),
+                        kept,
+                        (pictures, anchors),
+                        threshold,
+                    )?;
+                }
+                let mut counts = vec![0.0f32; pictures];
+                self.driver.download(kept, &mut counts)?;
+                let host = first_host(&mut self.host);
+                let rows_at = kept.pointer() + (pictures * size_of::<u32>()) as CUdeviceptr;
+                let mut found = Vec::with_capacity(pictures);
+                for (picture, (count, letterbox)) in counts.iter().zip(letterboxes).enumerate() {
+                    let count = (count.to_bits() as usize).min(anchors);
+                    host.resize(count * KEPT_FACE, 0.0);
+                    let from =
+                        rows_at + (picture * anchors * KEPT_FACE * size_of::<f32>()) as CUdeviceptr;
+                    // SAFETY: the first `count` rows of this picture's, inside
+                    // `kept`, which `keep_faces` sized for every anchor.
+                    unsafe { self.driver.download_from(from, host)? };
+                    found.push(letterbox.detections(faces.decode_kept(host, &self.options)));
+                }
+                return Ok(found);
+            }
         }
         // Any other output — YOLO's `[batch, boxes, 6]`, a few hundred boxes
         // a picture, or another kind's — copied down as it is, every one.

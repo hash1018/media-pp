@@ -1677,6 +1677,16 @@ BMDONE:
 /// thread a box, so neighbouring threads read neighbouring floats of each
 /// row; what is copied down is six floats a box rather than every class's.
 ///
+/// `keep_faces` does as much for a RetinaFace batch, whose every anchor —
+/// 16,800 of a 640 input — is a row of sixteen floats: a thread an anchor
+/// works out how sure its two scores say it is a face, as the CPU's reading
+/// does, and where that is at least `threshold` appends the anchor's number,
+/// scores, offsets and points — seventeen floats — to its picture's rows,
+/// counted in `counts`. Their order is the order threads arrive in, and the
+/// exponent `ex2.approx`'s, so the caller passes a threshold a little under
+/// the one it wants, sorts the rows by anchor and decides each again on the
+/// CPU: what it reads is then exactly what reading every anchor would be.
+///
 /// `warp_nv12` and `warp_bgra` fit an object to an embedding model's input
 /// through an affine map, the input pixel `(u, v)` read from the picture at
 /// `(m0 u + m1 v + m2, m3 u + m4 v + m5)` — each pixel's centre at whole
@@ -2251,6 +2261,128 @@ BEST_WRITE:
     st.global.f32   [%rd7+20], %f7;
 
 BEST_DONE:
+    ret;
+}
+
+// Each thread one anchor of one picture of a RetinaFace batch: see the doc
+// comment above.
+.visible .entry keep_faces(
+    .param .u64 boxes,
+    .param .u64 scores,
+    .param .u64 points,
+    .param .u64 counts,
+    .param .u64 dst,
+    .param .u32 anchors,
+    .param .u32 total,
+    .param .f32 threshold
+)
+{
+    .reg .pred  %p;
+    .reg .b32   %i, %t0, %t1, %t2, %n, %all, %pic, %anchor, %slot, %row;
+    .reg .f32   %bg, %fg, %off, %score, %e, %lim, %v;
+    .reg .b64   %base, %at, %out;
+
+    ld.param.u32    %n, [anchors];
+    ld.param.u32    %all, [total];
+    mov.u32         %t0, %ctaid.x;
+    mov.u32         %t1, %tid.y;
+    mov.u32         %t2, %tid.x;
+    shl.b32         %t0, %t0, 8;
+    shl.b32         %t1, %t1, 4;
+    add.s32         %i, %t0, %t1;
+    add.s32         %i, %i, %t2;
+    setp.ge.u32     %p, %i, %all;
+    @%p bra         KEEP_DONE;
+
+    ld.param.u64    %base, [scores];
+    mul.wide.u32    %at, %i, 8;
+    add.s64         %at, %base, %at;
+    ld.global.f32   %bg, [%at];
+    ld.global.f32   %fg, [%at+4];
+
+    // Already probabilities (both from 0 to 1, summing to 1 within a
+    // thousandth) or raw scores, through a softmax.
+    mov.f32         %score, %fg;
+    setp.lt.f32     %p, %bg, 0f00000000;
+    @%p bra         KEEP_SOFTMAX;
+    setp.gt.f32     %p, %bg, 0f3F800000;
+    @%p bra         KEEP_SOFTMAX;
+    setp.lt.f32     %p, %fg, 0f00000000;
+    @%p bra         KEEP_SOFTMAX;
+    setp.gt.f32     %p, %fg, 0f3F800000;
+    @%p bra         KEEP_SOFTMAX;
+    add.f32         %off, %bg, %fg;
+    sub.f32         %off, %off, 0f3F800000;
+    abs.f32         %off, %off;
+    setp.lt.f32     %p, %off, 0f3A83126F;
+    @%p bra         KEEP_TEST;
+KEEP_SOFTMAX:
+    // 1 / (1 + e^(bg - fg)), e^x as 2^(x log2 e).
+    sub.f32         %e, %bg, %fg;
+    mul.f32         %e, %e, 0f3FB8AA3B;
+    ex2.approx.f32  %e, %e;
+    add.f32         %e, %e, 0f3F800000;
+    mov.f32         %v, 0f3F800000;
+    div.rn.f32      %score, %v, %e;
+KEEP_TEST:
+    ld.param.f32    %lim, [threshold];
+    setp.lt.f32     %p, %score, %lim;
+    @%p bra         KEEP_DONE;
+
+    div.u32         %pic, %i, %n;
+    rem.u32         %anchor, %i, %n;
+    ld.param.u64    %base, [counts];
+    mul.wide.u32    %at, %pic, 4;
+    add.s64         %at, %base, %at;
+    atom.global.add.u32 %slot, [%at], 1;
+
+    // Row `pic * anchors + slot`, seventeen floats: the anchor, its two
+    // scores, its box's four offsets and its points' ten.
+    mad.lo.u32      %row, %pic, %n, %slot;
+    ld.param.u64    %base, [dst];
+    mul.wide.u32    %out, %row, 68;
+    add.s64         %out, %base, %out;
+    st.global.u32   [%out], %anchor;
+    st.global.f32   [%out+4], %bg;
+    st.global.f32   [%out+8], %fg;
+
+    ld.param.u64    %base, [boxes];
+    mul.wide.u32    %at, %i, 16;
+    add.s64         %at, %base, %at;
+    ld.global.f32   %v, [%at];
+    st.global.f32   [%out+12], %v;
+    ld.global.f32   %v, [%at+4];
+    st.global.f32   [%out+16], %v;
+    ld.global.f32   %v, [%at+8];
+    st.global.f32   [%out+20], %v;
+    ld.global.f32   %v, [%at+12];
+    st.global.f32   [%out+24], %v;
+
+    ld.param.u64    %base, [points];
+    mul.wide.u32    %at, %i, 40;
+    add.s64         %at, %base, %at;
+    ld.global.f32   %v, [%at];
+    st.global.f32   [%out+28], %v;
+    ld.global.f32   %v, [%at+4];
+    st.global.f32   [%out+32], %v;
+    ld.global.f32   %v, [%at+8];
+    st.global.f32   [%out+36], %v;
+    ld.global.f32   %v, [%at+12];
+    st.global.f32   [%out+40], %v;
+    ld.global.f32   %v, [%at+16];
+    st.global.f32   [%out+44], %v;
+    ld.global.f32   %v, [%at+20];
+    st.global.f32   [%out+48], %v;
+    ld.global.f32   %v, [%at+24];
+    st.global.f32   [%out+52], %v;
+    ld.global.f32   %v, [%at+28];
+    st.global.f32   [%out+56], %v;
+    ld.global.f32   %v, [%at+32];
+    st.global.f32   [%out+60], %v;
+    ld.global.f32   %v, [%at+36];
+    st.global.f32   [%out+64], %v;
+
+KEEP_DONE:
     ret;
 }
 

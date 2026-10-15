@@ -1345,6 +1345,14 @@ compile error with no explanation.
 
 ### Changed
 
+- **`CudaOrtDetector` keeps a RetinaFace model's faces on the GPU.** Its
+  outputs are a row for every anchor — 16,800 of a 640 input, a megabyte
+  an input — of which a handful are faces; all of them came down to be
+  read on the CPU. A kernel now keeps the anchors sure enough of a face
+  where they are and only those come down, read to exactly what reading
+  every anchor does. RetinaFace R50 through TensorRT on an RTX 3050, seven
+  inputs a picture: 34.4 ms a picture before, 33.1 ms after.
+
 - **`D3d11Decoder` hands on copies rather than running its pool out.**
   Downstream holding more pictures than `downstream_hw_frames` failed the
   stream with `SurfacePoolExhausted`, the fixed D3D11VA pool having no
