@@ -340,6 +340,7 @@ impl VulkanVideoCompositorHandle {
                 id: layer.id,
                 shared: self.shared.clone(),
                 input: layer.input.clone(),
+                told_stopped: false,
             }),
             layer,
         })
@@ -458,9 +459,22 @@ pub struct VulkanVideoCompositorInputSink {
     id: VideoInputId,
     shared: Weak<CompositorShared>,
     input: Weak<VideoInput>,
+    /// Whether this sink has said once that its compositor stopped: a
+    /// pipeline still feeding one hears it once, not for every buffer.
+    told_stopped: bool,
 }
 
 impl VulkanVideoCompositorInputSink {
+    /// What a buffer reaching a stopped compositor gets: the error the
+    /// first time, so a pipeline still feeding it hears why, and nothing
+    /// after, rather than the same error once a buffer.
+    fn stopped(&mut self) -> Result<()> {
+        if std::mem::replace(&mut self.told_stopped, true) {
+            return Ok(());
+        }
+        Err(VulkanVideoCompositorError::Stopped.into())
+    }
+
     /// Drops this registration, but only if it is still the current one —
     /// a replaced sink must not remove its replacement.
     fn detach(&self) {
@@ -529,7 +543,7 @@ impl RawSink for VulkanVideoCompositorInputSink {
         match buf {
             MediaBuffer::Video(frame) => {
                 let Some(shared) = self.shared.upgrade() else {
-                    return Err(VulkanVideoCompositorError::Stopped.into());
+                    return self.stopped();
                 };
                 // Validated here rather than when drawn, so a misconfigured
                 // input names *itself* in the error.

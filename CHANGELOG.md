@@ -1524,6 +1524,15 @@ compile error with no explanation.
   of this crate; a stream copied from elsewhere with its sets in band stays
   `hev1`. `SegmentedFileMuxer` and `ReplayBuffer` follow.
 
+- **A GPU compositor's input says once that its compositor stopped.** An
+  input of `CudaVideoCompositor`, `VulkanVideoCompositor`,
+  `MetalVideoCompositor` or `D3d12VideoCompositor` refused every picture
+  after its compositor was gone, so a pipeline still feeding one — an
+  offline export's sources after its end — posted the same
+  `BusEvent::Error` once a picture. It now refuses the first and drops the
+  rest, as the software and D3D11 compositors' inputs take them without a
+  word.
+
 - **A D3D12 detector, classifier or embedder warns of a model past opset
   20.** DirectML hands the operators of a later opset to the CPU, which made
   a YOLO11 exported at opset 22 five times slower than at 13 without a word

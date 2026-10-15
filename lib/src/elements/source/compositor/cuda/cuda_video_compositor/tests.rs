@@ -1522,3 +1522,40 @@ fn an_input_that_ends_is_shown_again() {
         || cuda_frame(&device, 64, 64, 200).expect("a frame, as a moment ago"),
     );
 }
+
+/// An input whose compositor has gone says so for the first picture it is
+/// handed and takes the rest without a word: a pipeline still feeding it
+/// hears why once, not once a picture.
+#[test]
+fn an_input_says_once_that_its_compositor_stopped() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let Ok((compositor, handle)) = CudaVideoCompositor::new("compositor", &device, options(64, 64))
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+    let mut input = handle
+        .add_source("layer", VideoLayer::new(VideoRect::new(0, 0, 32, 32)))
+        .expect("add source");
+    drop(compositor);
+    drop(handle);
+    let mut refusals = Vec::new();
+    for _ in 0..3 {
+        let Some(frame) = cuda_quadrant_frame(&device, 64, 64) else {
+            return;
+        };
+        refusals.push(input.sink.consume(frame).err());
+    }
+    assert!(
+        matches!(
+            refusals[0],
+            Some(crate::Error::CudaVideoCompositorError(
+                CudaVideoCompositorError::Stopped
+            ))
+        ),
+        "{refusals:?}"
+    );
+    assert!(refusals[1..].iter().all(Option::is_none), "{refusals:?}");
+}

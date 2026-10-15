@@ -312,6 +312,7 @@ impl D3d12VideoCompositorHandle {
                 id: layer.id,
                 shared: self.shared.clone(),
                 input: layer.input.clone(),
+                told_stopped: false,
             }),
             layer,
         })
@@ -419,9 +420,22 @@ pub struct D3d12VideoCompositorInputSink {
     id: VideoInputId,
     shared: Weak<CompositorShared>,
     input: Weak<VideoInput>,
+    /// Whether this sink has said once that its compositor stopped: a
+    /// pipeline still feeding one hears it once, not for every buffer.
+    told_stopped: bool,
 }
 
 impl D3d12VideoCompositorInputSink {
+    /// What a buffer reaching a stopped compositor gets: the error the
+    /// first time, so a pipeline still feeding it hears why, and nothing
+    /// after, rather than the same error once a buffer.
+    fn stopped(&mut self) -> Result<()> {
+        if std::mem::replace(&mut self.told_stopped, true) {
+            return Ok(());
+        }
+        Err(D3d12VideoCompositorError::Stopped.into())
+    }
+
     /// Drops this registration, but only if it is still the current one —
     /// a replaced sink must not remove its replacement.
     fn detach(&self) {
@@ -489,7 +503,7 @@ impl RawSink for D3d12VideoCompositorInputSink {
         match buf {
             MediaBuffer::Video(frame) => {
                 let Some(shared) = self.shared.upgrade() else {
-                    return Err(D3d12VideoCompositorError::Stopped.into());
+                    return self.stopped();
                 };
                 // Checked here, so a misconfigured input names itself.
                 validate_input_frame(&frame, shared.gpu.device())

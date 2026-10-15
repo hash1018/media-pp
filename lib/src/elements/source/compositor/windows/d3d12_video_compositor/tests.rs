@@ -429,6 +429,41 @@ fn layer_handle_moves_and_hides_a_live_source() {
     assert_eq!(luma_at(&composed(&mut compositor), 74, 74), 16);
 }
 
+/// An input whose compositor has gone says so for the first picture it is
+/// handed and takes the rest without a word: a pipeline still feeding it
+/// hears why once, not once a picture.
+#[test]
+fn an_input_says_once_that_its_compositor_stopped() {
+    let Some(gpu) = try_d3d12_gpu() else {
+        return;
+    };
+    let Some((compositor, handle)) = compositor(&gpu, options(64, 64)) else {
+        return;
+    };
+    let mut input = handle
+        .add_source("layer", VideoLayer::new(VideoRect::new(0, 0, 32, 32)))
+        .expect("add");
+    drop(compositor);
+    drop(handle);
+    let mut refusals = Vec::new();
+    for _ in 0..3 {
+        let Some(frame) = flat(&gpu, 32, 32, 180) else {
+            return;
+        };
+        refusals.push(input.sink.consume(frame).err());
+    }
+    assert!(
+        matches!(
+            refusals[0],
+            Some(crate::Error::D3d12VideoCompositorError(
+                D3d12VideoCompositorError::Stopped
+            ))
+        ),
+        "{refusals:?}"
+    );
+    assert!(refusals[1..].iter().all(Option::is_none), "{refusals:?}");
+}
+
 /// A font every machine running these tests has, or a skip, said.
 fn try_font() -> Option<Vec<u8>> {
     let font = std::fs::read("C:/Windows/Fonts/arial.ttf").ok();
