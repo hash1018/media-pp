@@ -12,6 +12,10 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`ReplayBufferError` has a `Replace` variant**: a clip written whole
+  that could not take the place of the file at its path — see Fixed. A
+  `match` on `ReplayBufferError` needs an arm for it.
+
 - **`ElementType` has `D3d12OrtDetector`, `D3d12OrtClassifier`,
   `D3d12OrtEmbedder`, `D3d12CutDetector`, `D3d12DetectionOverlay`,
   `D3d12ToneMap` and `D3d12VideoEncoder` variants**, for the D3D12
@@ -1391,6 +1395,13 @@ compile error with no explanation.
 
 ### Changed
 
+- **The API documentation on GitHub Pages covers CUDA and the GPU
+  inference providers.** The Windows pages were built without `cuda`,
+  `cuda-visual-tracking`, `ort-cuda`, `ort-tensorrt` and `ort-directml`,
+  and the macOS pages without `ort-coreml`, so no CUDA type, and no
+  detector, classifier or embedder on a GPU, was documented anywhere. The
+  build now checks a page of each is there.
+
 - **`CudaOrtDetector` keeps a RetinaFace model's faces on the GPU.** Its
   outputs are a row for every anchor — 16,800 of a 640 input, a megabyte
   an input — of which a handful are faces; all of them came down to be
@@ -1462,6 +1473,19 @@ compile error with no explanation.
   `.../macos/media_pp/`.
 
 ### Fixed
+
+- **A replay buffer's failed save no longer deletes the file at its
+  path.** `ReplayBufferHandle::save` removed the path on any failure,
+  including one before anything was written — a path naming no container
+  deleted the clip saved there before. The clip is now written beside the
+  path and put in its place once whole, so a file there is replaced by a
+  finished clip or kept as it was.
+
+- **What a `RackHandle` or a `TeeHandle` lets go of is dropped outside
+  their locks.** A replacement overtaken before the rack took it up was
+  dropped holding the handle's slot, and a branch a `Tee` refused holding
+  its branch list; a filter or sink whose drop reached for the same handle
+  then waited on itself forever.
 
 - **Turning playback around, and stepping, go on from the picture last
   shown.** `Pipeline::set_rate` turning backwards into forwards, or the

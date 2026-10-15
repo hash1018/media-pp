@@ -39,8 +39,11 @@ to start with `STATUS_DLL_NOT_FOUND`.
   or `cargo doc` with `DOCS_RS=1` skips the download, which is how CI checks
   it.
 - `cuda`: only the NVIDIA driver; the kernels ship as PTX. `nvcuda.dll` is
-  linked by name, so a binary built with `cuda` does not start on a machine
-  without the driver.
+  opened when CUDA is first used, so a binary built with `cuda` starts on
+  a machine without the driver and its CUDA elements report an error there.
+  `ort-cuda`, `ort-tensorrt` and `cuda-visual-tracking` are different: the
+  libraries they link must be found when the program starts — see
+  [features](../features.md).
 - `whisper-vulkan`: the Vulkan SDK's shader compiler at build time, long
   paths enabled, and a short target directory — see
   [`transcribe`](../../examples/core/transcribe/README.md).

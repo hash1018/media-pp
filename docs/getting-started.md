@@ -57,7 +57,18 @@ macOS, where every window is the main thread's, so `main` runs this inside
 ```rust,no_run
 use media_pp::player::{Player, PlayerEvent, PlayerOptions};
 
+#[cfg(not(target_os = "macos"))]
 fn main() -> media_pp::Result<()> {
+    play()
+}
+
+// AppKit's event loop runs on the main thread; the player runs beside it.
+#[cfg(target_os = "macos")]
+fn main() -> media_pp::Result<()> {
+    media_pp::elements::run_with_windows(play)
+}
+
+fn play() -> media_pp::Result<()> {
     let player = Player::open("video.mp4", PlayerOptions::default())?;
     player.play()?;
     while let Some(event) = player.next_event() {

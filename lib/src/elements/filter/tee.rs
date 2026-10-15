@@ -407,7 +407,7 @@ impl TeeHandle {
             .shared
             .upgrade()
             .ok_or(GraphError::ParentNotAttached(self.id))?;
-        let _operation = match shared.context.operation.try_lock() {
+        let operation = match shared.context.operation.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -418,8 +418,12 @@ impl TeeHandle {
         let mut pad = shared.next_pad(&self.name);
         let from_port: Arc<str> = pad.name().into();
         let DetachedBranch { root, plan } = branch;
+        // Held out here rather than moved into the attach, so a branch the
+        // graph refuses is dropped only once the locks are released: what a
+        // sink does as it goes is its own, and may reach for this handle.
+        let mut root = Some(root);
         let root_id = plan.root;
-        let branch_id = shared.context.graph.attach_with(
+        let attached = shared.context.graph.attach_with(
             self.id,
             from_port,
             // What this `Tee` was itself resolved to receive: a
@@ -428,7 +432,9 @@ impl TeeHandle {
             Incoming::FromParent,
             plan,
             |branch_id| {
-                pad.link(root);
+                if let Some(root) = root.take() {
+                    pad.link(root);
+                }
                 branches.push(Arc::new(TeeBranch {
                     id: Some(branch_id),
                     root_id,
@@ -439,10 +445,20 @@ impl TeeHandle {
                 }));
                 Ok(())
             },
-        )?;
+        );
+        let branch_id = match attached {
+            Ok(branch_id) => branch_id,
+            Err(error) => {
+                drop(branches);
+                drop(operation);
+                drop(root);
+                return Err(error.into());
+            }
+        };
         let snapshot =
             crate::log::enabled(crate::log::Level::Info).then(|| shared.context.graph.snapshot());
         drop(branches);
+        drop(operation);
         if let Some(snapshot) = snapshot {
             log_topology(&self.pp_log, "attach", &snapshot);
         }

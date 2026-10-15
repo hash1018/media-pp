@@ -40,7 +40,8 @@
 //! [`SegmentedFileMuxer`]: super::SegmentedFileMuxer
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -85,6 +86,16 @@ pub enum ReplayBufferError {
     /// end-of-stream.
     #[error("replay buffer tracks only accept Packet buffers, got {0}")]
     UnsupportedBuffer(&'static str),
+
+    /// [`ReplayBufferHandle::save`] wrote the clip whole but could not put
+    /// it in place of the file at `path` — one open elsewhere, say. That
+    /// file is as it was, and the clip is not kept.
+    #[error("the clip could not replace {}: {source}", path.display())]
+    Replace {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Keeps the last `length` of what its tracks are handed, and writes it to
@@ -518,8 +529,11 @@ impl ReplayBufferHandle {
     /// its first keyframe and at zero, and answers how long it is.
     ///
     /// The container is the path's, as it is for [`FileMuxer`] — which is
-    /// what writes it — and so is the rule that a file already at `path` is
-    /// replaced. A save that fails part-way removes what it wrote. An MP4 or
+    /// what writes it. The clip is written beside `path` and put in its
+    /// place only once whole, so a file already there is replaced by a
+    /// finished clip or not at all: a save that fails — a container the
+    /// path names none of, a write that stops part-way — leaves it as it
+    /// was, and removes what it wrote. An MP4 or
     /// MOV is laid out [`Mp4Layout::FastStart`]: a clip saved is one shared
     /// as it is, played in a messenger or a browser as it downloads, and
     /// moving a clip's index in front costs next to nothing.
@@ -535,7 +549,17 @@ impl ReplayBufferHandle {
         let shared = self.shared.upgrade().ok_or(ReplayBufferError::Stopped)?;
         let clip = shared.window.lock().unwrap().clip()?;
         let (duration, packets) = (clip.duration, clip.packets.len());
-        match clip.write(path) {
+        let writing = writing_path(path);
+        let written = clip.write(&writing).and_then(|()| {
+            std::fs::rename(&writing, path).map_err(|source| {
+                ReplayBufferError::Replace {
+                    path: path.to_owned(),
+                    source,
+                }
+                .into()
+            })
+        });
+        match written {
             Ok(()) => {
                 pp_info!(
                     pp_log: &shared.pp_log,
@@ -551,7 +575,7 @@ impl ReplayBufferHandle {
                     "event=save outcome=error path={} error={error}",
                     path.display()
                 );
-                let _ = std::fs::remove_file(path);
+                let _ = std::fs::remove_file(&writing);
                 Err(error)
             }
         }
@@ -565,6 +589,22 @@ impl ReplayBufferHandle {
             shared.window.lock().unwrap().span()
         })
     }
+}
+
+/// Where a clip for `path` is written until it is whole: beside it, so it
+/// is put in its place on the same volume, under a name of its own whose
+/// extension still names the container — numbered by the process and the
+/// save, so two saves at once never write the same file.
+fn writing_path(path: &Path) -> PathBuf {
+    static SAVES: AtomicU64 = AtomicU64::new(0);
+    let save = SAVES.fetch_add(1, Ordering::Relaxed);
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let mut name = format!(".{stem}.saving-{}-{save}", std::process::id());
+    if let Some(extension) = path.extension() {
+        name.push('.');
+        name.push_str(&extension.to_string_lossy());
+    }
+    path.with_file_name(name)
 }
 
 /// One track's own sink: a handle on the window every track shares.
@@ -1044,6 +1084,52 @@ mod tests {
             "no file is started for a clip that has nothing"
         );
         assert_eq!(handle.buffered(), Duration::ZERO);
+    }
+
+    /// What was written beside `path` for a save and is still there.
+    fn left_beside(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&format!(".{stem}.saving-")))
+            })
+            .collect()
+    }
+
+    /// A save that cannot be made — the path names no container — leaves
+    /// a file already there as it was, and nothing beside it.
+    #[test]
+    fn a_save_that_fails_keeps_the_file_it_would_have_replaced() {
+        let Some(recorded) = fixture() else { return };
+        let (mut sinks, handle) = buffer_over(&recorded, Duration::from_secs(3));
+        feed(&mut sinks, &recorded.packets);
+        let path = clip_path("kept").with_extension("notacontainer");
+        std::fs::write(&path, b"an earlier clip").unwrap();
+
+        assert!(handle.save(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"an earlier clip");
+        assert!(left_beside(&path).is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A file already there is replaced by the finished clip, and nothing
+    /// is left beside it.
+    #[test]
+    fn a_save_replaces_a_file_there_with_the_whole_clip() {
+        let Some(recorded) = fixture() else { return };
+        let (mut sinks, handle) = buffer_over(&recorded, Duration::from_secs(3));
+        feed(&mut sinks, &recorded.packets);
+        let path = clip_path("replaced");
+        std::fs::write(&path, b"an earlier clip").unwrap();
+
+        handle.save(&path).expect("the clip saves");
+        assert_eq!(read_back(&path).streams, recorded.streams.len());
+        assert!(left_beside(&path).is_empty());
+        std::fs::remove_file(&path).ok();
     }
 
     /// The handle holds the window weakly: once the sinks are gone so is

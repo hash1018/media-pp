@@ -194,11 +194,15 @@ impl RackHandle {
                 });
             }
         }
-        *self
+        let replaced = self
             .control
             .pending
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(elements);
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(elements);
+        // Dropped once the slot is free again: what a filter does as it goes
+        // is its own, and may reach for this handle.
+        drop(replaced);
         Ok(())
     }
 }
@@ -885,6 +889,77 @@ mod tests {
 
         let received = rig.received.lock().unwrap();
         assert_eq!(pts_of(&received[1]), 1, "what the rack held marked it");
+    }
+
+    /// A filter that, dropped, hands its rack a replacement of its own.
+    struct ReplacesOnDrop {
+        pp_log: PpLog,
+        name: Arc<str>,
+        pad: SrcPad,
+        handle: Option<RackHandle>,
+    }
+
+    impl Drop for ReplacesOnDrop {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.replace(Vec::new());
+            }
+        }
+    }
+
+    impl Element for ReplacesOnDrop {
+        fn name(&self) -> Arc<str> {
+            self.name.clone()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl SrcPads for ReplacesOnDrop {
+        fn src_pads(&mut self) -> &mut [SrcPad] {
+            std::slice::from_mut(&mut self.pad)
+        }
+    }
+
+    impl RawSink for ReplacesOnDrop {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.pad.push(buf)
+        }
+    }
+
+    /// A replacement not yet taken up is let go of outside the handle's
+    /// slot: a filter that reaches for the handle as it is dropped does not
+    /// wait on the slot it is being dropped from.
+    #[test]
+    fn a_replacement_overtaken_is_let_go_of_outside_the_slot() {
+        let rig = rig();
+        let handle = rig.handle.clone();
+        let name: Arc<str> = "replaces-on-drop".into();
+        handle
+            .replace(vec![crate::element::BoxFilter::new(ReplacesOnDrop {
+                pp_log: element_pp_log(ElementType::Other, &name, None),
+                pad: SrcPad::new("replaces-on-drop_src"),
+                name,
+                handle: Some(handle.clone()),
+            })])
+            .expect("one filter");
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let replaced = handle.replace(Vec::new());
+            let _ = done.send(replaced.is_ok());
+        });
+        assert_eq!(
+            finished.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "the replacement returned"
+        );
     }
 
     /// Dropping the rack leaves the handle usable rather than panicking on a

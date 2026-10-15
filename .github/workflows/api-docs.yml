@@ -51,7 +51,10 @@ jobs:
         uses: ./.github/actions/setup-ffmpeg
 
       # Every feature that builds on Windows, so this build stays a strict
-      # superset of docs.rs, which can only reach the non-Windows ones.
+      # superset of docs.rs, which can only reach the non-Windows ones —
+      # CUDA and the GPU inference providers among them, which documenting
+      # never links. `whisper-vulkan` is left out: it needs the Vulkan SDK's
+      # shader compiler to build, and presents the API `whisper` does.
       #
       # `DOCS_RS` is what the `ort` feature needs here. `ort-sys`'s build script
       # otherwise downloads ONNX Runtime and links its dylibs into the target
@@ -65,7 +68,22 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
-        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,mf-virtual-camera,wasapi-capture,wasapi-renderer,vulkan,webrtc,ort,whisper,rnnoise
+        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,mf-virtual-camera,wasapi-capture,wasapi-renderer,vulkan,cuda,cuda-visual-tracking,webrtc,ort,ort-cuda,ort-tensorrt,ort-directml,whisper,rnnoise
+
+      # A feature dropped from the list above still documents cleanly — it
+      # only takes its types with it — so what each GPU feature makes is
+      # looked for.
+      - name: Check the GPU APIs are documented
+        shell: pwsh
+        run: |
+          foreach ($page in @(
+            'elements/filter/struct.CudaDecoder.html',
+            'elements/vision/struct.CudaOrtDetector.html',
+            'elements/vision/struct.D3d12OrtDetector.html',
+            'elements/filter/struct.D3d12VideoEncoder.html'
+          )) {
+            if (-not (Test-Path "target/doc/media_pp/$page")) { throw "not documented: $page" }
+          }
 
       # Pages will not serve the `.lock` cargo leaves behind.
       - name: Drop the build lock
@@ -108,7 +126,14 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
-        run: cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,webrtc,ort,whisper,rnnoise
+        run: cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,webrtc,ort,ort-coreml,whisper,rnnoise
+
+      # As on Windows: a feature dropped from the list takes its types with it.
+      - name: Check the GPU APIs are documented
+        run: |
+          for page in elements/vision/struct.MetalOrtDetector.html elements/filter/struct.VideoToolboxDecoder.html; do
+            test -f "target/doc/media_pp/$page" || { echo "not documented: $page"; exit 1; }
+          done
 
       - name: Drop the build lock
         run: rm -f target/doc/.lock

@@ -44,8 +44,12 @@ binary fails to start.
   (`VULKAN_SDK`); the loader is opened at run time. Without a GPU, Mesa's
   lavapipe (`mesa-vulkan-drivers libvulkan1`) runs what needs only a Vulkan
   device, as in CI; Vulkan Video decode and encode and presenting skip.
-- `cuda`: only the NVIDIA driver; the kernels ship as PTX. A binary built
-  with `cuda` does not start on a machine without it.
+- `cuda`: only the NVIDIA driver; the kernels ship as PTX. `libcuda.so.1` is
+  opened when CUDA is first used, so a binary built with `cuda` starts on
+  a machine without the driver and its CUDA elements report an error there.
+  `ort-cuda`, `ort-tensorrt` and `cuda-visual-tracking` are different: the
+  libraries they link must be found when the program starts — see
+  [features](../features.md).
 - `whisper-vulkan`: the Vulkan SDK's shader compiler at build time — see
   [`transcribe`](../../examples/core/transcribe/README.md).
 - Screen capture goes through xdg-desktop-portal, whose picker opens on the

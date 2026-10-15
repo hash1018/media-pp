@@ -1152,6 +1152,89 @@ fn a_dynamic_tee_branch_is_checked_and_a_refusal_changes_nothing() {
         .expect("a video branch is what this Tee can feed");
 }
 
+/// A sink that, dropped, asks its `Tee` how many branches it has.
+struct AsksOnDrop {
+    sink: Box<DeclaringSink>,
+    handle: Option<crate::elements::TeeHandle>,
+}
+
+impl Drop for AsksOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.sink_count();
+        }
+    }
+}
+
+impl Element for AsksOnDrop {
+    fn name(&self) -> Arc<str> {
+        self.sink.name()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        self.sink.pp_log()
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        self.sink.pp_log_mut()
+    }
+}
+
+impl RawSink for AsksOnDrop {
+    fn input_contract(&self) -> InputContract {
+        self.sink.input_contract()
+    }
+
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        self.sink.consume(buf)
+    }
+}
+
+/// A branch the `Tee` refuses is dropped once its locks are released: a
+/// sink that asks the `Tee` about itself as it goes does not wait on them.
+#[test]
+fn a_refused_dynamic_branch_is_dropped_outside_the_tee_s_locks() {
+    use crate::elements::{TestVideoOptions, TestVideoSource};
+
+    let context = contract_context();
+    let initial = context
+        .branch()
+        .to(DeclaringSink::boxed("renderer", video_frames()))
+        .expect("consistent");
+    let (tee, handle) = context
+        .tee("tee")
+        .branch(initial)
+        .build_dynamic()
+        .expect("consistent");
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    context
+        .attach(&mut source, 0, tee)
+        .expect("the initial fan-out matches the source");
+
+    let audio_branch = handle
+        .branch()
+        .expect("the Tee is alive")
+        .to(Box::new(AsksOnDrop {
+            sink: audio_sink("speakers"),
+            handle: Some(handle.clone()),
+        }))
+        .expect("the branch itself is consistent");
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let refused = handle.attach(audio_branch).is_err();
+        let _ = done.send((refused, handle.sink_count()));
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok((true, 1)),
+        "refused, and the Tee still has its one branch"
+    );
+}
+
 /// Resolved contracts are live-graph state just like nodes and edges. A
 /// detached dynamic branch must release those entries too; element IDs are
 /// never reused, so leaving one behind would grow the graph for every churn
