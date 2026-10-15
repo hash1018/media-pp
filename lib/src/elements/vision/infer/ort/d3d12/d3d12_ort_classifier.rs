@@ -46,7 +46,8 @@ use super::{DIRECTML_BATCH, directml_memory, host_memory, object_model_session};
 /// best after an [`ObjectTracker`](crate::elements::ObjectTracker), which
 /// lets a followed object be classified once and its answer kept, as
 /// [`OrtClassifierOptions::reclassify`] says. It takes NV12 D3D12 pictures
-/// made on the [`D3d12Gpu`] it is given. The model is an image classifier
+/// made on the [`D3d12Gpu`] it is given, and HDR P010, HLG or PQ, through
+/// an SDR copy, as the detector does. The model is an image classifier
 /// with one input, `[batch, 3, height, width]` — 224 for a side it leaves
 /// open — and one output of a score per class, probabilities or raw. A
 /// model that takes any number of objects at once is fixed to take eight at
@@ -220,11 +221,11 @@ impl Element for Classifying {
 }
 
 impl Filter for Classifying {
-    /// Decoded NV12 video in D3D12 textures.
+    /// Decoded NV12, or HDR P010, video in D3D12 textures.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
-                .with_layouts(PixelLayoutSet::NV12),
+                .with_layouts(PixelLayoutSet::YUV420),
         )
     }
 

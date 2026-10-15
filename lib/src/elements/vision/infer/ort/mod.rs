@@ -336,7 +336,7 @@ pub enum OrtError {
     DirectMlUnavailable,
     /// Not a D3D12 picture this element reads: what it is.
     #[cfg(all(target_os = "windows", feature = "ort-directml"))]
-    #[error("takes NV12 D3D12 pictures, got {0}")]
+    #[error("takes NV12 or HDR P010 D3D12 pictures, got {0}")]
     UnsupportedD3d12Picture(String),
     /// A D3D12 picture made on another device than the element's: every
     /// D3D12 element of a pipeline shares one `D3d12Gpu`.

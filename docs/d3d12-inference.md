@@ -92,8 +92,10 @@ D3d12Decoder ─▶ D3d12OrtDetector ─▶ … (the picture passed on, Detectio
   nothing goes through host memory on the way in. `ort`'s own `DirectML`
   builder takes only an adapter index, which would give ONNX Runtime a
   device of its own.
-- **Fit on the GPU.** A compute shader samples the decoder's NV12 or P010
-  texture (and its array slice), letterboxes the whole picture or a tile
+- **Fit on the GPU.** A compute shader samples the decoder's NV12 texture —
+  or an HDR P010 one's SDR copy, which a second shader makes by
+  `core/tone_map.rs`'s definition, as the CUDA and Metal detectors look at
+  HDR — (and its array slice), letterboxes the whole picture or a tile
   into the model's input with grey, converts to the model's channel order,
   scale and bias (`ModelInput`), and writes fp32 NCHW — what
   `CudaOrtDetector`'s fit kernel does, ported. The picture is decoded once

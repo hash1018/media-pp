@@ -1,19 +1,20 @@
-// The kernel `D3d12OrtEmbedder` reads an object into an embedding model's
-// input with, the D3D12 counterpart of `warp_nv12` in
-// `shaders/metal/fit.metal` and the CUDA kernel of that name: input pixel
+// The kernels `D3d12OrtEmbedder` reads an object into an embedding model's
+// input with, the D3D12 counterparts of `warp_nv12` and `warp_bgra` in
+// `shaders/metal/fit.metal` and the CUDA kernels of those names: input pixel
 // `(u, v)` is read from the picture at `(dot(x_of.xyz, (u, v, 1)),
 // dot(y_of.xyz, (u, v, 1)))` — each pixel's centre at whole numbers —
 // between the four pixels around it, as `cv2.warpAffine` reads a face onto
 // the ArcFace template. Outside the picture, `size` in pixels, is black.
 // The luma and chroma are each mixed over the pixels inside and made RGB by
 // the picture's rows, then darkened by how much of the four was outside,
-// which is what mixing the RGB of each comes to. Written to three float
+// which is what mixing the RGB of each comes to; an RGBA picture — an HDR
+// picture's SDR copy — is mixed as it is. Written to three float
 // planes of input `slot.x` of `tensor` — R, G, B, or B, G, R where `slot.y`
 // says so — each then times `scale` plus `bias`.
 //
 // Compiled apart from `fit.hlsl`, as its constants are at b0 too: `Warp` as
-// 36 root constants, the luma and chroma planes' views at t0 and t1, and
-// the tensor as a root UAV at u0.
+// 36 root constants, the luma and chroma planes' views at t0 and t1 — or
+// the RGBA picture's at t0 — and the tensor as a root UAV at u0.
 
 cbuffer Warp : register(b0)
 {
@@ -32,7 +33,23 @@ cbuffer Warp : register(b0)
 
 Texture2D<float> luma : register(t0);
 Texture2D<float2> chroma : register(t1);
+Texture2D<float4> pixels : register(t0);
 RWStructuredBuffer<float> tensor : register(u0);
+
+// Input pixel `id`, `rgb` from 0 to 1, into its three planes of the input,
+// in the model's order and values.
+void store(uint2 id, float3 rgb)
+{
+    uint plane = model.x * model.y;
+    uint index = slot.x * 3 * plane + id.y * model.x + id.x;
+    if (slot.y != 0) {
+        rgb = rgb.bgr;
+    }
+    rgb = rgb * scale.rgb + bias.rgb;
+    tensor[index] = rgb.r;
+    tensor[plane + index] = rgb.g;
+    tensor[2 * plane + index] = rgb.b;
+}
 
 // The four pixels around `p` in a plane `extent` in pixels: where each is,
 // held inside the plane, and its weight, naught for one outside it.
@@ -105,13 +122,23 @@ void warp_nv12(uint3 thread_id : SV_DispatchThreadID)
         rgb = saturate(float3(dot(to_red, yuv), dot(to_green, yuv), dot(to_blue, yuv)))
             * four.inside;
     }
-    uint plane = model.x * model.y;
-    uint index = slot.x * 3 * plane + id.y * model.x + id.x;
-    if (slot.y != 0) {
-        rgb = rgb.bgr;
+    store(id, rgb);
+}
+
+[RootSignature(WARP_ROOT_SIGNATURE)]
+[numthreads(16, 16, 1)]
+void warp_rgba(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint2 id = thread_id.xy;
+    if (id.x >= model.x || id.y >= model.y) {
+        return;
     }
-    rgb = rgb * scale.rgb + bias.rgb;
-    tensor[index] = rgb.r;
-    tensor[plane + index] = rgb.g;
-    tensor[2 * plane + index] = rgb.b;
+    float3 at = float3(float(id.x), float(id.y), 1.0);
+    Four four = around(float2(dot(x_of.xyz, at), dot(y_of.xyz, at)), size);
+    float3 rgb = float3(0.0, 0.0, 0.0);
+    [unroll]
+    for (int i = 0; i < 4; i++) {
+        rgb += pixels.Load(int3(four.at[i], 0)).rgb * four.weight[i];
+    }
+    store(id, rgb);
 }

@@ -1,7 +1,8 @@
 //! What the D3D12 detector runs on the GPU ahead of the model: the compute
 //! shader that fits a D3D12 picture — or a rectangle of it — into a model's
 //! input, and that input, a buffer on the GPU that DirectML reads where it
-//! is.
+//! is. An HDR picture is first brought to SDR by a shader of its own, as the
+//! CUDA and Metal detectors look at one.
 
 use std::mem::ManuallyDrop;
 
@@ -15,8 +16,9 @@ use windows::{
             },
             Direct3D12::*,
             Dxgi::Common::{
-                DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM,
-                DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+                DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R8_UNORM,
+                DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16_UNORM,
+                DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
             },
         },
         System::Threading::{CreateEventW, INFINITE, WaitForSingleObject},
@@ -30,18 +32,20 @@ use crate::orientation::Orientation;
 use crate::platform::windows::{
     d3d12_gpu::D3d12Gpu, d3d12va::d3d12va_texture, hlsl::compile_shader,
 };
+use crate::tone_map::ToneMap;
 
 use super::super::{ChannelOrder, ModelInput, OrtError};
 
 const SHADER: &[u8] = include_bytes!("../../../../../shaders/d3d12/fit.hlsl");
 const WARP_SHADER: &[u8] = include_bytes!("../../../../../shaders/d3d12/warp.hlsl");
+const TONE_MAP_SHADER: &[u8] = include_bytes!("../../../../../shaders/d3d12/tone_map.hlsl");
 
 /// Each run of the shader is 16 by 16 pixels of the input.
 const GROUP: u32 = 16;
 
-/// A D3D12 picture a [`Fitting`] can read: NV12, on the fitting's device,
-/// no smaller than the picture says it is, with what the GPU must wait for
-/// before reading it.
+/// A D3D12 picture a [`Fitting`] can read: NV12, or HDR P010 tagged HLG or
+/// PQ, on the fitting's device, no smaller than the picture says it is,
+/// with what the GPU must wait for before reading it.
 pub(super) struct Picture {
     texture: ID3D12Resource,
     /// Signalled at `fence_value` once whatever wrote the picture has.
@@ -51,6 +55,9 @@ pub(super) struct Picture {
     pub(super) size: (u32, u32),
     /// The rows its own colour description makes RGB with.
     rows: [[f32; 4]; 3],
+    /// For an HDR picture, `tone_map.hlsl`'s constants to bring it to SDR
+    /// with, which is what is fitted.
+    hdr: Option<[u32; 32]>,
 }
 
 // SAFETY: the texture and fence are free-threaded COM objects, only read
@@ -86,10 +93,18 @@ impl Picture {
         }
         // SAFETY: a live resource's plain description, returned by value.
         let desc = unsafe { texture.GetDesc() };
-        if desc.Format != DXGI_FORMAT_NV12 {
-            return Err(OrtError::UnsupportedD3d12Picture(format_name(desc.Format)));
-        }
         let size = (frame.width(), frame.height());
+        let hdr = match desc.Format {
+            DXGI_FORMAT_NV12 => None,
+            // A ten-bit picture tagged neither HLG nor PQ has no tone map.
+            DXGI_FORMAT_P010 => Some(tone_map_constants(
+                &ToneMap::of_frame(frame).ok_or_else(|| {
+                    OrtError::UnsupportedD3d12Picture("a P010 one tagged neither HLG nor PQ".into())
+                })?,
+                size,
+            )),
+            other => return Err(OrtError::UnsupportedD3d12Picture(format_name(other))),
+        };
         let surface = (desc.Width as u32, desc.Height);
         if size.0 == 0 || size.1 == 0 || size.0 > surface.0 || size.1 > surface.1 {
             return Err(OrtError::PictureOutsideTexture {
@@ -103,8 +118,32 @@ impl Picture {
             fence_value,
             size,
             rows: ColorDescription::of(frame).yuv_to_rgb_rows(frame.height()),
+            hdr,
         })
     }
+}
+
+/// `tone_map.hlsl`'s thirty-two constants for `map`, on a picture of
+/// `size`, in its `ToneMap` order.
+fn tone_map_constants(map: &ToneMap, size: (u32, u32)) -> [u32; 32] {
+    let mut words = [0u32; 32];
+    for (word, value) in words[..12].iter_mut().zip(map.rows.iter().flatten()) {
+        *word = value.to_bits();
+    }
+    words[12] = map.transfer;
+    for (word, value) in
+        words[13..16]
+            .iter_mut()
+            .zip([map.source_peak_pq, map.target_peak, map.knee])
+    {
+        *word = value.to_bits();
+    }
+    for (word, value) in words[16..28].iter_mut().zip(map.gamut.iter().flatten()) {
+        *word = value.to_bits();
+    }
+    words[28] = size.0;
+    words[29] = size.1;
+    words
 }
 
 /// What a texture format is called, for an error.
@@ -135,11 +174,21 @@ pub(super) struct Fitting {
     capacity: usize,
     device: ID3D12Device,
     queue: ID3D12CommandQueue,
-    /// `fit.hlsl`'s, for a detector.
+    /// `fit.hlsl`'s, for a detector or a classifier: an NV12 picture's, and
+    /// an SDR copy's under the same root signature.
     fit: Kernel,
-    /// `warp.hlsl`'s, for an embedder.
+    fit_rgba: ID3D12PipelineState,
+    /// `warp.hlsl`'s, for an embedder, likewise.
     warp: Kernel,
-    /// Two views — luma, chroma — for each picture of a fit, shader-visible.
+    warp_rgba: ID3D12PipelineState,
+    /// `tone_map.hlsl`'s, which makes an HDR picture's SDR copy.
+    tone_map: Kernel,
+    /// The SDR copy of the HDR picture of each index of a fit, made the
+    /// first time one is needed and again for a larger picture.
+    copies: Vec<Option<(ID3D12Resource, (u32, u32))>>,
+    /// For each picture of a fit, shader-visible: two views — luma and
+    /// chroma, or its SDR copy twice — from the start, and three for
+    /// making its SDR copy — luma, chroma, the copy — after `2 * capacity`.
     heap: ID3D12DescriptorHeap,
     heap_step: usize,
     allocator: ID3D12CommandAllocator,
@@ -175,11 +224,19 @@ impl Fitting {
         // built here.
         unsafe {
             let fit = Kernel::new(&device, SHADER, s!("fit.hlsl"), s!("fit_nv12"))?;
+            let fit_rgba = fit.sibling(&device, SHADER, s!("fit.hlsl"), s!("fit_rgba"))?;
             let warp = Kernel::new(&device, WARP_SHADER, s!("warp.hlsl"), s!("warp_nv12"))?;
+            let warp_rgba = warp.sibling(&device, WARP_SHADER, s!("warp.hlsl"), s!("warp_rgba"))?;
+            let tone_map = Kernel::new(
+                &device,
+                TONE_MAP_SHADER,
+                s!("tone_map.hlsl"),
+                s!("hdr_to_rgba"),
+            )?;
             let heap: ID3D12DescriptorHeap =
                 device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                    NumDescriptors: 2 * capacity as u32,
+                    NumDescriptors: 5 * capacity as u32,
                     Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
                     NodeMask: 0,
                 })?;
@@ -214,7 +271,11 @@ impl Fitting {
                 device,
                 queue: gpu.queue().clone(),
                 fit,
+                fit_rgba,
                 warp,
+                warp_rgba,
+                tone_map,
+                copies: Vec::new(),
                 heap,
                 heap_step,
                 allocator,
@@ -294,38 +355,18 @@ impl Fitting {
         unsafe {
             self.allocator.Reset()?;
             self.list.Reset(&self.allocator, &self.fit.pipeline)?;
-            let list = &self.list;
-            list.SetComputeRootSignature(&self.fit.root_signature);
+            let list = self.list.clone();
             list.SetDescriptorHeaps(&[Some(self.heap.clone())]);
+            let only: Vec<&Picture> = pictures.iter().map(|&(picture, _)| picture).collect();
+            let copies = self.record_copies(&list, &only)?;
+            list.SetComputeRootSignature(&self.fit.root_signature);
             list.SetComputeRootUnorderedAccessView(2, self.tensor.GetGPUVirtualAddress());
-            let cpu_start = self.heap.GetCPUDescriptorHandleForHeapStart();
-            let gpu_start = self.heap.GetGPUDescriptorHandleForHeapStart();
-            for (index, &(picture, cuts)) in pictures.iter().enumerate() {
-                for (plane, format) in [DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let handle = D3D12_CPU_DESCRIPTOR_HANDLE {
-                        ptr: cpu_start.ptr + (2 * index + plane) * self.heap_step,
-                    };
-                    self.device.CreateShaderResourceView(
-                        &picture.texture,
-                        Some(&plane_view(format, plane as u32)),
-                        handle,
-                    );
-                }
-                transition(
-                    list,
-                    &picture.texture,
-                    D3D12_RESOURCE_STATE_COMMON,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                );
-                list.SetComputeRootDescriptorTable(
-                    1,
-                    D3D12_GPU_DESCRIPTOR_HANDLE {
-                        ptr: gpu_start.ptr + (2 * index * self.heap_step) as u64,
-                    },
-                );
+            for (index, (&(picture, cuts), copy)) in pictures.iter().zip(&copies).enumerate() {
+                let pipeline = match copy {
+                    None => &self.fit.pipeline,
+                    Some(_) => &self.fit_rgba,
+                };
+                self.bind(&list, index, picture, copy.as_ref(), pipeline);
                 for cut in cuts {
                     let constants = self.constants(picture, cut, (scale, bias), order);
                     list.SetComputeRoot32BitConstants(0, 40, constants.as_ptr().cast(), 0);
@@ -335,16 +376,9 @@ impl Fitting {
                         1,
                     );
                 }
-                // Back to `COMMON`: the texture is its producer's again once
-                // this list has run.
-                transition(
-                    list,
-                    &picture.texture,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_COMMON,
-                );
+                release(&list, picture, copy.as_ref());
             }
-            uav_barrier(list, &self.tensor);
+            uav_barrier(&list, &self.tensor);
             list.Close()?;
             // A GPU-side wait for whatever wrote each picture: sharing a
             // device does not order this queue after the decoder's.
@@ -417,6 +451,180 @@ impl Fitting {
         words
     }
 
+    /// Records making the SDR copy of each HDR picture of `pictures` — the
+    /// one at `index` into copy `index`, through the views after `2 *
+    /// capacity` — and says what each picture is fitted from: itself, or
+    /// its copy, left for a shader to read. Where it makes any, the list is
+    /// left with the tone map's root signature, which the caller replaces.
+    ///
+    /// # Safety
+    ///
+    /// `list` is this fitting's, open, its descriptor heap set, and the GPU
+    /// idle on this fitting's work, so a copy may be replaced.
+    unsafe fn record_copies(
+        &mut self,
+        list: &ID3D12GraphicsCommandList,
+        pictures: &[&Picture],
+    ) -> Result<Vec<Option<ID3D12Resource>>, OrtError> {
+        let mut copies = Vec::with_capacity(pictures.len());
+        let mut bound = false;
+        // SAFETY: the caller's contract; every view and barrier names a live
+        // resource the pictures or this fitting hold until the queue has run
+        // what reads them.
+        unsafe {
+            let cpu_start = self.heap.GetCPUDescriptorHandleForHeapStart();
+            let gpu_start = self.heap.GetGPUDescriptorHandleForHeapStart();
+            for (index, picture) in pictures.iter().enumerate() {
+                let Some(constants) = &picture.hdr else {
+                    copies.push(None);
+                    continue;
+                };
+                if self.copies.len() <= index {
+                    self.copies.resize_with(index + 1, || None);
+                }
+                let copy = match &self.copies[index] {
+                    Some((copy, size)) if size.0 >= picture.size.0 && size.1 >= picture.size.1 => {
+                        copy.clone()
+                    }
+                    _ => {
+                        let made = rgba_texture(&self.device, picture.size)?;
+                        self.copies[index] = Some((made.clone(), picture.size));
+                        made
+                    }
+                };
+                if !bound {
+                    list.SetComputeRootSignature(&self.tone_map.root_signature);
+                    list.SetPipelineState(&self.tone_map.pipeline);
+                    bound = true;
+                }
+                let first = 2 * self.capacity + 3 * index;
+                let handle = |at: usize| D3D12_CPU_DESCRIPTOR_HANDLE {
+                    ptr: cpu_start.ptr + (first + at) * self.heap_step,
+                };
+                for (plane, format) in [DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM]
+                    .into_iter()
+                    .enumerate()
+                {
+                    self.device.CreateShaderResourceView(
+                        &picture.texture,
+                        Some(&plane_view(format, plane as u32)),
+                        handle(plane),
+                    );
+                }
+                self.device.CreateUnorderedAccessView(
+                    &copy,
+                    None,
+                    Some(&D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                        ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+                        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                            Texture2D: D3D12_TEX2D_UAV {
+                                MipSlice: 0,
+                                PlaneSlice: 0,
+                            },
+                        },
+                    }),
+                    handle(2),
+                );
+                transition(
+                    list,
+                    &picture.texture,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                list.SetComputeRootDescriptorTable(
+                    1,
+                    D3D12_GPU_DESCRIPTOR_HANDLE {
+                        ptr: gpu_start.ptr + (first * self.heap_step) as u64,
+                    },
+                );
+                list.SetComputeRoot32BitConstants(0, 32, constants.as_ptr().cast(), 0);
+                list.Dispatch(
+                    picture.size.0.div_ceil(GROUP),
+                    picture.size.1.div_ceil(GROUP),
+                    1,
+                );
+                transition(
+                    list,
+                    &picture.texture,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON,
+                );
+                transition(
+                    list,
+                    &copy,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                copies.push(Some(copy));
+            }
+        }
+        Ok(copies)
+    }
+
+    /// Records reading `picture` — or its SDR `copy` — with `pipeline`: its
+    /// views at `2 * index`, the table set to them, and the texture made
+    /// readable; [`release`] undoes the last.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::record_copies`], the root signature `pipeline`'s.
+    unsafe fn bind(
+        &self,
+        list: &ID3D12GraphicsCommandList,
+        index: usize,
+        picture: &Picture,
+        copy: Option<&ID3D12Resource>,
+        pipeline: &ID3D12PipelineState,
+    ) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            let cpu_start = self.heap.GetCPUDescriptorHandleForHeapStart();
+            let gpu_start = self.heap.GetGPUDescriptorHandleForHeapStart();
+            let handle = |plane: usize| D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: cpu_start.ptr + (2 * index + plane) * self.heap_step,
+            };
+            match copy {
+                None => {
+                    for (plane, format) in [DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        self.device.CreateShaderResourceView(
+                            &picture.texture,
+                            Some(&plane_view(format, plane as u32)),
+                            handle(plane),
+                        );
+                    }
+                    transition(
+                        list,
+                        &picture.texture,
+                        D3D12_RESOURCE_STATE_COMMON,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                }
+                // The copy twice: the table has two views, of which the
+                // shader reads the first.
+                Some(copy) => {
+                    for plane in 0..2 {
+                        self.device.CreateShaderResourceView(
+                            copy,
+                            Some(&plane_view(DXGI_FORMAT_R8G8B8A8_UNORM, 0)),
+                            handle(plane),
+                        );
+                    }
+                }
+            }
+            list.SetPipelineState(pipeline);
+            list.SetComputeRootDescriptorTable(
+                1,
+                D3D12_GPU_DESCRIPTOR_HANDLE {
+                    ptr: gpu_start.ptr + (2 * index * self.heap_step) as u64,
+                },
+            );
+        }
+    }
+
     /// Reads each of `maps` of `picture` into the input of its index, in the
     /// model's `values`, in one submission to the queue after whatever wrote
     /// the picture: input pixel `(u, v)` from `(m[0] u + m[1] v + m[2], m[3]
@@ -445,31 +653,16 @@ impl Fitting {
         unsafe {
             self.allocator.Reset()?;
             self.list.Reset(&self.allocator, &self.warp.pipeline)?;
-            let list = &self.list;
-            list.SetComputeRootSignature(&self.warp.root_signature);
+            let list = self.list.clone();
             list.SetDescriptorHeaps(&[Some(self.heap.clone())]);
+            let copy = self.record_copies(&list, &[picture])?.remove(0);
+            list.SetComputeRootSignature(&self.warp.root_signature);
             list.SetComputeRootUnorderedAccessView(2, self.tensor.GetGPUVirtualAddress());
-            let cpu_start = self.heap.GetCPUDescriptorHandleForHeapStart();
-            for (plane, format) in [DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM]
-                .into_iter()
-                .enumerate()
-            {
-                let handle = D3D12_CPU_DESCRIPTOR_HANDLE {
-                    ptr: cpu_start.ptr + plane * self.heap_step,
-                };
-                self.device.CreateShaderResourceView(
-                    &picture.texture,
-                    Some(&plane_view(format, plane as u32)),
-                    handle,
-                );
-            }
-            transition(
-                list,
-                &picture.texture,
-                D3D12_RESOURCE_STATE_COMMON,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            );
-            list.SetComputeRootDescriptorTable(1, self.heap.GetGPUDescriptorHandleForHeapStart());
+            let pipeline = match copy {
+                None => &self.warp.pipeline,
+                Some(_) => &self.warp_rgba,
+            };
+            self.bind(&list, 0, picture, copy.as_ref(), pipeline);
             for (slot, map) in maps.iter().enumerate() {
                 let mut words = [0u32; 36];
                 words[..8].copy_from_slice(&[
@@ -501,13 +694,8 @@ impl Fitting {
                     1,
                 );
             }
-            transition(
-                list,
-                &picture.texture,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_COMMON,
-            );
-            uav_barrier(list, &self.tensor);
+            release(&list, picture, copy.as_ref());
+            uav_barrier(&list, &self.tensor);
             list.Close()?;
             self.queue.Wait(&picture.fence, picture.fence_value)?;
             self.queue
@@ -591,21 +779,52 @@ impl Kernel {
             )?;
             let root_signature: ID3D12RootSignature =
                 device.CreateRootSignature(0, blob_bytes(&root))?;
-            let mut desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-                pRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
-                CS: D3D12_SHADER_BYTECODE {
-                    pShaderBytecode: shader.GetBufferPointer(),
-                    BytecodeLength: shader.GetBufferSize(),
-                },
-                ..Default::default()
-            };
-            let pipeline = device.CreateComputePipelineState(&desc);
-            ManuallyDrop::drop(&mut desc.pRootSignature);
+            let pipeline = pipeline(device, &shader, &root_signature);
             Ok(Self {
                 root_signature,
                 pipeline: pipeline?,
             })
         }
+    }
+
+    /// `entry` of `source` made a pipeline under this kernel's root
+    /// signature, which it declares alike, so a list can change from one to
+    /// the other keeping what is bound.
+    unsafe fn sibling(
+        &self,
+        device: &ID3D12Device,
+        source: &[u8],
+        file: windows::core::PCSTR,
+        entry: windows::core::PCSTR,
+    ) -> Result<ID3D12PipelineState, OrtError> {
+        // SAFETY: as in `new`.
+        unsafe {
+            let shader = compile_shader(source, file, entry, s!("cs_5_1"))?;
+            Ok(pipeline(device, &shader, &self.root_signature)?)
+        }
+    }
+}
+
+/// `shader` made a compute pipeline under `root_signature`.
+unsafe fn pipeline(
+    device: &ID3D12Device,
+    shader: &ID3DBlob,
+    root_signature: &ID3D12RootSignature,
+) -> windows::core::Result<ID3D12PipelineState> {
+    // SAFETY: a live device and blob; the description's reference to the
+    // root signature is released once the pipeline is made.
+    unsafe {
+        let mut desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+            pRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
+            CS: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: shader.GetBufferPointer(),
+                BytecodeLength: shader.GetBufferSize(),
+            },
+            ..Default::default()
+        };
+        let pipeline = device.CreateComputePipelineState(&desc);
+        ManuallyDrop::drop(&mut desc.pRootSignature);
+        pipeline
     }
 }
 
@@ -654,6 +873,70 @@ unsafe fn buffer(
                 Flags: flags,
             },
             state,
+            None,
+            &mut resource,
+        )?;
+    }
+    Ok(resource.expect("CreateCommittedResource succeeded without a resource"))
+}
+
+/// Records `picture` — or its SDR `copy` — no longer read: the picture back
+/// to `COMMON`, its producer's again once the list has run, or the copy back
+/// to be written.
+unsafe fn release(
+    list: &ID3D12GraphicsCommandList,
+    picture: &Picture,
+    copy: Option<&ID3D12Resource>,
+) {
+    // SAFETY: the caller's open list, and live resources.
+    unsafe {
+        match copy {
+            None => transition(
+                list,
+                &picture.texture,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_COMMON,
+            ),
+            Some(copy) => transition(
+                list,
+                copy,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            ),
+        }
+    }
+}
+
+/// An RGBA texture of `size` a shader writes, for an HDR picture's SDR copy.
+unsafe fn rgba_texture(
+    device: &ID3D12Device,
+    (width, height): (u32, u32),
+) -> windows::core::Result<ID3D12Resource> {
+    let mut resource: Option<ID3D12Resource> = None;
+    // SAFETY: descriptions built here, and a correctly typed out-parameter.
+    unsafe {
+        device.CreateCommittedResource(
+            &D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_DEFAULT,
+                ..Default::default()
+            },
+            D3D12_HEAP_FLAG_NONE,
+            &D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                Alignment: 0,
+                Width: u64::from(width),
+                Height: height,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+                Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            },
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             None,
             &mut resource,
         )?;
@@ -1078,6 +1361,142 @@ pub(super) mod tests {
             let wanted = warped(&frame, map, model);
             let off = largest_difference(&tensor[slot * floats..(slot + 1) * floats], &wanted);
             assert!(off < 1e-3, "map {slot}: off by {off}");
+        }
+    }
+
+    /// `frame`, a P010 picture in system memory, as a D3D12 one on `gpu`,
+    /// made as a ten-bit decoder's is; `None` where FFmpeg cannot.
+    pub(in super::super) fn upload_p010(
+        gpu: &D3d12Gpu,
+        frame: &ffmpeg::frame::Video,
+    ) -> Option<ffmpeg::frame::Video> {
+        use crate::platform::ffmpeg::AvBufferRef;
+        use crate::platform::windows::d3d12va::create_hw_device_ctx;
+        use ffmpeg::ffi;
+        // SAFETY: a live device; the frames context is wrapped before it is
+        // filled in, and the frame is this function's own until returned.
+        unsafe {
+            let device = create_hw_device_ctx(gpu.device()).ok()?;
+            let frames = AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(device.as_ptr()))?;
+            let context = (*frames.as_ptr()).data as *mut ffi::AVHWFramesContext;
+            (*context).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D12;
+            (*context).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_P010LE;
+            (*context).width = frame.width() as i32;
+            (*context).height = frame.height() as i32;
+            if ffi::av_hwframe_ctx_init(frames.as_ptr()) < 0 {
+                eprintln!("skipping: FFmpeg could not make P010 D3D12 frames");
+                return None;
+            }
+            let mut on_gpu = ffmpeg::frame::Video::empty();
+            assert!(ffi::av_hwframe_get_buffer(frames.as_ptr(), on_gpu.as_mut_ptr(), 0) >= 0);
+            assert!(ffi::av_hwframe_transfer_data(on_gpu.as_mut_ptr(), frame.as_ptr(), 0) >= 0);
+            assert!(ffi::av_frame_copy_props(on_gpu.as_mut_ptr(), frame.as_ptr()) >= 0);
+            Some(on_gpu)
+        }
+    }
+
+    /// An HDR picture, HLG or PQ, is fitted and warped from an SDR copy
+    /// that is `core/tone_map.rs`'s definition, pixel for pixel to within
+    /// the rounding of a GPU's powers and of the copy's eight bits, as the
+    /// CUDA and Metal detectors look at one; a P010 picture tagged neither
+    /// is refused, having no tone map.
+    #[test]
+    fn an_hdr_picture_is_looked_at_in_sdr() {
+        let Some(gpu) = try_d3d12_gpu() else {
+            return;
+        };
+        let (width, height) = (64usize, 32usize);
+        let model = (width as u32, height as u32);
+        let mut fitting = Fitting::new(&gpu, model, 2).expect("the shaders compile");
+        // Ten-bit luma across the range, two chroma pairs off grey.
+        let luma = |x: usize, y: usize| (64 + (x * 13 + y * 7) % 877) as u16;
+        let chroma = |x: usize, y: usize| -> (u16, u16) {
+            match (x + y) % 3 {
+                0 => (512, 512),
+                1 => (400, 620),
+                _ => (600, 450),
+            }
+        };
+        for transfer in [
+            ffmpeg::color::TransferCharacteristic::ARIB_STD_B67,
+            ffmpeg::color::TransferCharacteristic::SMPTE2084,
+            ffmpeg::color::TransferCharacteristic::BT709,
+        ] {
+            let mut frame = ffmpeg::frame::Video::new(
+                ffmpeg::format::Pixel::P010LE,
+                width as u32,
+                height as u32,
+            );
+            let (stride, cstride) = (frame.stride(0), frame.stride(1));
+            for y in 0..height {
+                for x in 0..width {
+                    frame.data_mut(0)[y * stride + x * 2..][..2]
+                        .copy_from_slice(&(luma(x, y) << 6).to_le_bytes());
+                }
+            }
+            for y in 0..height / 2 {
+                for x in 0..width / 2 {
+                    let (cb, cr) = chroma(x, y);
+                    let at = y * cstride + x * 4;
+                    frame.data_mut(1)[at..at + 2].copy_from_slice(&(cb << 6).to_le_bytes());
+                    frame.data_mut(1)[at + 2..at + 4].copy_from_slice(&(cr << 6).to_le_bytes());
+                }
+            }
+            ColorDescription {
+                space: ffmpeg::color::Space::BT2020NCL,
+                range: ffmpeg::color::Range::MPEG,
+                primaries: ffmpeg::color::Primaries::BT2020,
+                transfer,
+            }
+            .describe(&mut frame);
+            let Some(on_gpu) = upload_p010(&gpu, &frame) else {
+                return;
+            };
+            let Some(map) = ToneMap::of_frame(&frame) else {
+                assert!(
+                    matches!(
+                        fitting.picture(&on_gpu),
+                        Err(OrtError::UnsupportedD3d12Picture(_))
+                    ),
+                    "SDR P010 has no tone map"
+                );
+                continue;
+            };
+            let picture = fitting.picture(&on_gpu).expect("reads a P010 picture");
+            // One input pixel to a picture pixel, fitted into the first
+            // input and warped into the second.
+            let whole = Cut {
+                crop: (0, 0, model.0, model.1),
+                orientation: Orientation::UPRIGHT,
+                offset: (0, 0),
+                scaled: model,
+                slot: 0,
+            };
+            fitting
+                .fit_each(&[(&picture, &[whole])], ModelInput::default())
+                .expect("fits");
+            let fitted = fitting.read_back(1).expect("reads back");
+            let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+            fitting
+                .warp(&picture, &[identity], ModelInput::default())
+                .expect("warps");
+            let warped = fitting.read_back(1).expect("reads back");
+            let plane = width * height;
+            for (what, tensor) in [("fitted", &fitted), ("warped", &warped)] {
+                let mut worst = 0.0f32;
+                for y in 0..height {
+                    for x in 0..width {
+                        let (cb, cr) = chroma(x / 2, y / 2);
+                        let unit = |code: u16| f32::from(code << 6) / 65535.0;
+                        let want = map.apply(unit(luma(x, y)), unit(cb), unit(cr));
+                        for (channel, want) in want.into_iter().enumerate() {
+                            let got = tensor[channel * plane + y * width + x] * 255.0;
+                            worst = worst.max((got - f32::from(want)).abs());
+                        }
+                    }
+                }
+                assert!(worst <= 2.0, "{transfer:?} {what}: off by {worst} of 255");
+            }
         }
     }
 }

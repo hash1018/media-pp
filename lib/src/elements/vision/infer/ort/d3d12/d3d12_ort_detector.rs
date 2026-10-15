@@ -80,7 +80,10 @@ impl Default for D3d12OrtDetectorOptions {
 ///
 /// It takes NV12 D3D12 pictures of any size — a `D3d12Decoder`'s, a
 /// `D3d12Upload`'s, a `D3d12Scaler`'s — made on the same [`D3d12Gpu`] it is
-/// given, and the boxes it finds are fractions of each picture, as
+/// given, and HDR P010, HLG or PQ, which it looks at through an SDR copy as
+/// `CudaOrtDetector` does: a model was trained on SDR pictures, and what it
+/// finds goes on the ten-bit picture itself. The boxes it finds are
+/// fractions of each picture, as
 /// [`Detection`](crate::elements::Detection) describes. The models it reads
 /// are those [`OrtDetectorOptions`] describes, with two things DirectML
 /// asks of them: an opset of 20 or lower, as an operator of a later opset
@@ -559,11 +562,11 @@ impl Element for Detecting {
 }
 
 impl Filter for Detecting {
-    /// Decoded NV12 video in D3D12 textures.
+    /// Decoded NV12, or HDR P010, video in D3D12 textures.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
-                .with_layouts(PixelLayoutSet::NV12),
+                .with_layouts(PixelLayoutSet::YUV420),
         )
     }
 
@@ -848,5 +851,50 @@ mod tests {
         let kept = capture(&mut detector);
         detector.consume(uploaded).expect("reads the next");
         assert_eq!(kept.lock().unwrap().len(), 1, "and hands it on");
+
+        // A ten-bit picture is read through its SDR copy where it is HLG or
+        // PQ, and refused where it has no tone map.
+        for (transfer, readable) in [
+            (ffmpeg::color::TransferCharacteristic::ARIB_STD_B67, true),
+            (ffmpeg::color::TransferCharacteristic::BT709, false),
+        ] {
+            let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::P010LE, 64, 64);
+            for plane in 0..2 {
+                frame.data_mut(plane).fill(0x80);
+            }
+            crate::color::ColorDescription {
+                space: ffmpeg::color::Space::BT2020NCL,
+                range: ffmpeg::color::Range::MPEG,
+                primaries: ffmpeg::color::Primaries::BT2020,
+                transfer,
+            }
+            .describe(&mut frame);
+            let Some(on_gpu) = super::super::fitting::tests::upload_p010(&gpu, &frame) else {
+                return;
+            };
+            let result = detector.consume(MediaBuffer::video(on_gpu));
+            if readable {
+                result.expect("reads an HLG picture");
+                let kept = kept.lock().unwrap();
+                let MediaBuffer::Video(handed) = kept.last().expect("handed on") else {
+                    panic!("a picture goes on");
+                };
+                assert_eq!(
+                    handed.format(),
+                    ffmpeg::format::Pixel::D3D12,
+                    "the picture itself"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::error::Error::OrtDetectorError(
+                            OrtError::UnsupportedD3d12Picture(_)
+                        ))
+                    ),
+                    "{result:?}"
+                );
+            }
+        }
     }
 }

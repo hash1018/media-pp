@@ -290,7 +290,9 @@ compile error with no explanation.
   made vectors 0.9975 and 0.9999 alike the CPU's. `D3d12OrtClassifier`
   names each object with a second model, its box cut by the first shader;
   through DirectML, MobileNetV2 named ten boxes of a picture as the CPU
-  did, the scores within 0.06.
+  did, the scores within 0.06. All three take HDR P010 pictures, HLG or
+  PQ, as the CUDA and Metal ones do: through an SDR copy a compute shader
+  makes by the same tone map, within 2 of 255 of it.
 
 - **An MP4 or MOV file can be laid out fast-start or in fragments**
   (`Mp4Layout`, given to `FileMuxer::create` and, for every segment,

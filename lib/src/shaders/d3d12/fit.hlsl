@@ -1,5 +1,6 @@
-// The kernel `D3d12OrtDetector` fits a picture into a model's input with,
-// the D3D12 counterpart of `fit_nv12` in `shaders/metal/fit.metal` and in
+// The kernels the D3D12 detector and classifier fit a picture into a
+// model's input with, the D3D12 counterparts of `fit_nv12` and `fit_bgra` in
+// `shaders/metal/fit.metal` and in
 // `platform::cuda::driver::ptx::FIT_PTX`: each thread one pixel of the
 // model's `model.x` by `model.y` input, written to three float planes of
 // input `slot.x` of `tensor` — R, then G, then B, or B, G, R where `slot.y`
@@ -13,7 +14,8 @@
 // where a 1080p picture is shrunk to 640 — or, enlarging, of the one it
 // falls in. An NV12 pixel is averaged as Y', Cb and Cr — each source pixel
 // with the chroma sample it shares — and made RGB by the three rows its own
-// colour description gives (`color::yuv_to_rgb_rows`).
+// colour description gives (`color::yuv_to_rgb_rows`); an RGBA one — an HDR
+// picture's SDR copy, made by `tone_map.hlsl` — is averaged as it is.
 //
 // The rectangle is read the way the picture is shown: each pixel of it
 // turned is read from the stored pixel `x_of` and `y_of` name — `origin +
@@ -21,7 +23,8 @@
 // picture shown as stored is the pixel itself.
 //
 // The root signature, in `ort/d3d12/fitting.rs`: `Fit` as 40 root
-// constants at b0, the luma and chroma planes' views at t0 and t1, and the
+// constants at b0, the luma and chroma planes' views at t0 and t1 — or the
+// RGBA picture's at t0, beside a view `fit_rgba` leaves unread — and the
 // tensor as a root UAV at u0.
 
 cbuffer Fit : register(b0)
@@ -43,6 +46,7 @@ cbuffer Fit : register(b0)
 
 Texture2D<float> luma : register(t0);
 Texture2D<float2> chroma : register(t1);
+Texture2D<float4> pixels : register(t0);
 RWStructuredBuffer<float> tensor : register(u0);
 
 static const float MARGIN = 114.0 / 255.0;
@@ -73,6 +77,21 @@ uint2 stored(uint x, uint y)
     return origin + uint2(uint(dot(x_of.xyz, at)), uint(dot(y_of.xyz, at)));
 }
 
+// Input pixel `id`, `rgb` from 0 to 1, into its three planes of the input,
+// in the model's order and values.
+void store(uint2 id, float3 rgb)
+{
+    uint plane = model.x * model.y;
+    uint at = slot.x * 3 * plane + id.y * model.x + id.x;
+    if (slot.y != 0) {
+        rgb = rgb.bgr;
+    }
+    rgb = rgb * scale.rgb + bias.rgb;
+    tensor[at] = rgb.r;
+    tensor[plane + at] = rgb.g;
+    tensor[2 * plane + at] = rgb.b;
+}
+
 #define FIT_ROOT_SIGNATURE \
     "RootConstants(num32BitConstants = 40, b0), " \
     "DescriptorTable(SRV(t0, numDescriptors = 2)), " \
@@ -99,13 +118,27 @@ void fit_nv12(uint3 thread_id : SV_DispatchThreadID)
         float4 yuv = float4(sum / float((hi.x - lo.x) * (hi.y - lo.y)), 1.0);
         rgb = saturate(float3(dot(to_red, yuv), dot(to_green, yuv), dot(to_blue, yuv)));
     }
-    uint plane = model.x * model.y;
-    uint at = slot.x * 3 * plane + id.y * model.x + id.x;
-    if (slot.y != 0) {
-        rgb = rgb.bgr;
+    store(id, rgb);
+}
+
+[RootSignature(FIT_ROOT_SIGNATURE)]
+[numthreads(16, 16, 1)]
+void fit_rgba(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint2 id = thread_id.xy;
+    if (id.x >= model.x || id.y >= model.y) {
+        return;
     }
-    rgb = rgb * scale.rgb + bias.rgb;
-    tensor[at] = rgb.r;
-    tensor[plane + at] = rgb.g;
-    tensor[2 * plane + at] = rgb.b;
+    float3 rgb = float3(MARGIN, MARGIN, MARGIN);
+    uint2 lo, hi;
+    if (covered(id, lo, hi)) {
+        float3 sum = float3(0.0, 0.0, 0.0);
+        for (uint y = lo.y; y < hi.y; y++) {
+            for (uint x = lo.x; x < hi.x; x++) {
+                sum += pixels.Load(int3(stored(x, y), 0)).rgb;
+            }
+        }
+        rgb = sum / float((hi.x - lo.x) * (hi.y - lo.y));
+    }
+    store(id, rgb);
 }

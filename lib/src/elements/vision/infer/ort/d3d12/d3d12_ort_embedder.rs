@@ -49,7 +49,8 @@ use super::{DIRECTML_BATCH, directml_memory, host_memory, object_model_session};
 /// and best after an [`ObjectTracker`](crate::elements::ObjectTracker),
 /// which lets a followed object be embedded once and its vector kept, as
 /// [`OrtEmbedderOptions::reembed`] says. It takes NV12 D3D12 pictures made
-/// on the [`D3d12Gpu`] it is given. The model has one input, `[batch, 3,
+/// on the [`D3d12Gpu`] it is given, and HDR P010, HLG or PQ, through an SDR
+/// copy, as the detector does. The model has one input, `[batch, 3,
 /// height, width]` — 112 for a side it leaves open — and its first output
 /// is a vector for each, made of length 1 here whatever the model makes.
 /// A model that takes any number of objects at once is fixed to take eight
@@ -208,11 +209,11 @@ impl Element for Embedder {
 }
 
 impl Filter for Embedder {
-    /// Decoded NV12 video in D3D12 textures.
+    /// Decoded NV12, or HDR P010, video in D3D12 textures.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
-                .with_layouts(PixelLayoutSet::NV12),
+                .with_layouts(PixelLayoutSet::YUV420),
         )
     }
 
