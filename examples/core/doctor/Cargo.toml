@@ -1,0 +1,26 @@
+[package]
+name = "doctor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# The Vulkan device too. Off by default: the crate's `vulkan` feature builds
+# against FFmpeg's Vulkan context and the Vulkan headers, which a machine
+# being diagnosed may not have yet, and a diagnosis that does not build tells
+# nobody anything.
+vulkan = ["media-pp/vulkan"]
+
+# Only what builds with nothing beyond FFmpeg: the system's own graphics
+# APIs, and CUDA, whose driver is opened when first called.
+[target.'cfg(target_os = "windows")'.dependencies]
+media-pp = { path = "../../../lib", features = ["d3d11", "d3d12", "cuda"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["cuda"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+media-pp = { path = "../../../lib", features = ["videotoolbox", "metal"] }
+
+[target.'cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))'.dependencies]
+media-pp = { path = "../../../lib" }

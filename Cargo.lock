@@ -1238,6 +1238,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctor"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

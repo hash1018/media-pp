@@ -16,6 +16,16 @@ FFmpeg, and why that one — is in
 
 ## FFmpeg
 
+The short way: [`scripts/`](../../scripts) builds the FFmpeg CI uses and
+points the build at it, then `cargo run -p doctor` checks what it found.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-ffmpeg.ps1 -Persist
+cargo run -p doctor
+```
+
+What the script does, by hand:
+
 vcpkg at the tag CI pins, into a dynamic tree:
 
 ```powershell

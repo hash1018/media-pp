@@ -20,6 +20,16 @@ FFmpeg, and why that one — is in
 
 ## FFmpeg
 
+The short way: [`scripts/`](../../scripts) builds the FFmpeg CI uses and
+points the build at it, then `cargo run -p doctor` checks what it found.
+
+```sh
+scripts/setup-ffmpeg.sh && . ~/.local/share/media-pp/ffmpeg/env.sh
+cargo run -p doctor
+```
+
+What the script does, by hand:
+
 vcpkg at the tag CI pins, into a dynamic tree — the default `x64-linux`
 triplet links statically, and would need every library FFmpeg's port pulls
 in linked by hand:
