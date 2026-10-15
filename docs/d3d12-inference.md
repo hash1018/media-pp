@@ -1,8 +1,9 @@
 # Detection on D3D12: DirectML
 
 Status: stages 0 to 2 done, 2026-10-15 — this document and its
-measurements, `D3d12OrtDetector` and `D3d12OrtEmbedder`. Stage 3, gamchum
-on a GPU without NVIDIA, is set aside: gamchum stays on CUDA for now.
+measurements, `D3d12OrtDetector` and `D3d12OrtEmbedder`, and beside them
+`D3d12OrtClassifier`. Stage 3, gamchum on a GPU without NVIDIA, is set
+aside: gamchum stays on CUDA for now.
 
 Built as designed but for one thing found on the way: `ort`'s
 `TensorRefMut::from_raw` locates every tensor it makes in host memory
@@ -121,6 +122,8 @@ D3d12Decoder ─▶ D3d12OrtDetector ─▶ … (the picture passed on, Detectio
    (boxes within a tolerance) and with an `ort-directml` CI job.
 2. **`D3d12OrtEmbedder`**: the same input path with the embedders' crop and
    alignment (five points or box), for gamchum's face and clothes vectors.
+   `D3d12OrtClassifier` came after, the classifiers' box cut through the
+   detector's fit shader.
 3. **gamchum on a GPU without NVIDIA**: analysis chooses D3D12 where CUDA is
    absent. Its other CUDA-only parts need an answer each: scene cuts
    (`CudaCutDetector`; a D3D12 one, or the software one on small copies),

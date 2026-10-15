@@ -305,6 +305,9 @@ pub enum ElementType {
     /// ONNX Runtime object-detection filter on D3D12 pictures, through
     /// DirectML.
     D3d12OrtDetector,
+    /// ONNX Runtime classifier of detected objects on D3D12 pictures,
+    /// through DirectML.
+    D3d12OrtClassifier,
     /// ONNX Runtime embedder of detected objects on D3D12 pictures, through
     /// DirectML.
     D3d12OrtEmbedder,

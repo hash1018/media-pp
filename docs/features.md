@@ -32,7 +32,7 @@ unprefixed type works the same on every platform.
 | `ort-tensorrt` | `CudaOrtDetector`, `CudaOrtClassifier` and `CudaOrtEmbedder` through TensorRT; links TensorRT as well; enables `ort-cuda` | Linux, Windows |
 | `cuda-visual-tracking` | `ObjectTracker`'s following by look on the GPU for CUDA pictures; links cuFFT; enables `cuda` | Linux, Windows |
 | `ort-coreml` | Object detection, classification and embedding on VideoToolbox pictures, `MetalOrtDetector`, `MetalOrtClassifier` and `MetalOrtEmbedder`, through ONNX Runtime's Core ML provider; enables `ort` and `metal` | macOS (Apple silicon) |
-| `ort-directml` | Object detection and embedding on D3D12 pictures, `D3d12OrtDetector` and `D3d12OrtEmbedder`, through ONNX Runtime's DirectML provider on any vendor's GPU; enables `ort` and `d3d12` | Windows |
+| `ort-directml` | Object detection, classification and embedding on D3D12 pictures, `D3d12OrtDetector`, `D3d12OrtClassifier` and `D3d12OrtEmbedder`, through ONNX Runtime's DirectML provider on any vendor's GPU; enables `ort` and `d3d12` | Windows |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
 | `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All |

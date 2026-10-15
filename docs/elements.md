@@ -65,8 +65,9 @@ Each type's own documentation says what it accepts, owns and how it fails.
   application's own, read by its `DetectorDecoder`, finds on each picture
   as `Detections` metadata, in overlapping tiles too where small ones must
   be found (`Tiles`, those worth looking in picked picture by picture by a
-  `TileChooser`); `SwOrtClassifier`, `CudaOrtClassifier` and
-  `MetalOrtClassifier`, which name each object found with a second model;
+  `TileChooser`); `SwOrtClassifier`, `CudaOrtClassifier`,
+  `MetalOrtClassifier` and `D3d12OrtClassifier`, which name each object
+  found with a second model;
   `SwOrtEmbedder`, `CudaOrtEmbedder`, `MetalOrtEmbedder` and
   `D3d12OrtEmbedder`, which make
   each object found a vector — a face straightened by its five points, or

@@ -12,9 +12,9 @@ compile error with no explanation.
 
 ### Breaking
 
-- **`ElementType` has `D3d12OrtDetector` and `D3d12OrtEmbedder`
-  variants**, for the D3D12 detector and embedder — see Added. A `match` on
-  `ElementType` needs an arm for each.
+- **`ElementType` has `D3d12OrtDetector`, `D3d12OrtClassifier` and
+  `D3d12OrtEmbedder` variants**, for the D3D12 detector, classifier and
+  embedder — see Added. A `match` on `ElementType` needs an arm for each.
 
 - **`MetalOrtEmbedder::new` takes `MetalOrtEmbedderOptions`, and Core ML
   keeps what it compiles.** Beside the `OrtEmbedderOptions` every embedder
@@ -287,7 +287,10 @@ compile error with no explanation.
   `docs/d3d12-inference.md`. `D3d12OrtEmbedder` beside it makes what a
   detector found into vectors the same way, each object read through its
   five points or its box by a second shader; on DirectML, SFace and OSNet
-  made vectors 0.9975 and 0.9999 alike the CPU's.
+  made vectors 0.9975 and 0.9999 alike the CPU's. `D3d12OrtClassifier`
+  names each object with a second model, its box cut by the first shader;
+  through DirectML, MobileNetV2 named ten boxes of a picture as the CPU
+  did, the scores within 0.06.
 
 - **An MP4 or MOV file can be laid out fast-start or in fragments**
   (`Mp4Layout`, given to `FileMuxer::create` and, for every segment,

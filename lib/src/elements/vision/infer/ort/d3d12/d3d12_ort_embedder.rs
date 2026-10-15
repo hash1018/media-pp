@@ -8,14 +8,13 @@ use ort::{
     ep::directml::{DMLResource, resource_from_d3d},
     memory::MemoryInfo,
     session::Session,
-    value::ValueType,
 };
 use windows::core::Interface;
 
 use crate::ffmpeg;
 use crate::orientation::Orientations;
 use crate::platform::windows::d3d12_gpu::D3d12Gpu;
-use crate::pp_log::{PpLog, pp_info, pp_warn};
+use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{
@@ -28,16 +27,11 @@ use crate::{
 };
 
 use super::super::OrtError;
-use super::super::classify::{Input, Memory, Plan, apply_each, image_input};
+use super::super::classify::{Input, Memory, Plan, apply_each};
 use super::super::device_tensor;
 use super::super::embed::{OrtEmbedderOptions, Warp, cutouts, embeddings, with_cutouts};
 use super::fitting::Fitting;
-use super::{DirectMl, directml_memory, host_memory};
-
-/// How many objects a model that takes any number at once is fixed to take
-/// for DirectML, which is fastest with every dimension fixed: a picture's
-/// objects go in eights, the inputs past them left as they were.
-const DIRECTML_BATCH: usize = 8;
+use super::{DIRECTML_BATCH, directml_memory, host_memory, object_model_session};
 
 /// Makes each object a detector found on each D3D12 picture into a vector
 /// with an embedding model — what
@@ -112,48 +106,7 @@ impl D3d12OrtEmbedder {
         let pp_log = element_pp_log(ElementType::D3d12OrtEmbedder, &name, None);
         let path = model_path.as_ref().display().to_string();
 
-        // Read on the CPU first: its input, and what it calls a batch or a
-        // side it leaves open, to fix them for DirectML.
-        let probe = Session::builder()
-            .map_err(OrtError::from)?
-            .commit_from_file(model_path.as_ref())
-            .map_err(OrtError::from)?;
-        let open = image_input(&probe, 112)?;
-        let mut fixed: Vec<(String, i64)> = Vec::new();
-        if let Some(ValueType::Tensor {
-            shape,
-            dimension_symbols,
-            ..
-        }) = probe.inputs().first().map(|input| input.dtype())
-        {
-            let named = |axis: usize| {
-                dimension_symbols
-                    .get(axis)
-                    .filter(|symbol| !symbol.is_empty() && shape[axis] <= 0)
-                    .cloned()
-            };
-            for (axis, size) in [(2, open.size.1), (3, open.size.0)] {
-                if let Some(symbol) = named(axis) {
-                    fixed.push((symbol, i64::from(size)));
-                }
-            }
-            match (open.batch, named(0)) {
-                (None, Some(symbol)) => fixed.push((symbol, DIRECTML_BATCH as i64)),
-                (None, None) => pp_warn!(
-                    pp_log: &pp_log,
-                    "the model leaves its batch open without a name to fix it by: \
-                     DirectML runs it at each number of objects as it comes"
-                ),
-                (Some(_), _) => {}
-            }
-        }
-        drop(probe);
-        let fixed: Vec<(&str, i64)> = fixed
-            .iter()
-            .map(|(symbol, size)| (symbol.as_str(), *size))
-            .collect();
-        let session = DirectMl::new(gpu)?.session(model_path.as_ref(), &fixed)?;
-        let input = image_input(&session, 112)?;
+        let (session, input) = object_model_session(gpu, model_path.as_ref(), 112, &pp_log)?;
         let fitting = Fitting::new(gpu, input.size, input.batch.unwrap_or(DIRECTML_BATCH))?;
         // SAFETY: the fitting's live buffer, on the device DirectML was made
         // on; the allocation is dropped before the fitting.
