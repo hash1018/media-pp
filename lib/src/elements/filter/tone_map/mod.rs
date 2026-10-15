@@ -3,4 +3,7 @@
 
 mod windows;
 
+#[cfg(feature = "d3d11")]
 pub use windows::{D3d11ToneMap, D3d11ToneMapError};
+#[cfg(feature = "d3d12")]
+pub use windows::{D3d12ToneMap, D3d12ToneMapError};

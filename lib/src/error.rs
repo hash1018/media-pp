@@ -743,6 +743,11 @@ pub enum Error {
     #[error(transparent)]
     D3d11ToneMapError(#[from] D3d11ToneMapError),
 
+    /// Bringing HDR video to SDR on a D3D12 texture failed.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12ToneMapError(#[from] crate::elements::D3d12ToneMapError),
+
     /// A D3D11-backed NVENC operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]

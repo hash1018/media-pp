@@ -145,7 +145,7 @@ pub use filter::{
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use filter::{
     D3d12Decoder, D3d12DecoderError, D3d12Download, D3d12DownloadError, D3d12Scaler,
-    D3d12ScalerError, D3d12Upload, D3d12UploadError,
+    D3d12ScalerError, D3d12ToneMap, D3d12ToneMapError, D3d12Upload, D3d12UploadError,
 };
 pub use filter::{
     DecodePath, DecodeTarget, DecodeThreadKind, DecodeThreading, SoftwareReason, VideoDecodeBin,

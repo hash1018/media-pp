@@ -8,7 +8,7 @@ unprefixed type works the same on every platform.
 |---|---|---|
 | `cuda` | NVDEC, NVENC, scaling, compositing, upload/download and rendering on CUDA frames | Linux, Windows |
 | `d3d11` | D3D11 decode, encode, scaling, compositing, upload/download and rendering | Windows |
-| `d3d12` | D3D12VA decode, scaling, upload/download, rendering, finding cuts (`D3d12CutDetector`) and drawing or hiding detections (`D3d12DetectionOverlay`) | Windows |
+| `d3d12` | D3D12VA decode, scaling, upload/download, HDR to SDR (`D3d12ToneMap`), rendering, finding cuts (`D3d12CutDetector`) and drawing or hiding detections (`D3d12DetectionOverlay`) | Windows |
 | `vulkan` | Vulkan Video decode and encode, compositing, upload/download; `VulkanWindowRenderer` on Linux | Linux, Windows |
 | `videotoolbox` | VideoToolbox decode and encode, upload/download | macOS |
 | `metal` | Scaling, converting, keying, colour effects and compositing on VideoToolbox frames with Metal, `MetalSharedTextureSource`, `MetalDetectionOverlay`, `ObjectTracker`'s following by look on the GPU for VideoToolbox pictures, and `MetalWindowRenderer`, `MetalRenderer`, `VideoWindow` and, with `coreaudio-renderer`, `Player`; enables `videotoolbox` | macOS |

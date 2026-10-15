@@ -223,6 +223,8 @@ pub enum ElementType {
     D3d11VideoEffect,
     /// D3D11 HDR-to-SDR filter.
     D3d11ToneMap,
+    /// D3D12 HDR-to-SDR filter.
+    D3d12ToneMap,
     /// Dynamic one-to-many branch filter.
     Tee,
     /// A stretch of chain whose contents are replaced while it runs.

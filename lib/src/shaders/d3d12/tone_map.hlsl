@@ -1,17 +1,23 @@
-// HDR brought into SDR BT.709 RGBA on D3D12, for the detectors, classifier
-// and embedder to look at an HDR picture as the CUDA and Metal ones do —
-// core/tone_map.rs's definition, one line to a step, as tone_map.hlsl draws
-// it for D3D11 and tone_map.metal's `hdr_to_bgra` makes it on Metal;
-// `ToneMap` there fills the constants below and says why each step is what
-// it is.
+// HDR brought into SDR BT.709 on D3D12 — core/tone_map.rs's definition, one
+// line to a step, as tone_map.hlsl draws it for D3D11 and tone_map.metal's
+// `hdr_to_bgra` makes it on Metal; `ToneMap` there fills the constants below
+// and says why each step is what it is.
 //
-// Each thread one pixel of the picture, `size` in pixels: a P010 picture's
-// luma read through an R16 view and its chroma through an R16G16 one, each
-// sample as it is stored, and the SDR copy written through an RGBA8 view.
+// Two kernels, one step for each pixel (`to_sdr`), each picture's luma read
+// through an R16 or R8 view and its chroma through an R16G16 or R8G8 one,
+// each sample as it is stored:
 //
-// The root signature, in `ort/d3d12/fitting.rs`: `ToneMap` as 32 root
-// constants at b0, and a table of the luma and chroma views at t0 and t1
-// and the copy's at u0.
+// - `hdr_to_rgba`, the detectors' SDR copy, in `ort/d3d12/fitting.rs`: a
+//   thread a pixel, written through an RGBA8 view at u0.
+// - `hdr_to_nv12`, `D3d12ToneMap`'s: a thread a 2x2 block, each pixel's SDR
+//   colour taken as the eight bits an RGB picture holds, made BT.709
+//   limited-range Y' through an R8 view at u0, and the block's average
+//   colour its Cb and Cr through an R8G8 view at u1 — the conversion the
+//   CUDA converter's `bgra_to_luma` and `bgra_to_chroma` make, after the
+//   tone map it makes on the way to BGRA.
+//
+// The root signature: `ToneMap` as 32 root constants at b0, and a table of
+// the luma and chroma views at t0 and t1 and what is written at u0 (and u1).
 
 cbuffer ToneMap : register(b0)
 {
@@ -33,6 +39,8 @@ cbuffer ToneMap : register(b0)
 Texture2D<float> luma : register(t0);
 Texture2D<float2> chroma : register(t1);
 RWTexture2D<unorm float4> sdr : register(u0);
+RWTexture2D<unorm float> sdr_luma : register(u0);
+RWTexture2D<unorm float2> sdr_chroma : register(u1);
 
 static const float PQ_M1 = 2610.0 / 16384.0;
 static const float PQ_M2 = 2523.0 / 4096.0 * 128.0;
@@ -79,18 +87,9 @@ float eetf(float normalised)
         + (-2.0 * t3 + 3.0 * t2) * target_peak;
 }
 
-#define TONE_MAP_ROOT_SIGNATURE \
-    "RootConstants(num32BitConstants = 32, b0), " \
-    "DescriptorTable(SRV(t0, numDescriptors = 2), UAV(u0))"
-
-[RootSignature(TONE_MAP_ROOT_SIGNATURE)]
-[numthreads(16, 16, 1)]
-void hdr_to_rgba(uint3 thread_id : SV_DispatchThreadID)
+// Pixel `id`'s Y'CbCr, normalised as read, to gamma-encoded SDR BT.709.
+float3 to_sdr(uint2 id)
 {
-    uint2 id = thread_id.xy;
-    if (id.x >= size.x || id.y >= size.y) {
-        return;
-    }
     float4 yuv = float4(luma.Load(int3(id, 0)), chroma.Load(int3(id / 2, 0)), 1.0);
     float3 signal = saturate(float3(
         dot(yuv, yuv_to_red),
@@ -113,5 +112,55 @@ void hdr_to_rgba(uint3 thread_id : SV_DispatchThreadID)
     }
 
     float3 white = saturate(bt709 * scale / SDR_WHITE_NITS);
-    sdr[id] = float4(pow(white, 1.0 / 2.2), 1.0);
+    return pow(white, 1.0 / 2.2);
+}
+
+#define TONE_MAP_ROOT_SIGNATURE \
+    "RootConstants(num32BitConstants = 32, b0), " \
+    "DescriptorTable(SRV(t0, numDescriptors = 2), UAV(u0))"
+
+[RootSignature(TONE_MAP_ROOT_SIGNATURE)]
+[numthreads(16, 16, 1)]
+void hdr_to_rgba(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint2 id = thread_id.xy;
+    if (id.x >= size.x || id.y >= size.y) {
+        return;
+    }
+    sdr[id] = float4(to_sdr(id), 1.0);
+}
+
+// Each channel's BT.709 limited-range Y', Cb, Cr from R'G'B' of 0 to 255.
+float3 bt709_limited(float3 rgb)
+{
+    float3 unit = rgb / 255.0;
+    float y = 0.2126 * unit.r + 0.7152 * unit.g + 0.0722 * unit.b;
+    float cb = (unit.b - y) / 1.8556;
+    float cr = (unit.r - y) / 1.5748;
+    return float3(16.0 + 219.0 * y, 128.0 + 224.0 * cb, 128.0 + 224.0 * cr);
+}
+
+#define NV12_ROOT_SIGNATURE \
+    "RootConstants(num32BitConstants = 32, b0), " \
+    "DescriptorTable(SRV(t0, numDescriptors = 2), UAV(u0, numDescriptors = 2))"
+
+[RootSignature(NV12_ROOT_SIGNATURE)]
+[numthreads(8, 8, 1)]
+void hdr_to_nv12(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint2 block = thread_id.xy;
+    if (block.x * 2 >= size.x || block.y * 2 >= size.y) {
+        return;
+    }
+    float3 sum = float3(0.0, 0.0, 0.0);
+    [unroll]
+    for (uint i = 0; i < 4; i++) {
+        uint2 id = block * 2 + uint2(i % 2, i / 2);
+        // The eight bits an RGB picture of it would hold.
+        float3 rgb = round(to_sdr(id) * 255.0);
+        sum += rgb;
+        sdr_luma[id] = round(bt709_limited(rgb).x) / 255.0;
+    }
+    float3 ycbcr = bt709_limited(sum / 4.0);
+    sdr_chroma[block] = round(ycbcr.yz) / 255.0;
 }

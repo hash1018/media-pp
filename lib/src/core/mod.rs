@@ -46,7 +46,7 @@ pub mod timing;
 #[cfg(any(
     feature = "cuda",
     all(target_os = "windows", feature = "d3d11"),
-    all(target_os = "windows", feature = "ort-directml"),
+    all(target_os = "windows", feature = "d3d12"),
     all(target_os = "macos", feature = "metal")
 ))]
 pub(crate) mod tone_map;
