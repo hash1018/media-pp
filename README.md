@@ -63,7 +63,9 @@ with a first pipeline and a first player.
 | [All documentation](docs/README.md) | Building, design records, benchmarks, contributing |
 
 API documentation: [docs.rs] for the shared and Linux API, and the
-[Windows] and [macOS] API pages for everything on those platforms.
+[Windows] and [macOS] API pages for everything on those platforms. The pages
+here follow `main`, which can be ahead of the release on crates.io: what is
+not released yet is under *Unreleased* in the changelog.
 
 The library is in `lib/`, and each directory under `examples/` is a crate of
 its own. [`CONTRIBUTING.md`](CONTRIBUTING.md) says how to test a change, and

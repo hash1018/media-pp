@@ -148,7 +148,7 @@ pub enum CudaEncoderError {
 /// Encodes GPU-resident `Pixel::CUDA` `Video` frames into `Packet`s on the
 /// GPU's dedicated NVENC block — the CUDA counterpart to
 /// [`crate::elements::SwEncoder`] and the sibling of
-/// `D3d11VideoEncoder`. A `RawFilter`: receives via `RawSink`,
+/// `D3d11VideoEncoder`. A filter: takes each buffer and
 /// pushes what it produces into its own single src pad.
 ///
 /// Fed by [`crate::elements::CudaDecoder`] this is a transcode that never

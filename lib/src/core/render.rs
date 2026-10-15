@@ -166,7 +166,8 @@ impl<R: Sink> RawSink for SinkStage<R> {
 /// ambiguous — implement one or the other.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is neither a `RawSink` nor a `Sink`",
-    note = "implement `Sink` for a terminal that does something with each buffer, or `RawSink` for one that routes the stream itself"
+    note = "implement `Sink` for a terminal that does something with each buffer, or `RawSink` for one that routes the stream itself",
+    note = "a chain ends at a `DetachedBranch` — a `Tee`'s fan-out — through `to_branch`, not `to`"
 )]
 pub trait IntoTerminal<M>: sealed::Sealed<M> {
     /// The terminal this is, whichever kind it is.

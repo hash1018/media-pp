@@ -110,7 +110,7 @@ pub struct SwAudioEncoderOptions {
 
 /// Encodes `Audio` frames into `Packet`s via a software encoder (see
 /// [`AudioCodec`]) — the audio sibling of
-/// [`crate::elements::SwEncoder`]. A `RawFilter`: receives via `RawSink`,
+/// [`crate::elements::SwEncoder`]. A filter: takes each buffer and
 /// pushes what it produces into its own (single) src pad.
 ///
 /// Unlike `SwEncoder` (which requires exactly `Pixel::YUV420P` in and

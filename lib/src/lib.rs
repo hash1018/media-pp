@@ -1,13 +1,20 @@
 //! A small, GStreamer-flavored media pipeline library built on
 //! [`ffmpeg-next`](https://docs.rs/ffmpeg-next).
 //!
-//! A pipeline has one or more [`RawSource`](element::RawSource)s,
-//! each feeding a graph of [`RawFilter`](element::RawFilter)s that ends in a
-//! [`RawSink`](element::RawSink):
+//! A pipeline has one or more sources, each feeding a graph of filters that
+//! ends in sinks:
 //!
 //! ```text
 //! FileDemuxer -> SwDecoder -> Queue -> Pacer -> FrameCounter
 //! ```
+//!
+//! An element of your own is a [`Source`](element::Source), a
+//! [`Filter`](element::Filter) or a [`Sink`](element::Sink) — see
+//! [Writing a filter](#writing-a-filter) below. The framework turns each into
+//! the [`RawSource`](element::RawSource), [`RawFilter`](element::RawFilter)
+//! or [`RawSink`](element::RawSink) a graph is wired from, which only an
+//! element routing the stream itself — a queue, a tee, a muxer of several
+//! tracks — implements directly.
 //!
 //! Each source registered with a [`Pipeline`](pipeline::Pipeline) runs on its
 //! own background thread. Within that source's graph,

@@ -131,7 +131,7 @@ pub enum VulkanEncoderError {
 
 /// Encodes NV12 Vulkan frames into `Packet`s with Vulkan Video, on a
 /// [`VulkanDevice`] — on any GPU whose driver encodes through Vulkan. The
-/// Vulkan counterpart of `CudaEncoder`, and a `RawFilter` as it is.
+/// Vulkan counterpart of `CudaEncoder`, and a filter as it is.
 ///
 /// Fed by [`crate::elements::VulkanDecoder`] this is a transcode that never
 /// brings a pixel to the CPU; fed by an NV12

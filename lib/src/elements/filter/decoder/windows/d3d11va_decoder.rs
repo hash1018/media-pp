@@ -125,7 +125,7 @@ const FFMPEG_WORK_SURFACES: usize = 4;
 /// `D3d12Decoder`, for a pipeline built entirely on
 /// one shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
 /// docs on why that means no explicit fence/sync is needed anywhere in
-/// this stack, unlike the D3D12 side). A `RawFilter`, same shape as
+/// this stack, unlike the D3D12 side). A filter, the same shape as
 /// `SwDecoder`/`D3d12Decoder`.
 pub struct D3d11Decoder {
     pp_log: PpLog,

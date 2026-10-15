@@ -83,7 +83,7 @@ const LAYOUTS: PixelLayoutSet =
 /// encoder to take. The macOS sibling of `VulkanUpload`;
 /// [`crate::elements::VideoToolboxDownload`] is the mirror of this element.
 ///
-/// A `RawFilter`: receives via `RawSink`, pushes the uploaded frame into its own
+/// A filter: takes each buffer and pushes the uploaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///

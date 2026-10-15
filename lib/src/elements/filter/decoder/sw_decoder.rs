@@ -87,7 +87,7 @@ pub struct DecodeThreading {
 }
 
 /// Decodes one stream's `Packet`s into `Frame`s in software (plain
-/// libavcodec, no hardware acceleration). A `RawFilter`: receives via `RawSink`,
+/// libavcodec, no hardware acceleration). A filter: takes each buffer and
 /// pushes what it produces into its own (single) src pad.
 ///
 /// One packet can turn into zero, one, or several frames (B-frame

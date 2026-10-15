@@ -87,7 +87,8 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see building on
   itself is part of macOS.
 - **`ort-directml`**: a D3D12 GPU of any vendor. ONNX Runtime's build with
   DirectML is fetched as the CPU one is — with `ort-tensorrt`, the one build
-  that has both — and `DirectML.dll` goes beside the program. Export the model
+  that has both — and its `DirectML.dll` is put beside the program in the
+  target directory by the build; ship it beside yours. Export the model
   at **opset 20 or lower** — Ultralytics' export picks the newest opset its
   PyTorch knows, 22 or later, unless told `opset=20` — and with half-precision weights: DirectML hands the
   operators of a later opset to the CPU, many times slower, and the

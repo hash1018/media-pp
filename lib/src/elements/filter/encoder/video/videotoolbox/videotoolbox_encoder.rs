@@ -158,7 +158,7 @@ pub enum VideoToolboxEncoderError {
 
 /// Encodes NV12, P010 or BGRA VideoToolbox frames into `Packet`s with the Mac's
 /// hardware encoder, through FFmpeg's VideoToolbox encoders — the macOS counterpart
-/// of `CudaEncoder` and `VideoToolboxEncoder`, and a `RawFilter` as they are.
+/// of `CudaEncoder` and `VideoToolboxEncoder`, and a filter as they are.
 ///
 /// Fed by [`crate::elements::VideoToolboxDecoder`] this is a transcode that
 /// never brings a pixel to the CPU; fed by

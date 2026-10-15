@@ -1,5 +1,9 @@
 # media-pp documentation
 
+These pages follow the repository's `main` branch, which can be ahead of the
+release on crates.io. What is not released yet is under *Unreleased* in
+[`CHANGELOG.md`](../CHANGELOG.md); [docs.rs] documents the released crate.
+
 ## Start here
 
 | | |

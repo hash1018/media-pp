@@ -53,7 +53,7 @@ pub enum CudaDecoderError {
 }
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames on
-/// NVDEC, tagged [`ffmpeg::format::Pixel::CUDA`]. A `RawFilter`, same shape as
+/// NVDEC, tagged [`ffmpeg::format::Pixel::CUDA`]. A filter, the same shape as
 /// [`crate::elements::SwDecoder`]/`D3d11Decoder`.
 ///
 /// Frames this produces are still plain `MediaBuffer::Video` — `Pacer`,

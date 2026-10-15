@@ -59,7 +59,7 @@ pub enum CudaDownloadError {
 /// hardware-decoded stream, for instance — goes
 /// `CudaDecoder -> CudaDownload -> SwScaler -> ...`.
 ///
-/// A `RawFilter`: receives via `RawSink`, pushes the downloaded frame into its own
+/// A filter: takes each buffer and pushes the downloaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///

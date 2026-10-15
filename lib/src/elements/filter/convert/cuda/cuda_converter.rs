@@ -69,7 +69,7 @@ pub enum CudaConverterError {
 
 /// Converts CUDA-resident BGRA surfaces into CUDA-resident NV12 ones.
 ///
-/// A `RawFilter`: receives via `RawSink`, pushes the converted frame into its own
+/// A filter: takes each buffer and pushes the converted frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///

@@ -175,7 +175,7 @@ impl D3d11ScalerFormat {
 
 /// Resizes and, when asked, converts GPU-resident `Pixel::D3D11` `Video`
 /// frames without ever touching the CPU, through D3D11's own video
-/// processor (`VideoProcessorBlt`). A `RawFilter`: receives via `RawSink`, pushes
+/// processor (`VideoProcessorBlt`). A filter: takes each buffer and pushes
 /// the scaled frame into its own single src pad.
 ///
 /// This is what makes a resolution change possible inside a D3D11 pipeline

@@ -53,7 +53,7 @@ pub enum VideoToolboxDecoderError {
 /// Decodes one video stream's `Packet`s into VideoToolbox frames through
 /// FFmpeg's VideoToolbox hwaccel, on a [`VideoToolboxDevice`] — the Mac's
 /// own media engine, for H.264, HEVC and whatever else this Mac decodes in
-/// hardware. A `RawFilter`, same shape as [`crate::elements::SwDecoder`].
+/// hardware. A filter, the same shape as [`crate::elements::SwDecoder`].
 ///
 /// Frames this produces are still plain `MediaBuffer::Video`, tagged
 /// [`ffmpeg::format::Pixel::VIDEOTOOLBOX`]: `Pacer`, `Tee` and `Queue` take

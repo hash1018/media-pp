@@ -53,7 +53,7 @@ pub enum SwScalerError {
 /// Converts/resizes decoded video frames — pixel format (e.g. the YUV a
 /// decoder produces -> the RGB most inference models expect) and
 /// resolution (source resolution -> a model's fixed input size) in one
-/// pass via `libswscale`. A `RawFilter`: receives via `RawSink`, pushes the
+/// pass via `libswscale`. A filter: takes each buffer and pushes the
 /// converted frame on through its own (single) src pad.
 ///
 /// Typical placement: right before something with a fixed input

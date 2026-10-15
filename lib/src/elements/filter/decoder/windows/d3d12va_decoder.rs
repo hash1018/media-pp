@@ -62,7 +62,7 @@ pub enum D3d12DecoderError {
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
 /// via D3D12VA hardware acceleration, instead of [`crate::elements::SwDecoder`]'s
-/// plain libavcodec software path. A `RawFilter`, same shape as `SwDecoder`.
+/// plain libavcodec software path. A filter, the same shape as `SwDecoder`.
 ///
 /// Frames this produces are still plain `MediaBuffer::Video` — nothing
 /// downstream needs to change to receive them. `Pacer`/`Tee`/

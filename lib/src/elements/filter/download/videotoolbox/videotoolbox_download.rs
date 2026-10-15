@@ -63,7 +63,7 @@ const LAYOUTS: PixelLayoutSet =
 /// hold — the mirror of [`crate::elements::VideoToolboxUpload`], and what
 /// lets a VideoToolbox frame reach anything that reads pixel bytes.
 ///
-/// A `RawFilter`: receives via `RawSink`, pushes the downloaded frame into its own
+/// A filter: takes each buffer and pushes the downloaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///

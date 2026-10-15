@@ -50,8 +50,8 @@ pub enum SwChromaKeyError {
 
 /// Keys a solid background color out of a decoded BGRA frame into alpha —
 /// the software half of this crate's chroma-key support, the GPU-resident
-/// other half being `D3d11ChromaKey`. A `RawFilter`:
-/// receives via `RawSink`, pushes the keyed frame on through its own (single)
+/// other half being `D3d11ChromaKey`. A filter: takes each buffer and
+/// pushes the keyed frame on through its own (single)
 /// src pad.
 ///
 /// Expects `BGRA` input — the same format [`crate::elements::SwVideoCompositor`]/

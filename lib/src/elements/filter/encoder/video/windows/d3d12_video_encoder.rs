@@ -138,7 +138,7 @@ pub enum D3d12VideoEncoderError {
 /// Encodes NV12 D3D12 frames into `Packet`s with D3D12 Video, on the
 /// [`D3d12Gpu`] the frames are made on — on any vendor's GPU whose driver
 /// encodes through D3D12. The D3D12 counterpart of `VulkanEncoder`, and a
-/// `RawFilter` as it is.
+/// a filter as it is.
 ///
 /// Fed by [`crate::elements::D3d12Decoder`] this is a transcode that never
 /// brings a pixel to the CPU; fed by a

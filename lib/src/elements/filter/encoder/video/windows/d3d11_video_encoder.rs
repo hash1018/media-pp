@@ -320,7 +320,7 @@ pub struct D3d11VideoEncoderOptions {
 /// [`crate::elements::SwEncoder`], for a pipeline built entirely on one
 /// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own docs
 /// on why that means no explicit fence/sync is needed anywhere in this
-/// stack). A `RawFilter`: receives via `RawSink`, pushes what it produces into
+/// stack). A filter: takes each buffer and pushes what it produces into
 /// its own single src pad.
 ///
 /// # Why the input texture is copied rather than handed over directly

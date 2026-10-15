@@ -45,7 +45,7 @@ pub enum SwVideoEffectError {
 }
 
 /// Applies a [`VideoEffect`] — a colour correction or a luma key — to a
-/// decoded BGRA frame, on the CPU. A `RawFilter`: receives via `RawSink`, pushes
+/// decoded BGRA frame, on the CPU. A filter: takes each buffer and pushes
 /// the result on through its own single src pad.
 ///
 /// The software member of a family whose GPU members are `D3d11VideoEffect`

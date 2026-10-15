@@ -163,7 +163,7 @@ impl ChromaKeyConstants {
 /// frame into its alpha channel without ever touching the CPU — the D3D11
 /// half of this crate's chroma-key support, doing through a pixel shader
 /// exactly what [`crate::elements::SwChromaKey`] does per pixel on the CPU.
-/// A `RawFilter`: receives via `RawSink`, pushes the keyed frame on through its
+/// A filter: takes each buffer and pushes the keyed frame on through its
 /// own single src pad.
 ///
 /// The point is placement: `DxgiCaptureSource -> D3d11ChromaKey ->

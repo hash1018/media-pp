@@ -110,8 +110,8 @@ impl CudaScalerInterp {
 }
 
 /// Resizes GPU-resident `Pixel::CUDA` `Video` frames without ever touching
-/// the CPU, through libavfilter's `scale_cuda`. A `RawFilter`: receives via
-/// `RawSink`, pushes the scaled frame into its own single src pad.
+/// the CPU, through libavfilter's `scale_cuda`. A filter: takes each buffer
+/// and pushes the scaled frame into its own single src pad.
 ///
 /// This is what makes a hardware transcode at a different resolution
 /// possible at all — `CudaDecoder -> CudaScaler -> CudaEncoder` stays on the

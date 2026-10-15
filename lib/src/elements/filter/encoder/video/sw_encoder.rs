@@ -241,8 +241,8 @@ pub struct SwEncoderOptions {
 
 /// Encodes `Video` frames in [`SwEncoderOptions::pixel_format`] (`YUV420P`
 /// for most) into `Packet`s via a software encoder (see [`VideoCodec`]) — the mirror image of
-/// [`crate::elements::SwDecoder`]'s decode direction. A `RawFilter`: receives
-/// via `RawSink`, pushes what it produces into its own (single) src pad.
+/// [`crate::elements::SwDecoder`]'s decode direction. A filter: takes each buffer and
+/// pushes what it produces into its own (single) src pad.
 ///
 /// One frame can turn into zero or one packets per `send_frame` (B-frame
 /// reordering delays some frames' packets until later ones arrive, or

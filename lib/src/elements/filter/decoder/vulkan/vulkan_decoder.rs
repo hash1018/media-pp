@@ -57,7 +57,7 @@ pub enum VulkanDecoderError {
 
 /// Decodes one video stream's `Packet`s into Vulkan frames with Vulkan
 /// Video, on a [`VulkanDevice`] — on any GPU whose driver decodes the codec
-/// through Vulkan: NVIDIA's, and AMD's and Intel's with Mesa. A `RawFilter`, same
+/// through Vulkan: NVIDIA's, and AMD's and Intel's with Mesa. A filter, the same
 /// shape as [`crate::elements::SwDecoder`].
 ///
 /// Frames this produces are still plain `MediaBuffer::Video`, tagged
