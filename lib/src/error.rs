@@ -880,6 +880,11 @@ pub enum Error {
     #[error(transparent)]
     MetalDetectionOverlayError(#[from] crate::elements::MetalDetectionOverlayError),
 
+    /// Drawing detections onto a D3D12 picture failed.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12DetectionOverlayError(#[from] crate::elements::D3d12DetectionOverlayError),
+
     /// An analytics element was given a zone or line it cannot count.
     #[error(transparent)]
     ObjectAnalyticsError(#[from] crate::elements::ObjectAnalyticsError),

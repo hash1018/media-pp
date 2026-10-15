@@ -13,8 +13,10 @@ compile error with no explanation.
 ### Breaking
 
 - **`ElementType` has `D3d12OrtDetector`, `D3d12OrtClassifier`,
-  `D3d12OrtEmbedder` and `D3d12CutDetector` variants**, for the D3D12
-  detector, classifier, embedder and cut detector — see Added. A `match` on `ElementType` needs an arm for each.
+  `D3d12OrtEmbedder`, `D3d12CutDetector` and `D3d12DetectionOverlay`
+  variants**, for the D3D12 detector, classifier, embedder, cut detector
+  and overlay — see Added. A `match` on `ElementType` needs an arm for
+  each.
 
 - **`MetalOrtEmbedder::new` takes `MetalOrtEmbedderOptions`, and Core ML
   keeps what it compiles.** Beside the `OrtEmbedderOptions` every embedder
@@ -274,6 +276,16 @@ compile error with no explanation.
   | `SegmentedFileMuxer::create(policy, naming)` | `SegmentedFileMuxer::create(policy, Mp4Layout::Standard, naming)` |
 
 ### Added
+
+- **`D3d12DetectionOverlay` draws and hides detections on D3D12
+  pictures**, with the `d3d12` feature: what `CudaDetectionOverlay` and
+  `MetalDetectionOverlay` do, on any vendor's GPU — boxes, labels, zones
+  and lines painted on a copy of each NV12 picture, and faces hidden by a
+  mosaic, a blur or a fill, of the box or the ellipse inside it, faded at
+  the edge where asked, in NV12 and in HDR P010. What the CPU works out
+  with a division or a square root it works out here too and hands to the
+  shaders, as HLSL's are not correctly rounded, so the bytes are
+  `SwDetectionOverlay`'s exactly.
 
 - **`D3d12CutDetector` finds cuts in D3D12 pictures**, with the `d3d12`
   feature: what `CudaCutDetector` and `MetalCutDetector` do, on any

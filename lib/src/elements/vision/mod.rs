@@ -19,8 +19,8 @@
 //! - `analytics` — making sense of it: [`ObjectAnalytics`], which counts
 //!   the objects in zones of the picture and across lines.
 //! - `overlay` — drawing what was found onto the pictures:
-//!   [`SwDetectionOverlay`], `CudaDetectionOverlay` and
-//!   `MetalDetectionOverlay`.
+//!   [`SwDetectionOverlay`], `CudaDetectionOverlay`,
+//!   `D3d12DetectionOverlay` and `MetalDetectionOverlay`.
 //!
 //! The data and the overlays need no feature of their own; only inference
 //! brings a runtime with it.
@@ -61,6 +61,8 @@ pub use overlay::{
 };
 #[cfg(feature = "cuda")]
 pub use overlay::{CudaDetectionOverlay, CudaDetectionOverlayError};
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use overlay::{D3d12DetectionOverlay, D3d12DetectionOverlayError};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use overlay::{MetalDetectionOverlay, MetalDetectionOverlayError};
 pub use track::{ObjectTracker, TrackerOptions};

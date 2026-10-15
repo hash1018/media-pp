@@ -176,8 +176,13 @@ impl Commands {
     /// Closes the list and submits it, after a GPU-side wait for each of
     /// `waits` — a fence and the value whatever wrote a resource it reads
     /// signals it at: sharing a device does not order this queue after
-    /// another's. It returns once the work is queued.
-    pub(crate) fn submit(&mut self, waits: &[(&ID3D12Fence, u64)]) -> windows::core::Result<()> {
+    /// another's — and signals each of `signals` once it has run, as what
+    /// it wrote is waited for. It returns once the work is queued.
+    pub(crate) fn submit(
+        &mut self,
+        waits: &[(&ID3D12Fence, u64)],
+        signals: &[(&ID3D12Fence, u64)],
+    ) -> windows::core::Result<()> {
         // SAFETY: the list is this one's, open since `begin`; the fences are
         // live.
         unsafe {
@@ -187,6 +192,9 @@ impl Commands {
             }
             self.queue
                 .ExecuteCommandLists(&[Some(self.list.cast::<ID3D12CommandList>()?)]);
+            for &(fence, value) in signals {
+                self.queue.Signal(fence, value)?;
+            }
             self.submitted += 1;
             self.queue.Signal(&self.fence, self.submitted)
         }
@@ -261,13 +269,145 @@ pub(crate) unsafe fn buffer(
     Ok(resource.expect("CreateCommittedResource succeeded without a resource"))
 }
 
+/// A texture of `format`, `size`, holding `data` — rows of `bytes_per_row`
+/// bytes, `pitch` apart — for a shader to read: uploaded through
+/// `commands`, which it waits for, and left `NON_PIXEL_SHADER_RESOURCE`.
+pub(crate) fn upload_texture(
+    device: &ID3D12Device,
+    commands: &mut Commands,
+    format: DXGI_FORMAT,
+    (width, height): (u32, u32),
+    (data, pitch, bytes_per_row): (&[u8], usize, usize),
+) -> windows::core::Result<ID3D12Resource> {
+    let desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        Alignment: 0,
+        Width: u64::from(width),
+        Height: height,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: format,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    // SAFETY: a live device, descriptions built here and correctly typed
+    // out-parameters; the staging buffer is written while mapped, within the
+    // footprint the device gave, and outlives the copy, which is waited for.
+    unsafe {
+        let mut texture: Option<ID3D12Resource> = None;
+        device.CreateCommittedResource(
+            &D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_DEFAULT,
+                ..Default::default()
+            },
+            D3D12_HEAP_FLAG_NONE,
+            &desc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut texture,
+        )?;
+        let texture = texture.expect("CreateCommittedResource succeeded without a resource");
+        let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+        let mut total = 0u64;
+        device.GetCopyableFootprints(
+            &desc,
+            0,
+            1,
+            0,
+            Some(&mut footprint),
+            None,
+            None,
+            Some(&mut total),
+        );
+        let staging = buffer(
+            device,
+            total,
+            D3D12_HEAP_TYPE_UPLOAD,
+            D3D12_RESOURCE_FLAG_NONE,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+        )?;
+        let mut mapped = std::ptr::null_mut();
+        staging.Map(0, None, Some(&mut mapped))?;
+        let row_pitch = footprint.Footprint.RowPitch as usize;
+        for row in 0..height as usize {
+            std::ptr::copy_nonoverlapping(
+                data[row * pitch..][..bytes_per_row].as_ptr(),
+                mapped
+                    .cast::<u8>()
+                    .add(footprint.Offset as usize + row * row_pitch),
+                bytes_per_row,
+            );
+        }
+        staging.Unmap(0, None);
+        let list = commands.begin(None)?;
+        let mut to = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: ManuallyDrop::new(Some(texture.clone())),
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: 0,
+            },
+        };
+        let mut from = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: ManuallyDrop::new(Some(staging.clone())),
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                PlacedFootprint: footprint,
+            },
+        };
+        list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
+        ManuallyDrop::drop(&mut to.pResource);
+        ManuallyDrop::drop(&mut from.pResource);
+        transition(
+            &list,
+            &texture,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        );
+        commands.submit(&[], &[])?;
+        commands.wait_idle()?;
+        Ok(texture)
+    }
+}
+
+/// Records a copy of subresource `from_plane` of `from` into subresource
+/// `to_plane` of `to` — a plane of a two-plane texture, or a texture of one
+/// plane as subresource 0.
+///
+/// # Safety
+///
+/// `list` is open, and both resources live and in the states a copy wants.
+pub(crate) unsafe fn copy_plane(
+    list: &ID3D12GraphicsCommandList,
+    (to, to_plane): (&ID3D12Resource, u32),
+    (from, from_plane): (&ID3D12Resource, u32),
+) {
+    let location = |resource: &ID3D12Resource, plane: u32| D3D12_TEXTURE_COPY_LOCATION {
+        pResource: ManuallyDrop::new(Some(resource.clone())),
+        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            SubresourceIndex: plane,
+        },
+    };
+    let (mut into, mut out_of) = (location(to, to_plane), location(from, from_plane));
+    // SAFETY: the caller's open list and live resources; the references the
+    // locations took are released after.
+    unsafe {
+        list.CopyTextureRegion(&into, 0, 0, 0, &out_of, None);
+        ManuallyDrop::drop(&mut into.pResource);
+        ManuallyDrop::drop(&mut out_of.pResource);
+    }
+}
+
 /// A texture of `format`, `width` by `height`, that a shader writes, made
 /// in `UNORDERED_ACCESS`.
 ///
 /// # Safety
 ///
 /// `device` is live.
-#[cfg(feature = "ort-directml")]
 pub(crate) unsafe fn writable_texture(
     device: &ID3D12Device,
     format: DXGI_FORMAT,
@@ -324,7 +464,6 @@ pub(crate) fn plane_view(format: DXGI_FORMAT, plane_slice: u32) -> D3D12_SHADER_
 }
 
 /// One plane of a texture written as `format`.
-#[cfg(feature = "ort-directml")]
 pub(crate) fn plane_write_view(
     format: DXGI_FORMAT,
     plane_slice: u32,

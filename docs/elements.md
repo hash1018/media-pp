@@ -16,10 +16,10 @@ Each type's own documentation says what it accepts, owns and how it fails.
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` | `VulkanVideoCompositor` | `MetalVideoCompositor` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` | `VulkanChromaKey`, `VulkanVideoEffect` | `MetalChromaKey`, `MetalVideoEffect` |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` | `VulkanUpload`, `VulkanDownload` | `VideoToolboxUpload`, `VideoToolboxDownload` |
-| Detect | `SwOrtDetector` | | | `CudaOrtDetector` | | `MetalOrtDetector` |
-| Classify what was found | `SwOrtClassifier` | | | `CudaOrtClassifier` | | `MetalOrtClassifier` |
-| Embed what was found | `SwOrtEmbedder` | | | `CudaOrtEmbedder` | | `MetalOrtEmbedder` |
-| Draw or hide detections | `SwDetectionOverlay` | | | `CudaDetectionOverlay` | | `MetalDetectionOverlay` |
+| Detect | `SwOrtDetector` | | `D3d12OrtDetector` | `CudaOrtDetector` | | `MetalOrtDetector` |
+| Classify what was found | `SwOrtClassifier` | | `D3d12OrtClassifier` | `CudaOrtClassifier` | | `MetalOrtClassifier` |
+| Embed what was found | `SwOrtEmbedder` | | `D3d12OrtEmbedder` | `CudaOrtEmbedder` | | `MetalOrtEmbedder` |
+| Draw or hide detections | `SwDetectionOverlay` | | `D3d12DetectionOverlay` | `CudaDetectionOverlay` | | `MetalDetectionOverlay` |
 | Render | `VideoWindow` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` | `VulkanWindowRenderer` (Linux) | `MetalWindowRenderer`, `MetalRenderer` |
 
 - `VideoDecodeBin` and `VideoEncodeBin` pick among these for a stream: the
@@ -84,8 +84,8 @@ Each type's own documentation says what it accepts, owns and how it fails.
   `SceneCut`, where a tracker starts over; `StreamMux`, which gathers a picture of each of several
   streams into a batch for a model to take at once, and the demux its
   handle makes, which splits the streams out again; `SwDetectionOverlay`,
-  `CudaDetectionOverlay` and `MetalDetectionOverlay`, which draw those boxes
-  and labels onto the picture, and an `ObjectAnalytics`'s zones and lines
+  `CudaDetectionOverlay`, `MetalDetectionOverlay` and `D3d12DetectionOverlay`,
+  which draw those boxes and labels onto the picture, and an `ObjectAnalytics`'s zones and lines
   with their counts, each as `OverlayParts` says; and hide what was found —
   faces, number plates — by a mosaic, a blur or a fill, of the box or the
   ellipse inside it, hard-edged or faded into the picture, each class as
@@ -102,7 +102,9 @@ have), an HDR10 file's mastering display and light levels kept, which
 `FileMuxer` writes as `hvc1`. On a Mac likewise: `VideoToolboxDecoder` hands on P010
 (`VideoToolboxFrameFormat::P010`), the Metal detectors, classifier and
 embedder look at an SDR copy, `MetalDetectionOverlay` hides in the ten
-bits, and `VideoToolboxEncoder` encodes HEVC Main 10.
+bits, and `VideoToolboxEncoder` encodes HEVC Main 10. On D3D12 the
+DirectML detectors, classifier and embedder look at an SDR copy too, and
+`D3d12DetectionOverlay` hides in the ten bits.
 
 A phone's portrait recording is stored on its side, with a display matrix
 saying to turn it. Every decoder hands that on with each picture

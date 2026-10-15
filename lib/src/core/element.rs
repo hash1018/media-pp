@@ -318,6 +318,8 @@ pub enum ElementType {
     /// Draws a detector's boxes and labels onto VideoToolbox pictures, with
     /// Metal.
     MetalDetectionOverlay,
+    /// Draws a detector's boxes and labels onto D3D12 pictures.
+    D3d12DetectionOverlay,
     /// Finds where one shot of an edited video ends and the next begins,
     /// on pictures in system memory.
     SwCutDetector,

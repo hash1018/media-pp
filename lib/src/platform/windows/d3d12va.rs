@@ -73,6 +73,27 @@ pub(crate) unsafe fn create_hw_frames_ctx(
     height: u32,
     initial_pool_size: i32,
 ) -> Result<AvBufferRef, i32> {
+    // SAFETY: this function's own contract.
+    unsafe {
+        create_hw_frames_ctx_of(
+            hw_device_ctx,
+            ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+            width,
+            height,
+            initial_pool_size,
+        )
+    }
+}
+
+/// Creates a D3D12VA frame pool of `sw_format` — NV12 or P010 — tied to
+/// `hw_device_ctx`.
+pub(crate) unsafe fn create_hw_frames_ctx_of(
+    hw_device_ctx: &AvBufferRef,
+    sw_format: ffi::AVPixelFormat,
+    width: u32,
+    height: u32,
+    initial_pool_size: i32,
+) -> Result<AvBufferRef, i32> {
     // SAFETY: `hw_device_ctx` owns a live initialized D3D12VA device context;
     // the allocated frames context is wrapped before mutation, and the fields
     // set here are precisely those consumed by `av_hwframe_ctx_init`.
@@ -81,7 +102,7 @@ pub(crate) unsafe fn create_hw_frames_ctx(
             AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(hw_device_ctx.as_ptr())).ok_or(-1)?;
         let frames_ctx = (*buf.as_ptr()).data as *mut ffi::AVHWFramesContext;
         (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D12;
-        (*frames_ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
+        (*frames_ctx).sw_format = sw_format;
         (*frames_ctx).width = width as i32;
         (*frames_ctx).height = height as i32;
         (*frames_ctx).initial_pool_size = initial_pool_size;

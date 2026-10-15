@@ -336,7 +336,7 @@ impl Fitting {
             .iter()
             .map(|&(picture, _)| (&picture.fence, picture.fence_value))
             .collect();
-        self.commands.submit(&waits)?;
+        self.commands.submit(&waits, &[])?;
         Ok(())
     }
 
@@ -637,7 +637,7 @@ impl Fitting {
             uav_barrier(&list, &self.tensor);
         }
         self.commands
-            .submit(&[(&picture.fence, picture.fence_value)])?;
+            .submit(&[(&picture.fence, picture.fence_value)], &[])?;
         Ok(())
     }
 
@@ -671,7 +671,7 @@ impl Fitting {
             };
             let list = self.commands.begin(None)?;
             list.CopyBufferRegion(&readback, 0, &self.tensor, 0, bytes);
-            self.commands.submit(&[])?;
+            self.commands.submit(&[], &[])?;
             self.commands.wait_idle()?;
             let mut mapped = std::ptr::null_mut();
             readback.Map(0, None, Some(&mut mapped))?;
