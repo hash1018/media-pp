@@ -100,7 +100,9 @@ pub struct Embedding {
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Cutout {
+    /// Its width in pixels.
     pub width: u32,
+    /// Its height in pixels.
     pub height: u32,
     /// `width * height * 3` bytes: red, green and blue of each pixel.
     pub rgb: Arc<[u8]>,

@@ -87,9 +87,11 @@ token to reuse.
 
 ## Documentation
 
-[docs.rs] builds for Linux and so omits the Windows-only and macOS-only
-API, which the API documentation workflow builds on runners of their own.
-To build either locally, labelled by feature:
+[docs.rs] builds for Linux with only the features that need no system
+libraries (`[package.metadata.docs.rs]`), and so omits the Windows-only,
+the macOS-only and the Linux backends' API, which the API documentation
+workflow builds on runners of their own. To build one locally, labelled by
+feature:
 
 ```powershell
 $env:RUSTDOCFLAGS = "--cfg docsrs"
@@ -98,6 +100,10 @@ cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wgc-ca
 
 ```sh
 RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc -p media-pp --open --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,webrtc
+```
+
+```sh
+RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc -p media-pp --open --features pipewire-screen-capture,pipewire-audio-capture,pipewire-audio-renderer,v4l2-capture,v4l2-virtual-camera,vulkan,cuda,webrtc
 ```
 
 CI builds the documentation with `-D warnings` for every feature set, so a

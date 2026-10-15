@@ -79,9 +79,11 @@ const PRIME_FRAMES: usize = QUEUE_CAPACITY / 2;
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum PipeWireAudioRendererError {
+    /// PipeWire refused to start the loop, connect, or make the stream.
     #[error("pipewire error: {0}")]
     PipeWire(String),
 
+    /// Finding the device named in the options failed.
     #[error(transparent)]
     Device(#[from] PipeWireDeviceError),
 
@@ -92,14 +94,23 @@ pub enum PipeWireAudioRendererError {
     #[error("PipeWireAudioRenderer needs a Sink device, but {0:?} is a Source")]
     NotAPlaybackDevice(String),
 
+    /// The stream connected but never settled a format in time.
     #[error("timed out waiting for the PipeWire audio stream to negotiate a format")]
     NegotiationTimeout,
 
+    /// The daemon settled on a sample format, by its SPA number, that has no
+    /// FFmpeg counterpart.
     #[error("unsupported PipeWire audio sample format {0:?}")]
     UnsupportedFormat(u32),
 
+    /// The settled format had no rate or no channels.
     #[error("PipeWire negotiated an empty audio format ({rate}Hz, {channels} channel(s))")]
-    EmptyFormat { rate: u32, channels: u32 },
+    EmptyFormat {
+        /// The sample rate it settled on.
+        rate: u32,
+        /// The channel count it settled on.
+        channels: u32,
+    },
 
     /// The incoming frame's layout does not match what `open` negotiated. This
     /// element performs no hidden conversion — see its own docs.
@@ -108,38 +119,51 @@ pub enum PipeWireAudioRendererError {
          got {actual:?} at {actual_rate}Hz x{actual_channels}"
     )]
     FormatMismatch {
+        /// The sample format `open` negotiated.
         expected: ffmpeg::format::Sample,
+        /// The rate `open` negotiated.
         expected_rate: u32,
+        /// The channel count `open` negotiated.
         expected_channels: u16,
+        /// The frame's sample format.
         actual: ffmpeg::format::Sample,
+        /// The frame's rate.
         actual_rate: u32,
+        /// The frame's channel count.
         actual_channels: u16,
     },
 
+    /// A buffer that is not sound — the variant it was, named.
     #[error("PipeWireAudioRenderer only accepts MediaBuffer::Audio, got {0}")]
     UnexpectedBuffer(&'static str),
 
+    /// A frame with no presentation timestamp, while this renderer masters
+    /// the playback clock and so has to say where each sample is.
     #[error("audio frames need a PTS when PipeWireAudioRenderer is the playback-clock master")]
     MissingPts,
 
+    /// The PipeWire stream went away — the daemon stopped, or the device
+    /// was removed.
     #[error("the PipeWire playback stream ended")]
     StreamEnded,
 
+    /// A frame holding fewer bytes than its samples and channels need.
     #[error("audio frame data is too short: need {expected} byte(s), got {actual}")]
-    FrameDataTooShort { expected: usize, actual: usize },
+    FrameDataTooShort {
+        /// The bytes its samples and channels need.
+        expected: usize,
+        /// The bytes it holds.
+        actual: usize,
+    },
 
     /// Stretching the sound to the playback rate failed in FFmpeg.
     #[error("stretching the sound to the playback rate failed: {0}")]
     Stretch(ffmpeg::Error),
 
+    /// Registering with the pipeline's playback clock, or telling it where
+    /// playback is, failed.
     #[error(transparent)]
     PlaybackClock(#[from] PlaybackClockError),
-
-    #[error("this renderer is already bound to a playback clock")]
-    PlaybackClockAlreadyBound,
-
-    #[error("a playback clock must be bound before the first frame is rendered")]
-    PlaybackClockBoundAfterStart,
 }
 
 /// Construction-time options for [`PipeWireAudioRenderer::open`].
@@ -380,13 +404,14 @@ fn complete_device_drain(
 ///
 /// It publishes this node's actual played-sample position as its pipeline's
 /// audio master, and takes the clock to do that from the pipeline rather than
-/// from the caller — see `Element::attach_context`. The master slot is claimed
-/// on the first frame rather than when the element is wired: claiming it at
-/// wiring time would move the clock into audio priming there and then, and
-/// video scheduled against the same clock would wait for audio that has not
-/// started — which for a branch attached to a running [`crate::elements::Tee`]
-/// is a deadlock. Same contract as `WasapiRenderer`, which is the Windows
-/// counterpart of this element.
+/// from the caller — as it is wired (`Sink::attached`;
+/// `Element::attach_context` says why). The master slot is claimed on the first
+/// frame rather than when the element is wired: claiming it at wiring time
+/// would move the clock into audio priming there and then, and video scheduled
+/// against the same clock would wait for audio that has not started — which for
+/// a branch attached to a running [`crate::elements::Tee`] is a deadlock. Same
+/// contract as `WasapiRenderer`, which is the Windows counterpart of this
+/// element.
 ///
 /// # Pacing
 ///

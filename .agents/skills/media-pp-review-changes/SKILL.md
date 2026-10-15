@@ -55,7 +55,7 @@ working tree.
   disabled-level hot-path cost, and complete topology/control records.
 - For public and gated code, compare module declarations, imports, flat
   re-exports, error conversions, Cargo features/dependencies, platform cfgs,
-  README inventory, examples, and both enabled and disabled builds.
+  the inventory and feature table in `docs/`, examples, and both enabled and disabled builds.
 
 ## Evaluate evidence and coverage
 

@@ -2,8 +2,8 @@
 
 The ideas you need before writing anything bigger than the first example.
 Each section is short and links to where the details are. The crate
-documentation's first page ([docs.rs], or the [Windows] and [macOS] API
-pages) covers the same ground in full.
+documentation's first page ([docs.rs], or the [Windows], [macOS] and
+[Linux] API pages) covers the same ground in full.
 
 - [Pipelines, sources, filters and sinks](#pipelines-sources-filters-and-sinks)
 - [Building a branch](#building-a-branch)
@@ -334,3 +334,4 @@ came from, and every pipeline's start logs a diagram of its graph.
 [docs.rs]: https://docs.rs/media-pp
 [Windows]: https://hash1018.github.io/media-pp/windows/media_pp/
 [macOS]: https://hash1018.github.io/media-pp/macos/media_pp/
+[Linux]: https://hash1018.github.io/media-pp/linux/media_pp/

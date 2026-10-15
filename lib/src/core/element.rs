@@ -358,10 +358,11 @@ pub enum ElementType {
     ReplayBuffer,
     /// RTMP publishing muxer sink, one FLV stream to an external server.
     RtmpMuxer,
-    /// Anything outside this crate's own elements — a test double, or a
-    /// custom `RawSink`/`RawSource` implemented downstream of this
-    /// crate. Keeps this enum from needing to grow every time someone
-    /// adds their own element.
+    /// Anything outside this crate's own elements — a test double, a
+    /// [`Source`], [`Filter`] or [`Sink`] of the application's own, which
+    /// its stage files under this, or a custom `RawSink`/`RawSource`
+    /// implemented downstream of this crate. Keeps this enum from needing
+    /// to grow every time someone adds their own element.
     Other,
 }
 
@@ -446,15 +447,20 @@ pub trait Element: Send {
     fn attach_context(&mut self, _context: &Arc<Context>) {}
 }
 
-/// Builds the [`PpLog`] every element constructs for its own [`Element::pp_log`]
-/// field, and that [`crate::pipeline::ChainBuilder`]/[`crate::pipeline::Pipeline`]
-/// rebuild once they know which pipeline an element belongs to. Keeps the
-/// element type, instance name, and pipeline id as separate fields, so a log
-/// reader does not need to parse a combined display string. The pipeline id is
+/// Builds the [`PpLog`] an element is known by in its records, and that
+/// [`crate::pipeline::ChainBuilder`]/[`crate::pipeline::Pipeline`] rebuild
+/// once they know which pipeline an element belongs to. Keeps the element
+/// type, instance name, and pipeline id as separate fields, so a log reader
+/// does not need to parse a combined display string. The pipeline id is
 /// `None` for an element that isn't wired into a `Pipeline` at all (e.g. most
-/// of this crate's own tests). Public so a custom `Element`
-/// implemented outside this crate (see [`ElementType::Other`]) can build
-/// its own `pp_log` field the same way.
+/// of this crate's own tests).
+///
+/// A [`Source`], [`Filter`] or [`Sink`] never calls it: its stage makes the
+/// identity and hands the element the wired one in `attached`
+/// ([`Attached::pp_log`]). Public for an element that implements
+/// [`Element`] itself — a `RawSink` or `SrcPads` written outside this crate
+/// (see [`ElementType::Other`]) — to build the field its
+/// [`Element::pp_log`] returns.
 pub fn element_pp_log(element_type: ElementType, name: &str, pipeline_id: Option<&str>) -> PpLog {
     // Every element comes through here as it is made, which makes this the
     // one place FFmpeg is readied before any of them reaches it.

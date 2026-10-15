@@ -424,10 +424,11 @@ final source of truth when documentation and implementation differ.
 ## Known historical hazards
 
 - An early hardware encoder was implemented, tested on real hardware, and then
-  intentionally reverted; the families now in the tree (`D3d11NvencEncoder`,
-  `CudaEncoder`) were reintroduced deliberately afterwards. Read history before
-  adding a third, but the question of whether hardware encoding belongs here at
-  all is settled.
+  intentionally reverted; the encoders now in the tree (`D3d11VideoEncoder`,
+  NVENC or Media Foundation, `D3d12VideoEncoder`, `CudaEncoder`,
+  `VulkanEncoder`, `VideoToolboxEncoder`) were added deliberately afterwards.
+  Read history before changing how one is built, but the question of whether
+  hardware encoding belongs here at all is settled.
 - D3D11VA decode surfaces are fixed-size. `extra_hw_frames` must cover the deepest
   downstream buffering, unlike the growable pools used elsewhere.
 - NVDEC's decode pool is capped: at most 32 surfaces including the codec's

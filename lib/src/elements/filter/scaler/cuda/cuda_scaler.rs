@@ -51,7 +51,9 @@ pub enum CudaScalerError {
     /// this surface's to — see [`CudaScaler::with_format`].
     #[error("CudaScaler cannot convert {from:?} surfaces to {to:?}")]
     UnsupportedConversion {
+        /// The surface's layout.
         from: ffmpeg::format::Pixel,
+        /// The layout the scaler was built to put out.
         to: CudaFrameFormat,
     },
 

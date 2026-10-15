@@ -28,11 +28,10 @@ mod example {
     };
 
     use media_pp::ffmpeg;
-    use media_pp::pp_log::PpLog;
     use media_pp::{
         buffer::MediaBuffer,
         driver::DriverRunner,
-        element::{Element, ElementType, RawSink, element_pp_log},
+        element::Sink,
         elements::{
             AttachedTrack, AudioCodec, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
             SwEncoderOptions, TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
@@ -231,11 +230,9 @@ mod example {
         let (builder, ()) = builder.add_source(video_source_b, {
             let count = video_count.clone();
             move |source, ctx| {
-                let branch = ctx.branch().to(CountingSink {
-                    name: "video-counter".into(),
-                    count,
-                    pp_log: element_pp_log(ElementType::Other, "video-counter", None),
-                })?;
+                let branch = ctx
+                    .branch()
+                    .to(CountingSink { count }.named("video-counter"))?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             }
@@ -243,11 +240,9 @@ mod example {
         let (builder, ()) = builder.add_source(audio_source_b, {
             let count = audio_count.clone();
             move |source, ctx| {
-                let branch = ctx.branch().to(CountingSink {
-                    name: "audio-counter".into(),
-                    count,
-                    pp_log: element_pp_log(ElementType::Other, "audio-counter", None),
-                })?;
+                let branch = ctx
+                    .branch()
+                    .to(CountingSink { count }.named("audio-counter"))?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             }
@@ -304,28 +299,11 @@ mod example {
     }
 
     struct CountingSink {
-        pp_log: PpLog,
-        name: Arc<str>,
         count: Arc<AtomicUsize>,
     }
 
-    impl Element for CountingSink {
-        fn name(&self) -> Arc<str> {
-            self.name.clone()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl RawSink for CountingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> media_pp::Result<()> {
+    impl Sink for CountingSink {
+        fn render(&mut self, buf: MediaBuffer) -> media_pp::Result<()> {
             if matches!(buf, MediaBuffer::Packet(_)) {
                 self.count.fetch_add(1, Ordering::SeqCst);
             }

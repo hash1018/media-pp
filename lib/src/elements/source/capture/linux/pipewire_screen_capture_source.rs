@@ -69,6 +69,8 @@ const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum PipeWireScreenCaptureSourceError {
+    /// The xdg-desktop-portal ScreenCast session failed — no portal, or a
+    /// request it refused.
     #[error("xdg-desktop-portal error: {0}")]
     Portal(String),
 
@@ -85,6 +87,8 @@ pub enum PipeWireScreenCaptureSourceError {
     #[error("the portal returned no screen-cast stream")]
     NoStream,
 
+    /// PipeWire refused to start the loop, connect to the portal's remote,
+    /// or make the stream.
     #[error("pipewire error: {0}")]
     PipeWire(String),
 

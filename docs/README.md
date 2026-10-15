@@ -1,8 +1,9 @@
 # media-pp documentation
 
 These pages follow the repository's `main` branch, which can be ahead of the
-release on crates.io. What is not released yet is under *Unreleased* in
-[`CHANGELOG.md`](../CHANGELOG.md); [docs.rs] documents the released crate.
+release on crates.io; what is not released yet, when there is anything, is
+under *Unreleased* in [`CHANGELOG.md`](../CHANGELOG.md). The API pages and
+[docs.rs] document the latest release.
 
 ## Start here
 
@@ -26,7 +27,7 @@ release on crates.io. What is not released yet is under *Unreleased* in
 | [Elements](elements.md) | Every element, by job and by backend |
 | [Features](features.md) | Every Cargo feature, its platform, and what it needs to build and run |
 | [Examples](examples.md) | The example crates and how to run them |
-| API documentation | [docs.rs] for the shared and Linux API; the [Windows] and [macOS] API pages for the rest |
+| API documentation | The [Windows], [macOS] and [Linux] API pages, each with everything on that platform; [docs.rs] for what every platform shares |
 | [`CHANGELOG.md`](../CHANGELOG.md) | What changed between versions, and what to write instead |
 
 ## Building and contributing
@@ -49,3 +50,4 @@ release on crates.io. What is not released yet is under *Unreleased* in
 [docs.rs]: https://docs.rs/media-pp
 [Windows]: https://hash1018.github.io/media-pp/windows/media_pp/
 [macOS]: https://hash1018.github.io/media-pp/macos/media_pp/
+[Linux]: https://hash1018.github.io/media-pp/linux/media_pp/

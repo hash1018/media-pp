@@ -1,6 +1,6 @@
 [package]
 name = "media-pp"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 # Verified with `cargo +1.88 check` across every feature. Edition 2024 alone
 # needs only 1.85; 1.88 is the highest MSRV among the resolved dependencies.
@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/hash1018/media-pp"
 documentation = "https://docs.rs/media-pp"
 readme = "../README.md"
-description = "A small, GStreamer-flavored media pipeline library built on FFmpeg. Capture, composite and encode without leaving the GPU, on D3D11 and CUDA."
+description = "A GStreamer-flavored media pipeline library built on FFmpeg. Decode, capture, composite, encode, stream and run object detection, on the CPU or end to end on the GPU with D3D11, D3D12, CUDA, Vulkan or Metal."
 keywords = ["ffmpeg", "gstreamer", "video", "audio", "screen-capture"]
 categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 

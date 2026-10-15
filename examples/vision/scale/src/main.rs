@@ -17,12 +17,11 @@ mod example {
     };
 
     use media_pp::ffmpeg::{format::Pixel, media, software::scaling::Flags};
-    use media_pp::pp_log::PpLog;
     use media_pp::{
         Result,
         buffer::MediaBuffer,
         bus::BusEvent,
-        element::{Element, ElementType, RawSink, element_pp_log},
+        element::Sink,
         elements::{FileDemuxer, SwDecoder, SwScaler},
         pipeline::Pipeline,
     };
@@ -51,8 +50,8 @@ mod example {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = VerifyingSink {
             count: count.clone(),
-            pp_log: element_pp_log(ElementType::Other, "verify", None),
-        };
+        }
+        .named("verify");
 
         let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
@@ -90,30 +89,11 @@ mod example {
     /// completion — then counts every frame after that the same way
     /// `FrameCounter` would.
     struct VerifyingSink {
-        pp_log: PpLog,
         count: Arc<AtomicUsize>,
     }
 
-    impl Element for VerifyingSink {
-        fn name(&self) -> Arc<str> {
-            "verify".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl RawSink for VerifyingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+    impl Sink for VerifyingSink {
+        fn render(&mut self, buf: MediaBuffer) -> Result<()> {
             if let MediaBuffer::Video(frame) = &buf
                 && self.count.fetch_add(1, Ordering::Relaxed) == 0
             {

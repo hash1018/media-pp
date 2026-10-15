@@ -56,6 +56,7 @@ const PACKET_QUEUE_CAPACITY: usize = 48;
 /// crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum PipeWireAudioCaptureSourceError {
+    /// PipeWire refused to start the loop, connect, or make the stream.
     #[error("pipewire error: {0}")]
     PipeWire(String),
 
@@ -64,6 +65,7 @@ pub enum PipeWireAudioCaptureSourceError {
     #[error("timed out waiting for the PipeWire audio stream to negotiate a format")]
     NegotiationTimeout,
 
+    /// Finding the device named in the options failed.
     #[error(transparent)]
     Device(#[from] PipeWireDeviceError),
 
@@ -75,8 +77,15 @@ pub enum PipeWireAudioCaptureSourceError {
     /// The negotiated format carried a zero rate or channel count, leaving
     /// nothing coherent to describe downstream.
     #[error("PipeWire negotiated an empty audio format ({rate}Hz, {channels} channel(s))")]
-    EmptyFormat { rate: u32, channels: u32 },
+    EmptyFormat {
+        /// The sample rate it settled on.
+        rate: u32,
+        /// The channel count it settled on.
+        channels: u32,
+    },
 
+    /// The PipeWire stream went away — the daemon stopped, or the device
+    /// was removed.
     #[error("the PipeWire audio capture stream ended")]
     StreamEnded,
 }

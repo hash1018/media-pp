@@ -45,47 +45,67 @@ use thiserror::Error as ThisError;
 /// negotiates. Byte order is the same for both; the alpha byte is ignored.
 const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 
+/// What can go wrong bringing a captured DMA-BUF into CUDA memory, through
+/// an EGL image on the NVIDIA driver's EGL device.
 #[derive(Debug, ThisError)]
 pub enum DmaBufCudaError {
+    /// A library the import needs — named — would not load.
     #[error("failed to load {0}")]
     Library(&'static str),
 
+    /// libEGL lacks the named entry point.
     #[error("{0} is missing from libEGL")]
     EglSymbol(&'static str),
 
+    /// libGLESv2 lacks the named entry point.
     #[error("{0} is missing from libGLESv2")]
     GlSymbol(&'static str),
 
+    /// libcuda lacks the named entry point.
     #[error("{0} is missing from libcuda")]
     CudaSymbol(&'static str),
 
+    /// No EGL device is the GPU CUDA device 0 is: the driver is not
+    /// NVIDIA's, or exposes no EGL device for it.
     #[error("no EGL device is backed by CUDA device 0")]
     NoCudaEglDevice,
 
+    /// `eglInitialize` failed, with the EGL error code.
     #[error("eglInitialize failed (EGL error {0:#x})")]
     EglInit(c_int),
 
+    /// The EGL device lacks the named extension.
     #[error("the EGL device is missing {0}")]
     EglExtension(&'static str),
 
+    /// `eglCreateContext` failed, with the EGL error code.
     #[error("eglCreateContext failed (EGL error {0:#x})")]
     EglContext(c_int),
 
+    /// `eglMakeCurrent` failed, with the EGL error code.
     #[error("eglMakeCurrent failed (EGL error {0:#x})")]
     EglMakeCurrent(c_int),
 
+    /// The driver offers no DMA-BUF format modifier for XRGB8888, so no
+    /// capture could be imported.
     #[error("the driver accepts no DMA-BUF modifier for XRGB8888")]
     NoModifiers,
 
+    /// `eglCreateImage` refused the captured DMA-BUF, with the EGL error
+    /// code.
     #[error("eglCreateImage failed for the captured DMA-BUF (EGL error {0:#x})")]
     CreateImage(c_int),
 
+    /// The named GL call failed, with the GL error code.
     #[error("{0} failed (GL error {1:#x})")]
     Gl(&'static str, c_uint),
 
+    /// The framebuffer over the imported image is incomplete, with GL's
+    /// status.
     #[error("the DMA-BUF framebuffer is incomplete ({0:#x})")]
     FramebufferIncomplete(c_uint),
 
+    /// The named CUDA call failed, with its `CUresult`.
     #[error("{0} failed (CUresult {1})")]
     Cuda(&'static str, c_int),
 }

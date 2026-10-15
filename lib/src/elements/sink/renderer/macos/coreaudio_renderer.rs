@@ -150,15 +150,15 @@ impl From<OsStatusError> for CoreAudioRendererError {
 /// [`CoreAudioRendererError::FormatMismatch`] rather than guessing.
 ///
 /// It publishes where the device's listener has actually got to as its
-/// pipeline's audio master, and takes the clock to do that from the
-/// pipeline rather than from the caller — see `Element::attach_context`. The
-/// master slot is claimed on the first frame rather than when the element
-/// is wired: claiming it at wiring time would move the clock into audio
-/// priming there and then, and video scheduled against the same clock would
-/// wait for audio that has not started — which for a branch attached to a
-/// running [`crate::elements::Tee`] is a deadlock. The same contract as
-/// `WasapiRenderer` and `PipeWireAudioRenderer`, its Windows and Linux
-/// counterparts.
+/// pipeline's audio master, and takes the clock to do that from the pipeline
+/// rather than from the caller — as it is wired (`Sink::attached`;
+/// `Element::attach_context` says why). The master slot is claimed on the first
+/// frame rather than when the element is wired: claiming it at wiring time
+/// would move the clock into audio priming there and then, and video scheduled
+/// against the same clock would wait for audio that has not started — which for
+/// a branch attached to a running [`crate::elements::Tee`] is a deadlock. The
+/// same contract as `WasapiRenderer` and `PipeWireAudioRenderer`, its Windows
+/// and Linux counterparts.
 ///
 /// # Pacing
 ///

@@ -61,7 +61,9 @@ pub enum D3d12CutDetectorError {
     /// A picture larger than the texture it is said to be in.
     #[error("a {picture:?} picture in a {texture:?} texture")]
     PictureOutsideTexture {
+        /// The picture's width and height.
         picture: (u32, u32),
+        /// The texture's width and height.
         texture: (u32, u32),
     },
     /// D3D12 failed.

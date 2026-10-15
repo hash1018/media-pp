@@ -123,7 +123,12 @@ pub enum WgcCaptureSourceError {
     WindowWatcherUnavailable(String),
     /// WGC reported a frame with unusable visible dimensions.
     #[error("Windows Graphics Capture reported an invalid content size {width}x{height}")]
-    InvalidContentSize { width: i32, height: i32 },
+    InvalidContentSize {
+        /// The width WGC reported.
+        width: i32,
+        /// The height WGC reported.
+        height: i32,
+    },
     /// A frame-pool surface unexpectedly came from another D3D11 device.
     #[error("Windows Graphics Capture returned a texture from another D3D11 device")]
     DeviceMismatch,
@@ -135,9 +140,13 @@ pub enum WgcCaptureSourceError {
         "Windows Graphics Capture texture {texture_width}x{texture_height} is smaller than visible content {content_width}x{content_height}"
     )]
     TextureTooSmall {
+        /// The texture's width.
         texture_width: u32,
+        /// The texture's height.
         texture_height: u32,
+        /// The visible content's width.
         content_width: u32,
+        /// The visible content's height.
         content_height: u32,
     },
     /// The frame callback disappeared while the capture session was still live.

@@ -94,14 +94,6 @@ pub enum WasapiRendererError {
 
     #[error(transparent)]
     PlaybackClock(#[from] PlaybackClockError),
-    /// Clock binding was attempted after audio submission began.
-
-    #[error("cannot bind a playback clock after this audio endpoint has started")]
-    PlaybackClockBoundAfterStart,
-    /// This renderer already owns a playback-clock registration.
-
-    #[error("this WasapiRenderer is already bound to a playback clock")]
-    PlaybackClockAlreadyBound,
     /// A clock-master audio frame has no presentation timestamp.
 
     #[error("audio frames need a PTS when WasapiRenderer is the playback-clock master")]
@@ -122,15 +114,16 @@ pub enum WasapiRendererError {
 /// before this sink. This element intentionally performs no hidden format
 /// conversion.
 ///
-/// It publishes this endpoint's actual played-sample position as its
-/// pipeline's audio master, and takes the clock to do that from the pipeline
-/// rather than from the caller — see `Element::attach_context`. The master
-/// slot is claimed on the first frame rather than when the element is wired:
-/// claiming it at wiring time would move the clock into `AudioPriming` there
-/// and then, and video scheduled against the same clock would wait for audio
-/// that has not started — which for a branch attached to a running `Tee` is a
-/// deadlock. An exclusive-master conflict therefore surfaces from the first
-/// `consume` rather than from the wiring.
+/// It publishes this endpoint's actual played-sample position as its pipeline's
+/// audio master, and takes the clock to do that from the pipeline rather than
+/// from the caller — as it is wired (`Sink::attached`;
+/// `Element::attach_context` says why). The master slot is claimed on the first
+/// frame rather than when the element is wired: claiming it at wiring time
+/// would move the clock into `AudioPriming` there and then, and video scheduled
+/// against the same clock would wait for audio that has not started — which for
+/// a branch attached to a running `Tee` is a deadlock. An exclusive-master
+/// conflict therefore surfaces from the first `consume` rather than from the
+/// wiring.
 ///
 /// Device-buffer backpressure is the playback clock: `consume` waits for
 /// enough WASAPI ring-buffer space to submit the whole input frame. Put a

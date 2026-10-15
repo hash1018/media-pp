@@ -42,7 +42,7 @@ building on [Windows](building/windows.md), [Linux](building/linux.md) or
 
 ```toml
 [dependencies]
-media-pp = { version = "0.3", features = ["d3d11"] }
+media-pp = { version = "0.4", features = ["d3d11"] }
 ```
 
 media-pp has **no default features**: the software elements are always
@@ -175,9 +175,10 @@ run: `cargo run -p player -- video.mp4`.
 | Find an element | [Elements](elements.md) |
 | Run an example | [Examples](examples.md) |
 | Fix a build or start-up problem | [Troubleshooting](guide/troubleshooting.md) |
-| Look up a type | API documentation: [docs.rs] (Linux and shared), [Windows], [macOS] |
+| Look up a type | API documentation: [Windows], [macOS], [Linux]; [docs.rs] for what every platform shares |
 | Upgrade between versions | [`CHANGELOG.md`](../CHANGELOG.md), which says what to write instead |
 
 [docs.rs]: https://docs.rs/media-pp
 [Windows]: https://hash1018.github.io/media-pp/windows/media_pp/
 [macOS]: https://hash1018.github.io/media-pp/macos/media_pp/
+[Linux]: https://hash1018.github.io/media-pp/linux/media_pp/

@@ -10,9 +10,13 @@ on:
     branches: [main]
 
 # docs.rs builds on Linux only, so the Windows and the macOS API are
-# documented here, each on a runner of its own platform, and published
-# together as one GitHub Pages site: `windows/` and `macos/`, with a page at
-# the root choosing between them.
+# documented here, each on a runner of its own platform. The Linux API is
+# too: docs.rs has no PipeWire development files and no FFmpeg built with
+# Vulkan, so it documents only the features that need neither (see
+# `[package.metadata.docs.rs]`), and the Linux backends would be on no page
+# at all. All three are published together as one GitHub Pages site:
+# `windows/`, `macos/` and `linux/`, with a page at the root choosing
+# between them.
 #
 # Built on every change and published only from a tag or by hand, so a
 # documentation error shows on the push that made it rather than first when a
@@ -144,13 +148,62 @@ jobs:
           name: macos-docs
           path: target/doc
 
-  # Both builds, as the one site Pages serves. `media_pp/` at the root is
+  linux:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      # Nightly for `doc_cfg`, as on Windows.
+      - name: Install Rust toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Select Rust toolchain
+        run: rustup default nightly
+
+      # What the pipewire-* features build against, as in the CI workflow.
+      - name: Install PipeWire development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpipewire-0.3-dev
+
+      # The default features, `openh264,vulkan`: FFmpeg's Vulkan context and
+      # the Vulkan headers the `vulkan` feature's bindings are made from.
+      - name: Set up FFmpeg
+        uses: ./.github/actions/setup-ffmpeg
+
+      # Every feature that builds on Linux. `DOCS_RS` for `ort`, as on
+      # Windows; CUDA, cuDNN, cuFFT and TensorRT are never linked by
+      # documenting.
+      - name: Build Linux API documentation
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+          DOCS_RS: "1"
+        run: cargo doc -p media-pp --no-deps --features pipewire-screen-capture,pipewire-audio-capture,pipewire-audio-renderer,v4l2-capture,v4l2-virtual-camera,vulkan,cuda,cuda-visual-tracking,webrtc,ort,ort-cuda,ort-tensorrt,whisper,rnnoise
+
+      # As on Windows: a feature dropped from the list takes its types with it.
+      - name: Check the Linux APIs are documented
+        run: |
+          for page in elements/source/struct.PipeWireScreenCaptureSource.html elements/source/struct.V4l2CaptureSource.html elements/sink/struct.VulkanWindowRenderer.html elements/filter/struct.VulkanDecoder.html elements/vision/struct.CudaOrtDetector.html; do
+            test -f "target/doc/media_pp/$page" || { echo "not documented: $page"; exit 1; }
+          done
+
+      - name: Drop the build lock
+        run: rm -f target/doc/.lock
+
+      - name: Upload Linux API documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-docs
+          path: target/doc
+
+  # The three builds, as the one site Pages serves. `media_pp/` at the root is
   # where the Windows documentation used to be alone, and sends a link to
   # it on to `windows/`.
   pages:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    needs: [windows, macos]
+    needs: [windows, macos, linux]
     steps:
       - name: Download Windows API documentation
         uses: actions/download-artifact@v4
@@ -164,6 +217,12 @@ jobs:
           name: macos-docs
           path: site/macos
 
+      - name: Download Linux API documentation
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-docs
+          path: site/linux
+
       - name: Write the landing pages
         run: |
           mkdir -p site/media_pp
@@ -175,7 +234,7 @@ jobs:
           <ul>
             <li><a href="windows/media_pp/">Windows</a></li>
             <li><a href="macos/media_pp/">macOS</a></li>
-            <li><a href="https://docs.rs/media-pp">Linux (docs.rs)</a></li>
+            <li><a href="linux/media_pp/">Linux</a></li>
           </ul>
           EOF
           echo '<meta http-equiv="refresh" content="0; url=../windows/media_pp/">' > site/media_pp/index.html

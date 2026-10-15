@@ -318,8 +318,9 @@
 //! `pipewire-*`, `coreaudio-*`) and the optional `ort` and `webrtc`
 //! integrations are each behind their own Cargo feature, and
 //! backend-specific types carry the backend's prefix. [docs.rs] builds this
-//! crate for Linux and therefore omits the Windows-only and macOS-only API;
-//! the complete reference is published separately (see the repository
+//! crate for Linux with only the features that need no system libraries,
+//! and therefore omits every platform's backends; the complete reference for
+//! Windows, macOS and Linux is published separately (see the repository
 //! README).
 //!
 //! # Logging

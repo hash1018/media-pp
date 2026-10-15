@@ -92,7 +92,9 @@ pub enum ReplayBufferError {
     /// file is as it was, and the clip is not kept.
     #[error("the clip could not replace {}: {source}", path.display())]
     Replace {
+        /// Where the clip was to go.
         path: PathBuf,
+        /// Why it could not.
         #[source]
         source: std::io::Error,
     },

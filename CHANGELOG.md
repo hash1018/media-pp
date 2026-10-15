@@ -8,7 +8,18 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
-## Unreleased
+## 0.4.0
+
+macOS, every GPU, and video analysis. The crate runs on macOS —
+VideoToolbox decoding and encoding, Metal scaling, compositing and
+rendering, ScreenCaptureKit, AVFoundation and Core Audio, and `Player` —
+and on any GPU through Vulkan Video on Linux and Windows, with D3D12 now
+end to end on Windows. Detectors, classifiers, embedders, a tracker,
+counting in zones and across lines, and finding cuts run on the CPU, CUDA,
+Core ML and DirectML, and what they find is drawn or hidden. Most of what
+breaks is how an element of your own is written: `Source`, `Filter` and
+`Sink` are the traits you implement, the stage the framework makes of one
+keeps who it is, and the end of a stream is an event, not a buffer.
 
 ### Breaking
 
@@ -31,6 +42,11 @@ compile error with no explanation.
   default, is the one output named for the source, which a source no
   longer has a name to make itself. `SeekableSource` asks only `Send` of
   what implements it.
+
+- **`WasapiRendererError` and `PipeWireAudioRendererError` lose
+  `PlaybackClockAlreadyBound` and `PlaybackClockBoundAfterStart`.** Nothing
+  has raised them since the pipeline hands a renderer its playback clock as
+  it is wired; an arm that names them goes.
 
 - **`ReplayBufferError` has a `Replace` variant**: a clip written whole
   that could not take the place of the file at its path — see Fixed. A
@@ -243,8 +259,9 @@ compile error with no explanation.
 - **The `vulkan` feature needs an FFmpeg built with Vulkan**, and the
   Vulkan headers, to build: its new elements are FFmpeg's Vulkan frames,
   and the build script generates the bindings to FFmpeg's Vulkan hardware
-  context from the installed `hwcontext_vulkan.h` — see the README's
-  requirements. vcpkg's `ffmpeg[vulkan]` brings both. A program using only
+  context from the installed `hwcontext_vulkan.h` — see the `vulkan`
+  feature's requirements in [`docs/features.md`](docs/features.md).
+  vcpkg's `ffmpeg[vulkan]` brings both. A program using only
   `VulkanWindowRenderer` builds against such an FFmpeg as before.
 
 - **`MemoryDomain` has a `Vulkan` variant**, for frames in Vulkan images.
@@ -263,7 +280,7 @@ compile error with no explanation.
   `ReversibleSource::stretch_complete()`**: a source says whether the
   stretch under way has been read to its end, and the framework asks it
   for more until it has, as a `Finish` arrives while playing backwards.
-  `SeekableSource` asks only `Element` of what implements it now, so a
+  `SeekableSource` asks only `Send` of what implements it now, so a
   `Source` can — see Added.
 
 - **`RackError` has a `Waits` variant**: a `Rack` refuses a `Pacer` or a

@@ -27,9 +27,11 @@ const ENUMERATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 /// this into its own error type rather than exposing it directly.
 #[derive(Debug, ThisError)]
 pub enum PipeWireDeviceError {
+    /// PipeWire refused to start the loop, connect, or list its registry.
     #[error("pipewire error: {0}")]
     PipeWire(String),
 
+    /// The daemon did not finish listing its nodes in time.
     #[error("timed out enumerating PipeWire audio nodes")]
     EnumerationTimeout,
 }
@@ -66,6 +68,7 @@ pub struct PipeWireAudioDevice {
     /// The node's human-readable `node.description`, falling back to
     /// `node.nick` and then to `name`.
     pub description: String,
+    /// Whether it plays or records.
     pub kind: PipeWireAudioDeviceKind,
     /// Whether this was the session's default node for its own [`kind`] when
     /// it was enumerated.
