@@ -22,10 +22,20 @@ a phone's portrait recording, stored on its side, stays turned.
 
 The file's source waits at its end rather than ending, so the example stops
 the pipeline on `Finished` — every packet has reached the file — or on an
-error.
+error. A bus error is returned as a failure, not a successful partial export.
 
 ```sh
-cargo run -p transcode -- input.mp4 [output.mp4]
+cargo run -p transcode -- input.mp4 [output.mp4] [--overwrite]
 ```
 
 The output defaults to `transcoded.mp4`.
+
+Input/output aliases (including hard links) are always refused, even with
+`--overwrite`. Existing outputs require that flag. Export goes to a temporary
+file beside the destination, keeping its extension; only a successfully
+finished, closed file is published. Setup and bus errors exit non-zero, leave
+the old destination unchanged, and do not print `wrote ...`. Partial temporary
+files are removed on ordinary failure, not guaranteed after a process crash.
+
+The copied audio must be supported by the output container. Use `--` before
+positional paths that begin with a dash, and quote paths containing spaces.

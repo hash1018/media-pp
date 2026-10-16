@@ -18,6 +18,7 @@ cargo run -p doctor                           # what this machine gives media-pp
 cargo run -p player -- path/to/video.mp4      # a file with its sound, in a window
 cargo run -p probe -- path/to/video.mp4       # what a file holds, through a queue
 cargo run -p transcode -- in.mp4 out.mp4      # decoded and encoded on the GPU where it can
+cargo run -p resize -- in.mp4 out.mp4 --width 640 # software resize, with the sound copied
 cargo run -p screen_record_software           # the desktop to an MP4
 ```
 
@@ -75,11 +76,18 @@ their keys, arguments and how each ends.
 |---|---|---|
 | [`transcode`](../examples/core/transcode) | `VideoDecodeBin -> VideoEncodeBin`, the sound copied across | All |
 | [`remux`](../examples/core/remux) | A new container with no re-encoding | All |
+| [`resize`](../examples/core/resize) | Software resize saved as H.264, preserving the best audio track by copying it | All |
 | [`scale`](../examples/vision/scale) | Converting and resizing with `SwScaler` | All |
 | [`transcribe`](../examples/core/transcribe) | Speech turned into a subtitle track with Whisper | All |
 | [`audio_record`](../examples/core/audio_record) | A tone encoded to AAC in an MP4 | All |
 | [`nvenc_record`](../examples/render/nvenc_record) | D3D11 pictures encoded with NVENC | Windows |
 | [`cuda_record`](../examples/cuda/cuda_record) | CUDA pictures encoded with NVENC | Linux, Windows |
+
+`remux`, `transcode` and `resize` stage their outputs and publish only on
+success. They refuse input/output aliases and require `--overwrite` to replace
+an existing destination. Their shared, unpublished [`file_common`](../examples/core/file_common)
+support crate has no executable. `scale` only verifies/counts resized frames;
+use `resize` to save a video.
 
 ## Screen capture
 

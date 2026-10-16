@@ -160,6 +160,10 @@ jobs:
       # reason (`try_device()`), so these run the whole logic suite here and
       # the D3D11/NVENC/capture parts on a developer machine. The soak
       # scenarios in `lib/tests/soak.rs` are `#[ignore]`d and stay out of this.
+      - name: Test file-export examples
+        shell: pwsh
+        run: cargo test -p file_common -p remux -p transcode -p resize
+
       - name: Test (no features)
         shell: pwsh
         run: cargo test -p media-pp
@@ -335,6 +339,9 @@ jobs:
           cargo fetch
           cargo +nightly docs-rs -p media-pp --offline
 
+      - name: Test file-export examples
+        run: cargo test -p file_common -p remux -p resize
+
       - name: Test (no features)
         run: cargo test -p media-pp
 
@@ -448,6 +455,9 @@ jobs:
         run: |
           cargo doc -p media-pp --no-deps
           cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
+
+      - name: Test file-export examples
+        run: cargo test -p file_common -p remux -p resize
 
       # Only what macOS alone can run: the tests of its backends, and of the
       # code only they compile. The platform-independent suite is the other

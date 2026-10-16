@@ -1,0 +1,10 @@
+[package]
+name = "file_common"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib" }
+same-file = "1"
+tempfile = "3.27"

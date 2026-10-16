@@ -20,15 +20,18 @@
 //! pipeline on `Finished` — every packet has reached the file — or on an
 //! error.
 //!
-//!     cargo run -p transcode -- input.mp4 [output.mp4]
+//! The destination is staged and published only on success. Existing outputs
+//! need `--overwrite`; input/output aliases are always refused.
+//!
+//!     cargo run -p transcode -- input.mp4 [output.mp4] [--overwrite]
 
 fn main() -> Result<(), media_pp::Report> {
     Ok(example::run()?)
 }
 
 mod example {
+    use file_common::{FileArgs, SafeOutput, run_to_end};
     use media_pp::{
-        bus::BusEvent,
         elements::{
             DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, Mp4Layout, TrackFormat,
             VideoDecodeBin, VideoEncodeBin, VideoEncodeOptions,
@@ -48,22 +51,25 @@ mod example {
             7,
         )?;
 
-        let Some(input_path) = std::env::args().nth(1) else {
-            eprintln!("usage: transcode <input.mp4> [output.mp4]");
-            std::process::exit(1);
-        };
-        let output_path = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "transcoded.mp4".into());
+        let args =
+            FileArgs::parse(std::env::args_os().skip(1), Some("transcoded.mp4")).map_err(|e| {
+                file_common::message(format!(
+                    "{e}\nusage: transcode <input> [output.mp4] [--overwrite]"
+                ))
+            })?;
+        let output = SafeOutput::new(&args)?;
 
-        let (source, _) = FileDemuxer::open("demux", &input_path)?;
+        let (source, _) = FileDemuxer::open("demux", &args.input)?;
         let video = source.best(ffmpeg::media::Type::Video)?;
         // A phone's portrait recording is stored on its side and says so;
         // what is recorded says so too, so it is shown the same way up.
         let orientation = video.orientation()?;
         let audio = source.best(ffmpeg::media::Type::Audio).ok();
         let (width, height) = video.size().ok_or_else(|| {
-            media_pp::Error::Other(format!("{input_path} does not say its picture size"))
+            media_pp::Error::Other(format!(
+                "{} does not say its picture size",
+                args.input.display()
+            ))
         })?;
         let frame_rate = video
             .frame_rate
@@ -100,7 +106,7 @@ mod example {
             encoder.path()
         );
 
-        let mut muxer = FileMuxer::create(&output_path, Mp4Layout::Standard)?;
+        let mut muxer = FileMuxer::create(output.path(), Mp4Layout::Standard)?;
         let video_track = muxer.add_stream(
             "video",
             TrackFormat::from(&encoder).with_orientation(orientation),
@@ -127,18 +133,14 @@ mod example {
             Ok(())
         })?;
 
-        println!("transcoding {input_path} -> {output_path} ...");
-        pipeline.run()?;
-        for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Error { .. } => eprintln!("{event}"),
-                _ => println!("{event}"),
-            }
-            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
-                pipeline.stop();
-            }
-        }
-        println!("wrote {output_path}");
+        println!(
+            "transcoding {} -> {} ...",
+            args.input.display(),
+            args.output.display()
+        );
+        run_to_end(pipeline)?;
+        output.commit()?;
+        println!("wrote {}", args.output.display());
         Ok(())
     }
 

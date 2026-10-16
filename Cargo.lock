@@ -1494,6 +1494,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "file_common"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+ "same-file",
+ "tempfile",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3392,7 +3401,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "remux"
 version = "0.1.0"
 dependencies = [
+ "file_common",
  "media-pp",
+ "tempfile",
 ]
 
 [[package]]
@@ -3400,6 +3411,15 @@ name = "render_common"
 version = "0.1.0"
 dependencies = [
  "media-pp",
+]
+
+[[package]]
+name = "resize"
+version = "0.1.0"
+dependencies = [
+ "file_common",
+ "media-pp",
+ "tempfile",
 ]
 
 [[package]]
@@ -4317,7 +4337,9 @@ dependencies = [
 name = "transcode"
 version = "0.1.0"
 dependencies = [
+ "file_common",
  "media-pp",
+ "tempfile",
 ]
 
 [[package]]

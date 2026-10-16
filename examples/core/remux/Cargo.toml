@@ -6,3 +6,7 @@ publish = false
 
 [dependencies]
 media-pp = { path = "../../../lib" }
+file_common = { path = "../file_common" }
+
+[dev-dependencies]
+tempfile = "3.27"

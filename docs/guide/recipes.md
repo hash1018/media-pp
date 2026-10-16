@@ -54,12 +54,32 @@ each decoded picture.
 |---|---|---|
 | Re-encode, GPU where possible | `VideoDecodeBin -> VideoEncodeBin -> FileMuxer` | [`transcode`](../../examples/core/transcode) |
 | Change container only, no re-encoding | `FileDemuxer -> FileMuxer` | [`remux`](../../examples/core/remux) |
-| Resize | `SwScaler`, or a GPU scaler | [`scale`](../../examples/vision/scale) |
+| Resize and save a file, copying its sound | `SwDecoder -> SwScaler -> SwEncoder -> FileMuxer` | [`resize`](../../examples/core/resize) |
+| Inspect resized frames without saving | `SwScaler`, or a GPU scaler | [`scale`](../../examples/vision/scale) |
 | Add subtitles from speech | `WhisperTranscriber` | [`transcribe`](../../examples/core/transcribe) |
 
 `FileMuxer` writes MP4, MOV, Matroska and more, by the file's extension; an
 MP4 can be fast-start (plays while downloading) or fragmented (still opens
 after a crash) — `Mp4Layout`.
+
+For a first saved resize, run from the repository root:
+
+```sh
+cargo run -p resize -- input.mp4 output.mp4 --width 160
+```
+
+For a 320x240 input this writes a playable 160x120 H.264 file and copies its
+best audio stream, if present, with its timestamps unchanged. Width must be
+even; height follows the stored picture's aspect ratio to the nearest even
+pixel. The example uses software only and accepts square-pixel SDR video;
+see its README for rotation, audio/container compatibility and limits.
+
+`remux`, `transcode` and `resize` refuse input/output aliases. Existing outputs
+need `--overwrite`; export is staged beside the destination and published only
+after successful completion and file closure. A bus error exits non-zero,
+without a completion message or a partial file at the destination. These are
+the examples' safety policies: `FileMuxer::create` itself still opens its path
+directly and can overwrite it.
 
 To keep only the first part of a file — its first ten seconds, say — there is
 no option to set: put a [`Filter`](#write-your-own-element) of your own on each

@@ -8,6 +8,26 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
+## Unreleased
+
+### Added
+
+- **`resize`, a saved software resize with sound.**
+  `cargo run -p resize -- input.mp4 output.mp4 --width 160` decodes, scales
+  and encodes SDR video to H.264, deriving an even height from the input's
+  aspect ratio and copying its best audio stream without resetting time.
+
+### Fixed
+
+- **File-export examples protect their inputs and existing outputs.**
+  `remux`, `transcode` and `resize` refuse input/output aliases and require
+  `--overwrite` for an existing destination. They write beside it to a
+  temporary file and publish only a completed, closed export; failure leaves
+  the destination unchanged. The library's `FileMuxer` API is unchanged.
+- **File-export examples fail on bus errors.** They return a failure exit
+  status without `wrote ...`, rather than reporting partial output as success.
+  The library still reports per-buffer errors and continues by its own policy.
+
 ## 0.4.1
 
 `Report`, which the getting-started guide's programs return from `main` and
