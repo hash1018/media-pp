@@ -85,6 +85,25 @@ capture scenarios also need `MEDIA_PP_SOAK_RESTORE_TOKEN`, since the portal
 would otherwise show its picker; any run of `screen_record_software` prints a
 token to reuse.
 
+## Releasing
+
+1. Move `CHANGELOG.md`'s *Unreleased* to the new version, with a sentence
+   or a paragraph saying what it is about, and set `version` in
+   `lib/Cargo.toml` (`cargo update -w` changes `Cargo.lock`'s line for it).
+   A breaking change bumps the minor version while the crate is pre-1.0.
+2. Run `scripts/crate-readme.sh`: crates.io's README links the repository's
+   files at the new version's tag, so a reader who installed that version
+   reads its documentation, not `main`'s.
+3. `cargo publish -p media-pp --dry-run`, commit as
+   `chore(release): prepare X.Y.Z`, push, and let CI pass.
+4. `cargo publish -p media-pp`, then tag `vX.Y.Z` and push the tag: the tag
+   is what the README's links point at, and what publishes the Windows,
+   macOS and Linux API documentation.
+
+The guides under `docs/` follow `main`, but tell a reader to install the
+release: an example there that uses API added since the last release does
+not build for them until the next one.
+
 ## Documentation
 
 [docs.rs] builds for Linux with only the features that need no system

@@ -98,21 +98,21 @@ Licensed under either the [Apache License, Version 2.0][apache] or the
 `media-pp` does not bundle FFmpeg. You are responsible for complying with the
 license of your FFmpeg build and the codecs you enable.
 
-[scripts]: https://github.com/hash1018/media-pp/tree/main/scripts
-[getting-started]: https://github.com/hash1018/media-pp/blob/main/docs/getting-started.md
-[concepts]: https://github.com/hash1018/media-pp/blob/main/docs/guide/concepts.md
-[choosing-a-backend]: https://github.com/hash1018/media-pp/blob/main/docs/guide/choosing-a-backend.md
-[recipes]: https://github.com/hash1018/media-pp/blob/main/docs/guide/recipes.md
-[troubleshooting]: https://github.com/hash1018/media-pp/blob/main/docs/guide/troubleshooting.md
-[elements]: https://github.com/hash1018/media-pp/blob/main/docs/elements.md
-[features]: https://github.com/hash1018/media-pp/blob/main/docs/features.md
-[examples]: https://github.com/hash1018/media-pp/blob/main/docs/examples.md
-[all-docs]: https://github.com/hash1018/media-pp/blob/main/docs/README.md
-[contributing]: https://github.com/hash1018/media-pp/blob/main/CONTRIBUTING.md
-[agents]: https://github.com/hash1018/media-pp/blob/main/AGENTS.md
-[apache]: https://github.com/hash1018/media-pp/blob/main/LICENSE-APACHE
-[mit]: https://github.com/hash1018/media-pp/blob/main/LICENSE-MIT
-[`CHANGELOG.md`]: https://github.com/hash1018/media-pp/blob/main/CHANGELOG.md
+[scripts]: scripts
+[getting-started]: docs/getting-started.md
+[concepts]: docs/guide/concepts.md
+[choosing-a-backend]: docs/guide/choosing-a-backend.md
+[recipes]: docs/guide/recipes.md
+[troubleshooting]: docs/guide/troubleshooting.md
+[elements]: docs/elements.md
+[features]: docs/features.md
+[examples]: docs/examples.md
+[all-docs]: docs/README.md
+[contributing]: CONTRIBUTING.md
+[agents]: AGENTS.md
+[apache]: LICENSE-APACHE
+[mit]: LICENSE-MIT
+[`CHANGELOG.md`]: CHANGELOG.md
 [`ffmpeg-next`]: https://github.com/zmwangx/rust-ffmpeg
 [docs.rs]: https://docs.rs/media-pp
 [Windows]: https://hash1018.github.io/media-pp/windows/media_pp/

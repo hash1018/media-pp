@@ -249,6 +249,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # crates.io's README is README.md with its links at the release's tag;
+      # one edited without the other, or a version bumped without it, fails
+      # here.
+      - name: Check the crate's README
+        run: scripts/crate-readme.sh --check
+
       - name: Lint (no features)
         run: cargo clippy -p media-pp --all-targets -- -D warnings
 

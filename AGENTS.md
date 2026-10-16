@@ -415,6 +415,10 @@ final source of truth when documentation and implementation differ.
   guide in `docs/guide/` where a concept, recipe or fix it describes
   changes. `docs/README.md` indexes them all. `README.md` stays a
   short overview with a table of those files; detail goes into `docs/`. Keep volatile roadmap ideas out of agent instruction files.
+- `lib/README.md`, which crates.io shows, is written from `README.md` by
+  `scripts/crate-readme.sh`, its links at the release's tag. Edit
+  `README.md` only, keep its links to repository files relative and
+  reference-style, and run the script after changing it or the version.
 - Doc comments should explain invariants, ownership, thread/error behavior, and
   non-obvious rationale. Do not repeat claims that can be read directly from a
   struct definition.
