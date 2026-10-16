@@ -34,13 +34,47 @@ use super::fitting::Fitting;
 use super::{DIRECTML_BATCH, directml_memory, host_memory, object_model_session};
 
 /// Makes each object a detector found on each D3D12 picture into a vector
-/// with an embedding model — what
-/// [`SwOrtEmbedder`](crate::elements::SwOrtEmbedder) does on the CPU, with
-/// each object read into the model's input by a compute shader where the
-/// picture is, through the map [`OrtEmbedderOptions::align`] makes for it —
-/// a face straightened by its five points, a box stretched — between the
-/// four pixels around each point, several objects to one run, and the model
-/// run by ONNX Runtime's DirectML provider on the same GPU.
+/// with an ONNX embedding model, run by DirectML on the same GPU.
+///
+/// It does what [`SwOrtEmbedder`](crate::elements::SwOrtEmbedder) does on
+/// the CPU, for NV12 or HDR P010 D3D12 pictures made on the [`D3d12Gpu`] it
+/// is given. Export the model at ONNX opset 20 or lower, as the detector's.
+/// Needs the `ort-directml` feature, on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d12Gpu, D3d12OrtDetector, D3d12OrtDetectorOptions, D3d12OrtEmbedder, DetectorModel,
+///     OrtDetectorOptions, OrtEmbedderOptions,
+/// };
+/// # use media_pp::{element::Context, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain(ctx: &std::sync::Arc<Context>) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("faces", |_buf| Ok(()));
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let options = D3d12OrtDetectorOptions {
+///     detector: OrtDetectorOptions { model: DetectorModel::RetinaFace, ..Default::default() },
+///     ..D3d12OrtDetectorOptions::default()
+/// };
+/// let faces = D3d12OrtDetector::new("faces", &gpu, "retinaface.onnx", options)?;
+/// let options = OrtEmbedderOptions::default();
+/// let embedder = D3d12OrtEmbedder::new("arcface", &gpu, "arcface.onnx", options)?;
+/// let branch = ctx.branch().pipe(faces).pipe(embedder).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// Each object is read into the model's input by a compute shader where
+/// the picture is, through the map [`OrtEmbedderOptions::align`] makes for
+/// it — a face straightened by its five points, a box stretched — between
+/// the four pixels around each point, several objects to one run, and the
+/// model is run by ONNX Runtime's DirectML provider on the same GPU.
 ///
 /// It goes after a detector — one that finds five points for a face, such
 /// as a [`D3d12OrtDetector`](crate::elements::D3d12OrtDetector) of

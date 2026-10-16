@@ -52,11 +52,43 @@ pub enum CudaCutDetectorError {
 }
 
 /// Finds where one shot of an edited video ends and the next begins, in
-/// NV12 or P010 CUDA pictures from the same [`CudaDevice`] as the rest of
-/// the pipeline, and hands each picture on — the first of each shot after
-/// the stream's first carrying a [`SceneCut`](crate::elements::SceneCut) —
-/// as [`SwCutDetector`](crate::elements::SwCutDetector) does in system
-/// memory, the two finding the same cuts in the same pictures.
+/// CUDA pictures.
+///
+/// It takes NV12 or P010 CUDA pictures from the same [`CudaDevice`] as the rest
+/// of the pipeline and hands each picture on — the first of each shot after the
+/// stream's first carrying a [`SceneCut`](crate::elements::SceneCut) — as
+/// [`SwCutDetector`](crate::elements::SwCutDetector) does in system memory, the
+/// two finding the same cuts in the same pictures. Needs the `cuda` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{CudaCutDetector, CudaDecoder, CudaDevice, CutDetectorOptions};
+/// # use media_pp::elements::{AppSink, FileDemuxer};
+/// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+/// # let sink = AppSink::new("shots", |_buf| Ok(()));
+///
+/// let device = CudaDevice::new()?;
+/// let options = CutDetectorOptions::default();
+/// let cuts = CudaCutDetector::new("cuts", &device, options)?;
+/// let (pipeline, ()) = Pipeline::new("cuts", source, |source, ctx| {
+///     // The cut detector holds `lookahead` pictures, which the decoder
+///     // needs surfaces for.
+///     let held = options.lookahead as i32;
+///     let decoder = CudaDecoder::new("decoder", params, &device, held)?;
+///     let branch = ctx.branch().pipe(decoder).pipe(cuts).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The cells of each picture's thumbnail are averaged on the GPU, by the
 /// kernel a [`CudaDetectionOverlay`](crate::elements::CudaDetectionOverlay)

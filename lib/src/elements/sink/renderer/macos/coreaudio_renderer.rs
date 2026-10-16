@@ -140,7 +140,44 @@ impl From<OsStatusError> for CoreAudioRendererError {
     }
 }
 
-/// Terminal audio sink playing to a Core Audio output device.
+/// Plays sound on a macOS output device through Core Audio.
+///
+/// It ends a branch of decoded sound in exactly the format
+/// [`CoreAudioRenderer::open`] returns — the device's own rate and channels, as
+/// 32-bit float: it converts nothing, so put an
+/// [`AudioResampler`](crate::elements::AudioResampler) to that format in front,
+/// and usually a [`Queue`](crate::queue::Queue) right before it, as it waits
+/// while its ring is full. Its played position is the pipeline's audio clock,
+/// as with `WasapiRenderer` on Windows. Needs the `coreaudio-renderer` feature.
+///
+/// # Example
+///
+/// ```ignore
+/// use media_pp::elements::{
+///     AudioResampler, CoreAudioRenderer, CoreAudioRendererOptions, TestAudioOptions,
+///     TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CoreAudioRenderer::list_devices()?
+///     .into_iter()
+///     .find(|device| device.is_default)
+///     .ok_or_else(|| media_pp::Error::Other("no default output device".into()))?;
+/// let (speakers, format) = CoreAudioRenderer::open("speakers", CoreAudioRendererOptions { device })?;
+///
+/// let source = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let resampler = AudioResampler::new("resampler", format);
+///     let branch = ctx.branch().pipe(resampler).queue("sound", 8).to(speakers)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// ```
+///
+/// # How it works
+///
+/// A terminal audio sink playing to a Core Audio output device.
 ///
 /// The device's format — its nominal rate, its output channels, as 32-bit
 /// float interleaved — is returned by [`CoreAudioRenderer::open`] so a caller

@@ -29,13 +29,52 @@ use crate::orientation::{Orientation, Orientations};
 /// trains on: 114 of 255.
 const MARGIN: f32 = 114.0 / 255.0;
 
-/// Runs a detector — YOLO, or the kind [`OrtDetectorOptions::model`]
-/// says — on each picture on the CPU and hands the picture on
-/// unchanged, carrying the [`Detections`] found in it — read them
-/// downstream with `buffer.metadata()?.get::<Detections>()`.
+/// Finds objects in each picture with an ONNX model on the CPU, and hands
+/// the picture on carrying what it found.
 ///
-/// It takes decoded video in system memory, any pixel format and size: each
-/// picture is fitted to the model's input inside the element (see
+/// It takes decoded pictures in system memory, any format and size, and hands
+/// each on unchanged with the [`Detections`] found in it; read them downstream
+/// with `buffer.metadata()?.get::<Detections>()`. The model is YOLO by default,
+/// or the kind [`OrtDetectorOptions::model`] says. Choose it where pictures are
+/// in system memory; `CudaOrtDetector` and `D3d12OrtDetector` do the same on
+/// GPU pictures. Needs the `ort` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AppSink, Detections, FileDemuxer, OrtDetectorOptions, SwDecoder, SwOrtDetector,
+/// };
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+/// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
+///     let decoder = SwDecoder::new("decoder", params)?;
+///     let detector =
+///         SwOrtDetector::new("detector", "yolov10n.onnx", OrtDetectorOptions::default())?;
+///     let sink = AppSink::new("found", |buf| {
+///         if let Some(found) = buf.metadata().and_then(|m| m.get::<Detections>()) {
+///             for object in &found.items {
+///                 println!("{:?} {:.2}", found.label(object), object.score);
+///             }
+///         }
+///         Ok(())
+///     });
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// Each picture is fitted to the model's input inside the element (see
 /// [`OrtDetectorOptions`] for the models it reads and how), and the
 /// boxes are mapped back onto the picture as fractions of it. What goes on
 /// is the picture it was handed, not the fitted copy.

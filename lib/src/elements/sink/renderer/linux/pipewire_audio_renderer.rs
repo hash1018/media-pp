@@ -75,8 +75,9 @@ const QUEUE_CAPACITY: usize = 8;
 /// `consume` to keep filling while the device drains the rest.
 const PRIME_FRAMES: usize = QUEUE_CAPACITY / 2;
 
-/// Errors specific to `PipeWireAudioRenderer`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Why a [`PipeWireAudioRenderer`] could not open its device or play a frame.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum PipeWireAudioRendererError {
     /// PipeWire refused to start the loop, connect, or make the stream.
@@ -166,7 +167,7 @@ pub enum PipeWireAudioRendererError {
     PlaybackClock(#[from] PlaybackClockError),
 }
 
-/// Construction-time options for [`PipeWireAudioRenderer::open`].
+/// Which device a [`PipeWireAudioRenderer`] plays to.
 #[derive(Debug, Clone)]
 pub struct PipeWireAudioRendererOptions {
     /// Which node to play to — one entry out of
@@ -394,7 +395,47 @@ fn complete_device_drain(
     }
 }
 
-/// Terminal audio sink backed by a PipeWire playback node.
+/// Plays sound on a Linux output device through PipeWire.
+///
+/// It ends a branch of decoded sound in exactly the format
+/// [`PipeWireAudioRenderer::open`] returns: it converts nothing, so put an
+/// [`AudioResampler`](crate::elements::AudioResampler) to that format in
+/// front, and usually a [`Queue`](crate::queue::Queue) right before it, as
+/// it waits once its own small queue is full. Its played position is the
+/// pipeline's audio clock, as with `WasapiRenderer` on Windows. Needs the
+/// `pipewire-audio-renderer` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioResampler, PipeWireAudioRenderer, PipeWireAudioRendererOptions, TestAudioOptions,
+///     TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let devices = PipeWireAudioRenderer::list_devices()?;
+/// let device = devices.iter().find(|device| device.is_default).or(devices.first()).cloned();
+/// let device = device.ok_or_else(|| media_pp::Error::Other("no playback device".into()))?;
+/// let options = PipeWireAudioRendererOptions { device };
+/// let (speakers, format) = PipeWireAudioRenderer::open("speakers", options)?;
+///
+/// let source = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let resampler = AudioResampler::new("resampler", format);
+///     let branch = ctx.branch().pipe(resampler).queue("sound", 8).to(speakers)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A terminal audio sink backed by a PipeWire playback node.
 ///
 /// The node's negotiated format is returned by [`PipeWireAudioRenderer::open`]
 /// so a caller can place an [`crate::elements::AudioResampler`] immediately

@@ -22,7 +22,7 @@ use crate::{
 /// own model wants.
 pub const SAMPLE_RATE: u32 = 16_000;
 
-/// Errors produced by [`WhisperTranscriber`].
+/// Why a [`WhisperTranscriber`] could not load its model or transcribe.
 #[derive(Debug, ThisError)]
 pub enum WhisperTranscriberError {
     /// The model file could not be read, or is not a whisper.cpp model.
@@ -535,7 +535,51 @@ fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTra
     whisper_rs::get_lang_str(id).ok_or_else(unknown)
 }
 
-/// Turns speech into timed text, one stretch at a time.
+/// Turns speech into timed text with a whisper.cpp model, handing each
+/// line to a callback of yours.
+///
+/// It ends a branch of decoded sound at [`SAMPLE_RATE`], mono, 32-bit float —
+/// an [`AudioResampler`](crate::elements::AudioResampler) in front gets it
+/// there — behind a [`Queue`](crate::queue::Queue), since inference is slow.
+/// Each [`Segment`] is reported once, settled, with its time on the audio's own
+/// timeline. Needs the `whisper` feature (`whisper-vulkan` for the GPU). The
+/// [`transcribe`](https://github.com/hash1018/media-pp/tree/main/examples/core/transcribe)
+/// example writes the lines into a file as subtitles.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioFormat, AudioResampler, ChunkPolicy, FileDemuxer, SwDecoder, WHISPER_SAMPLE_RATE,
+///     WhisperTranscriber,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("demux", "talk.mp4")?;
+/// let audio = source.best(ffmpeg::media::Type::Audio)?;
+/// let decoder = SwDecoder::new("decoder", audio.parameters.clone())?;
+/// let mono_f32 = ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed);
+/// let resampler = AudioResampler::new("resampler", AudioFormat::new(mono_f32, WHISPER_SAMPLE_RATE, 1));
+/// let transcriber = WhisperTranscriber::new("whisper", "ggml-base.bin", ChunkPolicy::default(), |line| {
+///     println!("{} ms: {}", line.start_ms, line.text);
+///     Ok(())
+/// })?;
+///
+/// let (pipeline, ()) = Pipeline::new("transcribe", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(resampler);
+///     let branch = branch.queue("speech", 64).to(transcriber)?;
+///     ctx.attach(source, audio.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It turns speech into timed text, one stretch at a time.
 ///
 /// A terminal sink, like the ONNX detector and for the same reason: what
 /// comes out is not media. The callback receives

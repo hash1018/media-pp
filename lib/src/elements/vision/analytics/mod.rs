@@ -41,10 +41,11 @@ pub struct StreamAnalyticsOptions {
     pub lines: Vec<Line>,
 }
 
-/// A region of the picture, by its corners in fractions of the picture's
-/// width and height, in order around it. An object is inside when the
-/// bottom middle of its box is — where a person stands, as DeepStream
-/// places it.
+/// A region of the picture an [`ObjectAnalytics`] counts the objects inside.
+///
+/// It is given by its corners in fractions of the picture's width and height,
+/// in order around it. An object is inside when the bottom middle of its box is
+/// — where a person stands, as DeepStream places it.
 ///
 /// The corners are of the picture as it is stored, as every box is — see
 /// [`Detection`](crate::elements::Detection); for a picture shown turned,
@@ -76,14 +77,16 @@ impl Zone {
     }
 }
 
-/// A line across the picture, from `start` to `end` in fractions of the
-/// picture's width and height as it is stored, as a [`Zone`]'s corners
-/// are. An object crosses it when the bottom middle
-/// of its box passes from one side of it to the other, as it is followed
-/// through the pictures — which takes an
-/// [`ObjectTracker`](crate::elements::ObjectTracker) before the analytics:
-/// an object without a [`track_id`](crate::elements::Detection::track_id)
-/// has no last place to have crossed from.
+/// A line across the picture an [`ObjectAnalytics`] counts the objects
+/// crossing.
+///
+/// It runs from `start` to `end` in fractions of the picture's width and height
+/// as it is stored, as a [`Zone`]'s corners are. An object crosses it when the
+/// bottom middle of its box passes from one side of it to the other, as it is
+/// followed through the pictures — which takes an
+/// [`ObjectTracker`](crate::elements::ObjectTracker) before the analytics: an
+/// object without a [`track_id`](crate::elements::Detection::track_id) has no
+/// last place to have crossed from.
 ///
 /// A side counts only once the object is `margin` away from the line, so
 /// a box trembling about it is not counted crossing back and forth.

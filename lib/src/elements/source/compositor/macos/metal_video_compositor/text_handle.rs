@@ -38,8 +38,12 @@ pub(super) struct TextLayerState {
     pub(super) z_index: AtomicI32,
 }
 
-/// Runtime control for one text layer — the Metal sibling of
-/// `CudaTextLayerHandle`.
+/// Writes and places one text layer of a
+/// [`MetalVideoCompositor`](super::MetalVideoCompositor) while it runs.
+///
+/// Made by [`MetalVideoCompositorHandle::add_text_layer`]; the
+/// [`MetalVideoCompositor`](super::MetalVideoCompositor) example shows one
+/// in use. The Metal sibling of `CudaTextLayerHandle`.
 ///
 /// Cloning is cheap and every clone controls the same layer. `set_text`
 /// rasterizes the string on the CPU, so it is not something to call per

@@ -38,8 +38,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `D3d11Scaler`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `D3d11Scaler`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11ScalerError {
     /// A Direct3D device, resource, or video-processor operation failed.
@@ -173,7 +174,43 @@ impl D3d11ScalerFormat {
     }
 }
 
-/// Resizes and, when asked, converts GPU-resident `Pixel::D3D11` `Video`
+/// Resizes pictures on a D3D11 GPU, and converts them between NV12 and BGRA
+/// on the way.
+///
+/// Behind the `d3d11` feature on Windows. Put it after a `D3d11Decoder`, a
+/// capture or a [`D3d11Upload`](crate::elements::D3d11Upload): in front of
+/// a hardware encoder to change the resolution, or with
+/// [`D3d11ScalerFormat::Bgra`] in front of a chroma key or compositor
+/// layer. It takes NV12, P010 or BGRA D3D11 textures and hands on textures
+/// in the size and [`D3d11ScalerFormat`] it was built with.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d11Gpu, D3d11Scaler, D3d11ScalerFormat, D3d11Upload, FrameCounter, TestVideoOptions,
+///     TestVideoSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let scaler = D3d11Scaler::new("scale", &gpu, D3d11ScalerFormat::Nv12, 1280, 720)?;
+/// let (encoder, _) = FrameCounter::new("encoder"); // a D3D11 encoder, in practice
+/// let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
+///     let upload = D3d11Upload::new("upload", &gpu);
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).pipe(scaler).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It resizes and, when asked, converts GPU-resident `Pixel::D3D11` `Video`
 /// frames without ever touching the CPU, through D3D11's own video
 /// processor (`VideoProcessorBlt`). A filter: takes each buffer and pushes
 /// the scaled frame into its own single src pad.

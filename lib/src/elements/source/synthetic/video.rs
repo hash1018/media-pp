@@ -12,7 +12,7 @@ use crate::{
     schedule::LiveSchedule,
 };
 
-/// Construction-time options for [`TestVideoSource::new`].
+/// The size and rate of the pictures a [`TestVideoSource`] makes.
 #[derive(Debug, Clone, Copy)]
 pub struct TestVideoOptions {
     /// Width of each generated frame in pixels.
@@ -40,15 +40,44 @@ impl Default for TestVideoOptions {
     }
 }
 
-/// Generates a synthetic, moving-diagonal-gradient video stream —
-/// GStreamer's `videotestsrc` equivalent. No real decode/demux involved:
-/// `run()` fabricates one `Pixel::YUV420P` frame per tick, stamps it with
-/// an increasing `pts` (one tick per frame, in [`TestVideoSource::time_base`]'s
-/// units), and pushes it straight downstream — useful for exercising
-/// `SwScaler`/`Pacer`/`D3d12Renderer`/etc. without a real file or camera.
-/// `D3d12Renderer` in particular already handles `Pixel::YUV420P` on its
-/// CPU-upload path, so this can feed a renderer directly, no decoder
-/// needed.
+/// Makes a moving test picture at a set size and rate, for trying a pipeline
+/// without a file or a camera.
+///
+/// GStreamer's `videotestsrc` equivalent. It hands on decoded YUV 4:2:0
+/// pictures in host memory, already at their own rate, so it can feed an
+/// encoder, a scaler or a renderer directly — no decoder and no
+/// [`Pacer`](crate::elements::Pacer). It is live and runs until stopped.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::ffmpeg::Rational;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let options = TestVideoOptions { width: 1280, height: 720, frame_rate: Rational(60, 1) };
+/// let source = TestVideoSource::new("pattern", options);
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// No real decode/demux involved: `run()` fabricates one `Pixel::YUV420P` frame
+/// per tick, stamps it with an increasing `pts` (one tick per frame, in
+/// [`TestVideoSource::time_base`]'s units), and pushes it straight downstream —
+/// useful for exercising `SwScaler`/`Pacer`/`D3d12Renderer`/etc. without a real
+/// file or camera. `D3d12Renderer` in particular already handles
+/// `Pixel::YUV420P` on its CPU-upload path, so this can feed a renderer
+/// directly, no decoder needed.
 ///
 /// Self-paces to `options.frame_rate` on a drift-free absolute schedule
 /// (`next_due += frame_interval` each tick in `run`, not "sleep
@@ -106,7 +135,8 @@ struct Generating {
 }
 
 impl TestVideoSource {
-    /// Creates an unbounded synthetic video source with the requested output definition.
+    /// Creates an unbounded synthetic video source with the requested output
+    /// definition.
     pub fn new(name: impl Into<String>, options: TestVideoOptions) -> Self {
         let identity = Identity::new(ElementType::TestVideoSource, name);
         let pp_log = identity.pp_log().clone();

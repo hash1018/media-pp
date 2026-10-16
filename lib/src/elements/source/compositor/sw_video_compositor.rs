@@ -46,8 +46,13 @@ const OUTPUT_POOL_SIZE: usize = 4;
 /// the old one later.
 const RATE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-/// The compositor's fixed output definition. Every emitted frame is an
-/// [`ffmpeg::format::Pixel::BGRA`] frame at `width` x `height`, opaque unless
+/// The canvas a video compositor draws: its size, frame rate, background and
+/// render mode.
+///
+/// Every backend's compositor takes these; [`Default`] is a 1920x1080 opaque
+/// black canvas at 30 frames a second, live. For [`SwVideoCompositor`]
+/// every emitted frame is an [`ffmpeg::format::Pixel::BGRA`] frame at
+/// `width` x `height`, opaque unless
 /// [`background_alpha`](Self::background_alpha) says otherwise.
 #[derive(Debug, Clone, Copy)]
 pub struct VideoCompositorOptions {
@@ -232,9 +237,11 @@ impl CompositorShared {
     }
 }
 
-/// A cheaply cloneable handle for adding and removing compositor inputs.
-/// It mirrors [`crate::elements::MixerHandle`], but each registration also
-/// returns a [`SwVideoLayerHandle`] for changing that input's placement.
+/// Adds, removes and paces the inputs of a running [`SwVideoCompositor`].
+///
+/// Cheap to clone, and holds the compositor only weakly. It mirrors
+/// [`crate::elements::MixerHandle`], but each registration also returns a
+/// [`SwVideoLayerHandle`] for changing that input's placement.
 #[derive(Clone)]
 pub struct SwVideoCompositorHandle {
     shared: Weak<CompositorShared>,
@@ -397,8 +404,11 @@ impl SwVideoCompositorHandle {
     }
 }
 
-/// Thread-safe runtime placement control for one compositor input.
-/// Retaining it does not keep the input or compositor alive.
+/// Moves, sizes, restacks and shows or hides one input of a
+/// [`SwVideoCompositor`] while it runs.
+///
+/// Thread-safe and cheap to clone. Retaining it does not keep the input or
+/// compositor alive.
 #[derive(Clone)]
 pub struct SwVideoLayerHandle {
     id: VideoInputId,
@@ -521,10 +531,12 @@ impl SwVideoLayerHandle {
     }
 }
 
-/// One terminal video input returned by
-/// [`SwVideoCompositorHandle::add_source`]. It stores only the latest frame,
-/// so a fast producer cannot build an unbounded queue behind a slower
-/// compositor output rate.
+/// The sink that ends one input's pipeline, handing its pictures to a
+/// [`SwVideoCompositor`].
+///
+/// Returned by [`SwVideoCompositorHandle::add_source`]. Live, it stores only
+/// the latest frame, so a fast producer cannot build an unbounded queue
+/// behind a slower compositor output rate.
 pub struct SwVideoCompositorInputSink {
     pp_log: PpLog,
     name: Arc<str>,
@@ -775,8 +787,59 @@ impl InputScaler {
     }
 }
 
-/// Composites the latest frames from any number of independent input
-/// pipelines into one fixed-rate opaque BGRA video stream.
+/// Composites any number of video inputs into one BGRA picture stream, on the
+/// CPU.
+///
+/// Each input is a pipeline of its own that ends at a sink from
+/// [`SwVideoCompositorHandle::add_source`], and may hand on pictures of any
+/// layout in system memory. The compositor is the source of its own
+/// pipeline and hands on one BGRA picture of the canvas per tick — live at
+/// its frame rate, or offline by the inputs' timestamps (see
+/// [`VideoCompositorOptions::mode`]). Text layers are added with
+/// [`SwVideoCompositorHandle::add_text_layer`]. Needs no GPU and no feature;
+/// where the pictures are already on a GPU, that backend's compositor keeps
+/// them there.
+///
+/// # Example
+///
+/// A test pattern filling the canvas, with a label over it:
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use media_pp::elements::{
+///     FrameCounter, SwVideoCompositor, TestVideoOptions, TestVideoSource, TextLayer,
+///     VideoCompositorOptions, VideoLayer, VideoRect,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (compositor, handle) = SwVideoCompositor::new("canvas", VideoCompositorOptions::default())?;
+///
+/// // An input: another pipeline's branch ends at its sink.
+/// let input = handle.add_source("camera", VideoLayer::new(VideoRect::new(0, 0, 1920, 1080)))?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let (camera, ()) = Pipeline::new("camera", camera, |source, ctx| {
+///     let branch = ctx.branch().to(input.sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+///
+/// let label = handle.add_text_layer("label", TextLayer::new(std::fs::read("font.ttf")?))?;
+/// label.set_text("LIVE")?;
+///
+/// // The compositor is the source of the pipeline that takes the canvas.
+/// let (counter, _frames) = FrameCounter::new("frames");
+/// let (canvas, ()) = Pipeline::new("canvas", compositor, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// canvas.run()?;
+/// camera.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// Like [`crate::elements::AudioMixer`], this is a source, not a
 /// conventional one-input filter: upstream pipelines terminate at the

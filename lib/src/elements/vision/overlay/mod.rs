@@ -1,9 +1,10 @@
-//! Drawing what a detector found onto the picture it found it in, as
-//! filters: each picture that carries [`Detections`] is handed on with a
-//! box around each object, and with a label above it where a font is given
-//! — and, as [`OverlayParts`] says, the zones and lines an
+//! Drawing what a detector found onto the picture it found it in, or hiding it.
+//!
+//! These are filters: each picture that carries [`Detections`] is handed on
+//! with a box around each object, and with a label above it where a font is
+//! given — and, as [`OverlayParts`] says, the zones and lines an
 //! [`ObjectAnalytics`](crate::elements::ObjectAnalytics) counted from its
-//! [`Analytics`] — or with a [`Redaction`], each box hidden by a mosaic, a
+//! [`Analytics`] — or with a [`Hiding`], each box hidden by a mosaic, a
 //! blur or a fill before anything is drawn over it.
 //!
 //! One element per place a picture lives, as the detectors are:
@@ -46,10 +47,11 @@ use crate::elements::source::{TextMask, TextRasterError, rasterize_coverage};
 use crate::elements::{Analytics, Detection, Detections};
 use crate::orientation::Orientation;
 
-/// What a detection overlay does with each picture: per class of what was
-/// found, whether its box is drawn and how, whether it is hidden and how,
-/// and from what score — and beside them, the font labels are drawn in and
-/// the zones and lines of an
+/// What a detection overlay draws and hides, class by class.
+///
+/// It says, per class of what was found, whether its box is drawn and how,
+/// whether it is hidden and how, and from what score — and beside them, the
+/// font labels are drawn in and the zones and lines of an
 /// [`ObjectAnalytics`](crate::elements::ObjectAnalytics).
 ///
 /// By default every detection's box is drawn, two pixels thick in its
@@ -132,9 +134,11 @@ impl std::fmt::Display for ClassId {
     }
 }
 
-/// What a detection overlay does with a detection: hides it, draws its box
-/// over that, both or neither — each only where the detection's score is
-/// at least `min_score`.
+/// What a detection overlay does with a detection: hides it, draws its box,
+/// both or neither.
+///
+/// Where it does both, the box is drawn over what was hidden. Each is done
+/// only where the detection's score is at least `min_score`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Treatment {
     /// How its box and label are drawn, or `None` to draw none.
@@ -209,9 +213,10 @@ impl Default for BoxStyle {
     }
 }
 
-/// How a detection is hidden: the box grown by `margin` and covered as
-/// `style` says, on the copy of the picture the overlay draws on —
-/// DeepStream's redaction.
+/// How a detection is hidden — DeepStream's redaction.
+///
+/// The box is grown by `margin` and covered as `style` says, on the copy of
+/// the picture the overlay draws on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hiding {
     /// How it is covered.
@@ -415,9 +420,10 @@ pub enum DetectionOverlayOptionsError {
     MinScore,
 }
 
-/// The zones and lines of an
-/// [`ObjectAnalytics`](crate::elements::ObjectAnalytics) an overlay draws,
-/// from the picture's [`Analytics`], each labelled where
+/// Which of an [`ObjectAnalytics`](crate::elements::ObjectAnalytics)'s zones
+/// and lines an overlay draws.
+///
+/// They are drawn from the picture's [`Analytics`], each labelled where
 /// [`DetectionOverlayOptions::font`] gives a font.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlayParts {
@@ -473,10 +479,11 @@ pub enum BoxColors {
     ByTrack,
 }
 
-/// How the label above a box is drawn, and what it says — of the class
-/// name, the number a tracker gave the object, the score and what
-/// classifiers said of it, each as asked for, `car #7 0.87 | minivan` with
-/// all four — on a band of the box's colour, in
+/// How the label above a box is drawn, and what it says.
+///
+/// It says the class name, the number a tracker gave the object, the score
+/// and what classifiers said of it, each as asked for — `car #7 0.87 |
+/// minivan` with all four — on a band of the box's colour, in
 /// [`DetectionOverlayOptions::font`]. A box whose label would say nothing
 /// has none.
 #[derive(Debug, Clone, Copy, PartialEq)]

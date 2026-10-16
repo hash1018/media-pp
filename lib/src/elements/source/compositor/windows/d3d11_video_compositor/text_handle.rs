@@ -67,6 +67,16 @@ pub enum D3d11TextLayerError {
     Windows(#[from] windows::core::Error),
 }
 
+/// Writes and places one text layer of a
+/// [`D3d11VideoCompositor`](super::D3d11VideoCompositor) while it runs.
+///
+/// Made by [`super::D3d11VideoCompositorHandle::add_text_layer`]; the
+/// [`D3d11VideoCompositor`](super::D3d11VideoCompositor) example shows one in
+/// use. Not `Clone`, and not cheap: it owns a device, a font and a frame
+/// pool, and [`Self::set_text`] rasterizes and uploads.
+///
+/// # How it works
+///
 /// Dynamic text drawn into a [`super::D3d11VideoCompositor`] scene, obtained via
 /// [`super::D3d11VideoCompositorHandle::add_text_layer`] — there's no upstream
 /// `Pipeline` branch feeding this input, only

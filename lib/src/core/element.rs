@@ -47,6 +47,8 @@ pub use crate::transform::{
     AsBoxFilter, AsFilter, AsNamedFilter, AsRawFilter, BoxFilter, Filter, IntoFilter, Output,
 };
 
+/// Which kind of element this is, as the bus and the log name it.
+///
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
 /// compare/match, unlike the accompanying `name: Arc<str>` (an
 /// instance-level identifier chosen by whoever constructed it, needed
@@ -370,6 +372,8 @@ pub enum ElementType {
 /// nothing about whether the node has an input, an output, both, or
 /// neither.
 pub trait Element: Send {
+    /// The name the caller gave this element.
+    ///
     /// Returns a cheap clone (refcount bump, not a deep copy) of this
     /// element's name — [`crate::bus::BusEvent`] stores names as
     /// `Arc<str>` for exactly this reason: a hot path like
@@ -378,7 +382,7 @@ pub trait Element: Send {
     /// time it wants to report which element it is.
     fn name(&self) -> Arc<str>;
 
-    /// See [`ElementType`].
+    /// Which kind of element this is — see [`ElementType`].
     fn element_type(&self) -> ElementType;
 
     /// A pre-reserved graph identity for elements that expose dynamic
@@ -388,6 +392,8 @@ pub trait Element: Send {
         None
     }
 
+    /// The identity this element's log records carry.
+    ///
     /// This element's identity for [`crate::bus::Bus::post`] — same
     /// `id`/`name` as [`Element::name`], just already wrapped as the
     /// [`crate::pp_log::PpLog`] its `pp_info!`/`pp_warn!`/`pp_error!` macros need. A
@@ -396,6 +402,8 @@ pub trait Element: Send {
     /// — see its own docs.
     fn pp_log(&self) -> &PpLog;
 
+    /// Mutable access to [`Element::pp_log`], for the pipeline's wiring.
+    ///
     /// Mutable access to the same field [`Element::pp_log`] reads — used by
     /// [`crate::pipeline::ChainBuilder`] to stamp the owning
     /// [`crate::pipeline::Pipeline`]'s id onto every element that
@@ -403,10 +411,11 @@ pub trait Element: Send {
     /// from anywhere else.
     fn pp_log_mut(&mut self) -> &mut PpLog;
 
-    /// Hands this element the pipeline it is being wired into, at the moment
-    /// and for the reason [`Element::pp_log_mut`] hands it the pipeline's
-    /// identity: the clock, the playback clock and the bus are the
-    /// pipeline's to give, not the caller's to choose.
+    /// Hands this element the pipeline it is being wired into.
+    ///
+    /// It comes at the moment and for the reason [`Element::pp_log_mut`]
+    /// hands it the pipeline's identity: the clock, the playback clock and
+    /// the bus are the pipeline's to give, not the caller's to choose.
     ///
     /// # Why this is not a constructor argument
     ///
@@ -521,8 +530,43 @@ impl Identity {
     }
 }
 
-/// What a [`Source`], [`Filter`] or [`Sink`] is told as it is wired into a
-/// pipeline: who it is there, and the pipeline it runs in.
+/// What a [`Source`], [`Filter`] or [`Sink`] of your own is told as it is
+/// wired into a pipeline: who it is there, and the pipeline it runs in.
+///
+/// Keep [`Self::pp_log`] from it to write log records under the element's
+/// own name and pipeline.
+///
+/// # Example
+///
+/// ```no_run
+/// use media_pp::buffer::MediaBuffer;
+/// use media_pp::element::{Attached, Filter, Output};
+/// use media_pp::pp_log::{PpLog, pp_info};
+///
+/// /// Hands every buffer on, and logs what the first one is.
+/// #[derive(Default)]
+/// struct Watch {
+///     pp_log: Option<PpLog>,
+///     seen: bool,
+/// }
+///
+/// impl Filter for Watch {
+///     fn attached(&mut self, cx: &Attached<'_>) {
+///         self.pp_log = Some(cx.pp_log().clone());
+///     }
+///
+///     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> media_pp::Result<()> {
+///         if let (false, Some(pp_log)) = (self.seen, &self.pp_log) {
+///             pp_info!(pp_log: pp_log, "first buffer: {}", buf.kind());
+///         }
+///         self.seen = true;
+///         out.push(buf);
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// # How it works
 ///
 /// Handed to its `attached`, before any buffer and again whenever it is
 /// wired anew — into a [`Rack`](crate::elements::Rack)'s line, say. An
@@ -559,10 +603,16 @@ impl<'a> Attached<'a> {
     }
 }
 
-/// A [`Source`], [`Filter`] or [`Sink`] of the application's own with the
-/// name it is to go by in the pipeline's log and on its bus — made by its
-/// `named`. One given no name goes by its type's, which is enough until the
-/// same element is wired twice.
+/// A [`Source`], [`Filter`] or [`Sink`] of your own, with the name it goes
+/// by in the pipeline.
+///
+/// Made by the element's `named` — [`Filter::named`], [`Sink::named`],
+/// [`Source::named`] — and put in a pipeline where the element itself would
+/// go: `ctx.branch().pipe(MyFilter.named("left"))`.
+///
+/// The name is the one it goes by in the pipeline's log and on its bus. One
+/// given no name goes by its type's, which is enough until the same element
+/// is wired twice.
 pub struct Named<T> {
     pub(crate) name: String,
     pub(crate) inner: T,
@@ -586,6 +636,14 @@ pub(crate) fn pipeline_pp_log(pipeline_id: &str) -> PpLog {
     PpLog::new("Pipeline", pipeline_id, Some(pipeline_id))
 }
 
+/// What a pipeline's `wire` closure is handed: the pipeline's bus, graph
+/// and clocks, and the way to build and attach branches.
+///
+/// Call [`Context::branch`] to start a branch and [`Context::attach`] to put it
+/// on a source's output — see [`crate::pipeline::Pipeline`] for an example.
+///
+/// # How it works
+///
 /// Everything a [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
 /// needs to wire itself into a [`crate::pipeline::Pipeline`] — bundled into
 /// one `Arc` instead of threading `bus`/`pipeline_id`/`graph`/the wall and
@@ -699,9 +757,10 @@ impl Context {
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input
-/// side of an element, or a terminal. Every `RawSink` is named
-/// (via `Element`) so bus events (e.g. EOS) can identify which one they
-/// came from.
+/// side of an element, or a terminal.
+///
+/// Every `RawSink` is named (via `Element`) so bus events (e.g. EOS) can
+/// identify which one they came from.
 ///
 /// An element of your own implements this only to route the stream itself
 /// — a muxer of several tracks, a terminal handing the stream's events on
@@ -788,8 +847,10 @@ pub trait RawSink: Element {
         None
     }
 
-    /// The pipeline pausing — called on the thread that carries it here,
-    /// in order with the data around it: stop what this sink plays or
+    /// Called as the pipeline pauses.
+    ///
+    /// It is called on the thread that carries the pause here, in order
+    /// with the data around it: stop what this sink plays or
     /// sends through, a device of its own. What reaches it while paused, a
     /// preroll's or a step's samples, it takes as ever. By default nothing.
     ///
@@ -801,14 +862,14 @@ pub trait RawSink: Element {
         Ok(())
     }
 
-    /// The pipeline playing on after a pause: start again what
+    /// Called as the pipeline plays on after a pause: start again what
     /// [`Self::pausing`] stopped. As there, only the reaction. By default
     /// nothing.
     fn resuming(&mut self) -> Result<()> {
         Ok(())
     }
 
-    /// The pipeline stopping: let go of what this sink holds, abandoned
+    /// Called as the pipeline stops: let go of what this sink holds, abandoned
     /// rather than finished — no end of the stream follows a stop. As
     /// [`Self::pausing`], only the reaction. By default nothing.
     ///
@@ -919,10 +980,11 @@ pub trait SrcPads: Element {
     fn src_pads(&mut self) -> &mut [SrcPad];
 }
 
-/// A pure source: has output but no input. Its loop, which the pipeline
-/// runs on a thread of its own, pushes buffers into its own src pad(s) and
-/// answers what the pipeline asks in between — pause, seek, stop — until
-/// its stream ends.
+/// A pure source: has output but no input.
+///
+/// Its loop, which the pipeline runs on a thread of its own, pushes buffers
+/// into its own src pad(s) and answers what the pipeline asks in between —
+/// pause, seek, stop — until its stream ends.
 ///
 /// Implemented only by this crate's sources: the loop is handed a channel
 /// nothing outside can name, and answering it right is what this crate's
@@ -1103,8 +1165,9 @@ pub trait ReversibleSource: SeekableSource {
 
 /// A decoder, an element that turns a picture's packets into pictures,
 /// that can hand them on backwards — what a pipeline asks of every such
-/// element for [`crate::pipeline::Pipeline::REVERSE_RATE`]. It says it is
-/// one through [`RawSink::as_reversible`].
+/// element for [`crate::pipeline::Pipeline::REVERSE_RATE`].
+///
+/// It says it is one through [`RawSink::as_reversible`].
 ///
 /// Played backwards, the packets come in the stretches a
 /// [`ReversibleSource`] reads, and the pipeline says where each begins and
@@ -1128,9 +1191,10 @@ pub trait ReversibleDecoder: RawSink {
 }
 
 /// An element with both an input and an output — decoder, encoder,
-/// filter, thumbnail extractor, ... Just a name for "has a `RawSink` to
-/// receive and a `SrcPads` to push what it produces into"; nothing new to
-/// implement beyond those two.
+/// filter, thumbnail extractor, ...
+///
+/// Just a name for "has a `RawSink` to receive and a `SrcPads` to push what it
+/// produces into"; nothing new to implement beyond those two.
 ///
 /// Implemented directly only by an element that routes the stream itself —
 /// splits it, holds it back, waits on a clock; one that makes buffers of

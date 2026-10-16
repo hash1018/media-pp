@@ -1,5 +1,6 @@
-//! Every element that turns `Video`/`Audio` frames into `Packet`s, split
-//! by media kind: [`video`] (software video encode via `libx264`/
+//! Encoders: the elements that turn pictures and sound into compressed packets.
+//!
+//! Split by media kind: [`video`] (software video encode via `libx264`/
 //! `libx265`/`libopenh264`/`libkvazaar`/`libvpx`/`libaom-av1`/
 //! `libsvtav1`) and [`audio`] (software audio encode via `aac`) — kept as
 //! their own directory anyway, alongside

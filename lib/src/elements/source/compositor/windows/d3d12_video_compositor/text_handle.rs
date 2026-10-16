@@ -53,8 +53,12 @@ pub(crate) struct TextLayerState {
     pub(super) z_index: AtomicI32,
 }
 
-/// Runtime control for one text layer — the D3D12 sibling of
-/// `CudaTextLayerHandle`.
+/// Writes and places one text layer of a
+/// [`D3d12VideoCompositor`](super::D3d12VideoCompositor) while it runs.
+///
+/// Made by [`D3d12VideoCompositorHandle::add_text_layer`]; the
+/// [`D3d12VideoCompositor`](super::D3d12VideoCompositor) example shows one in
+/// use. The D3D12 sibling of `CudaTextLayerHandle`.
 ///
 /// Cloning is cheap and every clone controls the same layer. It holds the
 /// layer's own state, the device and what masks are uploaded through —

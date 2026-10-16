@@ -21,7 +21,7 @@ use windows::{
 
 use super::super::com::ComApartment;
 
-/// Which direction a WASAPI endpoint flows.
+/// Whether a WASAPI endpoint plays sound or records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasapiDeviceKind {
     /// Speakers, headphones, HDMI audio, or another playback endpoint.
@@ -30,7 +30,11 @@ pub enum WasapiDeviceKind {
     Capture,
 }
 
-/// One active WASAPI endpoint.
+/// One sound device Windows offers to play to or record from.
+///
+/// `WasapiCaptureSource::list_devices` and `WasapiRenderer::list_devices`
+/// list the active ones; pass one as that element's `device` option. Needs
+/// the `wasapi-capture` or `wasapi-renderer` feature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasapiDevice {
     /// Opaque `IMMDevice::GetId` value.

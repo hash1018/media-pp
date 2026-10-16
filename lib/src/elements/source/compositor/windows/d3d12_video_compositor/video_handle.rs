@@ -15,8 +15,11 @@ use super::{
     validate_layer, validate_opacity, validate_rect,
 };
 
-/// Runtime placement control for one registered input — the D3D12 sibling
-/// of [`crate::elements::SwVideoLayerHandle`], with the same API.
+/// Moves, sizes, restacks and shows or hides one input of a
+/// [`D3d12VideoCompositor`](super::D3d12VideoCompositor) while it runs.
+///
+/// The D3D12 sibling of [`crate::elements::SwVideoLayerHandle`], with the
+/// same API.
 ///
 /// Cloning is cheap; a clone holds the input and the compositor only
 /// weakly, so it keeps neither alive, and once either is gone every call

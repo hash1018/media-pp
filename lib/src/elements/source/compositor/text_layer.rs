@@ -1,7 +1,8 @@
-//! [`TextLayer`] — backend-agnostic construction-time settings for a
-//! dynamic text layer, the text sibling of [`super::video_layer::VideoLayer`]
-//! — plus what every compositor that draws one shares: loading its font
-//! and rasterizing glyphs.
+//! Text layers' settings, and the font loading and glyph rasterizing every
+//! compositor shares.
+//!
+//! [`TextLayer`] is the backend-agnostic construction-time settings for a
+//! dynamic text layer, the text sibling of [`super::video_layer::VideoLayer`].
 //!
 //! Rasterizing is backend-agnostic by nature: `ab_glyph` turns a font and a
 //! string into per-pixel coverage, and what differs is only what each
@@ -180,11 +181,18 @@ pub(crate) fn rasterize_bgra(
     Ok(Some((mask.width, mask.height, pixels)))
 }
 
-/// Construction-time settings for one text layer, passed to a compositor
-/// handle's `add_text_layer` — the software, D3D11 or CUDA one — the
-/// text sibling of [`super::video_layer::VideoLayer`], which `add_source`
-/// takes the same way. `font_data` (raw TTF/OTF bytes; this crate bundles
-/// no font of its own) has no sane default, so — mirroring
+/// The font, size, colour and starting place of a text layer, passed to a
+/// compositor handle's `add_text_layer`.
+///
+/// Every backend's handle takes it — see
+/// [`VideoCompositorControl::add_text_layer`](crate::elements::VideoCompositorControl::add_text_layer).
+/// It is the text sibling of [`super::video_layer::VideoLayer`], which
+/// `add_source` takes the same way.
+///
+/// # Defaults and stacking
+///
+/// `font_data` (raw TTF/OTF bytes; this crate bundles no font of its own)
+/// has no sane default, so — mirroring
 /// [`super::video_layer::VideoLayer::new`], which takes the one field a
 /// caller must supply (`rect`) and defaults the rest — [`Self::new`] takes
 /// only `font_data` and defaults `font_size`/`color`/`x`/`y`, all freely

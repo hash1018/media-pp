@@ -23,8 +23,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to [`VulkanDownload`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VulkanDownload`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VulkanDownloadError {
     /// FFmpeg could not take a second reference to the download already in
@@ -62,9 +63,43 @@ impl From<NotOurs> for VulkanDownloadError {
 const LAYOUTS: PixelLayoutSet =
     PixelLayoutSet::from_slice(&[PixelLayout::Nv12, PixelLayout::P010, PixelLayout::Bgra]);
 
-/// Reads Vulkan frames back into system memory, in the layout they hold —
-/// the mirror of [`crate::elements::VulkanUpload`], and what lets a Vulkan
-/// frame reach anything that reads pixel bytes.
+/// Copies pictures from a Vulkan GPU back into system memory, for the CPU
+/// elements after it.
+///
+/// Behind the `vulkan` feature. Put it after a `VulkanDecoder` or another
+/// Vulkan element, in front of something that works in system memory. It
+/// takes NV12, P010 or BGRA Vulkan frames and hands on pictures in system
+/// memory in the same layout.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, TestVideoOptions, TestVideoSource, VulkanDevice, VulkanDownload,
+///     VulkanUpload,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VulkanDevice::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (encoder, _) = FrameCounter::new("encoder"); // a SwEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("round-trip", source, |source, ctx| {
+///     let upload = VulkanUpload::new("upload", &device);
+///     let download = VulkanDownload::new("download", &device);
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).pipe(download).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It reads Vulkan frames back into system memory, in the layout they hold
+/// — the mirror of [`crate::elements::VulkanUpload`], and what lets a
+/// Vulkan frame reach anything that reads pixel bytes.
 ///
 /// A filter: takes each buffer and pushes the downloaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with

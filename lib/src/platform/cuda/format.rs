@@ -1,6 +1,8 @@
 use ffmpeg_next::{self as ffmpeg, ffi};
 
-/// What a CUDA surface on this crate's path actually holds — the
+/// The pixel layout of a CUDA picture: NV12, BGRA or 10-bit P010.
+///
+/// It is what a CUDA surface on this crate's path actually holds — the
 /// `sw_format` half of a hardware frame, as opposed to
 /// [`ffmpeg::format::Pixel::CUDA`], which only says the pixels live in CUDA
 /// memory at all.

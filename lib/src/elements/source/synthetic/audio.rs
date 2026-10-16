@@ -21,7 +21,7 @@ use crate::{
 /// [`crate::elements::AudioMixer`]'s `TICK_INTERVAL`.
 const TICK_INTERVAL: Duration = Duration::from_millis(20);
 
-/// Construction-time options for [`TestAudioSource::new`].
+/// The rate, channels and pitch of the tone a [`TestAudioSource`] makes.
 #[derive(Debug, Clone, Copy)]
 pub struct TestAudioOptions {
     /// Sample rate of the generated audio, in hertz.
@@ -44,18 +44,45 @@ impl Default for TestAudioOptions {
     }
 }
 
-/// Generates a synthetic sine-wave tone — GStreamer's `audiotestsrc`
-/// equivalent. No real capture device involved: each tick it
-/// fabricates however many samples wall-clock time now owes on a
-/// drift-free absolute schedule (`expected = elapsed * sample_rate`,
-/// `needed = expected - samples_emitted` — the same shape
-/// `WasapiCaptureSource`'s `silence_owed` and `AudioMixer`'s `mix_tick` both
-/// use, not a fixed
-/// per-tick sample count, which would drift the same way a fixed-duration
-/// `thread::sleep`-only schedule would), stamps it with an increasing
-/// `pts` (one sample per tick of [`TestAudioSource::time_base`]'s units),
-/// and pushes it straight downstream — useful for exercising
-/// `AudioMixer`/an encoder/a muxer without a real microphone.
+/// Makes a steady sine tone, for trying a sound pipeline without a file or
+/// a microphone.
+///
+/// GStreamer's `audiotestsrc` equivalent. It hands on decoded interleaved
+/// `f32` sound at its own rate, so it can feed a mixer, an encoder or a
+/// renderer directly. It is live and runs until stopped.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, TestAudioOptions, TestAudioSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let options = TestAudioOptions { frequency: 1000.0, ..TestAudioOptions::default() };
+/// let source = TestAudioSource::new("tone", options);
+/// let (counter, _sound) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// No real capture device involved: each tick it fabricates however many
+/// samples wall-clock time now owes on a drift-free absolute schedule
+/// (`expected = elapsed * sample_rate`, `needed = expected - samples_emitted` —
+/// the same shape `WasapiCaptureSource`'s `silence_owed` and `AudioMixer`'s
+/// `mix_tick` both use, not a fixed per-tick sample count, which would drift
+/// the same way a fixed-duration `thread::sleep`-only schedule would), stamps
+/// it with an increasing `pts` (one sample per tick of
+/// [`TestAudioSource::time_base`]'s units), and pushes it straight downstream —
+/// useful for exercising `AudioMixer`/an encoder/a muxer without a real
+/// microphone.
 ///
 /// Always emits `Sample::F32(Packed)` — the same fixed internal format
 /// `AudioMixer` mixes in, so this can feed a `MixerHandle` input directly

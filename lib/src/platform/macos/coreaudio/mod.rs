@@ -51,9 +51,10 @@ mod tap;
 #[cfg(feature = "coreaudio-capture")]
 pub(crate) use tap::{ProcessTap, TapError};
 
-/// Which way a [`CoreAudioDevice`] entry goes — the same distinction
-/// `WasapiDeviceKind` and `PipeWireAudioDeviceKind` draw, and with the same
-/// consequence for capture.
+/// Whether a [`CoreAudioDevice`] entry plays sound or records it.
+///
+/// The same distinction `WasapiDeviceKind` and `PipeWireAudioDeviceKind`
+/// draw, and with the same consequence for capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreAudioDeviceKind {
     /// Something to record from: a microphone, a line input.
@@ -63,10 +64,13 @@ pub enum CoreAudioDeviceKind {
     Output,
 }
 
-/// One direction of one audio device, as `CoreAudioRenderer::list_devices`
-/// lists those it can play to and `CoreAudioCaptureSource::list_devices`
-/// those it can record from or capture the playback of. A device that goes
-/// both ways — a headset — is two entries, one of each [`kind`](Self::kind).
+/// One sound device macOS offers to play to or record from.
+///
+/// It is one direction of one audio device, as
+/// `CoreAudioRenderer::list_devices` lists those it can play to and
+/// `CoreAudioCaptureSource::list_devices` those it can record from or capture
+/// the playback of. A device that goes both ways — a headset — is two entries,
+/// one of each [`kind`](Self::kind).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreAudioDevice {
     /// The HAL's `AudioObjectID`. Good only while the device stays attached
@@ -88,9 +92,11 @@ pub struct CoreAudioDevice {
     pub is_default: bool,
 }
 
-/// One process Core Audio knows as a client — one that has played or
-/// recorded sound since it started — as `CoreAudioCaptureSource::list_processes`
-/// lists it for `open_process`.
+/// One running program that uses sound, whose sound alone a capture can record.
+///
+/// It is a process Core Audio knows as a client — one that has played or
+/// recorded sound since it started — as
+/// `CoreAudioCaptureSource::list_processes` lists it for `open_process`.
 #[cfg(feature = "coreaudio-capture")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreAudioProcess {

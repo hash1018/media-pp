@@ -30,9 +30,47 @@ use crate::{
 /// references.
 const OWN_QUEUE_CAPACITY: usize = 8;
 
-/// Builds one chain segment (a run of elements that all execute on the same
-/// thread). Call [`ChainBuilder::queue`] to close the current segment behind
-/// a `Queue` and start a new one on its own worker thread.
+/// Builds a branch: the elements a stream passes through, in order, ending
+/// in a sink.
+///
+/// Get one from [`Context::branch`] inside a pipeline's `wire` closure.
+/// Add filters with [`ChainBuilder::pipe`], a thread boundary with
+/// [`ChainBuilder::queue`], and end it with [`ChainBuilder::to`]. The result
+/// is a [`DetachedBranch`], which [`Context::attach`] puts on a source's
+/// output. Both steps check that each link can carry data, and fail before
+/// anything runs if one cannot.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, Pacer, SwDecoder, FileDemuxer};
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// let (source, _streams) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx
+///         .branch()
+///         .pipe(decoder) // runs on the source's thread
+///         .queue("frames", 8) // what follows runs on the queue's thread
+///         .pipe(Pacer::new("pacer"))
+///         .to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A chain is built of segments: runs of elements that all execute on the
+/// same thread. [`ChainBuilder::queue`] closes the current segment behind
+/// a `Queue` and starts a new one on its own worker thread.
 ///
 /// Because each element needs a handle to *its* downstream to be
 /// constructed, the chain is assembled back-to-front: elements are
@@ -59,8 +97,11 @@ struct PlannedNode {
     counters: Arc<ElementCounters>,
 }
 
+/// A built branch, not yet attached to a source.
+///
 /// A fully constructed runtime chain whose graph nodes are still detached.
-/// Dropping it has no topology effect; only an attach operation commits it.
+/// Dropping it has no topology effect; only an attach operation
+/// ([`Context::attach`]) commits it.
 pub struct DetachedBranch {
     pub(crate) root: Box<dyn RawSink>,
     pub(crate) plan: BranchPlan,
@@ -635,16 +676,17 @@ impl ChainBuilder {
         }
     }
 
-    /// Adds a single-output filter (decoder, encoder, filter, ...) that
-    /// receives what is upstream of it and hands on through its one pad —
-    /// either a [`RawFilter`] or a [`Filter`], which the framework makes one
-    /// of (see [`IntoFilter`]). It runs on the same thread as whatever is
-    /// upstream of it — direct function call, no queue — unless it waits on
-    /// the clock inside `consume`, as a [`Pacer`] and a
-    /// [`VideoSynchronizer`] do. Those run behind a queue of their own, so
-    /// the wait holds up nothing upstream: a [`Self::queue`] added straight
-    /// before them is that queue, and where there is none this puts one of
-    /// eight there, named `<name>-queue`.
+    /// Adds a filter — a decoder, an encoder, a scaler — to the branch.
+    ///
+    /// A single-output filter receives what is upstream of it and hands on
+    /// through its one pad — either a [`RawFilter`] or a [`Filter`], which the
+    /// framework makes one of (see [`IntoFilter`]). It runs on the same thread
+    /// as whatever is upstream of it — direct function call, no queue — unless
+    /// it waits on the clock inside `consume`, as a [`Pacer`] and a
+    /// [`VideoSynchronizer`] do. Those run behind a queue of their own, so the
+    /// wait holds up nothing upstream: a [`Self::queue`] added straight before
+    /// them is that queue, and where there is none this puts one of eight
+    /// there, named `<name>-queue`.
     ///
     /// [`Filter`]: crate::element::Filter
     /// [`Pacer`]: crate::elements::Pacer
@@ -694,7 +736,10 @@ impl ChainBuilder {
         self
     }
 
-    /// Introduces a thread boundary (blocking when full — see
+    /// Adds a [`Queue`] of `capacity` buffers: what follows runs on a thread
+    /// of its own.
+    ///
+    /// The queue is a thread boundary (blocking when full — see
     /// [`OverflowPolicy::Block`]): everything added after this runs on its
     /// own worker thread instead of the thread that feeds this queue.
     pub fn queue(self, name: impl Into<String>, capacity: usize) -> Self {
@@ -740,7 +785,9 @@ impl ChainBuilder {
         self
     }
 
-    /// Terminates the chain with a `RawSink` (muxer, file sink, ...) and
+    /// Ends the branch in a sink and checks every link in it.
+    ///
+    /// Terminates the chain with a sink (muxer, renderer, ...) and
     /// assembles everything into one branch ready to be linked into a
     /// source's src pad. The terminal's own `Element::name()` is what shows
     /// up on the bus when it reports EOS.

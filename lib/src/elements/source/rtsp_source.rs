@@ -16,8 +16,9 @@ use crate::{
 
 use super::file_demuxer::StreamInfo;
 
-/// Errors specific to `RtspSource`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why an [`RtspSource`] could not connect or read.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum RtspSourceError {
     /// FFmpeg rejected connection setup, stream reading, or shutdown.
@@ -29,10 +30,41 @@ pub enum RtspSourceError {
     NoStream(ffmpeg::media::Type),
 }
 
-/// Demuxes a live RTSP stream — the client/receive counterpart to
-/// [`crate::elements::RtspMuxer`] (which publishes). One src pad per
-/// stream the server advertises, same shape as
-/// [`crate::elements::FileDemuxer`].
+/// Receives a live RTSP stream — a camera, a server — and hands on its
+/// packets, one output per stream.
+///
+/// It is the client/receive counterpart to [`crate::elements::RtspMuxer`]
+/// (which publishes), and has the same shape as
+/// [`crate::elements::FileDemuxer`]: open it, pick a stream with
+/// [`RtspSource::best`], and attach a branch to that stream's `index`. It
+/// hands on encoded packets, as they arrive; it is live, so the branch needs
+/// no pacer, and it cannot be sought.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, RtspOptions, RtspSource, SwDecoder};
+/// use media_pp::ffmpeg::media;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let url = "rtsp://192.168.0.10:554/stream";
+/// let (source, _streams) = RtspSource::open("camera", url, RtspOptions::default())?;
+/// let video = source.best(media::Type::Video)?;
+/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
+///     let branch = ctx.branch().queue("packets", 32).pipe(decoder).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors and reconnecting
 ///
 /// Deliberately does **not** retry or reconnect internally: a read failure
 /// (dropped connection, camera reboot, ...) ends this source's thread with

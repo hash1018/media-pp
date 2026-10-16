@@ -31,7 +31,7 @@ use crate::{
 /// sooner, but a connection replaced or a bridge gone does not.
 const ROOM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Errors specific to [`PipelineBridge`].
+/// Why a [`PipelineBridge`]'s input could not hand a buffer across.
 #[derive(Debug, ThisError)]
 pub enum PipelineBridgeError {
     /// This sink was replaced by a later [`PipelineBridgeHandle::connect`],
@@ -58,7 +58,8 @@ pub enum PipelineBridgeError {
     Disconnected,
 }
 
-/// Construction-time options for [`PipelineBridge::new`].
+/// How many buffers a [`PipelineBridge`] holds between its two pipelines,
+/// and what happens when they fill up.
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineBridgeOptions {
     /// How many buffers may sit between the two pipelines.
@@ -82,6 +83,46 @@ impl Default for PipelineBridgeOptions {
 
 /// Carries buffers from one [`crate::pipeline::Pipeline`] into another, so
 /// the two can start, end and fail independently.
+///
+/// It is the downstream pipeline's source; the upstream pipeline's branch ends
+/// in the sink [`PipelineBridgeHandle::connect`] returns. It carries anything —
+/// packets, pictures, sound — unchanged, timestamps included, through one
+/// bounded queue. Choose it where a source may die and be replaced while what
+/// follows it — a recording, a stream — keeps running; where the two sides meet
+/// in a mix or a composition, an [`AudioMixer`](crate::elements::AudioMixer) or
+/// a compositor already is that boundary.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, PipelineBridge, PipelineBridgeOptions, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// // Downstream: lives as long as the application wants it.
+/// let (bridge, handle) = PipelineBridge::new("bridge", PipelineBridgeOptions::default());
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (down, ()) = Pipeline::new("down", bridge, |bridge, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(bridge, 0, branch)?;
+///     Ok(())
+/// })?;
+/// down.run()?;
+///
+/// // Upstream: may fail and be rebuilt with another `connect`.
+/// let input = handle.connect()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (up, ()) = Pipeline::new("up", source, |source, ctx| {
+///     let branch = ctx.branch().queue("to-bridge", 8).to(input)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// up.run()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # What it is for
 ///
@@ -310,10 +351,9 @@ impl BridgeShared {
     }
 }
 
-/// A cheaply-cloneable way to connect a pipeline to a [`PipelineBridge`], and
-/// to end it.
+/// Connects a feeding pipeline to a [`PipelineBridge`], and ends the bridge.
 ///
-/// Holds only a [`Weak`] reference, for the same reason
+/// Cheap to clone. Holds only a [`Weak`] reference, for the same reason
 /// [`crate::elements::MixerHandle`] does: keeping one after the bridge's own
 /// pipeline has finished must not keep its buffers alive forever, and every
 /// operation answers rather than taking effect once it is gone.

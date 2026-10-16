@@ -38,8 +38,9 @@ pub use input::StreamMuxInput;
 pub use meta::{BatchSlot, StreamId, StreamOrigin};
 pub(crate) use per_stream::PerStream;
 
-/// Errors specific to [`StreamMux`]. Converts into the crate-wide `Error`
-/// via `?`.
+/// Errors specific to [`StreamMux`].
+///
+/// Converts into the crate-wide `Error` via `?`.
 #[derive(Debug, ThisError)]
 pub enum StreamMuxError {
     /// An input was handed something other than a decoded picture.
@@ -151,6 +152,7 @@ impl MuxShared {
 }
 
 /// Adds and removes a [`StreamMux`]'s inputs while it runs, from any thread.
+///
 /// Cheap to clone; keeps only a [`Weak`] reference, so a handle kept after
 /// the mux's pipeline is gone keeps nothing of it alive, and every call then
 /// answers [`StreamMuxError::Stopped`] or does nothing.
@@ -231,8 +233,58 @@ impl StreamMuxHandle {
     }
 }
 
-/// Gathers a picture from each of its inputs into a batch, for an element
-/// that runs a model to take at once — DeepStream's `nvstreammux`.
+/// Gathers a picture from each of several streams into a batch, so that one
+/// model looks at them all at once.
+///
+/// It is the source of a pipeline of its own — DeepStream's `nvstreammux`.
+/// Each input is another pipeline, ending in the sink
+/// [`StreamMuxHandle::add_source`] gives, and the pictures it hands on carry
+/// [`StreamOrigin`], which says which stream each came from. Put a detector
+/// after it with a `max_batch` of the mux's, and split the streams out again
+/// with [`StreamMuxHandle::demux`]. It takes pictures wherever they live and
+/// needs no feature.
+///
+/// # Example
+///
+/// Every stream's pictures in one branch; a model would go before the sink. The
+/// `cuda_multi_detect` example
+/// (<https://github.com/hash1018/media-pp/tree/main/examples/vision/cuda_multi_detect>)
+/// runs a detector on a batch and splits the streams out again.
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AppSink, StreamMux, StreamMuxOptions, StreamOrigin, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (mux, handle) = StreamMux::new("mux", StreamMuxOptions::default())?;
+/// let sink = AppSink::new("batched", |buf| {
+///     if let Some(origin) = buf.metadata().and_then(|m| m.get::<StreamOrigin>()) {
+///         println!("a picture of {}", origin.name);
+///     }
+///     Ok(())
+/// });
+/// let (batching, ()) = Pipeline::new("batching", mux, |source, ctx| {
+///     let branch = ctx.branch().to(sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// // One pipeline per input, ending in the sink the handle gives.
+/// let (input, _stream) = handle.add_source("camera 1")?;
+/// let camera = TestVideoSource::new("camera 1", TestVideoOptions::default());
+/// let (feed, ()) = Pipeline::new("camera 1", camera, |source, ctx| {
+///     let branch = ctx.branch().queue("pictures", 4).to(input)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// batching.run()?;
+/// feed.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// Inputs come from other pipelines, each ending in the sink
 /// [`StreamMuxHandle::add_source`] returns, and come and go while it runs.

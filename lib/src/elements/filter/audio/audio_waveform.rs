@@ -83,15 +83,37 @@ impl Default for AudioWaveformOptions {
     }
 }
 
-/// Draws the sound it is given as a waveform — an oscilloscope's trace of
-/// the last picture's worth of it, its channels averaged — into BGRA
-/// pictures at a steady rate: the GStreamer `wavescope` of this crate, and
-/// what a player shows for a file with no picture.
+/// Draws the sound it is given as a moving waveform picture — what a player
+/// shows for a file with no picture.
 ///
-/// Takes decoded `f32` sound, packed or planar — an
-/// [`AudioResampler`](crate::elements::AudioResampler) in front makes
-/// anything else that. Puts out system-memory BGRA of the size asked for,
-/// black with the trace on it.
+/// An oscilloscope's trace of the last picture's worth of sound, its
+/// channels averaged, drawn into BGRA pictures at a steady rate: the
+/// GStreamer `wavescope` of this crate. Takes decoded `f32` sound, packed
+/// or planar — an [`AudioResampler`](crate::elements::AudioResampler) in
+/// front makes anything else that. Puts out system-memory BGRA of the size
+/// asked for, black with the trace on it; send it to a video renderer
+/// through a [`VideoSynchronizer`](crate::elements::VideoSynchronizer).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioWaveform, AudioWaveformOptions, FrameCounter, TestAudioOptions, TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let waveform = AudioWaveform::new("scope", AudioWaveformOptions::default())?;
+/// let (window, _) = FrameCounter::new("window"); // a video renderer, in a player
+/// let (pipeline, ()) = Pipeline::new("scope", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(waveform).to(window)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Timing
 ///

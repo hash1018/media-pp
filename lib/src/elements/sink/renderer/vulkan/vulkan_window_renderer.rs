@@ -149,6 +149,49 @@ impl WindowSize {
     }
 }
 
+/// Shows video in a window on Linux, drawing with Vulkan from frames in
+/// system memory or from CUDA.
+///
+/// It ends a branch of decoded pictures: frames in system memory (NV12,
+/// YUV420P or BGRA) from a software decode or a capture, or CUDA frames
+/// from a `CudaDecoder` (with the `cuda` feature) when its
+/// [`VulkanGpu`] was made with `VulkanGpu::for_cuda`. It draws but does not
+/// pace, so a [`Pacer`](crate::elements::Pacer) or
+/// [`VideoSynchronizer`](crate::elements::VideoSynchronizer) goes in front.
+/// [`VulkanWindowRenderer::open`] opens an X11 window of its own;
+/// [`VulkanWindowRenderer::for_window`] draws into the application's, X11
+/// or Wayland. Needs the `vulkan` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FileDemuxer, Pacer, SwDecoder, VulkanGpu, VulkanWindowRenderer, WindowEvent, WindowOptions,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let gpu = VulkanGpu::new()?;
+/// let (screen, events) = VulkanWindowRenderer::open("screen", &gpu, WindowOptions::default())?;
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 8);
+///     let branch = branch.pipe(Pacer::new("pacer")).to(screen)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// while events.recv().is_some_and(|event| event != WindowEvent::Closed) {}
+/// pipeline.stop();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
 /// A terminal sink that shows video frames in a window — one it opens for
 /// itself, the way a GStreamer video sink does when nobody hands it one, or
 /// one the application gives it, X11 or Wayland, such as a `winit` window.

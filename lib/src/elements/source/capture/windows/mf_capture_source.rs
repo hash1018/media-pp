@@ -33,8 +33,9 @@ use crate::{
 /// rather than `1 / fps`.
 const TIME_BASE_DENOMINATOR: i32 = 10_000_000;
 
-/// Errors specific to `MfCaptureSource`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Why an [`MfCaptureSource`] could not open a camera or go on capturing.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum MfCaptureSourceError {
     /// A COM or Media Foundation operation failed.
@@ -96,7 +97,7 @@ pub enum MfCaptureSourceError {
     },
 }
 
-/// Construction-time options for [`MfCaptureSource::open`].
+/// Which camera an [`MfCaptureSource`] opens, and at which size and rate.
 #[derive(Debug, Clone)]
 pub struct MfCaptureOptions {
     /// Which camera to capture — one entry out of
@@ -114,11 +115,43 @@ pub struct MfCaptureOptions {
     pub format: Option<MfCaptureFormat>,
 }
 
-/// Captures a camera through Media Foundation's synchronous source reader —
-/// GStreamer's `mfvideosrc` equivalent. One src pad, pushing CPU-resident
-/// `Pixel::NV12` [`MediaBuffer::Video`] frames at the negotiated size, ready
-/// for [`D3d11Upload`](crate::elements::D3d11Upload) (which takes NV12
-/// directly) or a [`SwScaler`](crate::elements::SwScaler).
+/// Captures a camera on Windows.
+///
+/// List the cameras with [`MfCaptureSource::list_devices`] and, if the size
+/// matters, the modes of one with [`MfCaptureSource::list_formats`]; then open
+/// it with [`MfCaptureOptions`]. GStreamer's `mfvideosrc` equivalent. One src
+/// pad, pushing CPU-resident `Pixel::NV12` [`MediaBuffer::Video`] frames at the
+/// negotiated size, ready for `D3d11Upload` (which takes NV12 directly) or a
+/// [`SwScaler`](crate::elements::SwScaler). It is live and needs no pacer.
+/// Needs the `mf-capture` feature.
+///
+/// # Example
+///
+/// Open the first camera at its largest mode:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, MfCaptureOptions, MfCaptureSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let Some(device) = MfCaptureSource::list_devices()?.into_iter().next() else {
+///     return Ok(()); // no camera attached
+/// };
+/// let formats = MfCaptureSource::list_formats(&device)?;
+/// let format = formats.into_iter().max_by_key(|mode| mode.width * mode.height);
+/// let (source, video) = MfCaptureSource::open("camera", MfCaptureOptions { device, format })?;
+/// println!("{}x{}", video.width, video.height);
+///
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # NV12 whatever the camera speaks
 ///
@@ -438,13 +471,12 @@ impl MfCaptureSource {
     /// The unit each emitted frame's `pts` is expressed in: Media
     /// Foundation's own 100ns tick, so `1 / 10_000_000`.
     ///
-    /// The device's clock rather than `1 / fps`, unlike
-    /// [`DxgiCaptureSource`](crate::elements::DxgiCaptureSource), whose
-    /// `1 / fps` is honest because it decides itself when a frame happens. A
-    /// camera does not: exposure lengthens an interval, and a mode nominally
-    /// at 30 fps is not delivered on a 1/30 grid. Counting the device's own
-    /// clock keeps every one of those intervals as it actually was, rather
-    /// than rounding it onto a grid the camera never promised.
+    /// The device's clock rather than `1 / fps`, unlike `DxgiCaptureSource`,
+    /// whose `1 / fps` is honest because it decides itself when a frame
+    /// happens. A camera does not: exposure lengthens an interval, and a mode
+    /// nominally at 30 fps is not delivered on a 1/30 grid. Counting the
+    /// device's own clock keeps every one of those intervals as it actually
+    /// was, rather than rounding it onto a grid the camera never promised.
     pub fn time_base(&self) -> ffmpeg::Rational {
         self.0.inner().time_base()
     }

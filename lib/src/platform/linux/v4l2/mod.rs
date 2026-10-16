@@ -16,6 +16,10 @@ pub(crate) use loopback::{LoopbackError, LoopbackOutput, list_loopback_devices};
 
 /// One V4L2 device node the machine currently has: a camera, or a loopback
 /// device a program writes pictures into.
+///
+/// `V4l2CaptureSource::list_devices` lists the cameras, to pass as
+/// `V4l2CaptureOptions::device`; `V4l2VirtualCamera::list_devices` lists the
+/// loopback devices. Needs the `v4l2-capture` or `v4l2-virtual-camera` feature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V4l2Device {
     /// The device node, which is what a caller stores and opens by —

@@ -12,7 +12,7 @@ use crate::{
     error::{Error, Result},
 };
 
-/// Errors produced while opening or writing an [`RtspMuxer`].
+/// What can go wrong opening an [`RtspMuxer`]'s session or publishing to it.
 #[derive(Debug, ThisError)]
 pub enum RtspMuxerError {
     /// FFmpeg rejected connection setup or packet writing.
@@ -32,7 +32,39 @@ pub enum RtspMuxerError {
     InvalidUrl,
 }
 
-/// Publishes one or more compressed packet streams to an already-running
+/// Publishes encoded tracks to an RTSP server that is already running,
+/// such as [MediaMTX].
+///
+/// It takes packets, one sink per track, and encodes nothing: put an encoder in
+/// front of each track, or copy a demuxer's packets through, with a
+/// [`Pacer`](crate::elements::Pacer) upstream when they are read from a file —
+/// otherwise the file is sent faster than real time. Each sink ends a chain, as
+/// in [`FileMuxer`](crate::elements::FileMuxer)'s example. The
+/// [`rtsp_serve`](https://github.com/hash1018/media-pp/tree/main/examples/rtsp/rtsp_serve)
+/// example publishes a file this way.
+///
+/// # Example
+///
+/// ```no_run
+/// # use media_pp::ffmpeg;
+/// # use media_pp::elements::{RtspMuxer, RtspOptions, TrackFormat};
+/// # fn main() -> media_pp::Result<()> {
+/// # // Usually `&encoder`, for the encoder feeding each track.
+/// # let video_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 90_000));
+/// # let audio_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 48_000));
+/// let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:8554/stream", RtspOptions::default())?;
+/// let video = muxer.add_stream("video", video_format)?; // usually `&encoder`
+/// let audio = muxer.add_stream("audio", audio_format)?;
+/// let mut sinks = muxer.open()?; // performs the RTSP handshake
+/// let video_sink = sinks.take(video)?; // ends the video chain
+/// let audio_sink = sinks.take(audio)?; // ends the audio chain
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It publishes one or more compressed packet streams to an already-running
 /// RTSP server, and hands out one [`RawSink`](crate::element::RawSink) per track.
 ///
 /// The server must already be listening at `url` and must permit publishing
@@ -82,23 +114,6 @@ pub enum RtspMuxerError {
 /// down either way.
 ///
 /// [MediaMTX]: https://github.com/bluenviron/mediamtx
-///
-/// ```no_run
-/// # use media_pp::ffmpeg;
-/// # use media_pp::elements::{RtspMuxer, RtspOptions, TrackFormat};
-/// # fn main() -> media_pp::Result<()> {
-/// # // Usually `&encoder`, for the encoder feeding each track.
-/// # let video_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 90_000));
-/// # let audio_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 48_000));
-/// let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:8554/stream", RtspOptions::default())?;
-/// let video = muxer.add_stream("video", video_format)?;
-/// let audio = muxer.add_stream("audio", audio_format)?;
-/// let mut sinks = muxer.open()?; // performs the RTSP handshake
-/// let video_sink = sinks.take(video)?;
-/// let audio_sink = sinks.take(audio)?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct RtspMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,

@@ -5,8 +5,8 @@ use std::{cmp::Ordering, time::Duration};
 
 use ffmpeg_next as ffmpeg;
 
-/// Whether a compositor makes its output as time passes or as its inputs'
-/// timestamps say.
+/// Whether a compositor or an [`AudioMixer`](crate::elements::AudioMixer)
+/// makes its output as time passes or as its inputs' timestamps say.
 ///
 /// A choice made at construction, not a switch: a live element and an
 /// offline one differ in what a pipeline may do with them — whether it can

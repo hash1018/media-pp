@@ -48,8 +48,9 @@ use crate::{
 /// is still looking at it.
 const UNDECODABLE_LIMIT: u32 = 30;
 
-/// Errors specific to [`V4l2CaptureSource`]. Converts into the crate-wide
-/// [`crate::error::Error`] via `?`.
+/// Why a [`V4l2CaptureSource`] could not open a camera or go on capturing.
+///
+/// Converts into the crate-wide [`crate::error::Error`] via `?`.
 #[derive(Debug, ThisError)]
 pub enum V4l2CaptureSourceError {
     /// FFmpeg refused the device, the format, or a frame from it.
@@ -85,7 +86,7 @@ pub enum V4l2CaptureSourceError {
     },
 }
 
-/// What to open, and how.
+/// Which camera a [`V4l2CaptureSource`] opens, and at which size and rate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V4l2CaptureOptions {
     /// The camera, as [`V4l2CaptureSource::list_devices`] listed it.
@@ -96,14 +97,49 @@ pub struct V4l2CaptureOptions {
     pub format: Option<V4l2CaptureFormat>,
 }
 
-/// One camera, delivering NV12 frames in system memory.
+/// Captures a camera on Linux, through Video4Linux2.
 ///
-/// The Linux counterpart of Windows' `MfCaptureSource`, with the same
-/// shape: `open` answers with the source and the geometry it
-/// negotiated, it hands on frames until it is stopped or the device goes
-/// away, and a device that disappears mid-capture ends the source with an
-/// error rather than reconnecting — a pipeline is one-shot, so coming back
-/// is whoever watches the bus building a new one.
+/// List the cameras with [`V4l2CaptureSource::list_devices`] and, if the size
+/// matters, the modes of one with [`V4l2CaptureSource::list_formats`]; then
+/// open it with [`V4l2CaptureOptions`]. It hands on NV12 pictures in system
+/// memory on one output, whatever the camera sends — Motion JPEG included. It
+/// is live and needs no pacer. Needs the `v4l2-capture` feature.
+///
+/// # Example
+///
+/// Open the first camera at its best mode:
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use media_pp::elements::{FrameCounter, V4l2CaptureOptions, V4l2CaptureSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let Some(device) = V4l2CaptureSource::list_devices()?.into_iter().next() else {
+///     return Ok(()); // no camera attached
+/// };
+/// let format = V4l2CaptureSource::list_formats(&device.id)?.into_iter().next();
+/// let (source, video) = V4l2CaptureSource::open("camera", V4l2CaptureOptions { device, format })?;
+/// println!("{}x{}", video.width, video.height);
+///
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It delivers NV12 frames in system memory. The Linux counterpart of Windows'
+/// `MfCaptureSource`, with the same shape: `open` answers with the source and
+/// the geometry it negotiated, it hands on frames until it is stopped or the
+/// device goes away, and a device that disappears mid-capture ends the source
+/// with an error rather than reconnecting — a pipeline is one-shot, so coming
+/// back is whoever watches the bus building a new one.
 pub struct V4l2CaptureSource(SourceStage<Capturing>);
 
 source_stage!(V4l2CaptureSource);

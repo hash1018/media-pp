@@ -247,9 +247,62 @@ impl EncodePath {
     }
 }
 
-/// One video stream's frames in, H.264 packets out, encoded by whichever
-/// encoder takes them — the encode side of
-/// [`VideoDecodeBin`](crate::elements::VideoDecodeBin).
+/// Encodes pictures into H.264 on the GPU's own encoder where one opens, and
+/// in software otherwise.
+///
+/// Takes pictures where [`EncodeInput`] says they are — system memory, or NV12
+/// or BGRA on a D3D11, CUDA, Vulkan or VideoToolbox device — and hands on H.264
+/// packets for a muxer. Choose it over one encoder alone ([`SwEncoder`],
+/// `D3d11VideoEncoder`, `CudaEncoder`, …) when the same code must record on any
+/// machine. [`Self::path`] says which encoder it chose. It is the encode side
+/// of [`VideoDecodeBin`](crate::elements::VideoDecodeBin), and
+/// [`EncodeInput::for_decoded`] matches the two.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, Mp4Layout, VideoDecodeBin,
+///     VideoEncodeBin, VideoEncodeOptions,
+/// };
+/// use media_pp::{Error, ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let (width, height) = video.size().ok_or(Error::Other("no size".into()))?;
+/// let target = DecodeTarget::System; // or a GPU: `DecodeTarget::D3d11 { .. }`, ...
+/// let decoder = VideoDecodeBin::open("decode", video.parameters.clone(), target.clone(), None)?;
+/// let input = EncodeInput::for_decoded(&target, decoder.output_format())
+///     .ok_or(Error::Other("no encoder takes these pictures".into()))?;
+/// let encoder = VideoEncodeBin::open("encode", input, VideoEncodeOptions {
+///     width,
+///     height,
+///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     bit_rate: 4_000_000,
+///     gop_size: 60,
+///     max_b_frames: None,
+///     color: video.color(),
+/// })?;
+/// println!("encoding with {:?}", encoder.path());
+///
+/// let mut muxer = FileMuxer::create("output.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+/// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The [`transcode`] example does the same with the sound copied across and
+/// a GPU target on each platform.
+///
+/// [`transcode`]: https://github.com/hash1018/media-pp/tree/main/examples/core/transcode
 ///
 /// # When it chooses
 ///

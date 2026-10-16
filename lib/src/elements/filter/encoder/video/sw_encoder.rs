@@ -19,8 +19,9 @@ use crate::{
 
 use crate::elements::filter::is_codec_drain_boundary;
 
-/// Errors specific to `SwEncoder`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `SwEncoder`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwEncoderError {
     /// The requested encoder is unavailable in the linked FFmpeg build.
@@ -83,7 +84,9 @@ pub enum SwEncoderError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// Which software encoder to open. Whatever's picked, [`SwEncoder::new`]
+/// Which software encoder to open.
+///
+/// Whatever's picked, [`SwEncoder::new`]
 /// fails with [`SwEncoderError::CodecNotFound`] (not a panic) if the
 /// linked ffmpeg build doesn't actually have it — this crate never
 /// vendors any of these, it's whatever the local ffmpeg install was built
@@ -171,12 +174,13 @@ impl VideoCodec {
     }
 }
 
-/// Construction-time options for [`SwEncoder::new`]. `width`/`height` must
-/// already be known rather than inferred from the first frame, since
-/// `avcodec_open2` needs them set before this can be opened at all — and a
-/// muxer needs the parameters that come out of it before the first frame.
-/// The unit of the frames' timestamps is not asked for: each frame carries
-/// its own, and the encoder converts it into [`SwEncoder::time_base`].
+/// Construction-time options for [`SwEncoder::new`].
+///
+/// `width`/`height` must already be known rather than inferred from the first
+/// frame, since `avcodec_open2` needs them set before this can be opened at all
+/// — and a muxer needs the parameters that come out of it before the first
+/// frame. The unit of the frames' timestamps is not asked for: each frame
+/// carries its own, and the encoder converts it into [`SwEncoder::time_base`].
 #[derive(Debug, Clone, Copy)]
 pub struct SwEncoderOptions {
     /// Compressed video codec to open.
@@ -239,10 +243,66 @@ pub struct SwEncoderOptions {
     pub max_b_frames: Option<u32>,
 }
 
-/// Encodes `Video` frames in [`SwEncoderOptions::pixel_format`] (`YUV420P`
-/// for most) into `Packet`s via a software encoder (see [`VideoCodec`]) — the mirror image of
-/// [`crate::elements::SwDecoder`]'s decode direction. A filter: takes each buffer and
-/// pushes what it produces into its own (single) src pad.
+/// Encodes pictures into compressed video packets on the CPU, with an
+/// encoder library FFmpeg was built with.
+///
+/// Takes system-memory pictures in the one
+/// [`SwEncoderOptions::pixel_format`] and size it was opened for (`YUV420P`
+/// for most codecs; put a [`SwScaler`](crate::elements::SwScaler) in front
+/// for anything else) and hands on `Packet`s for a muxer. Choose it where no
+/// GPU encoder is there, or for a codec only a library offers — see
+/// [`VideoCodec`]; [`VideoEncodeBin`](crate::elements::VideoEncodeBin)
+/// takes a GPU encoder where it can and this one otherwise. It is the mirror
+/// image of [`SwDecoder`](crate::elements::SwDecoder).
+///
+/// # Example
+///
+/// A file's picture re-encoded to H.264, opened in the stream's own colour
+/// with [`SwEncoder::for_stream`]:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FileDemuxer, FileMuxer, Mp4Layout, SwDecoder, SwEncoder, SwEncoderOptions, VideoCodec,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
+/// let decoder = SwDecoder::new("decode", video.parameters.clone())?;
+/// let options = SwEncoderOptions {
+///     codec: VideoCodec::OpenH264,
+///     width,
+///     height,
+///     // What an 8-bit 4:2:0 stream decodes to.
+///     pixel_format: ffmpeg::format::Pixel::YUV420P,
+///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     bit_rate: 4_000_000,
+///     gop_size: 60,
+///     max_b_frames: None,
+/// };
+/// let encoder = SwEncoder::for_stream("encode", options, &video)?;
+///
+/// let mut muxer = FileMuxer::create("output.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+///
+/// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(encoder).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// // Stop the pipeline on `BusEvent::Finished`: the file is then complete.
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A filter: takes each buffer and pushes what it produces into its own
+/// (single) src pad.
 ///
 /// One frame can turn into zero or one packets per `send_frame` (B-frame
 /// reordering delays some frames' packets until later ones arrive, or

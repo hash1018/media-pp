@@ -23,8 +23,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `CudaDownload`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `CudaDownload`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaDownloadError {
     /// FFmpeg could not take a second reference to the download already in
@@ -46,9 +47,44 @@ pub enum CudaDownloadError {
     Transfer(i32),
 }
 
-/// Downloads GPU-resident `Pixel::CUDA` `Video` frames to CPU-resident ones
-/// in the matching layout — the mirror of [`crate::elements::CudaUpload`]
-/// and the CUDA sibling of `D3d11Download`.
+/// Copies pictures from an NVIDIA GPU back into system memory, for the CPU
+/// elements after it.
+///
+/// Behind the `cuda` feature. Put it after a `CudaDecoder` or another CUDA
+/// element, in front of something that works in system memory — a software
+/// encoder, an [`AppSink`](crate::elements::AppSink), a model on the CPU.
+/// It takes CUDA surfaces in the [`CudaFrameFormat`] it was built for and
+/// hands on pictures in system memory in the matching layout.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, FrameCounter, TestVideoOptions,
+///     TestVideoSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CudaDevice::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (encoder, _) = FrameCounter::new("encoder"); // a SwEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("round-trip", source, |source, ctx| {
+///     let upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+///     let download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).pipe(download).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It downloads GPU-resident `Pixel::CUDA` `Video` frames to CPU-resident
+/// ones in the matching layout — the mirror of
+/// [`crate::elements::CudaUpload`] and the CUDA sibling of `D3d11Download`.
 ///
 /// This is what makes a CUDA frame reach anything other than
 /// [`crate::elements::CudaEncoder`] or [`crate::elements::CudaRenderer`]:

@@ -31,8 +31,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `D3d11Download`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `D3d11Download`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11DownloadError {
     /// Creating, copying, or mapping a D3D11 staging texture failed.
@@ -101,15 +102,49 @@ pub enum D3d11DownloadError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Downloads GPU-resident `Pixel::D3D11` video frames to CPU-resident ones in
-/// the same layout — BGRA (a [`crate::elements::D3d11VideoCompositor`]'s, a
+/// Copies pictures from a D3D11 GPU back into system memory, for the
+/// CPU elements after it.
+///
+/// Behind the `d3d11` feature on Windows. Put it after a D3D11 decoder,
+/// capture or compositor, in front of something that works in system memory
+/// — a software encoder, an [`AppSink`](crate::elements::AppSink), a model.
+/// It takes BGRA or NV12 D3D11 textures and hands on BGRA or NV12 pictures
+/// in system memory.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d11Download, D3d11Gpu, D3d11Upload, FrameCounter, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let download = D3d11Download::new("download", &gpu)?;
+/// let (encoder, _) = FrameCounter::new("encoder"); // a SwEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("round-trip", source, |source, ctx| {
+///     let upload = D3d11Upload::new("upload", &gpu); // ... D3D11 work in between ...
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).pipe(download).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It downloads GPU-resident `Pixel::D3D11` video frames to CPU-resident ones
+/// in the same layout — BGRA (a [`crate::elements::D3d11VideoCompositor`]'s, a
 /// capture's) as `Pixel::BGRA`, NV12 (a decoder's, an upload's) as
 /// `Pixel::NV12` with the frame's colour description — the mirror of
-/// [`crate::elements::D3d11Upload`]. Needed because
-/// this crate's video encoder ([`crate::elements::SwEncoder`]) is
-/// software-only and has no zero-copy GPU input path; chain a
+/// [`crate::elements::D3d11Upload`]. A picture bound for an encoder need not
+/// come down: [`crate::elements::D3d11VideoEncoder`] takes the texture as it
+/// is. Where it does come down — for [`crate::elements::SwEncoder`] — chain a
 /// [`crate::elements::SwScaler`] after this to convert to whatever pixel
-/// format an encoder actually needs.
+/// format that encoder needs.
 ///
 /// Unlike `D3d11Upload` (a plain `ID3D11Device::CreateTexture2D` call, safe
 /// to issue from any thread), reading a texture back to the CPU needs

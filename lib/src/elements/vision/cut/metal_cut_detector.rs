@@ -57,11 +57,42 @@ pub enum MetalCutDetectorError {
 }
 
 /// Finds where one shot of an edited video ends and the next begins, in
-/// NV12 or P010 VideoToolbox pictures, and hands each picture on — the
-/// first of each shot after the stream's first carrying a
+/// VideoToolbox pictures.
+///
+/// It takes NV12 or P010 VideoToolbox pictures and hands each picture on —
+/// the first of each shot after the stream's first carrying a
 /// [`SceneCut`](crate::elements::SceneCut) — as
 /// [`SwCutDetector`](crate::elements::SwCutDetector) does in system
-/// memory, the two finding the same cuts in the same pictures.
+/// memory, the two finding the same cuts in the same pictures. Needs the
+/// `metal` feature, on macOS.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CutDetectorOptions, MetalCutDetector, VideoToolboxDecoder, VideoToolboxDevice,
+/// };
+/// # use media_pp::elements::{AppSink, FileDemuxer};
+/// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+/// # let sink = AppSink::new("shots", |_buf| Ok(()));
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let cuts = MetalCutDetector::new("cuts", CutDetectorOptions::default())?;
+/// let (pipeline, ()) = Pipeline::new("cuts", source, |source, ctx| {
+///     let decoder = VideoToolboxDecoder::new("decoder", params, &device)?;
+///     let branch = ctx.branch().pipe(decoder).pipe(cuts).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The cells of each picture's thumbnail are averaged on the GPU, by the
 /// kernel a [`MetalDetectionOverlay`](crate::elements::MetalDetectionOverlay)

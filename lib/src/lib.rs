@@ -58,6 +58,8 @@
 //!
 //! # Where to start
 //!
+//! - New to media-pp: the user's guide — [getting started], [how media-pp
+//!   works] and [recipes], what to use for a job and which example does it.
 //! - [`elements`] is the inventory of built-in sources, filters, and sinks.
 //!   Each type's own documentation states what buffers it accepts, what it
 //!   owns, and how it behaves under error and runtime control.
@@ -68,6 +70,10 @@
 //!   it again, where it ends; [`bus`] is how an element reports something
 //!   the caller could not have been handed directly, and [`control`] why a
 //!   seek was refused.
+//!
+//! [getting started]: https://github.com/hash1018/media-pp/blob/main/docs/getting-started.md
+//! [how media-pp works]: https://github.com/hash1018/media-pp/blob/main/docs/guide/concepts.md
+//! [recipes]: https://github.com/hash1018/media-pp/blob/main/docs/guide/recipes.md
 //!
 //! # Buffer and timeline contract
 //!

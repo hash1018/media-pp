@@ -24,8 +24,9 @@ use crate::{
     produce::source_stage,
 };
 
-/// Errors specific to `MetalSharedTextureSource`. Converts into the
-/// crate-wide `Error` via `?` (see [`crate::error::Error`]).
+/// Why a [`MetalSharedTextureSource`] could not take a surface.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum MetalSharedTextureSourceError {
     /// The surface is not the size this source was opened for. Nothing
@@ -71,14 +72,36 @@ pub enum MetalSharedTextureSourceError {
 }
 
 /// Brings `IOSurface`s another part of the program — or another process —
-/// draws into this pipeline, as VideoToolbox frames of its own. The macOS
-/// sibling of `D3d11SharedTextureSource`.
+/// draws into a pipeline, as VideoToolbox frames of its own.
 ///
-/// A pushed source rather than a reading one: whoever produces the pictures
-/// calls [`MetalSharedTextureHandle::push`] with a surface per picture, and
-/// this emits one BGRA `Pixel::VIDEOTOOLBOX` frame downstream for each.
-/// That is [`crate::elements::AppSource`]'s shape, which this is built on —
-/// the difference is the copy, which is the whole point of the element.
+/// The macOS sibling of `D3d11SharedTextureSource`. A pushed source rather
+/// than a reading one: whoever produces the pictures calls
+/// [`MetalSharedTextureHandle::push`] with a surface per picture, and this
+/// emits one BGRA `Pixel::VIDEOTOOLBOX` frame downstream for each, usually
+/// to a [`MetalVideoCompositor`](crate::elements::MetalVideoCompositor)
+/// layer. That is [`crate::elements::AppSource`]'s shape, which this is
+/// built on — the difference is the copy, which is the whole point of the
+/// element. Needs the `metal` feature, on macOS.
+///
+/// # Example
+///
+/// ```ignore
+/// use media_pp::elements::{FrameCounter, MetalSharedTextureSource, VideoToolboxDevice};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let (source, pictures) = MetalSharedTextureSource::new("page", &device, 1920, 1080, 4)?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("page", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+///
+/// // In the producer's paint callback, with the `IOSurface` it hands over:
+/// pictures.try_push(surface, None)?;
+/// ```
 ///
 /// # Why it copies
 ///

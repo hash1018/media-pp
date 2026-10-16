@@ -43,8 +43,9 @@ const OFFLINE_CHUNK: i64 = 50;
 /// one is always there by the time it is wanted.
 const OFFLINE_LOOKAHEAD: i64 = 25;
 
-/// Errors specific to `AudioMixer`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why an [`AudioMixer`], its handle or one of its inputs failed.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum AudioMixerError {
     /// FFmpeg rejected resampler creation or audio conversion.
@@ -83,10 +84,11 @@ pub enum AudioMixerError {
     UntimedFrame(&'static str),
 }
 
-/// Construction-time options for [`AudioMixer::new`] — the mixer's fixed
-/// *output* format. Every input is resampled to match this on the way in
-/// (see `InputBuffer::push`); the mixer never adapts to whatever an
-/// input happens to produce.
+/// The sound an [`AudioMixer`] makes — rate and channels — and whether it
+/// mixes live or offline.
+///
+/// This is the mixer's *output* format. Every input is resampled to match it on
+/// the way in; the mixer never adapts to whatever an input happens to produce.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioMixerOptions {
     /// Sample rate of every mixed output frame, in hertz.
@@ -98,7 +100,8 @@ pub struct AudioMixerOptions {
     pub mode: RenderMode,
 }
 
-/// The format every input is resampled to and every output frame carries.
+/// The sample rate and channel count an [`AudioMixer`] mixes at — what every
+/// input is resampled to and every output frame carries.
 ///
 /// One value rather than three fields, packed into a word, so an input
 /// resampling on its own thread can never catch a sample rate from one
@@ -346,8 +349,10 @@ struct MixerShared {
     fed: AtomicBool,
 }
 
-/// A cheaply-cloneable handle for adding or removing an [`AudioMixer`]'s
-/// input sources while the pipeline is running — the mirror image of
+/// Adds and removes an [`AudioMixer`]'s inputs, and changes its format,
+/// while it runs.
+///
+/// A cheaply-cloneable handle — the mirror image of
 /// [`crate::elements::TeeHandle`]: `Tee` lets you attach/detach *outputs*
 /// from another thread; this lets you attach/detach *inputs*. Keeps only a
 /// [`Weak`] reference for the same reason `TeeHandle` does: retaining a
@@ -478,7 +483,9 @@ impl MixerHandle {
     }
 }
 
-/// One [`AudioMixer`] input, returned by [`MixerHandle::add_source`].
+/// The end of a branch that feeds one [`AudioMixer`] input, returned by
+/// [`MixerHandle::add_source`].
+///
 /// Resamples every incoming frame to the mixer's fixed output format and
 /// appends it to this input's own buffer — the actual summing happens
 /// later, on the mixer's own thread, not here. `consume` runs on
@@ -664,20 +671,62 @@ impl RawSink for MixerInputSink {
     }
 }
 
-/// Sums an arbitrary, dynamically-changing number of audio sources into
-/// one output stream — the structural mirror of [`crate::elements::Tee`]:
-/// `Tee` is one input fanned out to a dynamic set of outputs behind a
-/// lock; `AudioMixer` is a dynamic set of inputs (added/removed via
-/// [`MixerHandle`], from whatever thread each one's own source pipeline
-/// runs on) summed into one output. Unlike `Tee`, which is a passive
-/// [`RawSink`] driven entirely by whatever calls `consume`, `AudioMixer` has
-/// to drive itself: it's a source with a thread of its own,
-/// ticking every `TICK_INTERVAL` to sum however many samples each
-/// currently-attached input has ready — because mixing has to keep
-/// producing *something* on a steady clock even when some (or all) inputs
-/// have gone quiet, the same reason
-/// `WasapiCaptureSource` synthesizes silence for gaps
-/// rather than just emitting nothing.
+/// Mixes the sound of any number of branches, added and removed while it
+/// runs, into one stream.
+///
+/// It is a source: each input is the end of a branch in another pipeline, made
+/// by [`MixerHandle::add_source`]. Inputs take decoded sound of any format; the
+/// mix is interleaved `f32` at the rate and channels of [`AudioMixerOptions`],
+/// on one output. Built [`RenderMode::Live`] it mixes by the wall clock — a
+/// capture, a stream; built [`RenderMode::Offline`] it mixes by the inputs'
+/// timestamps — an export.
+///
+/// # Example
+///
+/// A live mix with one input, a test tone from its own pipeline:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioMixer, AudioMixerOptions, FrameCounter, RenderMode, TestAudioOptions, TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let options = AudioMixerOptions { sample_rate: 48_000, channels: 2, mode: RenderMode::Live };
+/// let (mixer, inputs) = AudioMixer::new("mixer", options);
+/// let (counter, _sound) = FrameCounter::new("counter");
+/// let (mix, ()) = Pipeline::new("mix", mixer, |mixer, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(mixer, 0, branch)?;
+///     Ok(())
+/// })?;
+/// mix.run()?;
+///
+/// let input = inputs.add_source("tone")?;
+/// let tone = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let (feed, ()) = Pipeline::new("tone", tone, |tone, ctx| {
+///     let branch = ctx.branch().queue("tone", 8).to(input)?;
+///     ctx.attach(tone, 0, branch)?;
+///     Ok(())
+/// })?;
+/// feed.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It is the structural mirror of [`crate::elements::Tee`]: `Tee` is one input
+/// fanned out to a dynamic set of outputs behind a lock; `AudioMixer` is a
+/// dynamic set of inputs (added/removed via [`MixerHandle`], from whatever
+/// thread each one's own source pipeline runs on) summed into one output.
+/// Unlike `Tee`, which is a passive [`RawSink`] driven entirely by whatever
+/// calls `consume`, `AudioMixer` has to drive itself: it's a source with a
+/// thread of its own, ticking every `TICK_INTERVAL` to sum however many samples
+/// each currently-attached input has ready — because mixing has to keep
+/// producing *something* on a steady clock even when some (or all) inputs have
+/// gone quiet, the same reason `WasapiCaptureSource` synthesizes silence for
+/// gaps rather than just emitting nothing.
 ///
 /// Every input is resampled to this mixer's own `sample_rate`/`channels`,
 /// which [`MixerHandle::set_mix_format`] can change while it runs — each

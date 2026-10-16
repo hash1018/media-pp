@@ -20,8 +20,9 @@ use crate::{
 /// and the same reason as `SwChromaKey`'s.
 const POOL_SIZE: usize = 4;
 
-/// Errors specific to `SwVideoEffect`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `SwVideoEffect`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwVideoEffectError {
     /// FFmpeg could not take a second reference to the frame already in
@@ -44,13 +45,46 @@ pub enum SwVideoEffectError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Applies a [`VideoEffect`] — a colour correction or a luma key — to a
-/// decoded BGRA frame, on the CPU. A filter: takes each buffer and pushes
-/// the result on through its own single src pad.
+/// Corrects a picture's colour, or cuts out its dark or bright parts, on the
+/// CPU.
 ///
-/// The software member of a family whose GPU members are `D3d11VideoEffect`
-/// and `CudaVideoEffect`. All three evaluate one resolved set of numbers
-/// per pixel, so an effect means the same thing on each.
+/// It applies one [`VideoEffect`] — a colour correction or a luma key — to BGRA
+/// pictures in system memory and hands on BGRA pictures; change the effect, or
+/// switch it off, while it runs through the [`VideoEffectHandle`] it returns.
+/// Put it on a source's branch in front of a compositor layer.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ColorCorrection, FrameCounter, SwScaler, SwVideoEffect, TestVideoOptions,
+///     TestVideoSource, VideoEffect,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let warmer = ColorCorrection { saturation: 1.2, hue_degrees: -5.0, ..Default::default() };
+/// let (effect, tuning) = SwVideoEffect::new("colour", VideoEffect::ColorCorrection(warmer));
+/// let (layer, _) = FrameCounter::new("layer"); // a compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("corrected", source, |source, ctx| {
+///     let to_bgra = SwScaler::to_format("to-bgra", Pixel::BGRA, Flags::BILINEAR);
+///     ctx.attach(source, 0, ctx.branch().pipe(to_bgra).pipe(effect).to(layer)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// tuning.set_enabled(false); // the picture as it came
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A filter: takes each buffer and pushes the result on through its own single
+/// src pad. The software member of a family whose GPU members are
+/// `D3d11VideoEffect` and `CudaVideoEffect`. All three evaluate one resolved
+/// set of numbers per pixel, so an effect means the same thing on each.
 ///
 /// BGRA in and BGRA out, for the reason `SwChromaKey` gives: a luma key's
 /// result is an alpha channel, and a colour correction is defined on RGB.

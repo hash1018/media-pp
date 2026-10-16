@@ -55,8 +55,45 @@ pub enum MetalSurfaceError {
     Metal(#[from] MetalError),
 }
 
-/// A VideoToolbox picture as Metal textures, made over the `IOSurface` its
-/// pixel buffer is in — nothing is copied.
+/// A VideoToolbox picture as Metal textures, for Metal work of your own on it.
+///
+/// Use it in an element of your own that works on the VideoToolbox pictures
+/// this crate's VideoToolbox and Metal elements hand on, without leaving the
+/// GPU; write its output into a picture from a
+/// [`VideoToolboxFramePool`](crate::elements::VideoToolboxFramePool). A whole
+/// element built this way is in
+/// [`lib/tests/metal_custom_element.rs`](https://github.com/hash1018/media-pp/blob/main/lib/tests/metal_custom_element.rs).
+/// Needs the `metal` feature, on macOS.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     MetalSurfaceView, VideoToolboxDevice, VideoToolboxFrameFormat, VideoToolboxFramePool,
+/// };
+/// use objc2_metal::MTLCreateSystemDefaultDevice;
+/// # let handed = media_pp::ffmpeg::frame::Video::empty();
+///
+/// let metal = MTLCreateSystemDefaultDevice().expect("a Metal device");
+/// let device = VideoToolboxDevice::new()?; // the one the pipeline's elements use
+/// let pool = VideoToolboxFramePool::new(&device, VideoToolboxFrameFormat::Nv12, 1280, 720)?;
+///
+/// // For each picture `handed` to your element:
+/// let input = MetalSurfaceView::new(&metal, &handed)?;
+/// let output = pool.get()?;
+/// let target = MetalSurfaceView::new(&metal, &output)?;
+/// // Encode Metal work that reads `input.planes()` and writes
+/// // `target.planes()`, wait for it, copy the timing over, then:
+/// pool.describe(&output)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// The textures are made over the `IOSurface` the pixel buffer is in —
+/// nothing is copied.
 ///
 /// What a custom element reads a picture by — a model of its own, a
 /// measurement — or, for a picture from its own

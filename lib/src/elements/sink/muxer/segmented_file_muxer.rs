@@ -59,12 +59,16 @@ struct StreamDef {
     is_video: bool,
 }
 
-/// Builds a [`SegmentedFileMuxer`] the same two-phase way as a plain
-/// [`FileMuxer`] (every track's shape must be known before the first byte
-/// is written) — `create` picks the rotation policy and how segments get
-/// named, `add_stream` registers each track exactly like
-/// [`FileMuxer::add_stream`], `open` writes the first segment's header and
-/// returns one [`RawSink`] per track.
+/// Records encoded tracks into a run of files, starting a new one at a
+/// keyframe once the current one is long or large enough.
+///
+/// It is a [`FileMuxer`] that rotates: the same packets in, one sink per
+/// track, each file playable on its own from its first picture, every file's
+/// timeline starting at zero. A [`SegmentPolicy`] says when to cut, and a
+/// closure names each file. Each sink ends a chain behind its encoder, as in
+/// [`FileMuxer`]'s example.
+///
+/// # Example
 ///
 /// ```no_run
 /// # use std::{path::PathBuf, time::Duration};
@@ -98,11 +102,20 @@ struct StreamDef {
 /// let video = muxer.add_stream("video", &video_encoder);
 /// let audio = muxer.add_stream("audio", &audio_encoder);
 /// let mut sinks = muxer.open()?;
-/// let video_sink = sinks.take(video)?;
-/// let audio_sink = sinks.take(audio)?;
+/// let video_sink = sinks.take(video)?; // ends the chain behind `video_encoder`
+/// let audio_sink = sinks.take(audio)?; // ends the chain behind `audio_encoder`
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # How it works
+///
+/// It is built the same two-phase way as a plain [`FileMuxer`] (every track's
+/// shape must be known before the first byte is written) — `create` picks the
+/// rotation policy and how segments get named, `add_stream` registers each
+/// track exactly like [`FileMuxer::add_stream`], `open` writes the first
+/// segment's header and returns one [`RawSink`] per track. When and how a cut
+/// happens is on [`SegmentedFileMuxer::open`].
 pub struct SegmentedFileMuxer {
     id: MuxerId,
     policy: SegmentPolicy,

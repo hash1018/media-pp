@@ -284,8 +284,10 @@ unsafe impl Send for CompositorShared {}
 // thread share this with the compositor's own.
 unsafe impl Sync for CompositorShared {}
 
-/// A cheaply cloneable handle for adding and removing compositor inputs —
-/// the CUDA sibling of [`crate::elements::SwVideoCompositorHandle`].
+/// Adds, removes and paces the inputs of a running [`CudaVideoCompositor`].
+///
+/// Cheap to clone, and holds the compositor only weakly. The CUDA sibling
+/// of [`crate::elements::SwVideoCompositorHandle`].
 #[derive(Clone)]
 pub struct CudaVideoCompositorHandle {
     shared: Weak<CompositorShared>,
@@ -448,9 +450,12 @@ impl CudaVideoCompositorHandle {
     }
 }
 
-/// The terminal Sink for one compositor input. Keeps only the latest frame:
-/// the compositor emits on its own clock, so an input that runs faster than
-/// the output rate simply has its older frames dropped.
+/// The sink that ends one input's pipeline, handing its pictures to a
+/// [`CudaVideoCompositor`].
+///
+/// Returned by [`CudaVideoCompositorHandle::add_source`]. Live, it keeps only
+/// the latest frame: the compositor emits on its own clock, so an input that
+/// runs faster than the output rate simply has its older frames dropped.
 pub struct CudaVideoCompositorInputSink {
     pp_log: PpLog,
     name: Arc<str>,
@@ -696,7 +701,66 @@ impl Composed {
     }
 }
 
-/// Composites the latest frames from any number of independent CUDA input
+/// Composites any number of video inputs into one NV12 (or BGRA) picture
+/// stream, on an NVIDIA GPU through CUDA.
+///
+/// Each input is a pipeline of its own that ends at a sink from
+/// [`CudaVideoCompositorHandle::add_source`], and must hand on NV12 or BGRA
+/// `Pixel::CUDA` pictures made on the same [`CudaDevice`] as the compositor —
+/// from [`crate::elements::CudaDecoder`] or [`crate::elements::CudaUpload`],
+/// say. The compositor is the source of its own pipeline and hands on
+/// one `Pixel::CUDA` picture of the canvas per tick, NV12 unless
+/// [`Self::with_format`] asks for BGRA — live at its frame rate, or offline
+/// by the inputs' timestamps (see [`VideoCompositorOptions::mode`]). Text
+/// layers are added with [`CudaVideoCompositorHandle::add_text_layer`].
+/// Needs the `cuda` feature.
+///
+/// # Example
+///
+/// A test pattern uploaded to the GPU fills the canvas, with a label over it:
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use media_pp::elements::{
+///     CudaDevice, CudaFrameFormat, CudaUpload, CudaVideoCompositor, FrameCounter,
+///     TestVideoOptions, TestVideoSource, TextLayer, VideoCompositorOptions, VideoLayer,
+///     VideoRect,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CudaDevice::new()?;
+/// let (compositor, handle) =
+///     CudaVideoCompositor::new("canvas", &device, VideoCompositorOptions::default())?;
+///
+/// // An input: another pipeline's branch, on the same device, ends at its sink.
+/// let input = handle.add_source("camera", VideoLayer::new(VideoRect::new(0, 0, 1920, 1080)))?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let (camera, ()) = Pipeline::new("camera", camera, |source, ctx| {
+///     let upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+///     let branch = ctx.branch().pipe(upload).to(input.sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+///
+/// let label = handle.add_text_layer("label", TextLayer::new(std::fs::read("font.ttf")?))?;
+/// label.set_text("LIVE")?;
+///
+/// // The compositor is the source of the pipeline that takes the canvas.
+/// let (counter, _frames) = FrameCounter::new("frames");
+/// let (canvas, ()) = Pipeline::new("canvas", compositor, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// canvas.run()?;
+/// camera.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It composites the latest frames from any number of independent CUDA input
 /// pipelines into one fixed-rate NV12 `Pixel::CUDA` stream, without any frame
 /// ever leaving the GPU — the CUDA sibling of
 /// [`crate::elements::SwVideoCompositor`] and
@@ -835,6 +899,9 @@ struct Compositing {
 unsafe impl Send for Compositing {}
 
 impl CudaVideoCompositor {
+    /// Creates a compositor drawing on `device` in NV12, and the handle that
+    /// adds its inputs.
+    ///
     /// `device` must be the same [`CudaDevice`] every input pipeline's CUDA
     /// elements were built from; a frame from another context is rejected by
     /// the input sink rather than read from meaningless pointers.
@@ -949,7 +1016,8 @@ impl CudaVideoCompositor {
         ))
     }
 
-    /// Every output frame is a CUDA-resident NV12 surface.
+    /// Every output frame is a CUDA-resident surface: NV12, unless
+    /// [`Self::with_format`] asked for BGRA.
     pub fn format(&self) -> ffmpeg::format::Pixel {
         ffmpeg::format::Pixel::CUDA
     }

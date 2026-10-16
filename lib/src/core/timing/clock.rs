@@ -12,9 +12,11 @@ use std::{
 };
 
 /// Shared wall-clock reference for pacing decoded frames to their
-/// presentation time. Whichever branch (video, audio, ...) processes a
-/// frame first sets the anchor; every other branch reads the same one, so
-/// they agree on t=0 instead of each drifting from its own first frame.
+/// presentation time.
+///
+/// Whichever branch (video, audio, ...) processes a frame first sets the
+/// anchor; every other branch reads the same one, so they agree on t=0
+/// instead of each drifting from its own first frame.
 ///
 /// Owned by [`crate::pipeline::Pipeline`] (one per pipeline, shared with
 /// every [`crate::elements::Pacer`] via the `wire` closure) so

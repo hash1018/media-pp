@@ -15,8 +15,11 @@ use super::{
     validate_layer, validate_opacity, validate_rect,
 };
 
-/// Runtime placement control for one registered input — the Vulkan sibling of
-/// [`crate::elements::SwVideoLayerHandle`], with the same API.
+/// Moves, sizes, restacks and shows or hides one input of a
+/// [`VulkanVideoCompositor`](super::VulkanVideoCompositor) while it runs.
+///
+/// The Vulkan sibling of [`crate::elements::SwVideoLayerHandle`], with the
+/// same API.
 #[derive(Clone)]
 pub struct VulkanVideoLayerHandle {
     pub(super) id: VideoInputId,

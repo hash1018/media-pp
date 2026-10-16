@@ -18,16 +18,18 @@ use crate::{
     pool::UnboundObjectPoolRef,
 };
 
-/// What [`D3d12Renderer`] needs from an actual DX12 window/rendering
-/// implementation — deliberately the *only* thing this crate knows about
-/// D3D12 rendering. `submit_nv12_texture` takes
-/// `ID3D12Resource`/`ID3D12Fence` directly, so this trait (and any
-/// element built on it) is inherently D3D12-only — a Vulkan/CUDA renderer
-/// would need its own trait, not an impl of this one. `D3d12Renderer`
-/// itself only depends on this trait (plus the `windows` COM types the
-/// zero-copy path needs to pass through) — not on `renderer_engine` or
-/// any other concrete rendering crate. A caller wanting to actually
-/// render implements this for its own window/rendering stack.
+/// Your own D3D12 drawing code, which a [`D3d12Renderer`] hands each
+/// picture to.
+///
+/// It is what [`D3d12Renderer`] needs from an actual DX12 window/rendering
+/// implementation — deliberately the *only* thing this crate knows about D3D12
+/// rendering. `submit_nv12_texture` takes `ID3D12Resource`/`ID3D12Fence`
+/// directly, so this trait (and any element built on it) is inherently
+/// D3D12-only — a Vulkan/CUDA renderer would need its own trait, not an impl of
+/// this one. `D3d12Renderer` itself only depends on this trait (plus the
+/// `windows` COM types the zero-copy path needs to pass through) — not on
+/// `renderer_engine` or any other concrete rendering crate. A caller wanting to
+/// actually render implements this for its own window/rendering stack.
 ///
 /// It is handed a texture and nothing about its colour: an NV12 frame's
 /// matrix and range stay with the frame. A window of the renderer's own,
@@ -74,8 +76,9 @@ pub trait D3d12FrameRenderer: Send {
     fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError>;
 }
 
-/// Errors specific to `D3d12Renderer`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why a [`D3d12Renderer`] could not show a picture.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12RendererError {
     /// The caller-provided renderer rejected frame submission.
@@ -110,11 +113,49 @@ pub enum D3d12RendererError {
     DeviceMismatch,
 }
 
-/// Terminal sink that submits decoded video frames to a caller-supplied
-/// [`D3d12FrameRenderer`]. Only built with the `d3d12` feature —
-/// every consumer that doesn't need to render to a window pulls in
-/// neither this nor the `windows` dependency it needs for the zero-copy
-/// path.
+/// Hands each D3D12 picture to drawing code of your own — a UI's swap
+/// chain, an offscreen target.
+///
+/// It ends a branch of D3D12 NV12 textures — a
+/// [`D3d12Decoder`](crate::elements::D3d12Decoder)'s, or a
+/// [`D3d12Upload`](crate::elements::D3d12Upload)'s for frames in system memory
+/// — and passes each zero-copy, with the fence that says it is written, to the
+/// [`D3d12FrameRenderer`] you implement. It draws nothing itself and does not
+/// pace, so a [`Pacer`](crate::elements::Pacer) goes in front. For a window of
+/// its own, use [`D3d12WindowRenderer`](crate::elements::D3d12WindowRenderer).
+///
+/// # Example
+///
+/// ```no_run
+/// # use media_pp::elements::{
+/// #     D3d12Decoder, D3d12FrameRenderer, D3d12Gpu, D3d12Renderer, FileDemuxer, Pacer,
+/// # };
+/// # use media_pp::{ffmpeg, pipeline::Pipeline};
+/// # fn ui_renderer(_gpu: &D3d12Gpu) -> Box<dyn D3d12FrameRenderer> { unimplemented!() }
+/// # fn main() -> media_pp::Result<()> {
+/// # let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// # let video = source.best(ffmpeg::media::Type::Video)?;
+/// let gpu = D3d12Gpu::new()?;
+/// // Your own `D3d12FrameRenderer`, drawing on the same device.
+/// let renderer = D3d12Renderer::new("screen", ui_renderer(&gpu));
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let decoder = D3d12Decoder::new("decoder", video.parameters.clone(), &gpu)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
+///     let branch = branch.pipe(Pacer::new("pacer")).to(renderer)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A terminal sink that submits decoded video frames to a caller-supplied
+/// [`D3d12FrameRenderer`]. Only built with the `d3d12` feature — every consumer
+/// that doesn't need to render to a window pulls in neither this nor the
+/// `windows` dependency it needs for the zero-copy path.
 ///
 /// Takes `Pixel::D3D12` frames only, drawn zero-copy straight from
 /// whatever produced the texture via

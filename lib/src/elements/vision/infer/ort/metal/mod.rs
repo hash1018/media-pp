@@ -26,8 +26,9 @@ pub use metal_ort_classifier::MetalOrtClassifier;
 pub use metal_ort_detector::{MetalOrtDetector, MetalOrtDetectorOptions};
 pub use metal_ort_embedder::{MetalOrtEmbedder, MetalOrtEmbedderOptions};
 
-/// Where Core ML may run a model: what its `MLComputeUnits` allows. The
-/// CPU is allowed in each, for the layers the others do not take — a
+/// Where Core ML may run a model: what its `MLComputeUnits` allows.
+///
+/// The CPU is allowed in each, for the layers the others do not take — a
 /// detector that is to run on the CPU alone is
 /// [`SwOrtDetector`](crate::elements::SwOrtDetector).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

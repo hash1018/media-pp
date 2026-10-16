@@ -19,9 +19,11 @@ use crate::{
     },
 };
 
-/// What [`CudaRenderer`] needs from an actual windowing/graphics
-/// implementation — the CUDA sibling of
-/// `D3d11FrameRenderer`.
+/// Your own presenting code, which a [`CudaRenderer`] hands each CUDA
+/// picture's device pointers to.
+///
+/// It is what [`CudaRenderer`] needs from an actual windowing/graphics
+/// implementation — the CUDA sibling of `D3d11FrameRenderer`.
 ///
 /// # Why this trait carries device pointers rather than an image handle
 ///
@@ -75,8 +77,9 @@ pub trait CudaFrameRenderer: Send {
     fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError>;
 }
 
-/// Errors specific to `CudaRenderer`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why a [`CudaRenderer`] could not show a picture.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaRendererError {
     /// The frame is not an NV12 surface from the context this renderer
@@ -99,7 +102,45 @@ pub enum CudaRendererError {
     Resize(SubmitError),
 }
 
-/// Presents GPU-resident CUDA frames — the terminal for a
+/// Hands each CUDA picture to presenting code of your own, which copies it
+/// on the GPU into an image its graphics API draws.
+///
+/// It ends a [`CudaDecoder`](crate::elements::CudaDecoder) branch: CUDA
+/// frames on the one [`CudaDevice`] the pipeline shares, whose device
+/// pointers and pitches it passes to the [`CudaFrameRenderer`] you
+/// implement. It does not pace, so a [`Pacer`](crate::elements::Pacer) goes
+/// in front. On Linux, `VulkanWindowRenderer` is a ready-made window for
+/// CUDA frames. Needs the `cuda` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # use media_pp::elements::{
+/// #     CudaDecoder, CudaDevice, CudaFrameRenderer, CudaRenderer, FileDemuxer, Pacer,
+/// # };
+/// # use media_pp::{ffmpeg, pipeline::Pipeline};
+/// # fn presenter(_device: &CudaDevice) -> Box<dyn CudaFrameRenderer> { unimplemented!() }
+/// # fn main() -> media_pp::Result<()> {
+/// # let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// # let video = source.best(ffmpeg::media::Type::Video)?;
+/// let device = CudaDevice::new()?;
+/// // Your own `CudaFrameRenderer`, its image imported into `device`.
+/// let renderer = CudaRenderer::new("screen", &device, presenter(&device));
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let decoder = CudaDecoder::new("decoder", video.parameters.clone(), &device, 20)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
+///     let branch = branch.pipe(Pacer::new("pacer")).to(renderer)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It presents GPU-resident CUDA frames — the terminal for a
 /// [`crate::elements::CudaDecoder`] branch, and the CUDA sibling of
 /// `D3d11Renderer`.
 ///

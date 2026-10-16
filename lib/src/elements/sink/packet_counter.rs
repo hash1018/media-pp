@@ -9,9 +9,36 @@ use crate::{
     render::{SinkStage, sink_stage},
 };
 
-/// Terminal sink that counts packets. The [`CounterHandle`] it comes
+/// Ends a branch by counting the packets reaching it.
+///
+/// It takes encoded packets, video or audio, and does nothing else with
+/// them: the trivial end that makes a demuxer's or an encoder's output
+/// runnable while it is being tested. For decoded pictures or sound use
+/// [`FrameCounter`](super::FrameCounter). The [`CounterHandle`] it comes
 /// with reads the count from outside the pipeline, even while this sink runs
 /// on a `Queue` worker thread.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FileDemuxer, PacketCounter};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (demuxer, _streams) = FileDemuxer::open("demuxer", "input.mp4")?;
+/// let video = demuxer.best(ffmpeg::media::Type::Video)?;
+/// let (counter, packets) = PacketCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("count", demuxer, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// println!("packets so far: {}", packets.get());
+/// # Ok(())
+/// # }
+/// ```
 pub struct PacketCounter(SinkStage<Counting>);
 
 sink_stage!(PacketCounter);

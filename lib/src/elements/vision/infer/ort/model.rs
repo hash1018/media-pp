@@ -147,8 +147,11 @@ impl DetectorModel {
     }
 }
 
-/// The values a model wants in its input, made from each pixel's red, green
-/// and blue as 0 to 1: put in `order`, then each times `scale` plus `bias`,
+/// The values a model wants in its input: the channel order, and a scale
+/// and a bias for each channel.
+///
+/// They are made from each pixel's red, green and blue as 0 to 1: put in
+/// `order`, then each times `scale` plus `bias`,
 /// both given in that order. The margin around a picture fitted inside the
 /// input — Ultralytics' grey, 114 of 255 — is made the same way.
 ///
@@ -203,10 +206,50 @@ pub enum ChannelOrder {
     Bgr,
 }
 
-/// What reads a detection model's output into boxes, for a model this
-/// crate does not read itself: a [`DetectorModel::Custom`]'s. One decoder is
-/// shared by every detector it is given to, and called from each one's own
-/// thread.
+/// Reads a detection model's output into boxes, for a model this crate does
+/// not read itself.
+///
+/// Implement it for your own model and give it to a detector as
+/// [`DetectorModel::Custom`]. One decoder is shared by every detector it is
+/// given to, and called from each one's own thread.
+///
+/// # Example
+///
+/// A model with one output of `[boxes, 6]` rows: corners, score, class.
+///
+/// ```no_run
+/// use std::sync::Arc;
+///
+/// use media_pp::elements::{
+///     DetectorDecoder, DetectorModel, ModelBox, ModelInput, ModelOutput, OrtDetectorOptions,
+///     OrtError,
+/// };
+///
+/// #[derive(Debug)]
+/// struct Rows;
+///
+/// impl DetectorDecoder for Rows {
+///     fn decode(
+///         &self,
+///         outputs: &[ModelOutput<'_>],
+///         _input: (u32, u32),
+///         options: &OrtDetectorOptions,
+///     ) -> Result<Vec<ModelBox>, OrtError> {
+///         let rows = outputs[0].data.chunks_exact(6);
+///         Ok(rows
+///             .filter(|row| row[4] >= options.conf_threshold)
+///             .map(|row| ModelBox::new(row[5] as usize, row[4], [row[0], row[1], row[2], row[3]]))
+///             .collect())
+///     }
+/// }
+///
+/// let options = OrtDetectorOptions {
+///     model: DetectorModel::Custom { input: ModelInput::default(), decoder: Arc::new(Rows) },
+///     ..OrtDetectorOptions::default()
+/// };
+/// ```
+///
+/// # How it works
 ///
 /// It is handed one picture's outputs at a time and says what the model
 /// found in that picture, in pixels of the model's input; the detector maps
@@ -274,8 +317,11 @@ impl ModelBox {
     }
 }
 
-/// `boxes` less the duplicates: highest score first, each box kept unless
-/// it overlaps one kept already of its own class by more than
+/// Removes duplicate boxes of one class, keeping the most confident — for a
+/// [`DetectorDecoder`].
+///
+/// It returns `boxes` less the duplicates: highest score first, each box
+/// kept unless it overlaps one kept already of its own class by more than
 /// `iou_threshold`, as intersection over union — Ultralytics' default,
 /// per-class suppression. What is kept is most confident first.
 pub fn non_max_suppression(mut boxes: Vec<ModelBox>, iou_threshold: f32) -> Vec<ModelBox> {
@@ -422,11 +468,13 @@ impl Letterbox {
     }
 }
 
-/// Looking at a picture in overlapping tiles as well as whole: each tile is
-/// fitted to the model's input as a picture of its own would be, so that a
-/// face too small to find in the whole picture shrunk to the model's input
-/// is found in a tile shrunk less — DeepStream's `nvdspreprocess` regions,
-/// SAHI's slices.
+/// Looks at a picture in overlapping tiles as well as whole, to find faces
+/// and objects too small to find in the whole picture.
+///
+/// Give it to a detector as [`OrtDetectorOptions::tiles`]. Each tile is fitted
+/// to the model's input as a picture of its own would be, so that a face too
+/// small to find in the whole picture shrunk to the model's input is found in a
+/// tile shrunk less — DeepStream's `nvdspreprocess` regions, SAHI's slices.
 ///
 /// On eleven public videos, a RetinaFace ResNet50 looking at 3 by 2 tiles
 /// with a quarter overlap as well as the whole picture missed 19% of 976
@@ -484,11 +532,12 @@ impl PartialEq for Tiles {
     }
 }
 
-/// What picks the tiles a detector looks in, picture by picture —
-/// [`Tiles::choose`]. A tile can be passed over where nothing it could find
-/// is there: in front of a face detector, where a person detector found no
-/// small person, a tile holds no face the whole picture misses, and running
-/// the model on it is time spent for nothing.
+/// Picks the tiles a detector looks in, picture by picture — [`Tiles::choose`].
+///
+/// A tile can be passed over where nothing it could find is there: in front of
+/// a face detector, where a person detector found no small person, a tile holds
+/// no face the whole picture misses, and running the model on it is time spent
+/// for nothing.
 ///
 /// One chooser is shared by every detector it is given to, and called from
 /// each one's own thread, once for each tile of each picture looked at.

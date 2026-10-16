@@ -119,7 +119,9 @@ impl From<Unreadable> for AudioCompressorError {
     }
 }
 
-/// Thread-safe runtime control for an [`AudioCompressor`] — what
+/// Changes an [`AudioCompressor`]'s settings while it runs.
+///
+/// Thread-safe runtime control — what
 /// [`AudioGateHandle`](crate::elements::AudioGateHandle) is for a gate, and
 /// with the same ownership: cheap to clone, keeping only the settings alive.
 #[derive(Debug, Clone)]
@@ -188,7 +190,31 @@ impl Rates {
 /// count, and passes it on with its format, rate, layout, sample count and
 /// timestamps unchanged; it only scales samples, and adds no delay. Like
 /// [`AudioGate`](crate::elements::AudioGate), one gain for every channel,
-/// from the loudest.
+/// from the loudest. On a microphone it usually comes after the gate and
+/// before an [`AudioLimiter`](crate::elements::AudioLimiter).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioCompressor, AudioCompressorOptions, FrameCounter, TestAudioOptions, TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("mic", TestAudioOptions::default()); // a capture, in practice
+/// let options = AudioCompressorOptions { ratio: 4.0, output_gain_db: 6.0, ..Default::default() };
+/// let (compressor, settings) = AudioCompressor::with_options("compressor", options)?;
+/// let (mixer, _) = FrameCounter::new("mixer"); // a mixer input, in practice
+/// let (pipeline, ()) = Pipeline::new("voice", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(compressor).to(mixer)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// settings.set_options(AudioCompressorOptions { ratio: 8.0, ..settings.options() })?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # How it decides
 ///

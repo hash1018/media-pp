@@ -28,11 +28,42 @@ use crate::orientation::Orientations;
 /// at once.
 const MAX_BATCH: usize = 32;
 
-/// Makes each object a detector found on each picture into a vector with an
-/// embedding model, on the CPU, and hands the picture on with each vector
-/// in its object's [`Detection::embeddings`](crate::elements::Detection::embeddings)
-/// — vectors that lie near each other where two objects look alike, for
-/// telling which boxes across a video are the same thing.
+/// Makes each object a detector found into a vector with an ONNX embedding
+/// model on the CPU, for telling which objects look alike.
+///
+/// It goes after a detector and hands each picture on with each vector in
+/// its object's [`Detection::embeddings`](crate::elements::Detection::embeddings).
+/// Vectors lie near each other where two objects look alike — compare them
+/// with [`Embedding::similarity`](crate::elements::Embedding::similarity) —
+/// for telling which boxes across a video are the same thing: one face seen
+/// twice. It takes decoded pictures in system memory; `CudaOrtEmbedder` and
+/// `D3d12OrtEmbedder` do the same on GPU pictures. Needs the `ort` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     DetectorModel, ObjectTracker, OrtDetectorOptions, OrtEmbedderOptions, SwOrtDetector,
+///     SwOrtEmbedder, TrackerOptions,
+/// };
+/// # use media_pp::{element::Context, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain(ctx: &std::sync::Arc<Context>) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("faces", |_buf| Ok(()));
+///
+/// // RetinaFace finds the five points a face is straightened by.
+/// let options = OrtDetectorOptions { model: DetectorModel::RetinaFace, ..Default::default() };
+/// let faces = SwOrtDetector::new("faces", "retinaface.onnx", options)?;
+/// let tracker = ObjectTracker::new("tracker", TrackerOptions::default());
+/// let embedder = SwOrtEmbedder::new("arcface", "arcface.onnx", OrtEmbedderOptions::default())?;
+/// let branch = ctx.branch().pipe(faces).pipe(tracker).pipe(embedder).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// It goes after a detector, and best after an
 /// [`ObjectTracker`](crate::elements::ObjectTracker): a followed object is

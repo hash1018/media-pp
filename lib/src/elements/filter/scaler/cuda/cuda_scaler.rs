@@ -23,8 +23,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `CudaScaler`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `CudaScaler`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaScalerError {
     /// FFmpeg rejected filter-graph or frame processing.
@@ -82,11 +83,13 @@ pub enum CudaScalerError {
     BufferSinkPull(i32),
 }
 
-/// Interpolation `scale_cuda` uses when resampling — the CUDA counterpart to
-/// the `libswscale` flags [`crate::elements::SwScaler`] takes, exposed for the
-/// same reason: downscaling 1080p to 720p looks visibly different between
-/// nearest and lanczos, and the caller is the one who knows whether this
-/// scaler sits in a quality-sensitive path.
+/// How [`CudaScaler`] interpolates when it resizes.
+///
+/// The interpolation `scale_cuda` uses when resampling — the CUDA counterpart
+/// to the `libswscale` flags [`crate::elements::SwScaler`] takes, exposed for
+/// the same reason: downscaling 1080p to 720p looks visibly different between
+/// nearest and lanczos, and the caller is the one who knows whether this scaler
+/// sits in a quality-sensitive path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaScalerInterp {
     /// Select the nearest input texel without interpolation.
@@ -111,9 +114,47 @@ impl CudaScalerInterp {
     }
 }
 
-/// Resizes GPU-resident `Pixel::CUDA` `Video` frames without ever touching
-/// the CPU, through libavfilter's `scale_cuda`. A filter: takes each buffer
-/// and pushes the scaled frame into its own single src pad.
+/// Resizes pictures on an NVIDIA GPU with CUDA, and brings 10-bit pictures
+/// down to 8 bits.
+///
+/// Behind the `cuda` feature. Put it after a `CudaDecoder` or a
+/// [`CudaUpload`](crate::elements::CudaUpload), in front of a `CudaEncoder`,
+/// a renderer or a model that wants another size. It takes CUDA surfaces in
+/// any [`CudaFrameFormat`] (and P010) and hands on CUDA surfaces of the
+/// size it was built with.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CudaDevice, CudaFrameFormat, CudaScaler, CudaScalerInterp, CudaUpload, FrameCounter,
+///     SwScaler, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CudaDevice::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let scaler = CudaScaler::new("scale", &device, 1280, 720, CudaScalerInterp::Bilinear);
+/// let (encoder, _) = FrameCounter::new("encoder"); // a CudaEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(scaler).to(encoder)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It resizes GPU-resident `Pixel::CUDA` `Video` frames without ever
+/// touching the CPU, through libavfilter's `scale_cuda`. A filter: takes
+/// each buffer and pushes the scaled frame into its own single src pad.
 ///
 /// This is what makes a hardware transcode at a different resolution
 /// possible at all — `CudaDecoder -> CudaScaler -> CudaEncoder` stays on the

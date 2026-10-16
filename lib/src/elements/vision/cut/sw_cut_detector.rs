@@ -34,18 +34,52 @@ pub enum SwCutDetectorError {
 }
 
 /// Finds where one shot of an edited video ends and the next begins, in
-/// pictures in system memory, and hands each picture on — the first of
-/// each shot after the stream's first carrying a
-/// [`SceneCut`](crate::elements::SceneCut) — as
-/// [`CutDetectorOptions`] says; see it, and the module, for how.
+/// pictures in system memory.
 ///
-/// It reads 8-bit NV12 and 4:2:0 pictures, and P010, in place; any other
+/// It hands each picture on, the first of each shot after the stream's
+/// first carrying a [`SceneCut`](crate::elements::SceneCut). Put it before
+/// an [`ObjectTracker`](crate::elements::ObjectTracker), which starts over
+/// on a cut. `CudaCutDetector`, `D3d12CutDetector` and `MetalCutDetector`
+/// find the same cuts in GPU pictures. It needs no feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{AppSink, CutDetectorOptions, SceneCut, SwCutDetector, SwDecoder};
+/// # use media_pp::elements::FileDemuxer;
+/// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+///
+/// let (pipeline, ()) = Pipeline::new("cuts", source, |source, ctx| {
+///     let decoder = SwDecoder::new("decoder", params)?;
+///     let cuts = SwCutDetector::new("cuts", CutDetectorOptions::default())?;
+///     let sink = AppSink::new("shots", |buf| {
+///         if buf.metadata().is_some_and(|m| m.contains::<SceneCut>()) {
+///             println!("a new shot at {:?}", buf.pts());
+///         }
+///         Ok(())
+///     });
+///     let branch = ctx.branch().pipe(decoder).pipe(cuts).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It finds cuts as [`CutDetectorOptions`] says; see it, and the module, for
+/// how. It reads 8-bit NV12 and 4:2:0 pictures, and P010, in place; any other
 /// layout through a conversion to 4:2:0 at its own size. It holds
-/// [`CutDetectorOptions::lookahead`] pictures of each stream, handing each
-/// on once the ones after it are seen, and every one still held at the end
-/// of the stream; a seek or a flush lets go of them. After a
-/// [`StreamMux`](crate::elements::StreamMux) each stream is judged on its
-/// own.
+/// [`CutDetectorOptions::lookahead`] pictures of each stream, handing each on
+/// once the ones after it are seen, and every one still held at the end of the
+/// stream; a seek or a flush lets go of them. After a
+/// [`StreamMux`](crate::elements::StreamMux) each stream is judged on its own.
 pub struct SwCutDetector(FilterStage<Detecting>);
 
 filter_stage!(SwCutDetector);

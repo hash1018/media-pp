@@ -38,8 +38,9 @@ use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use super::super::qos::Qos;
 use crate::elements::filter::is_codec_drain_boundary;
 
-/// Errors specific to `D3d11Decoder`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to `D3d11Decoder`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11DecoderError {
     /// The selected stream is not video.
@@ -120,9 +121,42 @@ const D3D11VA_MAX_SURFACES: usize = 64;
 /// The working surfaces FFmpeg gives a pool beside the codec's references.
 const FFMPEG_WORK_SURFACES: usize = 4;
 
-/// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
-/// via D3D11VA hardware acceleration — the D3D11 sibling of
-/// `D3d12Decoder`, for a pipeline built entirely on
+/// Decodes a video stream on the GPU through D3D11VA into D3D11 textures.
+///
+/// Takes one video stream's packets and hands on frames on the pipeline's one
+/// [`D3d11Gpu`] — NV12, or P010 for a 10-bit stream — for D3D11 elements after
+/// it: a scaler, a compositor, an encoder, a renderer. A codec the GPU has no
+/// decoder for fails at construction; for streams that must reach D3D11 either
+/// way, [`VideoDecodeBin`](crate::elements::VideoDecodeBin) falls back to
+/// software and uploads. Needs the `d3d11` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{D3d11Decoder, D3d11Gpu, FileDemuxer, FrameCounter};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// // Room in the fixed surface pool for the 4 pictures the queue may hold.
+/// let decoder = D3d11Decoder::new("decode", video.parameters.clone(), &gpu, 4)?;
+/// let (counter, frames) = FrameCounter::new("count");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// The D3D11 sibling of `D3d12Decoder`, for a pipeline built entirely on
 /// one shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
 /// docs on why that means no explicit fence/sync is needed anywhere in
 /// this stack, unlike the D3D12 side). A filter, the same shape as

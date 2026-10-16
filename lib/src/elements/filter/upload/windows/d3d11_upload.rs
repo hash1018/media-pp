@@ -23,8 +23,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `D3d11Upload`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `D3d11Upload`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11UploadError {
     /// Creating or updating a D3D11 texture failed.
@@ -62,16 +63,45 @@ pub enum D3d11UploadError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Uploads CPU-resident `Pixel::NV12`, `Pixel::YUV420P` (and `YUVJ420P`) and
+/// Copies pictures from system memory onto a D3D11 GPU, so the D3D11
+/// elements after it can work on them.
+///
+/// Behind the `d3d11` feature on Windows. Put it after a software decoder,
+/// a CPU capture or a test source, in front of a D3D11 scaler, key,
+/// compositor, encoder or renderer. It takes NV12, YUV420P or BGRA pictures
+/// in system memory and hands on D3D11 textures (NV12 or BGRA).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{D3d11Gpu, D3d11Upload, FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d11Gpu::new()?; // shared by every D3D11 element in the pipeline
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let upload = D3d11Upload::new("upload", &gpu);
+/// let (renderer, _) = FrameCounter::new("renderer"); // a D3D11 renderer, in practice
+/// let (pipeline, ()) = Pipeline::new("upload", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).to(renderer)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It uploads CPU-resident `Pixel::NV12`, `Pixel::YUV420P` (and `YUVJ420P`) and
 /// `Pixel::BGRA` video frames to GPU-resident `Video` frames tagged
-/// `Pixel::D3D11` — the D3D11 sibling of
-/// `D3d12Upload`, for a pipeline built entirely on one
-/// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
-/// docs on why). A YUV420P frame — what a software decode usually gives —
-/// goes up as NV12, its two chroma planes interleaved on the way: the same
-/// samples, so no scaler is needed for it. Chain a
-/// [`crate::elements::SwScaler`] in front of this if the source produces
-/// anything else.
+/// `Pixel::D3D11` — the D3D11 sibling of `D3d12Upload`, for a pipeline built
+/// entirely on one shared `ID3D11Device` (see
+/// [`crate::elements::D3d11Renderer`]'s own docs on why). A YUV420P frame —
+/// what a software decode usually gives — goes up as NV12, its two chroma
+/// planes interleaved on the way: the same samples, so no scaler is needed for
+/// it. Chain a [`crate::elements::SwScaler`] in front of this if the source
+/// produces anything else.
 ///
 /// # Which of the two to feed it
 ///

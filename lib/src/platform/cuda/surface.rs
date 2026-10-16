@@ -18,8 +18,42 @@ use crate::{
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
 };
 
-/// Where a CUDA picture's pixels are: one [`CudaPlane`] for BGRA, two for
-/// NV12 and P010 (luma, then interleaved chroma).
+/// The device pointers of a CUDA picture's planes, for CUDA work of your
+/// own on it.
+///
+/// Use it in an element of your own that works on the CUDA pictures this
+/// crate's CUDA elements hand on, without leaving the GPU; write its output
+/// into a picture from a [`CudaFramePool`]. A whole element built this way is
+/// in
+/// [`lib/tests/cuda_custom_element.rs`](https://github.com/hash1018/media-pp/blob/main/lib/tests/cuda_custom_element.rs).
+/// Needs the `cuda` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{CudaDevice, CudaFrameFormat, CudaFramePool, CudaSurfaceView};
+/// # let handed = media_pp::ffmpeg::frame::Video::empty();
+///
+/// let device = CudaDevice::new()?; // the one the pipeline's CUDA elements use
+/// let pool = CudaFramePool::new(&device, CudaFrameFormat::Nv12, 1280, 720)?;
+///
+/// // For each picture `handed` to your element:
+/// let input = CudaSurfaceView::new(&device, &handed)?;
+/// let output = pool.get()?;
+/// let target = CudaSurfaceView::new(&device, &output)?;
+/// for (from, to) in input.planes().iter().zip(target.planes()) {
+///     // Read `from.rows` rows of `from.row_bytes` bytes at `from.pointer`,
+///     // `from.pitch` apart, and write `to` likewise with your CUDA calls.
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A view holds one [`CudaPlane`] for BGRA, two for NV12 and P010 (luma,
+/// then interleaved chroma).
 ///
 /// What a custom element reads a picture by — a detector or a model of its
 /// own, a measurement — or, for a picture from its own [`CudaFramePool`],
@@ -197,8 +231,17 @@ impl From<CudaFramesContextError> for CudaFramePoolError {
     }
 }
 
-/// CUDA pictures of one format and size on a [`CudaDevice`], for an element
-/// of your own to write into and hand on.
+/// CUDA pictures of one format and size, for an element of your own to
+/// write into and hand on.
+///
+/// Make it from the [`CudaDevice`] the pipeline's CUDA elements share, so they
+/// take its pictures as their own; read and write a picture's planes through
+/// [`CudaSurfaceView`], whose example shows both. A whole element built this
+/// way is in
+/// [`lib/tests/cuda_custom_element.rs`](https://github.com/hash1018/media-pp/blob/main/lib/tests/cuda_custom_element.rs).
+/// Needs the `cuda` feature.
+///
+/// # How it works
 ///
 /// A picture from here is one every CUDA element of the pipeline takes as
 /// from its own device; one allocated through another FFmpeg device

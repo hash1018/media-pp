@@ -52,8 +52,10 @@ const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// instead of unbounded memory growth.
 const PACKET_QUEUE_CAPACITY: usize = 48;
 
-/// Errors specific to `PipeWireAudioCaptureSource`. Converts into the
-/// crate-wide `Error` via `?` (see [`crate::error::Error`]).
+/// Why a [`PipeWireAudioCaptureSource`] could not open a node or go on
+/// capturing.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum PipeWireAudioCaptureSourceError {
     /// PipeWire refused to start the loop, connect, or make the stream.
@@ -90,7 +92,7 @@ pub enum PipeWireAudioCaptureSourceError {
     StreamEnded,
 }
 
-/// Construction-time options for [`PipeWireAudioCaptureSource::open`].
+/// Which PipeWire node a [`PipeWireAudioCaptureSource`] records.
 #[derive(Debug, Clone)]
 pub struct PipeWireAudioCaptureOptions {
     /// Which node to capture from — one entry out of
@@ -193,20 +195,61 @@ fn wait_set_active(
     }
 }
 
-/// Captures system audio or microphone input through PipeWire, emitting
-/// `MediaBuffer::Audio` frames in the graph's own native rate, channel count,
-/// and sample format — no resampling.
+/// Records sound on Linux through PipeWire: a microphone, what an output
+/// plays, or what one application plays.
+///
+/// List the nodes with [`PipeWireAudioCaptureSource::list_devices`] and open
+/// one with [`PipeWireAudioCaptureSource::open`];
+/// [`PipeWireAudioCaptureSource::list_applications`] and
+/// [`PipeWireAudioCaptureSource::open_application`] record one application
+/// instead. It emits `MediaBuffer::Audio` frames in the graph's own native
+/// rate, channel count, and sample format — no resampling; put an
+/// [`AudioResampler`](crate::elements::AudioResampler) after it where a fixed
+/// format is needed. It is live. Needs the `pipewire-audio-capture` feature.
+///
+/// # Example
+///
+/// Record the first microphone:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource,
+///     PipeWireAudioDeviceKind,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let devices = PipeWireAudioCaptureSource::list_devices()?;
+/// let Some(device) = devices
+///     .into_iter()
+///     .find(|device| device.kind == PipeWireAudioDeviceKind::Source)
+/// else {
+///     return Ok(());
+/// };
+/// let options = PipeWireAudioCaptureOptions { device };
+/// let (source, format) = PipeWireAudioCaptureSource::open("mic", options)?;
+/// println!("{} Hz, {} channel(s)", format.sample_rate, format.channels);
+///
+/// let (counter, _sound) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("mic", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # What this captures
 ///
 /// Whatever [`PipeWireAudioCaptureOptions::device`] names, chosen
 /// programmatically. This is the substantive difference from
-/// [`crate::elements::PipeWireScreenCaptureSource`], which shares the same
-/// backend but cannot select anything: audio capture goes straight to a
-/// PipeWire node with no xdg-desktop-portal involved, so there is no dialog,
-/// no user interaction, and no restore token. `list_devices` plus a `device`
-/// field is the whole selection story, the same shape
-/// `WasapiCaptureSource` uses.
+/// `PipeWireScreenCaptureSource`, which shares the same backend but cannot
+/// select anything: audio capture goes straight to a PipeWire node with no
+/// xdg-desktop-portal involved, so there is no dialog, no user interaction, and
+/// no restore token. `list_devices` plus a `device` field is the whole
+/// selection story, the same shape `WasapiCaptureSource` uses.
 ///
 /// A [`PipeWireAudioDeviceKind::Sink`] device is captured through its monitor
 /// ports (what the system is playing); a [`PipeWireAudioDeviceKind::Source`]
@@ -273,7 +316,7 @@ impl PipeWireAudioCaptureSource {
     /// [`PipeWireAudioCaptureOptions::device`].
     ///
     /// Needs no portal and shows no dialog. See
-    /// [`crate::elements::PipeWireAudioRenderer::list_devices`] for the same
+    /// `PipeWireAudioRenderer::list_devices` for the same
     /// list filtered to playback nodes.
     pub fn list_devices()
     -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireAudioCaptureSourceError> {

@@ -25,8 +25,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `CudaChromaKey`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `CudaChromaKey`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaChromaKeyError {
     /// FFmpeg could not take a second reference to the keyed frame already
@@ -55,17 +56,52 @@ pub enum CudaChromaKeyError {
     Driver(#[from] CudaDriverError),
 }
 
-/// Keys a solid background colour out of a CUDA-resident BGRA surface into
-/// alpha, on the GPU.
+/// Makes a green (or blue, or any solid) background transparent, on an
+/// NVIDIA GPU with CUDA.
 ///
-/// The CUDA counterpart of `D3d11ChromaKey` (not linked: that type only
-/// exists in a Windows build with `d3d11`, and this one compiles without
-/// it), and the reason a
-/// Linux graph can key at all: a CUDA compositor cannot accept a D3D11
-/// texture, and the software element in between would cost a
-/// [`CudaDownload`](crate::elements::CudaDownload) and a
-/// [`CudaUpload`](crate::elements::CudaUpload) — two PCIe crossings per
-/// frame — around it.
+/// Behind the `cuda` feature. It takes BGRA CUDA surfaces and hands on BGRA
+/// surfaces with the background cut into their alpha, ready for a CUDA
+/// compositor layer; tune it while it runs through the [`ChromaKeyHandle`]
+/// it returns.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ChromaKeyMethod, ChromaKeyOptions, CudaChromaKey, CudaDevice, CudaFrameFormat, CudaUpload,
+///     FrameCounter, SwScaler, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CudaDevice::new()?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let options = ChromaKeyOptions { method: ChromaKeyMethod::Green, threshold: 0.4, smoothing: 0.1 };
+/// let (key, _tuning) = CudaChromaKey::new("key", &device, options)?;
+/// let (layer, _) = FrameCounter::new("layer"); // a CUDA compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("keyed", camera, |source, ctx| {
+///     let to_bgra = SwScaler::to_format("to-bgra", Pixel::BGRA, Flags::BILINEAR);
+///     let upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
+///     let branch = ctx.branch().pipe(to_bgra).pipe(upload).pipe(key).to(layer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It keys a solid background colour out of a CUDA-resident BGRA surface into
+/// alpha, on the GPU. The CUDA counterpart of `D3d11ChromaKey` (not linked:
+/// that type only exists in a Windows build with `d3d11`, and this one compiles
+/// without it), and the reason a Linux graph can key at all: a CUDA compositor
+/// cannot accept a D3D11 texture, and the software element in between would
+/// cost a [`CudaDownload`](crate::elements::CudaDownload) and a
+/// [`CudaUpload`](crate::elements::CudaUpload) — two PCIe crossings per frame —
+/// around it.
 ///
 /// # BGRA in, BGRA out
 ///

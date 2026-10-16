@@ -57,13 +57,45 @@ pub struct CudaOrtEmbedderOptions {
 }
 
 /// Makes each object a detector found on each CUDA picture into a vector
-/// with an embedding model, without the picture leaving the GPU — what
-/// [`SwOrtEmbedder`](crate::elements::SwOrtEmbedder) does on the CPU: a
-/// kernel reads each object into the model's input through the map
-/// [`OrtEmbedderOptions::align`] makes for it — a face straightened by its
-/// five points, a box stretched — between the four pixels around each
-/// point, several objects to one run, and ONNX Runtime's CUDA provider
-/// reads them there.
+/// with an ONNX embedding model, without the picture leaving the GPU.
+///
+/// It does what [`SwOrtEmbedder`](crate::elements::SwOrtEmbedder) does on the
+/// CPU, for NV12, BGRA or HDR P010 CUDA pictures from the same [`CudaDevice`]
+/// as the rest of the pipeline. Needs the `ort-cuda` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CudaDevice, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
+///     CudaOrtEmbedderOptions, DetectorModel, OrtDetectorOptions,
+/// };
+/// # use media_pp::{element::Context, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain(ctx: &std::sync::Arc<Context>) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("faces", |_buf| Ok(()));
+///
+/// let device = CudaDevice::new()?;
+/// let options = CudaOrtDetectorOptions {
+///     detector: OrtDetectorOptions { model: DetectorModel::RetinaFace, ..Default::default() },
+///     ..CudaOrtDetectorOptions::default()
+/// };
+/// let faces = CudaOrtDetector::new("faces", &device, "retinaface.onnx", options)?;
+/// let options = CudaOrtEmbedderOptions::default();
+/// let embedder = CudaOrtEmbedder::new("arcface", &device, "arcface.onnx", options)?;
+/// let branch = ctx.branch().pipe(faces).pipe(embedder).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A kernel reads each object into the model's input through the map
+/// [`OrtEmbedderOptions::align`] makes for it — a face straightened by its five
+/// points, a box stretched — between the four pixels around each point, several
+/// objects to one run, and ONNX Runtime's CUDA provider reads them there.
 ///
 /// It takes NV12, BGRA or HDR P010 CUDA pictures from the same
 /// [`CudaDevice`] as the rest of the pipeline; an HDR picture is read from

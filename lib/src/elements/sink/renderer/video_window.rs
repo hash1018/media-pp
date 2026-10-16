@@ -44,6 +44,45 @@ pub enum VideoWindowError {
     Window(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// Shows video in a window of its own on any platform — this crate's
+/// GStreamer `autovideosink`.
+///
+/// It ends a branch of pictures in system memory — NV12, YUV420P or BGRA,
+/// what a software decode, a CPU capture or an application's own frames
+/// give — and is the one video sink a program can name without a `#[cfg]`.
+/// It draws but does not pace, so a [`Pacer`](crate::elements::Pacer) goes
+/// in front for a file. For GPU pictures, open the platform's window
+/// renderer on the GPU the pipeline shares instead. It needs `d3d11` or
+/// `d3d12` on Windows, `vulkan` on Linux and `metal` on macOS, where the
+/// program runs inside `run_with_windows`.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FileDemuxer, Pacer, SwDecoder, VideoWindow, WindowOptions};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let (window, events) = VideoWindow::open("window", WindowOptions::default())?;
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 8);
+///     let branch = branch.pipe(Pacer::new("pacer")).to(window)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// events.recv(); // the first thing the window reports, a key or a close
+/// pipeline.stop();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
 /// A terminal sink that shows video in a window of its own, on whichever
 /// renderer this platform has — `D3d11WindowRenderer` on Windows (or
 /// `D3d12WindowRenderer` in a build with only `d3d12`), `VulkanWindowRenderer`

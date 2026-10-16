@@ -65,8 +65,9 @@ const SESSION_POLL_GRANULARITY: Duration = Duration::from_millis(250);
 /// see [`close_session`].
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Errors specific to `PipeWireScreenCaptureSource`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Why a [`PipeWireScreenCaptureSource`] could not open or go on capturing.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum PipeWireScreenCaptureSourceError {
     /// The xdg-desktop-portal ScreenCast session failed — no portal, or a
@@ -156,7 +157,7 @@ pub enum PipeWireScreenCaptureSourceError {
     NotDmaBuf(String),
 }
 
-/// Which kinds of source the portal's picker offers the user — see
+/// Whether the screen-share dialog offers monitors, windows or both — see
 /// [`PipeWireScreenCaptureOptions::source_kind`].
 ///
 /// This is a *filter on the dialog*, not a selection. Wayland gives no way to
@@ -173,7 +174,8 @@ pub enum CaptureSourceKind {
     MonitorOrWindow,
 }
 
-/// Construction-time options for [`PipeWireScreenCaptureSource::open`].
+/// What the screen-share dialog offers, the rate a
+/// [`PipeWireScreenCaptureSource`] captures at, and an earlier choice to reuse.
 #[derive(Debug, Clone)]
 pub struct PipeWireScreenCaptureOptions {
     /// The constant rate frames are emitted at. Like
@@ -392,8 +394,49 @@ enum Startup {
 /// Sent into the PipeWire thread's own main loop to end it.
 struct Terminate;
 
-/// Captures the Wayland desktop through xdg-desktop-portal's ScreenCast
-/// portal and a PipeWire stream, emitting full-range BGRA CPU frames.
+/// Captures a monitor or a window on Linux (Wayland), at a steady frame
+/// rate, through the desktop's screen-share dialog.
+///
+/// The user picks what to share in the compositor's own dialog;
+/// [`PipeWireScreenCaptureOptions::source_kind`] narrows what it offers, and
+/// the restore token [`PipeWireScreenCaptureSource::open`] returns skips it
+/// next time. It hands on full-range BGRA pictures in system memory on one
+/// output — or CUDA surfaces with `open_gpu` and the `cuda` feature. It is live
+/// and needs no pacer. Needs the `pipewire-screen-capture` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CaptureSourceKind, FrameCounter, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let options = PipeWireScreenCaptureOptions {
+///     source_kind: CaptureSourceKind::Window,
+///     restore_token: None, // a token saved from an earlier run skips the dialog
+///     ..PipeWireScreenCaptureOptions::default()
+/// };
+/// // Shows the dialog and waits for the user.
+/// let (source, video, _token) = PipeWireScreenCaptureSource::open("screen", options)?;
+/// println!("{}x{}", video.width, video.height);
+///
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("screen", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It works through xdg-desktop-portal's ScreenCast portal and a PipeWire
+/// stream.
 ///
 /// # What this captures
 ///

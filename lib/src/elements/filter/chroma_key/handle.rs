@@ -78,8 +78,11 @@ impl ChromaKeyControl {
     }
 }
 
-/// Thread-safe runtime control for a chroma-key element, from either
-/// backend.
+/// Retunes a chroma key, or turns it off, while the pipeline runs.
+///
+/// Every chroma-key element returns one from its constructor, whatever its
+/// backend; see [`SwChromaKey`](crate::elements::SwChromaKey) for an
+/// example. It is thread-safe runtime control.
 ///
 /// What it is for is a slider. Keying is tuned by eye — a threshold that
 /// works for one room's lighting spills on another's — and rebuilding the

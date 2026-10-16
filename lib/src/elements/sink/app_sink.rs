@@ -10,28 +10,49 @@ use crate::{
     stream::StreamEvent,
 };
 
-/// Terminal sink that hands every buffer (and, optionally, every event in
-/// the stream) to a plain closure instead of requiring a bespoke `struct` +
-/// `Element`/`RawSink` impl — the equivalent of GStreamer's `appsink`: the
-/// pipeline's job ends here, and whatever the caller does with the data
+/// Ends a branch in a closure of yours, which is handed every buffer —
+/// GStreamer's `appsink`.
+///
+/// It takes anything: packets, pictures or sound, in any memory. The
+/// pipeline's job ends here, and whatever the closure does with the data
 /// (run inference, forward it to a channel, write it out, ...) is none of
-/// this crate's concern.
+/// this crate's concern. [`AppSink::with_events`] also hands it the events
+/// in the stream — a seek's new segment, the end of the stream.
 ///
-/// `FrameCounter`/`PacketCounter` are what a one-off consumer looked
-/// like *before* this existed — this is the general case of the same
-/// pattern, for when a whole new type per use site is more ceremony than
-/// the actual logic warrants:
+/// # Example
 ///
-/// ```
-/// # use media_pp::{buffer::MediaBuffer, elements::AppSink};
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::buffer::MediaBuffer;
+/// use media_pp::elements::{AppSink, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
 /// let mut count = 0usize;
-/// let sink = AppSink::new("counter", move |buf: MediaBuffer| {
-///     if matches!(buf, MediaBuffer::Video(_)) {
+/// let sink = AppSink::new("pictures", move |buffer: MediaBuffer| {
+///     if matches!(buffer, MediaBuffer::Video(_)) {
 ///         count += 1;
 ///     }
 ///     Ok(())
 /// });
+///
+/// let (pipeline, ()) = Pipeline::new("app", source, |source, ctx| {
+///     let branch = ctx.branch().to(sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
 /// ```
+///
+/// # How it works
+///
+/// It saves writing a bespoke `struct` + `Element`/`RawSink` impl.
+/// `FrameCounter`/`PacketCounter` are what a one-off consumer looked
+/// like *before* this existed — this is the general case of the same
+/// pattern, for when a whole new type per use site is more ceremony than
+/// the actual logic warrants.
 pub struct AppSink<F, E> {
     pp_log: PpLog,
     name: Arc<str>,

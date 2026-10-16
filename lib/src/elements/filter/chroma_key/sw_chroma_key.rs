@@ -25,8 +25,9 @@ use crate::{
 /// to be.
 const POOL_SIZE: usize = 4;
 
-/// Errors specific to `SwChromaKey`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `SwChromaKey`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwChromaKeyError {
     /// FFmpeg could not take a second reference to the keyed frame already
@@ -48,11 +49,46 @@ pub enum SwChromaKeyError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Keys a solid background color out of a decoded BGRA frame into alpha —
-/// the software half of this crate's chroma-key support, the GPU-resident
-/// other half being `D3d11ChromaKey`. A filter: takes each buffer and
-/// pushes the keyed frame on through its own (single)
-/// src pad.
+/// Makes a green (or blue, or any solid) background transparent, on the CPU.
+///
+/// Put it on a camera's branch in front of a compositor, so the person in
+/// front of a green screen is laid over the rest of the scene. It takes
+/// BGRA pictures in system memory and hands on BGRA pictures with the
+/// background cut into their alpha; tune it while it runs through the
+/// [`ChromaKeyHandle`] it returns. For pictures on a GPU use that backend's
+/// key instead (`D3d11ChromaKey`, `CudaChromaKey`, `VulkanChromaKey`).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ChromaKeyMethod, ChromaKeyOptions, FrameCounter, SwChromaKey, SwScaler, TestVideoOptions,
+///     TestVideoSource,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let options = ChromaKeyOptions { method: ChromaKeyMethod::Green, threshold: 0.4, smoothing: 0.1 };
+/// let (key, tuning) = SwChromaKey::new("key", options);
+/// let (layer, _) = FrameCounter::new("layer"); // a compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("keyed", camera, |source, ctx| {
+///     let to_bgra = SwScaler::to_format("to-bgra", Pixel::BGRA, Flags::BILINEAR);
+///     ctx.attach(source, 0, ctx.branch().pipe(to_bgra).pipe(key).to(layer)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// tuning.set_options(ChromaKeyOptions { threshold: 0.3, ..tuning.options() });
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It keys a solid background color out of a decoded BGRA frame into alpha —
+/// the software half of this crate's chroma-key support. A filter: takes each
+/// buffer and pushes the keyed frame on through its own (single) src pad.
 ///
 /// Expects `BGRA` input — the same format [`crate::elements::SwVideoCompositor`]/
 /// `D3d11VideoCompositor` layers already use, so the

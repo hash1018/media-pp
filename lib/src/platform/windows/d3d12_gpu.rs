@@ -22,8 +22,41 @@ pub enum D3d12GpuError {
     Queue(windows::core::Error),
 }
 
-/// The D3D12 device every D3D12 element of a pipeline shares — what every
-/// D3D12 element's constructor takes — and the one direct command queue a
+/// The Direct3D 12 device that all D3D12 elements of a pipeline share.
+///
+/// Make one and pass it to every D3D12 element of that backend in a pipeline —
+/// decoder, upload, scaler, compositor, renderer. Pictures made on one device
+/// cannot be used on another. Needs the `d3d12` feature, on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{D3d12Decoder, D3d12Gpu, D3d12Scaler, FileDemuxer, FrameCounter};
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// // Both elements are made from the same `gpu`.
+/// let decoder = D3d12Decoder::new("decoder", video.parameters.clone(), &gpu)?;
+/// let scaler = D3d12Scaler::new("scaler", &gpu, 1280, 720)?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(scaler).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It is the device every D3D12 element's constructor takes, and the one
+/// direct command queue a
 /// [`D3d12WindowRenderer`](crate::elements::D3d12WindowRenderer) presents
 /// through.
 ///

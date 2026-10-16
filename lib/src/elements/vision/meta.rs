@@ -7,11 +7,12 @@ use std::sync::Arc;
 
 use crate::buffer::MediaBuffer;
 
-/// One object a detector found, placed as fractions of the picture it is
-/// attached to: `x` and `y` are its top-left corner, `width` and `height`
-/// its size, each from 0 to 1. Multiply by the picture's own width and
-/// height for pixels — which holds whatever the picture is scaled to
-/// afterwards.
+/// One object a detector found: its class, its score and its box.
+///
+/// The box is placed as fractions of the picture it is attached to: `x` and `y`
+/// are its top-left corner, `width` and `height` its size, each from 0 to 1.
+/// Multiply by the picture's own width and height for pixels — which holds
+/// whatever the picture is scaled to afterwards.
 ///
 /// The box is of the picture as it is stored. A phone's portrait recording
 /// is stored on its side and shown turned — see [`Orientation`] — and a
@@ -75,9 +76,12 @@ pub struct Detection {
     pub look: Option<f32>,
 }
 
-/// What an embedding model made of an object: a vector of unit length, so
-/// that how alike two objects look is the dot product of theirs —
-/// [`Embedding::similarity`]. Only vectors of one embedder compare.
+/// What an embedding model made of an object: a vector for telling how
+/// alike two objects look.
+///
+/// The vector is of unit length, so that how alike two objects look is the
+/// dot product of theirs — [`Embedding::similarity`]. Only vectors of one
+/// embedder compare.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Embedding {
@@ -93,9 +97,10 @@ pub struct Embedding {
     pub cutout: Option<Arc<Cutout>>,
 }
 
-/// A picture of one object, as an embedding model was handed it: RGB, eight
-/// bits a channel, row by row from the top, `width` by `height` — the
-/// model's own input size. What the model looked at, so what a person
+/// A picture of one object, as an embedding model was handed it.
+///
+/// It is RGB, eight bits a channel, row by row from the top, `width` by
+/// `height` — the model's own input size. What the model looked at, so what a person
 /// shown it would recognise the object by.
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
@@ -213,9 +218,11 @@ impl Detection {
     }
 }
 
-/// What a detector found in one picture: the
-/// [`Metadata`](crate::buffer::Metadata) it puts on the picture it hands on.
-/// Read it downstream with `buffer.metadata()?.get::<Detections>()`.
+/// What a detector found in one picture, carried on the picture.
+///
+/// It is the [`Metadata`](crate::buffer::Metadata) a detector puts on the
+/// picture it hands on. Read it downstream with
+/// `buffer.metadata()?.get::<Detections>()`.
 ///
 /// An empty list is an answer — the detector looked and found nothing —
 /// where a picture carrying no `Detections` was not looked at.
@@ -272,11 +279,12 @@ impl Detections {
     }
 }
 
-/// That a picture begins a new shot of an edited video — the first after a
-/// cut, or after a fade through black — as a cut detector such as
-/// [`SwCutDetector`](crate::elements::SwCutDetector) puts it on the
-/// picture. An [`ObjectTracker`](crate::elements::ObjectTracker) starts
-/// over on it, and an [`ObjectAnalytics`](crate::elements::ObjectAnalytics)
+/// Marks a picture that begins a new shot of an edited video.
+///
+/// A cut detector such as [`SwCutDetector`](crate::elements::SwCutDetector)
+/// puts it on the first picture after a cut, or after a fade through black.
+/// An [`ObjectTracker`](crate::elements::ObjectTracker) starts over on it,
+/// and an [`ObjectAnalytics`](crate::elements::ObjectAnalytics)
 /// forgets where each object was, since nothing in the new shot is where
 /// anything was. The first picture of a stream carries none.
 #[derive(Debug, Clone, PartialEq)]
@@ -289,11 +297,14 @@ pub struct SceneCut {
     pub score: f32,
 }
 
-/// What an [`ObjectAnalytics`](crate::elements::ObjectAnalytics) made of one
-/// picture's [`Detections`]: for each of its zones the objects inside, and
-/// for each of its lines how many objects have crossed it so far and which
-/// crossed on this picture — the [`Metadata`](crate::buffer::Metadata) it
-/// puts beside them. Read it with `buffer.metadata()?.get::<Analytics>()`.
+/// What an [`ObjectAnalytics`](crate::elements::ObjectAnalytics) counted on
+/// one picture.
+///
+/// It is made of the picture's [`Detections`]: for each of its zones the
+/// objects inside, and for each of its lines how many objects have crossed it
+/// so far and which crossed on this picture — the
+/// [`Metadata`](crate::buffer::Metadata) it puts beside them. Read it with
+/// `buffer.metadata()?.get::<Analytics>()`.
 ///
 /// The zones and lines are in the order the element was given them.
 #[derive(Debug, Clone, Default, PartialEq)]

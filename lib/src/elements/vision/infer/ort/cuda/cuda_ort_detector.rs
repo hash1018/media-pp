@@ -150,31 +150,68 @@ impl Default for CudaOrtDetectorOptions {
     }
 }
 
-/// Runs a detector — YOLO, or the kind [`OrtDetectorOptions::model`] says
-/// — on each CUDA picture and hands the picture on
-/// unchanged, carrying the [`Detections`] found in it — what
-/// [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU, with the
-/// picture never leaving the GPU: a kernel fits it into the model's input
-/// in device memory, and ONNX Runtime's CUDA provider — or with
-/// `ort-tensorrt`, TensorRT — reads it there.
+/// Finds objects in each CUDA picture with an ONNX model on the GPU, and
+/// hands the picture on carrying what it found.
 ///
 /// It takes NV12 or BGRA CUDA pictures of any size from the same
 /// [`CudaDevice`] as the rest of the pipeline — a decoder's, a compositor's
-/// — and the boxes it finds are fractions of each picture, as
-/// [`Detection`](crate::elements::Detection) describes. The models it
-/// reads are those [`OrtDetectorOptions`] describes.
+/// — and hands each on unchanged with the [`Detections`] found in it. It
+/// does what [`SwOrtDetector`](super::super::SwOrtDetector) does on the
+/// CPU, with the picture never leaving the GPU. Needs the `ort-cuda`
+/// feature; with `ort-tensorrt` the model can run through TensorRT.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AppSink, CudaDecoder, CudaDevice, CudaOrtDetector, CudaOrtDetectorOptions, FileDemuxer,
+/// };
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+/// # let sink = AppSink::new("found", |_buf| Ok(()));
+/// let device = CudaDevice::new()?;
+/// let detector = CudaOrtDetector::new(
+///     "detector",
+///     &device,
+///     "yolov10n.onnx",
+///     CudaOrtDetectorOptions::default(),
+/// )?;
+/// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
+///     let decoder = CudaDecoder::new("decoder", params, &device, 16)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A kernel fits each picture into the model's input in device memory, and
+/// ONNX Runtime's CUDA provider — or with `ort-tensorrt`, TensorRT — reads
+/// it there. The boxes it finds are fractions of each picture, as
+/// [`Detection`](crate::elements::Detection) describes, and the model is
+/// YOLO by default, or the kind [`OrtDetectorOptions::model`] says. The
+/// models it reads are those [`OrtDetectorOptions`] describes.
 ///
 /// # Requirements
 ///
 /// The `ort-cuda` feature, which fetches ONNX Runtime's CUDA build and
 /// links CUDA 13's runtime, cuBLAS and cuRAND, and cuDNN 9, into the
 /// program; `ort-tensorrt` adds TensorRT 10 and its ONNX parser. Building
-/// needs them where the linker finds them, and a program built with them
-/// does not start without them, as it does not without FFmpeg. At run time
-/// it also needs a driver for CUDA 13.0, and versions no older than ONNX
-/// Runtime's build was made against: the CUDA 13.2 runtime, cuDNN 9.23.2
-/// and TensorRT 10.15.1 — [`CudaOrtDetector::runtime`] says which falls
-/// short, before a model is loaded.
+/// on Linux needs them where the linker finds them (Windows names the DLLs
+/// to the linker itself, so no import libraries are needed), and a program
+/// built with them does not start without them, as it does not without
+/// FFmpeg. At run time it also needs a driver for CUDA 13.0, and versions no
+/// older than ONNX Runtime's build was made against: the CUDA 13.2 runtime,
+/// cuDNN 9.23.2 and TensorRT 10.15.1 — [`CudaOrtDetector::runtime`] says
+/// which falls short, before a model is loaded.
 ///
 /// The first start with TensorRT builds an engine for the model and GPU,
 /// which takes minutes — see `CudaOrtDetectorOptions::engine_cache`.

@@ -46,13 +46,45 @@ pub struct MetalOrtEmbedderOptions {
 }
 
 /// Makes each object a detector found on each VideoToolbox picture into a
-/// vector with an embedding model — what
-/// [`SwOrtEmbedder`](crate::elements::SwOrtEmbedder) does on the CPU, with
-/// each object read into the model's input by a Metal kernel where the
-/// picture is, through the map [`OrtEmbedderOptions::align`] makes for it —
-/// a face straightened by its five points, a box stretched — between the
-/// four pixels around each point, several objects to one run, and the model
-/// run by ONNX Runtime's Core ML provider on the GPU or the Neural Engine.
+/// vector with an ONNX embedding model, run by Core ML.
+///
+/// It does what [`SwOrtEmbedder`](crate::elements::SwOrtEmbedder) does on
+/// the CPU, for NV12, BGRA or HDR P010 VideoToolbox pictures. Needs the
+/// `ort-coreml` feature, on an Apple silicon Mac.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     DetectorModel, MetalOrtDetector, MetalOrtDetectorOptions, MetalOrtEmbedder,
+///     MetalOrtEmbedderOptions, OrtDetectorOptions,
+/// };
+/// # use media_pp::{element::Context, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain(ctx: &std::sync::Arc<Context>) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("faces", |_buf| Ok(()));
+///
+/// let options = MetalOrtDetectorOptions {
+///     detector: OrtDetectorOptions { model: DetectorModel::RetinaFace, ..Default::default() },
+///     ..MetalOrtDetectorOptions::default()
+/// };
+/// let faces = MetalOrtDetector::new("faces", "retinaface.onnx", options)?;
+/// let embedder =
+///     MetalOrtEmbedder::new("arcface", "arcface.onnx", MetalOrtEmbedderOptions::default())?;
+/// let branch = ctx.branch().pipe(faces).pipe(embedder).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// Each object is read into the model's input by a Metal kernel where the
+/// picture is, through the map [`OrtEmbedderOptions::align`] makes for it — a
+/// face straightened by its five points, a box stretched — between the four
+/// pixels around each point, several objects to one run, and the model is run
+/// by ONNX Runtime's Core ML provider on the GPU or the Neural Engine.
 ///
 /// It goes after a detector — one that finds five points for a face, such
 /// as a [`MetalOrtDetector`](crate::elements::MetalOrtDetector) of

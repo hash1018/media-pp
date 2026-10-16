@@ -32,8 +32,43 @@ pub enum VideoToolboxDeviceError {
     MissingContext,
 }
 
-/// The one VideoToolbox context a pipeline's VideoToolbox elements share —
-/// the macOS counterpart of `CudaDevice` and `VulkanDevice`.
+/// The VideoToolbox context that all VideoToolbox and Metal elements of a
+/// pipeline share.
+///
+/// Make one and pass it to every VideoToolbox and Metal element of that
+/// backend in a pipeline — decoder, upload, scaler, compositor. It is the
+/// macOS counterpart of `CudaDevice` and `VulkanDevice`. Needs the
+/// `videotoolbox` feature, on macOS.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FileDemuxer, FrameCounter, MetalScaler, MetalScalerInterp, VideoToolboxDecoder,
+///     VideoToolboxDevice,
+/// };
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// // Both elements are made from the same `device`.
+/// let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device)?;
+/// let scaler = MetalScaler::new("scaler", &device, 1280, 720, MetalScalerInterp::Bilinear)?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(scaler).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// It is FFmpeg's `AV_HWDEVICE_TYPE_VIDEOTOOLBOX` context, which a decoder
 /// decodes on and an upload makes its frames on. There is no GPU to choose
@@ -89,8 +124,10 @@ impl VideoToolboxDevice {
     }
 }
 
-/// What VideoToolbox frames hold, where an element has to be told — as
-/// [`crate::elements::EncodeInput::VideoToolbox`] and
+/// The pixel layout of a VideoToolbox picture: NV12, BGRA or 10-bit P010.
+///
+/// It is what VideoToolbox frames hold, where an element has to be told —
+/// as [`crate::elements::EncodeInput::VideoToolbox`] and
 /// [`crate::elements::VideoToolboxEncoderOptions::format`] are: the two
 /// layouts everything that makes VideoToolbox frames here puts out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,7 +283,16 @@ impl From<VideoToolboxFramesContextError> for VideoToolboxFramePoolError {
 }
 
 /// VideoToolbox pictures of one format and size, for an element of your own
-/// to write into and hand on — the macOS counterpart of `CudaFramePool`.
+/// to write into and hand on.
+///
+/// Make it from the [`VideoToolboxDevice`] the pipeline's VideoToolbox elements
+/// share, and draw into its pictures with Metal through `MetalSurfaceView`
+/// (with the `metal` feature). It is the macOS counterpart of `CudaFramePool`.
+/// A whole element built this way is in
+/// [`lib/tests/metal_custom_element.rs`](https://github.com/hash1018/media-pp/blob/main/lib/tests/metal_custom_element.rs).
+/// Needs the `videotoolbox` feature, on macOS.
+///
+/// # How it works
 ///
 /// A picture from here is what the VideoToolbox and Metal elements of this
 /// crate take from their own upload or decoder: a frame in FFmpeg's

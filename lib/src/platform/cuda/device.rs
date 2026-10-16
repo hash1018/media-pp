@@ -17,15 +17,49 @@ pub enum CudaDeviceError {
     MissingContext,
 }
 
-/// The one CUDA device context every CUDA element in a pipeline shares.
+/// The CUDA device that all CUDA elements of a pipeline share.
 ///
+/// Make one and pass it to every CUDA element of that backend in a pipeline —
+/// decoder, upload, scaler, encoder, renderer. A picture made on one CUDA
+/// context cannot be read from another. Make it once, before any pipeline
+/// starts (see below). Needs the `cuda` feature, on Linux or Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CudaDecoder, CudaDevice, CudaDownload, CudaFrameFormat, FileDemuxer, FrameCounter,
+/// };
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// let device = CudaDevice::new()?;
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// // Both elements are made from the same `device`.
+/// let decoder = CudaDecoder::new("decoder", video.parameters.clone(), &device, 8)?;
+/// let download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
+/// let (counter, _frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(download).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It is the one CUDA device context every CUDA element in a pipeline shares.
 /// This is the exact analog of the single `ID3D11Device` the D3D11 stack
-/// requires (see `D3d11Renderer`'s docs on why that stack
-/// needs one shared device rather than merely one adapter): a CUDA frame
-/// allocated against one context is not readable from another, so
-/// [`crate::elements::CudaDecoder`] and [`crate::elements::CudaRenderer`]
-/// must be constructed from the *same* `CudaDevice`. Create one per stack
-/// and hand it to every CUDA element.
+/// requires (see `D3d11Renderer`'s docs on why that stack needs one shared
+/// device rather than merely one adapter): a CUDA frame allocated against one
+/// context is not readable from another, so [`crate::elements::CudaDecoder`]
+/// and [`crate::elements::CudaRenderer`] must be constructed from the *same*
+/// `CudaDevice`. Create one per stack and hand it to every CUDA element.
 ///
 /// Each element takes its own FFmpeg reference at construction, so this
 /// value only has to outlive the constructor calls — not the pipeline. The

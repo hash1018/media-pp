@@ -70,12 +70,52 @@ impl Default for D3d12OrtDetectorOptions {
     }
 }
 
-/// Runs a detector — YOLO, or the kind [`OrtDetectorOptions::model`] says
-/// — on each D3D12 picture and hands the picture on unchanged, carrying the
-/// [`Detections`] found in it — what
-/// [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU, with the
-/// picture fitted to the model's input by a compute shader where it is, and
-/// the model run by ONNX Runtime's DirectML provider on the same GPU: any
+/// Finds objects in each D3D12 picture with an ONNX model run by DirectML,
+/// on any vendor's GPU, and hands the picture on carrying what it found.
+///
+/// It takes NV12 or HDR P010 D3D12 pictures made on the [`D3d12Gpu`] it is
+/// given, and hands each on unchanged with the [`Detections`] found in it,
+/// as [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU.
+/// Export the model at ONNX opset 20 or lower: an operator of a later opset
+/// runs on the CPU, slower than the CPU detector, with a warning. Needs the
+/// `ort-directml` feature, on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AppSink, D3d12Decoder, D3d12Gpu, D3d12OrtDetector, D3d12OrtDetectorOptions, FileDemuxer,
+/// };
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+/// # let sink = AppSink::new("found", |_buf| Ok(()));
+/// let gpu = D3d12Gpu::new()?;
+/// let detector = D3d12OrtDetector::new(
+///     "detector",
+///     &gpu,
+///     "yolov10n.onnx",
+///     D3d12OrtDetectorOptions::default(),
+/// )?;
+/// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
+///     let decoder = D3d12Decoder::new("decoder", params, &gpu)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// The picture is fitted to the model's input by a compute shader where it
+/// is, and the model — YOLO, or the kind [`OrtDetectorOptions::model`] says
+/// — is run by ONNX Runtime's DirectML provider on the same GPU: any
 /// vendor's, through its own D3D12 driver.
 ///
 /// It takes NV12 D3D12 pictures of any size — a `D3d12Decoder`'s, a

@@ -86,6 +86,48 @@ pub enum MetalWindowRendererError {
     },
 }
 
+/// Shows video in a window on macOS, drawing with Metal from VideoToolbox
+/// frames or frames in system memory.
+///
+/// It ends a branch of decoded pictures: VideoToolbox frames (NV12 or BGRA)
+/// from a `VideoToolboxDecoder`, a camera or a screen capture, drawn
+/// zero-copy, or frames in system memory (NV12, YUV420P or BGRA). It draws
+/// but does not pace, so a [`Pacer`](crate::elements::Pacer) or
+/// [`VideoSynchronizer`](crate::elements::VideoSynchronizer) goes in front.
+/// [`MetalWindowRenderer::open`] opens a window of its own, from inside
+/// [`run_with_windows`](crate::elements::run_with_windows) where the
+/// program has no event loop; [`MetalWindowRenderer::for_window`] draws into
+/// an AppKit view the application owns. Needs the `metal` feature.
+///
+/// # Example
+///
+/// ```ignore
+/// use media_pp::elements::{
+///     FileDemuxer, MetalWindowRenderer, Pacer, VideoToolboxDecoder, VideoToolboxDevice,
+///     WindowEvent, WindowOptions,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// // Inside `run_with_windows`:
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let device = VideoToolboxDevice::new()?;
+/// let (screen, events) = MetalWindowRenderer::open("screen", WindowOptions::default())?;
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 8);
+///     let branch = branch.pipe(Pacer::new("pacer")).to(screen)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// while events.recv().is_some_and(|event| event != WindowEvent::Closed) {}
+/// pipeline.stop();
+/// ```
+///
+/// # How it works
+///
 /// A terminal sink that shows video frames in a window — one it opens for
 /// itself, the way a GStreamer video sink does when nobody hands it one, or
 /// an AppKit view the application gives it.

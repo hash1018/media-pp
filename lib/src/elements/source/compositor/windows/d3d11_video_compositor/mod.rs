@@ -1,9 +1,8 @@
-//! GPU (D3D11) video compositor — [`D3d11VideoCompositor`] itself plus
-//! everything specific to driving it: input registration
-//! ([`D3d11VideoCompositorHandle`]), per-input placement control
-//! ([`video_handle::D3d11VideoLayerHandle`]), and the dynamic-text
-//! sibling ([`text_handle::D3d11TextLayerHandle`]) each split into their
-//! own file since neither is small enough to justify inlining here.
+//! The D3D11 video compositor: [`D3d11VideoCompositor`] itself plus everything
+//! specific to driving it: input registration ([`D3d11VideoCompositorHandle`]),
+//! per-input placement control ([`video_handle::D3d11VideoLayerHandle`]), and
+//! the dynamic-text sibling ([`text_handle::D3d11TextLayerHandle`]) each split
+//! into their own file since neither is small enough to justify inlining here.
 
 use crate::color::yuv_to_rgb_rows;
 use crate::rate::FrameRate;
@@ -307,8 +306,9 @@ impl D3d11CompositorShared {
     }
 }
 
-/// A cheaply cloneable handle for adding and removing
-/// [`D3d11VideoCompositor`] inputs — the GPU sibling of
+/// Adds, removes and paces the inputs of a running [`D3d11VideoCompositor`].
+///
+/// Cheap to clone, and holds the compositor only weakly. The GPU sibling of
 /// [`crate::elements::SwVideoCompositorHandle`], same shape and behavior.
 #[derive(Clone)]
 pub struct D3d11VideoCompositorHandle {
@@ -480,17 +480,18 @@ impl D3d11VideoCompositorHandle {
             .unwrap_or(0)
     }
 
-    /// Registers a new text layer and returns a [`D3d11TextLayerHandle`]
-    /// ready for [`D3d11TextLayerHandle::set_text`] — the text-specific
-    /// sibling of [`Self::add_layer`] (which stays generic, unaware of
-    /// text), taking a [`TextLayer`] the same way `add_source` takes a
-    /// [`VideoLayer`]. Always uses this compositor's own device
-    /// internally, so unlike a hand-assembled `add_layer` +
-    /// separately-supplied device there's no way to accidentally construct
-    /// a `D3d11TextLayerHandle` against the wrong device — the one class
-    /// of bug a caller-supplied device would allow. Fails with
-    /// [`D3d11VideoCompositorError::Stopped`] once the compositor is gone,
-    /// as [`Self::add_layer`] does.
+    /// Registers a text layer and returns the handle that writes and places it.
+    ///
+    /// The returned [`D3d11TextLayerHandle`] is ready for
+    /// [`D3d11TextLayerHandle::set_text`] — the text-specific sibling of
+    /// [`Self::add_layer`] (which stays generic, unaware of text), taking a
+    /// [`TextLayer`] the same way `add_source` takes a [`VideoLayer`]. Always
+    /// uses this compositor's own device internally, so unlike a hand-assembled
+    /// `add_layer` + separately-supplied device there's no way to accidentally
+    /// construct a `D3d11TextLayerHandle` against the wrong device — the one
+    /// class of bug a caller-supplied device would allow. Fails with
+    /// [`D3d11VideoCompositorError::Stopped`] once the compositor is gone, as
+    /// [`Self::add_layer`] does.
     pub fn add_text_layer(
         &self,
         name: impl Into<String>,
@@ -522,8 +523,10 @@ impl D3d11VideoCompositorHandle {
     }
 }
 
-/// One terminal video input returned by
-/// [`D3d11VideoCompositorHandle::add_source`] — the GPU sibling of
+/// The sink that ends one input's pipeline, handing its pictures to a
+/// [`D3d11VideoCompositor`].
+///
+/// Returned by [`D3d11VideoCompositorHandle::add_source`] — the GPU sibling of
 /// [`crate::elements::SwVideoCompositorInputSink`], same behavior (stores
 /// only the latest frame; a fast producer can't build an unbounded queue
 /// behind a slower compositor output rate).
@@ -851,9 +854,63 @@ fn visible_uv_window(
     })
 }
 
-/// Composites the latest frames from any number of independent GPU-backed
-/// input pipelines into one fixed-rate opaque `Pixel::D3D11` (BGRA)
-/// stream, entirely on the GPU via a D3D11 pixel shader — the D3D11
+/// Composites any number of video inputs into one BGRA picture stream, on a
+/// D3D11 GPU.
+///
+/// Each input is a pipeline of its own that ends at a sink from
+/// [`D3d11VideoCompositorHandle::add_source`], and must hand on `Pixel::D3D11`
+/// pictures (BGRA or NV12) made on the same [`D3d11Gpu`] as the compositor. The
+/// compositor is the source of its own pipeline and hands on one `Pixel::D3D11`
+/// BGRA picture of the canvas per tick — live at its frame rate, or offline by
+/// the inputs' timestamps (see [`VideoCompositorOptions::mode`]). Text layers
+/// are added with [`D3d11VideoCompositorHandle::add_text_layer`]. Needs the
+/// `d3d11` feature, on Windows.
+///
+/// # Example
+///
+/// A test pattern uploaded to the GPU fills the canvas, with a label over it:
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use media_pp::elements::{
+///     D3d11Gpu, D3d11Upload, D3d11VideoCompositor, FrameCounter, TestVideoOptions,
+///     TestVideoSource, TextLayer, VideoCompositorOptions, VideoLayer, VideoRect,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let (compositor, handle) =
+///     D3d11VideoCompositor::new("canvas", &gpu, VideoCompositorOptions::default())?;
+///
+/// // An input: another pipeline's branch, on the same device, ends at its sink.
+/// let input = handle.add_source("camera", VideoLayer::new(VideoRect::new(0, 0, 1920, 1080)))?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let (camera, ()) = Pipeline::new("camera", camera, |source, ctx| {
+///     let branch = ctx.branch().pipe(D3d11Upload::new("upload", &gpu)).to(input.sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+///
+/// let font = std::fs::read("C:/Windows/Fonts/arial.ttf")?;
+/// let label = handle.add_text_layer("label", TextLayer::new(font))?;
+/// label.set_text("LIVE")?;
+///
+/// // The compositor is the source of the pipeline that takes the canvas.
+/// let (counter, _frames) = FrameCounter::new("frames");
+/// let (canvas, ()) = Pipeline::new("canvas", compositor, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// canvas.run()?;
+/// camera.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It composites entirely on the GPU via a D3D11 pixel shader — the D3D11
 /// sibling of [`crate::elements::SwVideoCompositor`] (which does the same
 /// job on the CPU via `libswscale`). Same [`VideoLayer`]/[`video_layer::VideoRect`]/
 /// [`video_layer::VideoFit`] API — a caller's layer-control code doesn't
@@ -936,6 +993,9 @@ struct Compositing {
 unsafe impl Send for Compositing {}
 
 impl D3d11VideoCompositor {
+    /// Creates a compositor drawing on `gpu`, and the handle that adds its
+    /// inputs.
+    ///
     /// `gpu` must be the [`D3d11Gpu`] every producer feeding this
     /// compositor's inputs, and every other D3D11 element in this pipeline,
     /// shares: its [`D3d11Gpu::context`] is the device's one immediate

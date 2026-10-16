@@ -112,10 +112,11 @@ impl VolumeControl {
     }
 }
 
-/// Thread-safe runtime control for an [`AudioVolume`].
+/// Changes an [`AudioVolume`]'s gain, or mutes it, while it plays.
 ///
-/// Retaining this handle only keeps the small atomic control state alive;
-/// it does not retain the element, its pad, or the pipeline graph.
+/// Thread-safe runtime control. Retaining this handle only keeps the small
+/// atomic control state alive; it does not retain the element, its pad, or the
+/// pipeline graph.
 #[derive(Debug, Clone)]
 pub struct AudioVolumeHandle {
     control: Arc<VolumeControl>,
@@ -174,7 +175,37 @@ impl AudioVolumeHandle {
     }
 }
 
-/// Applies a runtime-adjustable master gain to decoded audio.
+/// Makes sound louder or quieter, or mutes it, with a gain you can change
+/// while it plays.
+///
+/// Put it anywhere on a decoded sound branch — before a renderer for a
+/// volume slider, on a mixer input for one channel's level. It takes decoded
+/// sound in any PCM format and hands on the same format; change the gain
+/// through the [`AudioVolumeHandle`] it returns.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{AudioVolume, FrameCounter, TestAudioOptions, TestAudioSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let (volume, level) = AudioVolume::new("volume");
+/// let (speakers, _) = FrameCounter::new("speakers"); // an audio renderer, in a player
+/// let (pipeline, ()) = Pipeline::new("sound", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(volume).to(speakers)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+///
+/// level.set_gain_db(-6.0)?; // from a slider, on any thread
+/// level.set_muted(true);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The input's sample format, rate, channels, sample count, and timestamps
 /// are preserved. Integer formats saturate when amplified; floating-point

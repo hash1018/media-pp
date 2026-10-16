@@ -179,15 +179,16 @@ pub enum D3d11SharedDeviceError {
     Windows(#[from] windows::core::Error),
 }
 
-/// Crate-wide error. Each element defines its own `{Element}Error` (see
-/// [`FileDemuxerError`], [`SwDecoderError`], [`QueueError`]) for its own
-/// domain-specific failures; this enum just aggregates them so trait
-/// methods (`RawSink::consume`, `RawSource::run`, ...) — which have to
-/// return one common error type to stay object-safe across arbitrary
-/// `Box<dyn RawSink>` — can report any of them. `?` chains through
-/// automatically: an element's own function returns its own error type,
-/// and the moment that gets used with `?` inside a function returning
-/// this top-level `Result`, it's converted here via `#[from]`.
+/// The crate-wide error, which every element's own error converts into.
+///
+/// Each element defines its own `{Element}Error` (see [`FileDemuxerError`],
+/// [`SwDecoderError`], [`QueueError`]) for its own domain-specific failures;
+/// this enum just aggregates them so trait methods (`RawSink::consume`,
+/// `RawSource::run`, ...) — which have to return one common error type to stay
+/// object-safe across arbitrary `Box<dyn RawSink>` — can report any of them.
+/// `?` chains through automatically: an element's own function returns its own
+/// error type, and the moment that gets used with `?` inside a function
+/// returning this top-level `Result`, it's converted here via `#[from]`.
 ///
 /// Every public error type in this crate converts, so a caller never has to
 /// turn one into a string to get it past `?` — which would throw away what

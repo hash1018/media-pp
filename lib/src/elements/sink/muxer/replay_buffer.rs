@@ -60,8 +60,9 @@ use crate::{
     stream::StreamEvent,
 };
 
-/// Errors specific to [`ReplayBuffer`]. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// What can go wrong building a [`ReplayBuffer`] or saving a clip from it.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum ReplayBufferError {
     /// [`ReplayBuffer::open`] was given a window of no length at all.
@@ -100,12 +101,17 @@ pub enum ReplayBufferError {
     },
 }
 
-/// Keeps the last `length` of what its tracks are handed, and writes it to
-/// a file when [`ReplayBufferHandle::save`] asks — see this module's docs.
+/// Keeps the last stretch of what was encoded in memory, and writes it to a
+/// file only when asked — what OBS calls a replay buffer.
 ///
-/// Built the two-phase way every muxer is, because a saved clip has to
-/// describe each track's codec in its header: `add_stream` for each track,
-/// `open` for one sink per track and the handle that saves.
+/// It takes packets, one sink per track, the way [`FileMuxer`] does, so it goes
+/// wherever a [`FileMuxer`] would: behind an encoder, or beside a recording
+/// behind a [`Tee`](crate::elements::Tee). It keeps the last `length` of what
+/// its tracks are handed, and [`ReplayBufferHandle::save`] writes that to a
+/// file of its own, as often as asked. A clip starts on a keyframe, so it holds
+/// at most `length` and at least that less one keyframe interval.
+///
+/// # Example
 ///
 /// ```no_run
 /// # use std::time::Duration;
@@ -137,11 +143,21 @@ pub enum ReplayBufferError {
 /// let (mut sinks, handle) = replay.open()?;
 /// let video_sink = sinks.take(video)?;
 /// let audio_sink = sinks.take(audio)?;
-/// // ...wire both sinks behind their encoders and run; then, when asked:
+/// // ...end each encoder's chain in its sink, as in FileMuxer's example,
+/// // and run; then, when asked:
 /// let length = handle.save("replay.mp4")?;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # How it works
+///
+/// It keeps the last `length` of what its tracks are handed, and writes it to a
+/// file when [`ReplayBufferHandle::save`] asks — see this module's docs.
+///
+/// Built the two-phase way every muxer is, because a saved clip has to
+/// describe each track's codec in its header: `add_stream` for each track,
+/// `open` for one sink per track and the handle that saves.
 pub struct ReplayBuffer {
     id: MuxerId,
     length: Duration,

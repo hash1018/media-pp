@@ -233,6 +233,8 @@ impl Pipeline {
         Ok(())
     }
 
+    /// Pauses playback; [`Pipeline::resume`] plays on from the same place.
+    ///
     /// Blocks until every element downstream of every source has paused —
     /// passed on by each source's thread and by
     /// [`crate::queue::Queue`]'s worker loop (each thread boundary). Also

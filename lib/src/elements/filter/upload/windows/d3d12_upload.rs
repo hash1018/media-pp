@@ -32,8 +32,9 @@ use crate::{
 /// frames must be sized with that in mind.
 const POOL_SIZE: i32 = 4;
 
-/// Errors specific to `D3d12Upload`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `D3d12Upload`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12UploadError {
     /// FFmpeg could not take a second reference to the upload already in
@@ -73,16 +74,49 @@ pub enum D3d12UploadError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Uploads CPU-resident `Pixel::NV12` video frames (e.g. from
-/// [`crate::elements::SwScaler`], fed by a synthetic source, a screen
-/// capture, ...) to GPU-resident `Video` frames tagged `Pixel::D3D12` —
-/// the mirror image of [`crate::elements::D3d12Decoder`]: that one
-/// decodes compressed `Packet`s straight to GPU frames; this one moves
-/// frames that start out on the CPU onto the same device a
-/// [`crate::elements::D3d12Renderer`] reads from, so the renderer can take
-/// its zero-copy path (`Pixel::D3D12`) instead of its CPU-upload one
-/// (`Pixel::YUV420P`) — or so any other GPU-side stage downstream can work
-/// on the frame without a CPU round trip.
+/// Copies NV12 pictures from system memory onto a D3D12 GPU, so the D3D12
+/// elements after it can work on them.
+///
+/// Behind the `d3d12` feature on Windows. Put it after a software source or
+/// a [`SwScaler`](crate::elements::SwScaler) to NV12, in front of a D3D12
+/// scaler, encoder or renderer. It takes NV12 pictures in system memory and
+/// hands on NV12 D3D12 frames.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d12Gpu, D3d12Upload, FrameCounter, SwScaler, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d12Gpu::new()?; // shared by every D3D12 element in the pipeline
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let upload = D3d12Upload::new("upload", &gpu)?;
+/// let (renderer, _) = FrameCounter::new("renderer"); // a D3D12 renderer, in practice
+/// let (pipeline, ()) = Pipeline::new("upload", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     ctx.attach(source, 0, ctx.branch().pipe(to_nv12).pipe(upload).to(renderer)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It uploads CPU-resident `Pixel::NV12` video frames (e.g. from
+/// [`crate::elements::SwScaler`], fed by a synthetic source, a screen capture,
+/// ...) to GPU-resident `Video` frames tagged `Pixel::D3D12` — the mirror image
+/// of [`crate::elements::D3d12Decoder`]: that one decodes compressed `Packet`s
+/// straight to GPU frames; this one moves frames that start out on the CPU onto
+/// the same device a [`crate::elements::D3d12Renderer`] reads from, so the
+/// renderer can take its zero-copy path (`Pixel::D3D12`) instead of its
+/// CPU-upload one (`Pixel::YUV420P`) — or so any other GPU-side stage
+/// downstream can work on the frame without a CPU round trip.
 ///
 /// Only accepts `Pixel::NV12` input — that's the layout
 /// [`crate::elements::D3d12Renderer`]'s zero-copy `submit_nv12_texture`

@@ -36,9 +36,10 @@ pub enum PipeWireDeviceError {
     EnumerationTimeout,
 }
 
-/// Which direction a PipeWire audio node flows — the same distinction
-/// `WasapiDeviceKind` draws, and with the same consequence for how `open`
-/// connects to it.
+/// Whether a PipeWire audio node plays sound or records it.
+///
+/// The same distinction `WasapiDeviceKind` draws, and with the same
+/// consequence for how `open` connects to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeWireAudioDeviceKind {
     /// A playback node (speakers, headphones, HDMI). Captured through its
@@ -84,9 +85,10 @@ pub struct PipeWireAudioDevice {
     pub is_default: bool,
 }
 
-/// One application playing audio, as the graph publishes it: a
-/// `Stream/Output/Audio` node, which is what a program's playback looks like
-/// from outside.
+/// One program playing sound, whose sound alone a capture can record.
+///
+/// It is a `Stream/Output/Audio` node as the graph publishes it, which is
+/// what a program's playback looks like from outside.
 ///
 /// The PipeWire counterpart of `WasapiProcess`, and listed for the same
 /// reason — to be shown in a picker and handed to

@@ -152,7 +152,43 @@ pub enum D3d12ScalerError {
     FenceWaitFailed,
 }
 
-/// Resizes GPU-resident NV12 `Pixel::D3D12` frames with D3D12's video
+/// Resizes NV12 pictures on a D3D12 GPU.
+///
+/// Behind the `d3d12` feature on Windows. Put it after a `D3d12Decoder` or
+/// a [`D3d12Upload`](crate::elements::D3d12Upload), in front of a D3D12
+/// encoder or renderer that wants another size. It takes NV12 D3D12
+/// frames and hands on NV12 D3D12 frames of the size it was built with.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d12Gpu, D3d12Scaler, D3d12Upload, FrameCounter, SwScaler, TestVideoOptions,
+///     TestVideoSource,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let upload = D3d12Upload::new("upload", &gpu)?;
+/// let scaler = D3d12Scaler::new("scale", &gpu, 1280, 720)?;
+/// let (encoder, _) = FrameCounter::new("encoder"); // a D3D12 encoder, in practice
+/// let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(scaler).to(encoder)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It resizes GPU-resident NV12 `Pixel::D3D12` frames with D3D12's video
 /// processor. Input and output stay NV12; this element never performs a
 /// pixel-format conversion or a CPU transfer.
 ///

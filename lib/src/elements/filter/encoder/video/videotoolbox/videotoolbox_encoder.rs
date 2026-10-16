@@ -74,8 +74,9 @@ pub struct VideoToolboxEncoderOptions {
     pub max_b_frames: Option<u32>,
 }
 
-/// Errors specific to [`VideoToolboxEncoder`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VideoToolboxEncoder`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VideoToolboxEncoderError {
     /// The encoder is not in this FFmpeg build.
@@ -156,9 +157,60 @@ pub enum VideoToolboxEncoderError {
     HwFramesRef,
 }
 
-/// Encodes NV12, P010 or BGRA VideoToolbox frames into `Packet`s with the Mac's
-/// hardware encoder, through FFmpeg's VideoToolbox encoders — the macOS counterpart
-/// of `CudaEncoder` and `VideoToolboxEncoder`, and a filter as they are.
+/// Encodes VideoToolbox pictures into H.264 or HEVC on the Mac's own media
+/// engine.
+///
+/// Takes NV12, P010 or BGRA Core Video pixel buffers and hands on packets
+/// for a muxer, without the pictures coming back to the CPU; P010 becomes
+/// HEVC Main 10. [`VideoEncodeBin`](crate::elements::VideoEncodeBin) opens
+/// it for VideoToolbox frames where it can. macOS only, with the
+/// `videotoolbox` feature.
+///
+/// # Example
+///
+/// A file decoded and re-encoded on the media engine, in the stream's own
+/// colour (HDR10 included) through [`VideoToolboxEncoder::for_stream`]:
+///
+/// ```ignore
+/// use media_pp::elements::{
+///     FileDemuxer, FileMuxer, Mp4Layout, VideoToolboxCodec, VideoToolboxDecoder,
+///     VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
+///     VideoToolboxFrameFormat,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mov")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
+/// let decoder = VideoToolboxDecoder::new("decode", video.parameters.clone(), &device)?;
+/// let options = VideoToolboxEncoderOptions {
+///     codec: VideoToolboxCodec::H265,
+///     format: VideoToolboxFrameFormat::Nv12, // P010 for a 10-bit stream
+///     width,
+///     height,
+///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     bit_rate: 8_000_000,
+///     gop_size: 60,
+///     max_b_frames: None,
+/// };
+/// let encoder = VideoToolboxEncoder::for_stream("encode", &device, options, &video)?;
+///
+/// let mut muxer = FileMuxer::create("output.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+/// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// ```
+///
+/// # How it works
+///
+/// Goes through FFmpeg's VideoToolbox encoders — the macOS counterpart of
+/// `D3d11VideoEncoder` and `CudaEncoder`, and a filter as they are.
 ///
 /// Fed by [`crate::elements::VideoToolboxDecoder`] this is a transcode that
 /// never brings a pixel to the CPU; fed by

@@ -15,7 +15,12 @@ use ffmpeg_next as ffmpeg;
 use super::V4l2Device;
 use super::ioctl::{READ_WRITE, call, query_capability, request, video_nodes};
 
-/// One picture shape a camera offers.
+/// One picture size and rate a camera offers.
+///
+/// [`V4l2CaptureSource::list_formats`](crate::elements::V4l2CaptureSource::list_formats)
+/// lists a camera's; pass one as
+/// [`V4l2CaptureOptions::format`](crate::elements::V4l2CaptureOptions::format).
+/// Needs the `v4l2-capture` feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct V4l2CaptureFormat {
     /// Frame width in pixels.

@@ -19,8 +19,9 @@ use super::preroll_gate::PrerollGate;
 use super::qos::Qos;
 use crate::elements::filter::is_codec_drain_boundary;
 
-/// Errors specific to `SwDecoder`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `SwDecoder`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwDecoderError {
     /// The selected stream is neither audio nor video.
@@ -86,9 +87,45 @@ pub struct DecodeThreading {
     pub kind: DecodeThreadKind,
 }
 
-/// Decodes one stream's `Packet`s into `Frame`s in software (plain
-/// libavcodec, no hardware acceleration). A filter: takes each buffer and
-/// pushes what it produces into its own (single) src pad.
+/// Decodes one video or audio stream on the CPU into pictures or sound in
+/// system memory.
+///
+/// Takes one stream's packets — from a [`FileDemuxer`], an
+/// [`RtspSource`] — and hands on decoded frames in whatever layout the
+/// stream decodes to (`YUV420P` for most 8-bit video). It decodes every
+/// codec FFmpeg has, with no feature needed. For video bound for a GPU,
+/// [`VideoDecodeBin`] uses the GPU's own decoder where it can and this one
+/// otherwise; [`Self::with_threading`] gives it more than one thread.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FileDemuxer, FrameCounter, SwDecoder};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let decoder = SwDecoder::new("decode", video.parameters.clone())?;
+/// let (counter, frames) = FrameCounter::new("count");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(counter)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// [`FileDemuxer`]: crate::elements::FileDemuxer
+/// [`RtspSource`]: crate::elements::RtspSource
+/// [`VideoDecodeBin`]: crate::elements::VideoDecodeBin
+///
+/// # How it works
+///
+/// Plain libavcodec, no hardware acceleration. A filter: takes each buffer
+/// and pushes what it produces into its own (single) src pad.
 ///
 /// One packet can turn into zero, one, or several frames (B-frame
 /// reordering, decoder buffering, ...) — `consume` just drains

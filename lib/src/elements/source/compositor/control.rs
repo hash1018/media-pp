@@ -1,12 +1,13 @@
-//! What every video compositor's handles do, whichever backend draws.
+//! The traits every video compositor's handles implement, so one piece of
+//! code can drive any backend.
 //!
 //! Each compositor has handles of its own — [`SwVideoCompositorHandle`],
-//! `D3d11VideoCompositorHandle`, `CudaVideoCompositorHandle`,
-//! `VulkanVideoCompositorHandle` — with the same methods, each answering
-//! its own error type. These traits are those methods once, answering the
-//! crate's [`Error`], so code that builds a composition — a Scene, an
-//! editing timeline — is written once and handed whichever compositor the
-//! platform has.
+//! `D3d11VideoCompositorHandle`, `D3d12VideoCompositorHandle`,
+//! `CudaVideoCompositorHandle`, `VulkanVideoCompositorHandle`,
+//! `MetalVideoCompositorHandle` — with the same methods, each answering its own
+//! error type. These traits are those methods once, answering the crate's
+//! [`Error`], so code that builds a composition — a Scene, an editing timeline
+//! — is written once and handed whichever compositor the platform has.
 //!
 //! A backend's own handle is still what to reach for where the backend is
 //! known: it says exactly which errors it can give, and has what only that
@@ -30,8 +31,9 @@ pub type LayerFrame = Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>;
 /// The two ends of one input fed through a pipeline: the sink that ends
 /// that pipeline, and the handle that places what it feeds.
 ///
-/// Move `sink` into the input's own pipeline and keep `layer` for moving,
-/// showing and restacking it while it runs.
+/// Returned by every compositor handle's `add_source`. Move `sink` into the
+/// input's own pipeline and keep `layer` for moving, showing and restacking it
+/// while it runs.
 pub struct CompositorInput<L> {
     /// The terminal sink to end the input's pipeline with.
     pub sink: BoxSink,
@@ -39,10 +41,42 @@ pub struct CompositorInput<L> {
     pub layer: L,
 }
 
-/// Adding, removing and pacing a video compositor's inputs.
+/// Adding, removing and pacing a video compositor's inputs, whichever
+/// backend draws.
 ///
-/// Implemented by every compositor's handle: see the module docs. What each
-/// method does is what the backend's own method of the same name does.
+/// Implemented by every compositor's handle. Each backend's handle has the
+/// same methods, each answering its own error type; these answer the
+/// crate's [`Error`], so code that builds a composition — a Scene, an
+/// editing timeline — is written once and handed whichever compositor the
+/// platform has. What each method does is what the backend's own method of
+/// the same name does. Where the backend is known, its own handle says
+/// exactly which errors it can give, and has what only that backend has.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     SwVideoCompositor, TextLayer, TextLayerControl, VideoCompositorControl,
+///     VideoCompositorOptions, VideoLayer, VideoLayerControl, VideoRect,
+/// };
+///
+/// /// A picture-in-picture input and a caption, on any backend.
+/// fn arrange<C: VideoCompositorControl>(canvas: &C, font: Vec<u8>) -> media_pp::Result<()> {
+///     let pip = canvas.add_source("pip", VideoLayer::new(VideoRect::new(1280, 720, 640, 360)))?;
+///     pip.layer.set_z_index(1)?;
+///     let caption = canvas.add_text_layer("caption", TextLayer::new(font))?;
+///     caption.set_text("Q&A")?;
+///     // `pip.sink` is what the input's own pipeline ends with.
+///     Ok(())
+/// }
+///
+/// let (_compositor, handle) = SwVideoCompositor::new("canvas", VideoCompositorOptions::default())?;
+/// # let font = Vec::new();
+/// arrange(&handle, font)?;
+/// # Ok(())
+/// # }
+/// ```
 pub trait VideoCompositorControl: Clone + Send + 'static {
     /// The handle each video input is placed through.
     type Layer: VideoLayerControl;
@@ -85,6 +119,9 @@ pub trait VideoCompositorControl: Clone + Send + 'static {
 
 /// Placing one video input: where it is drawn, how, and — for an input
 /// added with [`VideoCompositorControl::add_layer`] — what.
+///
+/// Implemented by every compositor's layer handle, answering the crate's
+/// [`Error`].
 pub trait VideoLayerControl: Clone + Send + 'static {
     /// The identity of this registration, which a same-name replacement
     /// does not share.
@@ -115,6 +152,9 @@ pub trait VideoLayerControl: Clone + Send + 'static {
 }
 
 /// Writing and placing one text layer.
+///
+/// Implemented by every compositor's text layer handle, answering the
+/// crate's [`Error`].
 pub trait TextLayerControl: Send + 'static {
     /// What it says; empty text draws nothing.
     fn set_text(&self, text: &str) -> Result<()>;

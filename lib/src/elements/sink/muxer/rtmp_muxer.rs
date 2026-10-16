@@ -30,8 +30,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// URL schemes FFmpeg's RTMP protocol answers to.
 const RTMP_SCHEMES: [&str; 6] = ["rtmp", "rtmps", "rtmpt", "rtmpe", "rtmpte", "rtmpts"];
 
-/// Errors specific to `RtmpMuxer`. Converts into the crate-wide `Error` via
-/// `?` (see [`crate::error::Error`]).
+/// What can go wrong connecting to an RTMP server or publishing to it.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum RtmpMuxerError {
     /// A stream sink received a buffer other than a packet or end-of-stream.
@@ -60,13 +61,51 @@ pub enum RtmpMuxerError {
     NotAnRtmpUrl,
 }
 
-/// Publishes one FLV stream to an RTMP server — Twitch, YouTube, or a local
-/// [MediaMTX] — and hands out one [`RawSink`](crate::element::RawSink) per track.
+/// Broadcasts encoded video and sound to an RTMP server — Twitch, YouTube,
+/// or a local [MediaMTX].
 ///
-/// This is the publishing half only. It does not run a server and does not
-/// depend on a particular one: the address and the stream key come from
-/// whoever is receiving. For local work, MediaMTX accepts RTMP publishing on
-/// port 1935 out of the box.
+/// It takes packets, one sink per track — in practice one H.264 video and
+/// one AAC sound track — and encodes nothing; it sends them as one FLV
+/// stream. This is the publishing half only. It does not run a server and
+/// does not depend on a particular one: the address and the stream key come
+/// from whoever is receiving. For local work, MediaMTX accepts RTMP
+/// publishing on port 1935 out of the box. Each sink ends a chain behind
+/// its encoder, as in [`FileMuxer`](crate::elements::FileMuxer)'s example.
+///
+/// # Example
+///
+/// ```no_run
+/// # use media_pp::ffmpeg;
+/// # use media_pp::elements::{
+/// #     AudioCodec, RtmpMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+/// #     SwEncoderOptions, VideoCodec,
+/// # };
+/// # fn main() -> media_pp::Result<()> {
+/// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
+/// #     codec: VideoCodec::OpenH264,
+/// #     width: 640,
+/// #     height: 360,
+/// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
+/// #     frame_rate: ffmpeg::Rational(30, 1),
+/// #     bit_rate: 2_000_000,
+/// #     gop_size: 30,
+/// #     max_b_frames: None,
+/// # })?;
+/// # let audio_encoder = SwAudioEncoder::new("audio", SwAudioEncoderOptions {
+/// #     codec: AudioCodec::Aac,
+/// #     sample_rate: 48_000,
+/// #     channels: 2,
+/// #     bit_rate: 128_000,
+/// # })?;
+/// let mut muxer = RtmpMuxer::create("rtmp://127.0.0.1:1935/live/stream")?;
+/// let video = muxer.add_stream("video", &video_encoder)?;
+/// let audio = muxer.add_stream("audio", &audio_encoder)?;
+/// let mut sinks = muxer.open()?; // writes the FLV header
+/// let video_sink = sinks.take(video)?; // ends the chain behind `video_encoder`
+/// let audio_sink = sinks.take(audio)?; // ends the chain behind `audio_encoder`
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Muxer, not sink, and why it is shaped like [`crate::elements::FileMuxer`]
 ///
@@ -113,39 +152,6 @@ pub enum RtmpMuxerError {
 /// and the server has already received everything.
 ///
 /// [MediaMTX]: https://github.com/bluenviron/mediamtx
-///
-/// ```no_run
-/// # use media_pp::ffmpeg;
-/// # use media_pp::elements::{
-/// #     AudioCodec, RtmpMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
-/// #     SwEncoderOptions, VideoCodec,
-/// # };
-/// # fn main() -> media_pp::Result<()> {
-/// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
-/// #     codec: VideoCodec::OpenH264,
-/// #     width: 640,
-/// #     height: 360,
-/// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
-/// #     frame_rate: ffmpeg::Rational(30, 1),
-/// #     bit_rate: 2_000_000,
-/// #     gop_size: 30,
-/// #     max_b_frames: None,
-/// # })?;
-/// # let audio_encoder = SwAudioEncoder::new("audio", SwAudioEncoderOptions {
-/// #     codec: AudioCodec::Aac,
-/// #     sample_rate: 48_000,
-/// #     channels: 2,
-/// #     bit_rate: 128_000,
-/// # })?;
-/// let mut muxer = RtmpMuxer::create("rtmp://127.0.0.1:1935/live/stream")?;
-/// let video = muxer.add_stream("video", &video_encoder)?;
-/// let audio = muxer.add_stream("audio", &audio_encoder)?;
-/// let mut sinks = muxer.open()?; // writes the FLV header
-/// let video_sink = sinks.take(video)?;
-/// let audio_sink = sinks.take(audio)?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct RtmpMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,

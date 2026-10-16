@@ -37,8 +37,9 @@ const LAYOUTS: PixelLayoutSet = PixelLayoutSet::from_slice(&[
     PixelLayout::Bgra,
 ]);
 
-/// Errors specific to `SwDetectionOverlay`. Converts into the crate-wide
-/// `Error` via `?`.
+/// Errors specific to `SwDetectionOverlay`.
+///
+/// Converts into the crate-wide `Error` via `?`.
 #[derive(Debug, ThisError)]
 pub enum SwDetectionOverlayError {
     /// Something other than a decoded picture arrived.
@@ -66,17 +67,57 @@ impl From<TextFontError> for SwDetectionOverlayError {
     }
 }
 
-/// Draws the [`Detections`] each picture carries onto a copy of it, in
-/// system memory — each class as its
-/// [`ClassRule`](super::ClassRule) in the options says: its box and label drawn,
-/// or it hidden by a mosaic, a blur or a fill, or both — and
-/// hands the copy on, carrying the same `Detections`.
+/// Draws boxes around what a detector found, or hides it, on pictures in
+/// system memory.
 ///
-/// It takes NV12, YUV 4:2:0, RGB24 or BGRA pictures of any size, and draws
-/// at that size: the boxes are fractions of the picture, so it goes before
-/// or after a scaler alike. A picture carrying nothing to draw is handed on
-/// as it came, not copied. The copy is what keeps the boxes off the picture
-/// it was handed, which a Tee in front of it shares with another branch.
+/// It goes after a detector, and draws the [`Detections`] each picture carries
+/// onto a copy of it — each class as its [`ClassRule`](super::ClassRule) in the
+/// options says: its box and label drawn, or it hidden by a mosaic, a blur or a
+/// fill, or both — and hands the copy on, carrying the same `Detections`. It
+/// takes NV12, YUV 4:2:0, RGB24 or BGRA pictures of any size.
+/// `CudaDetectionOverlay`, `D3d12DetectionOverlay` and `MetalDetectionOverlay`
+/// do the same on GPU pictures. It needs no feature.
+///
+/// # Example
+///
+/// Faces blurred inside an ellipse, every other class boxed:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ClassRule, DetectionOverlayOptions, HideShape, Hiding, RedactStyle, SwDetectionOverlay,
+///     Treatment,
+/// };
+/// # use media_pp::{element::{Context, IntoFilter}, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain<M>(
+/// #     ctx: &std::sync::Arc<Context>,
+/// #     detector: impl IntoFilter<M>,
+/// # ) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("drawn", |_buf| Ok(()));
+///
+/// let hide_faces = Treatment {
+///     hide: Some(Hiding { shape: HideShape::Ellipse, ..Hiding::new(RedactStyle::blur()) }),
+///     ..Treatment::none()
+/// };
+/// let options = DetectionOverlayOptions {
+///     rules: vec![ClassRule::new("face", hide_faces)],
+///     ..DetectionOverlayOptions::default()
+/// };
+/// let overlay = SwDetectionOverlay::new("overlay", options)?;
+/// let branch = ctx.branch().pipe(detector).pipe(overlay).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It draws at the picture's own size: the boxes are fractions of the
+/// picture, so it goes before or after a scaler alike. A picture carrying
+/// nothing to draw is handed on as it came, not copied. The copy is what
+/// keeps the boxes off the picture it was handed, which a Tee in front of
+/// it shares with another branch.
 pub struct SwDetectionOverlay(FilterStage<Overlaying>);
 
 filter_stage!(SwDetectionOverlay);

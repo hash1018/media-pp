@@ -35,6 +35,32 @@ pub enum FrameRateLimiterError {
 /// Forwards video frames at a fixed rate lower than the one they arrive at,
 /// stamping what it forwards as a constant-rate stream of its own.
 ///
+/// Put it on one branch of a `Tee`, in front of an encoder, to record at
+/// 30 pictures a second what a capture or compositor makes at 60. It takes
+/// decoded pictures in any memory and hands on the ones it keeps, with new
+/// timestamps from zero in [`time_base`](Self::time_base); open the encoder
+/// after it at the same rate.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, FrameRateLimiter, TestVideoOptions, TestVideoSource};
+/// use media_pp::ffmpeg::Rational;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let limiter = FrameRateLimiter::new("30fps", Rational::new(30, 1));
+/// let (encoder, _) = FrameCounter::new("encoder"); // an encoder opened at 30/1
+/// let (pipeline, ()) = Pipeline::new("record", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(limiter).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
 /// # What it is for
 ///
 /// A branch that wants a different rate from the source everything else on

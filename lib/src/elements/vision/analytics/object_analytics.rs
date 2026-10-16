@@ -22,19 +22,55 @@ use crate::orientation::{Orientation, Orientations};
 /// forgotten — a tracker forgets it sooner, so this only bounds memory.
 const FORGET_AFTER: u64 = 300;
 
-/// Counts the objects each picture's [`Detections`] place inside zones of
-/// the picture, and the objects crossing lines across it, and hands the
-/// picture on carrying what it counted as [`Analytics`] beside them —
-/// DeepStream's `nvdsanalytics`, for region-of-interest counts,
-/// overcrowding and line crossing.
+/// Counts the objects inside zones of the picture and the objects crossing
+/// lines across it.
 ///
 /// It goes after a detector, and for lines after an
-/// [`ObjectTracker`](crate::elements::ObjectTracker):
-/// `Detector -> ObjectTracker -> ObjectAnalytics`. A line is crossed by an
-/// object followed from one side of it to the other, which only a tracker's
-/// numbers say; a zone counts whatever is in it. The pictures a tracker
-/// filled in count as the detector's do, so an object crossing between two
-/// detections is counted on the picture it crossed on.
+/// [`ObjectTracker`](crate::elements::ObjectTracker): `Detector ->
+/// ObjectTracker -> ObjectAnalytics`. It counts from each picture's
+/// [`Detections`] and hands the picture on carrying what it counted as
+/// [`Analytics`] beside them — DeepStream's `nvdsanalytics`, for
+/// region-of-interest counts, overcrowding and line crossing. Zones and lines
+/// are in fractions of the picture, as the boxes are. It needs no feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{Analytics, AnalyticsOptions, AppSink, Line, ObjectAnalytics, Zone};
+/// # use media_pp::{element::{Context, IntoFilter}, pipeline::DetachedBranch};
+/// # fn chain<M, N>(
+/// #     ctx: &std::sync::Arc<Context>,
+/// #     detector: impl IntoFilter<M>,
+/// #     tracker: impl IntoFilter<N>,
+/// # ) -> media_pp::Result<DetachedBranch> {
+///
+/// let options = AnalyticsOptions {
+///     zones: vec![Zone::new("door", vec![(0.1, 0.5), (0.4, 0.5), (0.4, 1.0), (0.1, 1.0)])],
+///     lines: vec![Line::new("gate", (0.5, 0.0), (0.5, 1.0))],
+///     ..AnalyticsOptions::default()
+/// };
+/// let analytics = ObjectAnalytics::new("analytics", options)?;
+/// let sink = AppSink::new("counts", |buf| {
+///     if let Some(counted) = buf.metadata().and_then(|m| m.get::<Analytics>()) {
+///         let (door, gate) = (&counted.zones[0], &counted.lines[0]);
+///         println!("door {}, gate {} / {}", door.objects.len(), gate.forward, gate.backward);
+///     }
+///     Ok(())
+/// });
+/// let branch = ctx.branch().pipe(detector).pipe(tracker).pipe(analytics).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A line is crossed by an object followed from one side of it to the other,
+/// which only a tracker's numbers say; a zone counts whatever is in it. The
+/// pictures a tracker filled in count as the detector's do, so an object
+/// crossing between two detections is counted on the picture it crossed on.
 ///
 /// It reads metadata alone, never a pixel, so it takes pictures wherever
 /// they live and hands each on as it came. A picture carrying no

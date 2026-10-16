@@ -23,8 +23,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to [`VulkanUpload`]. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VulkanUpload`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VulkanUploadError {
     /// FFmpeg could not take a second reference to the upload already in
@@ -78,7 +79,39 @@ impl From<VulkanFramesContextError> for VulkanUploadError {
 const LAYOUTS: PixelLayoutSet =
     PixelLayoutSet::from_slice(&[PixelLayout::Nv12, PixelLayout::P010, PixelLayout::Bgra]);
 
-/// Uploads `Video` frames in system memory into Vulkan frames on a
+/// Copies pictures from system memory onto a GPU through Vulkan, so the
+/// Vulkan elements after it can work on them.
+///
+/// Behind the `vulkan` feature. Put it after a software decoder, a CPU capture
+/// or a test source, in front of a Vulkan scaler, key, compositor, encoder or
+/// renderer. It takes NV12, YUV420P, P010 or BGRA pictures in system memory and
+/// hands on Vulkan frames in the same layout (YUV420P goes up as NV12).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, TestVideoOptions, TestVideoSource, VulkanDevice, VulkanUpload,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VulkanDevice::new()?; // shared by every Vulkan element in the pipeline
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let upload = VulkanUpload::new("upload", &device);
+/// let (encoder, _) = FrameCounter::new("encoder"); // a VulkanEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("upload", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It uploads `Video` frames in system memory into Vulkan frames on a
 /// [`VulkanDevice`] — the Vulkan sibling of `CudaUpload`.
 /// [`crate::elements::VulkanDownload`] is the mirror of this element.
 ///

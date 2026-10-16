@@ -29,8 +29,9 @@ use crate::{
 /// flight at once.
 const POOL_SIZE: usize = 4;
 
-/// Errors specific to `SwScaler`. Converts into the crate-wide `Error` via
-/// `?` (see [`crate::error::Error`]).
+/// Errors specific to `SwScaler`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwScalerError {
     /// FFmpeg rejected creation or use of the scaling context.
@@ -50,11 +51,42 @@ pub enum SwScalerError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Converts/resizes decoded video frames — pixel format (e.g. the YUV a
-/// decoder produces -> the RGB most inference models expect) and
-/// resolution (source resolution -> a model's fixed input size) in one
-/// pass via `libswscale`. A filter: takes each buffer and pushes the
-/// converted frame on through its own (single) src pad.
+/// Resizes pictures in system memory and changes their pixel format, on the
+/// CPU.
+///
+/// Put it in front of anything that takes one size or one layout: an encoder
+/// opened for 1280x720 YUV420P, an upload that takes NV12, a compositor layer
+/// or chroma key that wants BGRA, a model with a fixed input. It takes decoded
+/// pictures in system memory, in any layout FFmpeg knows, and hands on pictures
+/// in system memory. Pictures already on a GPU are cheaper to scale there, with
+/// `D3d11Scaler`, `CudaScaler` or another backend's scaler.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, SwScaler, TestVideoOptions, TestVideoSource};
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let scaler = SwScaler::new("scale", Pixel::YUV420P, 1280, 720, Flags::BILINEAR);
+/// let (encoder, _) = FrameCounter::new("encoder"); // an encoder opened at 1280x720
+/// let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(scaler).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It converts pixel format (e.g. the YUV a decoder produces -> the RGB most
+/// inference models expect) and resolution (source resolution -> a model's
+/// fixed input size) in one pass via `libswscale`. A filter: takes each buffer
+/// and pushes the converted frame on through its own (single) src pad.
 ///
 /// Typical placement: right before something with a fixed input
 /// contract, e.g. an ONNX object-detection model — not a general-purpose

@@ -108,11 +108,50 @@ pub enum WasapiRendererError {
     Stretch(ffmpeg::Error),
 }
 
-/// Terminal audio sink backed by a WASAPI shared-mode render endpoint.
-/// The endpoint's mix format is returned by [`WasapiRenderer::open`] so a
-/// caller can place an [`crate::elements::AudioResampler`] immediately
-/// before this sink. This element intentionally performs no hidden format
-/// conversion.
+/// Plays sound on a Windows output device — speakers, headphones, HDMI —
+/// through WASAPI.
+///
+/// It ends a branch of decoded sound in exactly the device's own mix format,
+/// which [`WasapiRenderer::open`] returns: it converts nothing, so put an
+/// [`AudioResampler`](crate::elements::AudioResampler) to that format in
+/// front, and usually a [`Queue`](crate::queue::Queue) right before it, as
+/// it waits for room on the device. Its played position is the pipeline's
+/// audio clock, which a [`VideoSynchronizer`](crate::elements::VideoSynchronizer)
+/// shows pictures against. Needs the `wasapi-renderer` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioResampler, TestAudioOptions, TestAudioSource, WasapiRenderer, WasapiRendererOptions,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = WasapiRenderer::list_devices()?
+///     .into_iter()
+///     .find(|device| device.is_default)
+///     .ok_or_else(|| media_pp::Error::Other("no default output device".into()))?;
+/// let (speakers, format) = WasapiRenderer::open("speakers", WasapiRendererOptions { device })?;
+///
+/// let source = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let resampler = AudioResampler::new("resampler", format);
+///     let branch = ctx.branch().pipe(resampler).queue("sound", 8).to(speakers)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A terminal audio sink backed by a WASAPI shared-mode render endpoint. The
+/// endpoint's mix format is returned by [`WasapiRenderer::open`] so a caller
+/// can place an [`crate::elements::AudioResampler`] immediately before this
+/// sink. This element intentionally performs no hidden format conversion.
 ///
 /// It publishes this endpoint's actual played-sample position as its pipeline's
 /// audio master, and takes the clock to do that from the pipeline rather than

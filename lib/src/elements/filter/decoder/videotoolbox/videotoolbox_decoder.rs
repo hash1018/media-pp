@@ -20,8 +20,9 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-/// Errors specific to [`VideoToolboxDecoder`]. Converts into the
-/// crate-wide `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VideoToolboxDecoder`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VideoToolboxDecoderError {
     /// The selected stream is not video.
@@ -50,10 +51,41 @@ pub enum VideoToolboxDecoderError {
     HwAccelUnavailable,
 }
 
-/// Decodes one video stream's `Packet`s into VideoToolbox frames through
-/// FFmpeg's VideoToolbox hwaccel, on a [`VideoToolboxDevice`] — the Mac's
-/// own media engine, for H.264, HEVC and whatever else this Mac decodes in
-/// hardware. A filter, the same shape as [`crate::elements::SwDecoder`].
+/// Decodes a video stream on the Mac's own media engine into VideoToolbox
+/// pictures.
+///
+/// Takes one video stream's packets — H.264, HEVC and whatever else this
+/// Mac decodes in hardware — and hands on Core Video pixel buffers, NV12 or
+/// P010 for a 10-bit stream, for VideoToolbox elements after it: a
+/// compositor, [`VideoToolboxEncoder`](crate::elements::VideoToolboxEncoder),
+/// a renderer. For streams that must reach VideoToolbox either way,
+/// [`VideoDecodeBin`](crate::elements::VideoDecodeBin) falls back to
+/// software and uploads. macOS only, with the `videotoolbox` feature.
+///
+/// # Example
+///
+/// ```ignore
+/// use media_pp::elements::{FileDemuxer, FrameCounter, VideoToolboxDecoder, VideoToolboxDevice};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mov")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let decoder = VideoToolboxDecoder::new("decode", video.parameters.clone(), &device)?;
+/// let (counter, frames) = FrameCounter::new("count");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// ```
+///
+/// # How it works
+///
+/// Goes through FFmpeg's VideoToolbox hwaccel, on a [`VideoToolboxDevice`].
+/// A filter, the same shape as [`crate::elements::SwDecoder`].
 ///
 /// Frames this produces are still plain `MediaBuffer::Video`, tagged
 /// [`ffmpeg::format::Pixel::VIDEOTOOLBOX`]: `Pacer`, `Tee` and `Queue` take

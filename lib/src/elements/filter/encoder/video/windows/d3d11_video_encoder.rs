@@ -36,8 +36,9 @@ use crate::{
 // The video-encoder helpers every backend shares, a module up from this one.
 use super::super as shared;
 
-/// Errors specific to `D3d11VideoEncoder`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to `D3d11VideoEncoder`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11VideoEncoderError {
     /// The requested encoder is unavailable in the FFmpeg build.
@@ -229,10 +230,11 @@ impl D3d11VideoCodec {
     }
 }
 
-/// Which D3D11 texture format this encoder's input frames carry. This is
-/// the `sw_format` of the encoder's own hw frames context, fixed at
-/// `avcodec_open2` time like every other codec parameter — it is *not*
-/// inferred from the first frame, for the same reason
+/// Which D3D11 texture format this encoder's input frames carry.
+///
+/// This is the `sw_format` of the encoder's own hw frames context, fixed at
+/// `avcodec_open2` time like every other codec parameter — it is *not* inferred
+/// from the first frame, for the same reason
 /// [`crate::elements::SwEncoderOptions`] takes `width`/`height` up front.
 ///
 /// Both were verified against `h264_nvenc`/`hevc_nvenc` and `h264_mf` on real
@@ -276,6 +278,9 @@ impl D3d11VideoInputFormat {
     }
 }
 
+/// What a [`D3d11VideoEncoder`] is opened with: codec, input format, size,
+/// rate and keyframe spacing.
+///
 /// Everything `avcodec_open2` needs before this encoder can be opened at
 /// all — same convention, and the same reasoning, as
 /// [`crate::elements::SwEncoderOptions`]. The unit of the frames'
@@ -315,12 +320,65 @@ pub struct D3d11VideoEncoderOptions {
     pub max_b_frames: Option<u32>,
 }
 
-/// Encodes GPU-resident `Pixel::D3D11` `Video` frames into `Packet`s on a
-/// GPU's dedicated encode block — the hardware counterpart to
-/// [`crate::elements::SwEncoder`], for a pipeline built entirely on one
-/// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own docs
-/// on why that means no explicit fence/sync is needed anywhere in this
-/// stack). A filter: takes each buffer and pushes what it produces into
+/// Encodes D3D11 pictures into H.264 or HEVC on the GPU's own encoder,
+/// through NVENC or Media Foundation.
+///
+/// Takes NV12 or BGRA textures on the pipeline's one [`D3d11Gpu`] — a
+/// [`D3d11Decoder`](crate::elements::D3d11Decoder)'s, a
+/// [`D3d11VideoCompositor`](crate::elements::D3d11VideoCompositor)'s, a
+/// GPU screen capture's — and hands on packets for a muxer, without the
+/// pictures coming back to the CPU. [`D3d11VideoCodec`] says which
+/// encoder; [`VideoEncodeBin`](crate::elements::VideoEncodeBin) tries them
+/// in order for you. Needs the `d3d11` feature. It is the hardware
+/// counterpart to [`SwEncoder`](crate::elements::SwEncoder).
+///
+/// # Example
+///
+/// A file decoded and re-encoded on the GPU:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d11Decoder, D3d11Gpu, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
+///     D3d11VideoInputFormat, FileDemuxer, FileMuxer, Mp4Layout,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
+/// let decoder = D3d11Decoder::new("decode", video.parameters.clone(), &gpu, 4)?;
+/// let encoder = D3d11VideoEncoder::new("encode", &gpu, D3d11VideoEncoderOptions {
+///     codec: D3d11VideoCodec::H264MediaFoundation, // any vendor's GPU
+///     input_format: D3d11VideoInputFormat::Nv12, // what an 8-bit stream decodes to
+///     width,
+///     height,
+///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     bit_rate: 6_000_000,
+///     gop_size: 60,
+///     max_b_frames: None,
+/// })?;
+///
+/// let mut muxer = FileMuxer::create("output.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+/// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A filter, for a pipeline built entirely on one shared `ID3D11Device` (see
+/// [`crate::elements::D3d11Renderer`]'s own docs on why that means no
+/// explicit fence/sync is needed anywhere in this stack): takes each buffer
+/// of GPU-resident `Pixel::D3D11` frames and pushes what it produces into
 /// its own single src pad.
 ///
 /// # Why the input texture is copied rather than handed over directly

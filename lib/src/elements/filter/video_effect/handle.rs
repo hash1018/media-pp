@@ -48,8 +48,11 @@ impl VideoEffectControl {
     }
 }
 
-/// Thread-safe runtime control for a video-effect element, from any
-/// backend.
+/// Changes a video effect's settings, or turns it off, while the pipeline runs.
+///
+/// Every video-effect element returns one from its constructor, whatever
+/// its backend; see [`SwVideoEffect`](crate::elements::SwVideoEffect) for an
+/// example. It is thread-safe runtime control.
 ///
 /// What it is for is a slider: an effect is tuned by watching the picture,
 /// and rebuilding the element for each nudge would mean reopening whatever

@@ -39,8 +39,12 @@ pub(super) struct TextLayerState {
     pub(super) z_index: AtomicI32,
 }
 
-/// Runtime control for one text layer — the CUDA sibling of
-/// `D3d11TextLayerHandle`.
+/// Writes and places one text layer of a
+/// [`CudaVideoCompositor`](super::CudaVideoCompositor) while it runs.
+///
+/// Made by [`CudaVideoCompositorHandle::add_text_layer`]; the
+/// [`CudaVideoCompositor`](super::CudaVideoCompositor) example shows one in
+/// use. The CUDA sibling of `D3d11TextLayerHandle`.
 ///
 /// Cloning is cheap and every clone controls the same layer. Unlike a
 /// [`CudaVideoLayerHandle`](super::CudaVideoLayerHandle), this one does real work on `set_text`: it

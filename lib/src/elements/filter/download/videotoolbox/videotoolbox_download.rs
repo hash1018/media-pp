@@ -19,8 +19,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to [`VideoToolboxDownload`]. Converts into the
-/// crate-wide `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VideoToolboxDownload`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VideoToolboxDownloadError {
     /// FFmpeg could not take a second reference to the download already in
@@ -59,7 +60,41 @@ impl From<NotVideoToolbox> for VideoToolboxDownloadError {
 const LAYOUTS: PixelLayoutSet =
     PixelLayoutSet::from_slice(&[PixelLayout::Nv12, PixelLayout::P010, PixelLayout::Bgra]);
 
-/// Reads VideoToolbox frames back into system memory, in the layout they
+/// Copies pictures from VideoToolbox pixel buffers back into system memory,
+/// for the CPU elements after it.
+///
+/// Behind the `videotoolbox` feature on macOS. Put it after a VideoToolbox
+/// decoder or capture, or a Metal element, in front of something that works
+/// in system memory. It takes VideoToolbox frames and hands on pictures in
+/// system memory in the same layout; it needs no device.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, TestVideoOptions, TestVideoSource, VideoToolboxDevice,
+///     VideoToolboxDownload, VideoToolboxUpload,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (encoder, _) = FrameCounter::new("encoder"); // a SwEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("round-trip", source, |source, ctx| {
+///     let upload = VideoToolboxUpload::new("upload", &device);
+///     let download = VideoToolboxDownload::new("download");
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).pipe(download).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It reads VideoToolbox frames back into system memory, in the layout they
 /// hold — the mirror of [`crate::elements::VideoToolboxUpload`], and what
 /// lets a VideoToolbox frame reach anything that reads pixel bytes.
 ///

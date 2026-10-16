@@ -1,21 +1,26 @@
-//! Shared, backend-agnostic layer types/math for anything that composites
-//! multiple video inputs into one output — [`crate::elements::SwVideoCompositor`]
-//! (CPU, `libswscale`) and [`crate::elements::D3d11VideoCompositor`] (GPU,
-//! D3D11) both use these exact same types, so a caller's layer-control code
-//! doesn't change shape when switching between them. Only the actual pixel
-//! work (scale+blend vs. shader draw) differs per backend.
+//! Where and how a compositor draws each input: the layer types and math every
+//! backend shares.
+//!
+//! [`crate::elements::SwVideoCompositor`] (CPU, `libswscale`) and the GPU
+//! compositors (D3D11, D3D12, CUDA, Vulkan, Metal) all use these exact same
+//! types, so a caller's layer-control code doesn't change shape when switching
+//! between them. Only the actual pixel work (scale+blend vs. shader draw)
+//! differs per backend.
 
 use thiserror::Error as ThisError;
 
 pub(crate) const MAX_DIMENSION: u32 = 16_384;
 
 /// An opaque, stable identity for one compositor input registration.
+///
 /// Replacing an input with the same name creates a different identity, so
 /// an old sink or layer handle can never affect its replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VideoInputId(pub(crate) u64);
 
-/// An output-space rectangle. Signed coordinates allow a layer to be
+/// Where a layer is drawn on the canvas, in output pixels.
+///
+/// Signed coordinates allow a layer to be
 /// moved partially outside the canvas while its size remains positive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoRect {
@@ -87,7 +92,12 @@ pub enum VideoFit {
     Cover,
 }
 
-/// Runtime-adjustable spatial settings for one compositor input.
+/// Where, how and in what order a compositor draws one input.
+///
+/// Passed to a compositor handle's `add_source` or `add_layer`, and changed
+/// while it runs through the layer handle those return. [`Self::new`] places
+/// a visible, opaque layer that keeps its picture's aspect ratio; set the
+/// other fields before adding it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VideoLayer {
     /// Output-space destination and clipping rectangle.
@@ -116,11 +126,11 @@ pub struct VideoLayer {
     /// It changes how the layer is blended, not its pixels. `opacity` still
     /// means what it means either way.
     ///
-    /// `D3d11VideoCompositor` is the one backend that acts on it so far,
-    /// because it is the one such a picture can reach today — a foreign
-    /// texture arrives through `D3d11SharedTextureSource`. The software and
-    /// CUDA compositors accept the field and draw such a layer as they
-    /// always have.
+    /// `D3d11VideoCompositor`, `VulkanVideoCompositor` and
+    /// `MetalVideoCompositor` act on it, for a BGRA layer — a foreign texture
+    /// reaches the first through `D3d11SharedTextureSource` and the last
+    /// through `MetalSharedTextureSource`. The software, CUDA and D3D12
+    /// compositors accept the field and draw such a layer as they always have.
     pub premultiplied_alpha: bool,
     /// The part of the input to draw, or `None` for all of it.
     ///

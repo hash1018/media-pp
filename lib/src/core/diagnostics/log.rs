@@ -198,6 +198,19 @@ struct PrivateLogger {
 /// directory afterwards. Integration tests that need this logger therefore need
 /// one test binary each, since `cargo test` runs a binary's tests in one
 /// process.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> Result<(), media_pp::log::LogInitError> {
+/// use media_pp::log::{self, Level};
+///
+/// // Writes ./logs/my-app.<date>.log, keeping the newest 7 files.
+/// let _guard = log::init("my-app", "logs", Level::Info, 7)?;
+/// // Build and run pipelines here; keep `_guard` until they are done.
+/// # Ok(())
+/// # }
+/// ```
 pub fn init(
     log_prefix: &str,
     log_path: impl AsRef<Path>,

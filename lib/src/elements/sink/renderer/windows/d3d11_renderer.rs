@@ -20,20 +20,21 @@ use crate::{
     platform::windows::{d3d11::protect_shared_device, d3d11va::d3d11va_texture},
 };
 
-/// What [`D3d11Renderer`] needs from an actual DX11 window/rendering
-/// implementation — the D3D11 sibling of
-/// `D3d12FrameRenderer`, deliberately **not** an impl of
-/// that trait (it's documented as inherently D3D12-only). Unlike the D3D12
-/// trait, neither submit method here takes a fence *or* a `keep_alive` —
-/// see [`crate::elements::D3d11Renderer`]'s own docs on why a single
-/// shared `ID3D11Device` needs no explicit GPU-side synchronization at
+/// Your own D3D11 drawing code, which a [`D3d11Renderer`] hands each
+/// picture to.
+///
+/// It is what [`D3d11Renderer`] needs from an actual DX11 window/rendering
+/// implementation — the D3D11 sibling of `D3d12FrameRenderer`, deliberately
+/// **not** an impl of that trait (it's documented as inherently D3D12-only).
+/// Unlike the D3D12 trait, neither submit method here takes a fence *or* a
+/// `keep_alive` — see [`crate::elements::D3d11Renderer`]'s own docs on why a
+/// single shared `ID3D11Device` needs no explicit GPU-side synchronization at
 /// all, and this doc comment's own note below on why lifetime-keeping is
-/// unnecessary too. Both paths here are zero-copy: everything in
-/// this crate's D3D11 stack already produces GPU-resident `Pixel::D3D11`
-/// textures (see [`crate::elements::D3d11Upload`]/
-/// `DxgiCaptureSource`'s GPU capture mode/
-/// [`crate::elements::D3d11Decoder`]), so there's no CPU-side pixel data
-/// left to upload by the time a frame reaches here.
+/// unnecessary too. Both paths here are zero-copy: everything in this crate's
+/// D3D11 stack already produces GPU-resident `Pixel::D3D11` textures (see
+/// [`crate::elements::D3d11Upload`]/ `DxgiCaptureSource`'s GPU capture mode/
+/// [`crate::elements::D3d11Decoder`]), so there's no CPU-side pixel data left
+/// to upload by the time a frame reaches here.
 ///
 /// No `keep_alive` parameter (unlike `D3d12FrameRenderer::submit_nv12_texture`):
 /// D3D11's own COM+driver contract already defers actually freeing a
@@ -115,8 +116,9 @@ pub trait D3d11FrameRenderer: Send {
     fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError>;
 }
 
-/// Errors specific to `D3d11Renderer`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why a [`D3d11Renderer`] could not show a picture.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11RendererError {
     /// The caller-provided renderer rejected frame submission.
@@ -173,10 +175,48 @@ pub enum D3d11RendererError {
     SharedDevice(#[from] D3d11SharedDeviceError),
 }
 
-/// Terminal sink that submits `Pixel::D3D11` video frames to a
-/// caller-supplied [`D3d11FrameRenderer`] — the D3D11 sibling of
-/// `D3d12Renderer`. Only built with the
+/// Hands each D3D11 picture to drawing code of your own — a UI's swap
+/// chain, an offscreen target.
+///
+/// It ends a branch of D3D11 textures, NV12 or BGRA, on the one
+/// [`D3d11Gpu`](crate::elements::D3d11Gpu) the pipeline shares, and passes each
+/// zero-copy to the [`D3d11FrameRenderer`] you implement. It draws nothing
+/// itself and does not pace, so a [`Pacer`](crate::elements::Pacer) goes in
+/// front. For a window of its own, which also takes frames in system memory,
+/// use [`D3d11WindowRenderer`](crate::elements::D3d11WindowRenderer). Needs the
 /// `d3d11` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # use media_pp::elements::{
+/// #     D3d11Decoder, D3d11FrameRenderer, D3d11Gpu, D3d11Renderer, FileDemuxer, Pacer,
+/// # };
+/// # use media_pp::{ffmpeg, pipeline::Pipeline};
+/// # fn ui_renderer(_gpu: &D3d11Gpu) -> Box<dyn D3d11FrameRenderer> { unimplemented!() }
+/// # fn main() -> media_pp::Result<()> {
+/// # let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// # let video = source.best(ffmpeg::media::Type::Video)?;
+/// let gpu = D3d11Gpu::new()?;
+/// // Your own `D3d11FrameRenderer`, drawing on the same device.
+/// let renderer = D3d11Renderer::new("screen", ui_renderer(&gpu));
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let decoder = D3d11Decoder::new("decoder", video.parameters.clone(), &gpu, 20)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
+///     let branch = branch.pipe(Pacer::new("pacer")).to(renderer)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A terminal sink that submits `Pixel::D3D11` video frames to a
+/// caller-supplied [`D3d11FrameRenderer`] — the D3D11 sibling of
+/// `D3d12Renderer`. Only built with the `d3d11` feature.
 ///
 /// Every producer in this crate's D3D11 stack
 /// ([`crate::elements::D3d11Upload`], [`crate::elements::D3d11Decoder`],

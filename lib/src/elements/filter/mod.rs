@@ -1,5 +1,9 @@
-//! Elements that are both a [`RawSink`](crate::element::RawSink) and a
-//! [`SrcPads`](crate::element::SrcPads).
+//! The elements in the middle of a chain: they take buffers and hand on
+//! what they make of them.
+//!
+//! Most are both a [`RawSink`](crate::element::RawSink) and a
+//! [`SrcPads`](crate::element::SrcPads), and go into a chain with
+//! [`ChainBuilder::pipe`](crate::pipeline::ChainBuilder::pipe).
 //!
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
 //! resampling, gain, gating, compression, limiting and noise suppression,

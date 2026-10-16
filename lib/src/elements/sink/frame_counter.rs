@@ -9,9 +9,35 @@ use crate::{
     render::{SinkStage, sink_stage},
 };
 
-/// Terminal sink that counts decoded frames, video or audio. The
-/// [`CounterHandle`] it comes with reads the count from outside the
-/// pipeline, even while this sink runs on a `Queue` worker thread.
+/// Ends a branch by counting the decoded pictures or sound reaching it.
+///
+/// It takes decoded frames, video or audio, in any memory, and does nothing
+/// else with them: it is the trivial end that makes a graph runnable while
+/// something upstream is being tested. For packets use
+/// [`PacketCounter`](super::PacketCounter). The [`CounterHandle`] it comes with
+/// reads the count from outside the pipeline, even while this sink runs on a
+/// `Queue` worker thread.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (counter, frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("count", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// println!("pictures so far: {}", frames.get());
+/// # Ok(())
+/// # }
+/// ```
 pub struct FrameCounter(SinkStage<Counting>);
 
 sink_stage!(FrameCounter);

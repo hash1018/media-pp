@@ -1,6 +1,6 @@
-//! [`SwTextLayerHandle`] — dynamic text drawn into a
-//! [`SwVideoCompositor`](super::SwVideoCompositor) scene, the software
-//! sibling of the D3D11 and CUDA compositors' text layers.
+//! Text layers of a [`SwVideoCompositor`](super::SwVideoCompositor):
+//! [`SwTextLayerHandle`], the software sibling of the GPU compositors' text
+//! layers.
 
 use std::sync::Arc;
 
@@ -65,11 +65,17 @@ impl From<TextRasterError> for SwTextLayerError {
     }
 }
 
-/// Dynamic text drawn into a [`SwVideoCompositor`](super::SwVideoCompositor)
-/// scene, from [`SwVideoCompositorHandle::add_text_layer`]. No branch feeds
-/// it: [`Self::set_text`] rasterizes the string on the calling thread into a
-/// straight-alpha BGRA picture exactly the text's size, and the compositor
-/// blends it like any other layer from its next tick on.
+/// Writes and places one text layer of a
+/// [`SwVideoCompositor`](super::SwVideoCompositor) while it runs.
+///
+/// Made by [`SwVideoCompositorHandle::add_text_layer`]; the
+/// [`SwVideoCompositor`](super::SwVideoCompositor) example shows one in use.
+///
+/// # How it works
+///
+/// No branch feeds it: [`Self::set_text`] rasterizes the string on the calling
+/// thread into a straight-alpha BGRA picture exactly the text's size, and the
+/// compositor blends it like any other layer from its next tick on.
 ///
 /// Stacked like a video input — see [`TextLayer`] — and placed by its
 /// top-left corner; its size is always the text's own, set by each

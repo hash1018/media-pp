@@ -15,8 +15,11 @@ use super::{
     validate_layer, validate_opacity, validate_rect,
 };
 
-/// Runtime placement control for one registered input — the CUDA sibling of
-/// [`crate::elements::SwVideoLayerHandle`], with the same API.
+/// Moves, sizes, restacks and shows or hides one input of a
+/// [`CudaVideoCompositor`](super::CudaVideoCompositor) while it runs.
+///
+/// The CUDA sibling of [`crate::elements::SwVideoLayerHandle`], with the
+/// same API.
 #[derive(Clone)]
 pub struct CudaVideoLayerHandle {
     pub(super) id: VideoInputId,

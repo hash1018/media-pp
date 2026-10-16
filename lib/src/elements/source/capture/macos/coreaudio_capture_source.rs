@@ -129,16 +129,55 @@ impl From<TapError> for CoreAudioCaptureSourceError {
     }
 }
 
-/// Captures audio through Core Audio: what an input device records — a
+/// Records sound on macOS: a microphone, what an output plays, or what one
+/// application plays.
+///
+/// List the devices with [`Self::list_devices`] and open one with
+/// [`Self::open`]: an input device records what it hears, an output device
+/// what the system plays to it. [`Self::list_processes`] and
+/// [`Self::open_process`] record one application instead. It is live.
+/// Needs the `coreaudio-capture` feature.
+///
+/// # Example
+///
+/// Record the default microphone:
+///
+/// ```ignore
+/// use media_pp::elements::{
+///     CoreAudioCaptureOptions, CoreAudioCaptureSource, CoreAudioDeviceKind, FrameCounter,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let devices = CoreAudioCaptureSource::list_devices()?;
+/// let Some(device) = devices
+///     .into_iter()
+///     .find(|device| device.kind == CoreAudioDeviceKind::Input && device.is_default)
+/// else {
+///     return Ok(());
+/// };
+/// let (source, format) = CoreAudioCaptureSource::open("mic", CoreAudioCaptureOptions { device })?;
+/// println!("{} Hz, {} channel(s)", format.sample_rate, format.channels);
+///
+/// let (counter, _sound) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("mic", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// ```
+///
+/// # How it works
+///
+/// It captures audio through Core Audio: what an input device records — a
 /// microphone, a line input — what the system plays to an output device, or
-/// what one application plays. One src pad, pushing `MediaBuffer::Audio`
-/// frames as 32-bit float interleaved, in the format
-/// [`CoreAudioCaptureSource::open`] or [`CoreAudioCaptureSource::open_process`]
-/// reports. If something downstream needs another format, an
-/// [`crate::elements::AudioResampler`] converts — this element does not, as
-/// `WasapiCaptureSource` and `PipeWireAudioCaptureSource`, its Windows and
-/// Linux counterparts, do not; they are also where the device-or-process
-/// shape of this API comes from.
+/// what one application plays. One src pad, pushing `MediaBuffer::Audio` frames
+/// as 32-bit float interleaved, in the format [`CoreAudioCaptureSource::open`]
+/// or [`CoreAudioCaptureSource::open_process`] reports. If something downstream
+/// needs another format, an [`crate::elements::AudioResampler`] converts — this
+/// element does not, as `WasapiCaptureSource` and `PipeWireAudioCaptureSource`,
+/// its Windows and Linux counterparts, do not; they are also where the
+/// device-or-process shape of this API comes from.
 ///
 /// What is played is captured through a Core Audio process tap, macOS 14.2
 /// and newer: a tap of the processes asked for, and a private aggregate

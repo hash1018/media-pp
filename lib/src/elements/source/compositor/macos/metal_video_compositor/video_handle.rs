@@ -15,8 +15,11 @@ use super::{
     validate_layer, validate_opacity, validate_rect,
 };
 
-/// Runtime placement control for one registered input — the Metal sibling of
-/// [`crate::elements::SwVideoLayerHandle`], with the same API.
+/// Moves, sizes, restacks and shows or hides one input of a
+/// [`MetalVideoCompositor`](super::MetalVideoCompositor) while it runs.
+///
+/// The Metal sibling of [`crate::elements::SwVideoLayerHandle`], with the
+/// same API.
 #[derive(Clone)]
 pub struct MetalVideoLayerHandle {
     pub(super) id: VideoInputId,

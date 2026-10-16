@@ -1,3 +1,5 @@
+/// Why a frame renderer refused or failed a picture handed to it.
+///
 /// Errors a `D3d12FrameRenderer`/`D3d11FrameRenderer` implementation can
 /// report. GPU-vendor-agnostic (no D3D11/D3D12-specific type in here), so
 /// it's shared by both instead of each defining its own copy — and left

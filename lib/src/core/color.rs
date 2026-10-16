@@ -3,9 +3,10 @@
 //! `core` rather than under a specific element's module because nothing
 //! about it is pipeline- or backend-specific.
 
-/// An opaque RGB color (no alpha — compositor output is always opaque;
-/// per-layer translucency is a separate `opacity` field, not per-pixel
-/// alpha here).
+/// An opaque RGB color, such as a compositor's background.
+///
+/// It has no alpha — compositor output is always opaque; per-layer
+/// translucency is a separate `opacity` field, not per-pixel alpha here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
     /// Red component.

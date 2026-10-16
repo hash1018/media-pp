@@ -72,8 +72,9 @@ const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 /// quantizes to anyway.
 const ACQUIRE_TIMEOUT_MS: u32 = 0;
 
-/// Errors specific to `DxgiCaptureSource`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Why a [`DxgiCaptureSource`] could not open or go on capturing.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum DxgiCaptureSourceError {
     /// FFmpeg could not allocate a reference-counted wrapper for a captured texture.
@@ -141,8 +142,8 @@ pub enum DxgiCaptureSourceError {
     CursorUnsupportedForRegion,
 }
 
-/// How [`DxgiCaptureSource::open`] captures each frame — see
-/// [`DxgiCaptureOptions::capture_mode`].
+/// Whether a [`DxgiCaptureSource`] hands on pictures in host memory or as
+/// D3D11 textures — see [`DxgiCaptureOptions::capture_mode`].
 #[derive(Debug, Clone)]
 pub enum CaptureMode {
     /// The original behavior: `AcquireNextFrame`'s resource is copied into
@@ -191,11 +192,12 @@ pub enum CaptureMode {
     Gpu,
 }
 
-/// A capture region in absolute virtual-desktop pixel coordinates — the
-/// same origin/units Win32 itself uses for multi-monitor layout
-/// (`GetSystemMetrics(SM_XVIRTUALSCREEN)`, `MONITORINFOEX::rcMonitor`,
-/// `DXGI_OUTPUT_DESC::DesktopCoordinates`), not local to any one monitor.
-/// See [`CaptureArea::Region`].
+/// A rectangle of the desktop, in virtual-desktop pixels.
+///
+/// Absolute virtual-desktop pixel coordinates are the same origin/units Win32
+/// itself uses for multi-monitor layout (`GetSystemMetrics(SM_XVIRTUALSCREEN)`,
+/// `MONITORINFOEX::rcMonitor`, `DXGI_OUTPUT_DESC::DesktopCoordinates`), not
+/// local to any one monitor. See [`CaptureArea::Region`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureRect {
     /// Absolute virtual-desktop x coordinate of the left edge.
@@ -208,8 +210,8 @@ pub struct CaptureRect {
     pub height: u32,
 }
 
-/// Which portion of the desktop [`DxgiCaptureSource::open`] duplicates —
-/// see [`DxgiCaptureOptions::area`].
+/// Which part of the desktop a [`DxgiCaptureSource`] captures: one monitor,
+/// or a rectangle — see [`DxgiCaptureOptions::area`].
 #[derive(Debug, Clone, Copy)]
 pub enum CaptureArea {
     /// The `output_index`'th output's entire desktop — a flat index
@@ -258,8 +260,8 @@ pub enum CaptureArea {
     Region(CaptureRect),
 }
 
-/// One output [`CaptureArea::Output`] can name — see
-/// [`DxgiCaptureSource::outputs`].
+/// One monitor [`CaptureArea::Output`] can name, as
+/// [`DxgiCaptureSource::outputs`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DxgiOutput {
     /// What [`CaptureArea::Output`]'s `output_index` names it by.
@@ -274,7 +276,7 @@ pub struct DxgiOutput {
     pub primary: bool,
 }
 
-/// Construction-time options for [`DxgiCaptureSource::open`].
+/// What a [`DxgiCaptureSource`] captures, at what rate, and into which memory.
 #[derive(Debug, Clone)]
 pub struct DxgiCaptureOptions {
     /// Which output(s) to capture from — see [`CaptureArea`].
@@ -372,13 +374,52 @@ struct CaptureUnit {
     has_captured: bool,
 }
 
-/// Captures the desktop via Windows' DXGI Desktop Duplication API
-/// (`IDXGIOutputDuplication`) — GStreamer's `d3d11screencapturesrc`
-/// equivalent. One src pad, pushing `Pixel::BGRA` frames (no internal
-/// color conversion — same division of labor as every other source in
-/// this crate: chain a [`crate::elements::SwScaler`] downstream if
-/// something needs YUV420P, e.g. `D3d12Renderer`'s
-/// CPU-upload path or [`crate::elements::SwEncoder`]).
+/// Captures a monitor, or a rectangle of the desktop, at a steady frame
+/// rate on Windows.
+///
+/// List the monitors with [`DxgiCaptureSource::outputs`], choose one (or a
+/// region) in [`DxgiCaptureOptions`], and open it. It hands on BGRA
+/// pictures on one output: in host memory by default, or as D3D11 textures
+/// with [`CaptureMode::Gpu`], which also returns the [`D3d11Gpu`] every other
+/// D3D11 element must share. It is live and needs no pacer. Choose it for a
+/// whole screen; `WgcCaptureSource` captures one window. Needs the
+/// `dxgi-capture` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{CaptureArea, DxgiCaptureOptions, DxgiCaptureSource, FrameCounter};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let outputs = DxgiCaptureSource::outputs()?;
+/// let primary = outputs.iter().find(|output| output.primary).map_or(0, |output| output.index);
+/// let options = DxgiCaptureOptions {
+///     area: CaptureArea::Output { output_index: primary },
+///     ..DxgiCaptureOptions::default()
+/// };
+/// let (source, format, _gpu) = DxgiCaptureSource::open("screen", options)?;
+/// println!("{}x{}", format.width, format.height);
+///
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("screen", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It captures the desktop via Windows' DXGI Desktop Duplication API
+/// (`IDXGIOutputDuplication`) — GStreamer's `d3d11screencapturesrc` equivalent.
+/// One src pad, pushing `Pixel::BGRA` frames (no internal color conversion —
+/// same division of labor as every other source in this crate: chain a
+/// [`crate::elements::SwScaler`] downstream if something needs YUV420P, e.g.
+/// `D3d12Renderer`'s CPU-upload path or [`crate::elements::SwEncoder`]).
 ///
 /// Emits at a **constant** rate — [`DxgiCaptureOptions::frame_rate`] — not one
 /// push per real desktop change. An earlier version of this pushed

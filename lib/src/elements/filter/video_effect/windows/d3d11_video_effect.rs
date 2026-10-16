@@ -30,8 +30,9 @@ use crate::{
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/video_effect_bgra.hlsl");
 
-/// Errors specific to [`D3d11VideoEffect`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`D3d11VideoEffect`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11VideoEffectError {
     /// A Direct3D resource, shader, or draw operation failed.
@@ -153,7 +154,44 @@ impl EffectConstants {
     }
 }
 
-/// Applies a [`VideoEffect`] — a colour correction or a luma key — to a
+/// Corrects a picture's colour, or cuts out its dark or bright parts, on a
+/// D3D11 GPU.
+///
+/// Behind the `d3d11` feature on Windows. It takes BGRA D3D11 textures and
+/// hands on BGRA textures, so a corrected source reaches a
+/// `D3d11VideoCompositor` without leaving the GPU; change the effect while
+/// it runs through the [`VideoEffectHandle`] it returns.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d11Gpu, D3d11Scaler, D3d11ScalerFormat, D3d11Upload, D3d11VideoEffect, FrameCounter,
+///     LumaKey, TestVideoOptions, TestVideoSource, VideoEffect,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let source = TestVideoSource::new("logo", TestVideoOptions::default());
+/// let to_bgra = D3d11Scaler::to_format("to-bgra", &gpu, D3d11ScalerFormat::Bgra)?;
+/// let no_black = VideoEffect::LumaKey(LumaKey { min: 0.1, min_smoothing: 0.05, ..Default::default() });
+/// let (effect, _tuning) = D3d11VideoEffect::new("key", &gpu, no_black)?;
+/// let (layer, _) = FrameCounter::new("layer"); // a compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("keyed", source, |source, ctx| {
+///     let upload = D3d11Upload::new("upload", &gpu);
+///     let branch = ctx.branch().pipe(upload).pipe(to_bgra).pipe(effect).to(layer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It applies a [`VideoEffect`] — a colour correction or a luma key — to a
 /// GPU-resident `Pixel::D3D11` BGRA frame through a pixel shader, without
 /// the frame leaving video memory. The D3D11 member of the family whose
 /// software member is [`crate::elements::SwVideoEffect`]; both evaluate the

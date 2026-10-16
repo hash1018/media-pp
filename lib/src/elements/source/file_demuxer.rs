@@ -24,8 +24,9 @@ use crate::{
     produce::source_stage,
 };
 
-/// Errors specific to `FileDemuxer`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why a [`FileDemuxer`] could not open or read a file.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum FileDemuxerError {
     /// The file could not be opened as a media file: it is not there, not
@@ -57,9 +58,12 @@ pub enum FileDemuxerError {
     NoStream(ffmpeg::media::Type),
 }
 
-/// Metadata about one stream in an opened container, reported up front so
-/// callers can decide what to build downstream before the pipeline runs —
-/// everything a branch for it is built from, without asking again by index.
+/// One stream of a file opened by [`FileDemuxer::open`]: its index, kind,
+/// codec parameters and time base.
+///
+/// It is reported up front so callers can decide what to build downstream
+/// before the pipeline runs — everything a branch for it is built from,
+/// without asking again by index.
 #[derive(Clone)]
 pub struct StreamInfo {
     /// Zero-based stream index used by the matching source pad.
@@ -196,9 +200,30 @@ impl std::fmt::Debug for StreamInfo {
     }
 }
 
-/// Runtime control for a [`FileDemuxer`], taken with
-/// [`FileDemuxer::looping_handle`] before the demuxer is moved into its
-/// pipeline.
+/// Turns a [`FileDemuxer`]'s looping on and off while it runs, and reads its
+/// timestamps back as positions in the file.
+///
+/// Take it with [`FileDemuxer::looping_handle`] before the demuxer is moved
+/// into its pipeline.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::FileDemuxer;
+///
+/// let (source, _streams) = FileDemuxer::open("file", "clip.mp4")?;
+/// let laps = source.looping_handle();
+/// laps.set_looping(true);
+/// // ... build and run the pipeline with `source`; later, for a progress bar:
+/// # let position = std::time::Duration::ZERO;
+/// let in_file = laps.in_lap(position);
+/// # let _ = in_file;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Ownership
 ///
 /// Cheap to clone and safe to share: it holds a few atomics and nothing
 /// else, so it keeps neither the demuxer, its file, nor its pipeline alive.
@@ -265,7 +290,56 @@ impl FileDemuxerHandle {
     }
 }
 
-/// Demuxes a file, exposing one src pad per container stream (indexed the
+/// Reads a media file and hands on its packets, one output per stream in the
+/// file.
+///
+/// Open the file with [`FileDemuxer::open`], pick a stream — usually with
+/// [`FileDemuxer::best`] — and attach a branch to that stream's `index`. It
+/// hands on encoded packets in host memory, so the branch starts with a
+/// decoder ([`SwDecoder`](crate::elements::SwDecoder),
+/// [`VideoDecodeBin`](crate::elements::VideoDecodeBin)) or goes straight to
+/// a muxer to copy the stream. A stream with no branch is read and dropped.
+/// It can be sought, played backwards, and made to loop
+/// ([`FileDemuxer::looping_handle`]).
+///
+/// # Example
+///
+/// Play a file's video at its own speed:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
+/// use media_pp::elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder};
+/// use media_pp::ffmpeg::media;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (source, _streams) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let (counter, frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx
+///         .branch()
+///         .pipe(decoder)
+///         .queue("frames", 8)
+///         .pipe(Pacer::new("pacer"))
+///         .to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// // The file's end does not stop the pipeline; `Finished` says it played out.
+/// pipeline.bus().iter().find(|event| matches!(event, BusEvent::Finished));
+/// pipeline.stop();
+/// println!("{} pictures", frames.get());
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It exposes one src pad per container stream (indexed the
 /// same way as `StreamInfo::index`). Linking a pad "selects" that stream;
 /// leaving it unlinked just drops its packets. Real demuxer I/O is
 /// blocking, so this is meant to be run as the pipeline's source thread.

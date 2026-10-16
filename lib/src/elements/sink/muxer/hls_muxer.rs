@@ -48,7 +48,10 @@ pub enum HlsSegmentFormat {
     Fmp4,
 }
 
-/// Construction-time options for [`HlsMuxer`].
+/// Where an [`HlsMuxer`] writes, and how it cuts and keeps segments.
+///
+/// [`HlsOptions::new`] gives a live fMP4 playlist; change a field to
+/// differ from it.
 #[derive(Debug, Clone)]
 pub struct HlsOptions {
     /// Media playlist written by FFmpeg, normally ending in `.m3u8`.
@@ -256,7 +259,7 @@ fn has_integer_conversion(pattern: &str) -> bool {
     false
 }
 
-/// Errors specific to [`HlsMuxer`].
+/// What can go wrong configuring or writing an [`HlsMuxer`].
 #[derive(Debug, ThisError)]
 pub enum HlsMuxerError {
     /// A stream sink received a buffer other than a packet or end-of-stream.
@@ -307,10 +310,49 @@ pub enum HlsMuxerError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// Builds one HLS media playlist and returns one [`RawSink`](crate::element::RawSink) per registered
-/// track. FFmpeg owns segment boundary selection, fMP4/MPEG-TS creation,
-/// atomic playlist replacement, live-window trimming, and final
-/// `#EXT-X-ENDLIST` generation.
+/// Writes encoded tracks as an HLS playlist and its segment files, for
+/// players and browsers to stream over plain HTTP.
+///
+/// It takes packets, one sink per track, and encodes nothing. [`HlsOptions`]
+/// says where the playlist and segments go, how long a segment is, and
+/// whether the playlist is a sliding live window, a growing event or a
+/// finished video-on-demand one ([`HlsMode`]). Serving the files is left to
+/// any web server. Each sink ends a chain behind its encoder, as in
+/// [`FileMuxer`](crate::elements::FileMuxer)'s example.
+///
+/// # Example
+///
+/// ```no_run
+/// # use media_pp::ffmpeg;
+/// # use media_pp::elements::{SwEncoder, SwEncoderOptions, VideoCodec};
+/// use media_pp::elements::{HlsMuxer, HlsOptions};
+/// # fn main() -> media_pp::Result<()> {
+/// # let encoder = SwEncoder::new("encoder", SwEncoderOptions {
+/// #     codec: VideoCodec::OpenH264,
+/// #     width: 640,
+/// #     height: 360,
+/// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
+/// #     frame_rate: ffmpeg::Rational(30, 1),
+/// #     bit_rate: 2_000_000,
+/// #     gop_size: 60,
+/// #     max_b_frames: None,
+/// # })?;
+/// // A live fMP4 playlist: two-second segments, the last six kept.
+/// let options = HlsOptions::new("hls/stream.m3u8", "hls/segment_%05d.m4s");
+/// let mut muxer = HlsMuxer::create(options)?;
+/// let video = muxer.add_stream("video", &encoder)?;
+/// let mut sinks = muxer.open()?; // writes the header
+/// let video_sink = sinks.take(video)?; // ends the chain behind `encoder`
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It builds one HLS media playlist and returns one
+/// [`RawSink`](crate::element::RawSink) per registered track. FFmpeg owns
+/// segment boundary selection, fMP4/MPEG-TS creation, atomic playlist
+/// replacement, live-window trimming, and final `#EXT-X-ENDLIST` generation.
 ///
 /// This deliberately has the same two-phase shape as
 /// [`crate::elements::FileMuxer`]: call [`HlsMuxer::add_stream`] for every

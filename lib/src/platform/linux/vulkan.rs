@@ -55,8 +55,34 @@ pub enum VulkanGpuError {
     Cuda(#[from] crate::platform::cuda::CudaDriverError),
 }
 
-/// The Vulkan device a program's window renderers share, and the one lock
-/// around its queue.
+/// The Vulkan device that all `VulkanWindowRenderer`s of a program draw with.
+///
+/// Make one and pass it to every
+/// [`VulkanWindowRenderer`](crate::elements::VulkanWindowRenderer) — one device
+/// for all the windows. Use [`Self::new`] for pictures in system memory, or
+/// `for_cuda` (with the `cuda` feature) to also show CUDA pictures. Needs the
+/// `vulkan` feature, on Linux. The decoders, scalers and other Vulkan filters
+/// take a [`VulkanDevice`](crate::elements::VulkanDevice) instead.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{VulkanGpu, VulkanWindowRenderer, WindowOptions};
+///
+/// let gpu = VulkanGpu::new()?;
+/// // Two windows, both drawn with the same `gpu`.
+/// let (left, _left_events) = VulkanWindowRenderer::open("left", &gpu, WindowOptions::default())?;
+/// let (right, _right_events) =
+///     VulkanWindowRenderer::open("right", &gpu, WindowOptions::default())?;
+/// // Each renderer ends a chain: `ctx.branch().pipe(..).to(left)?`.
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It holds the device and the one lock around its queue.
 ///
 /// Every submission to a Vulkan queue, and every present, must be externally
 /// synchronized: two renderers submitting on one queue from their own

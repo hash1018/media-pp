@@ -279,8 +279,10 @@ impl CompositorShared {
     }
 }
 
-/// A cheaply cloneable handle for adding and removing compositor inputs —
-/// the D3D12 sibling of [`crate::elements::SwVideoCompositorHandle`].
+/// Adds, removes and paces the inputs of a running [`D3d12VideoCompositor`].
+///
+/// Cheap to clone, and holds the compositor only weakly. The D3D12 sibling
+/// of [`crate::elements::SwVideoCompositorHandle`].
 #[derive(Clone)]
 pub struct D3d12VideoCompositorHandle {
     shared: Weak<CompositorShared>,
@@ -412,8 +414,11 @@ impl D3d12VideoCompositorHandle {
     }
 }
 
-/// The terminal Sink for one compositor input. Keeps only the latest frame:
-/// the compositor emits on its own clock.
+/// The sink that ends one input's pipeline, handing its pictures to a
+/// [`D3d12VideoCompositor`].
+///
+/// Returned by [`D3d12VideoCompositorHandle::add_source`]. Live, it keeps
+/// only the latest frame: the compositor emits on its own clock.
 pub struct D3d12VideoCompositorInputSink {
     pp_log: PpLog,
     name: Arc<str>,
@@ -630,12 +635,73 @@ impl Composed {
     }
 }
 
-/// Composites the latest pictures of any number of D3D12 input pipelines
+/// Composites any number of video inputs into one NV12 picture stream, on a
+/// D3D12 GPU.
+///
+/// Each input is a pipeline of its own that ends at a sink from
+/// [`D3d12VideoCompositorHandle::add_source`], and must hand on NV12
+/// `Pixel::D3D12` pictures made on the same [`D3d12Gpu`] as the compositor —
+/// from [`crate::elements::D3d12Decoder`] or [`crate::elements::D3d12Upload`].
+/// The compositor is the source of its own pipeline and hands on one
+/// `Pixel::D3D12` NV12 picture of the canvas per tick — live at its frame rate,
+/// or offline by the inputs' timestamps (see [`VideoCompositorOptions::mode`]).
+/// Text layers are added with [`D3d12VideoCompositorHandle::add_text_layer`].
+/// Needs the `d3d12` feature, on Windows.
+///
+/// # Example
+///
+/// A test pattern uploaded to the GPU fills the canvas, with a label over it:
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use media_pp::elements::{
+///     D3d12Gpu, D3d12Upload, D3d12VideoCompositor, FrameCounter, SwScaler, TestVideoOptions,
+///     TestVideoSource, TextLayer, VideoCompositorOptions, VideoLayer, VideoRect,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let (compositor, handle) =
+///     D3d12VideoCompositor::new("canvas", &gpu, VideoCompositorOptions::default())?;
+///
+/// // An input: another pipeline's branch, on the same device, ends at its sink.
+/// let input = handle.add_source("camera", VideoLayer::new(VideoRect::new(0, 0, 1920, 1080)))?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let (camera, ()) = Pipeline::new("camera", camera, |source, ctx| {
+///     let flags = ffmpeg::software::scaling::Flags::BILINEAR;
+///     let branch = ctx
+///         .branch()
+///         .pipe(SwScaler::to_format("nv12", ffmpeg::format::Pixel::NV12, flags))
+///         .pipe(D3d12Upload::new("upload", &gpu)?)
+///         .to(input.sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+///
+/// let font = std::fs::read("C:/Windows/Fonts/arial.ttf")?;
+/// let label = handle.add_text_layer("label", TextLayer::new(font))?;
+/// label.set_text("LIVE")?;
+///
+/// // The compositor is the source of the pipeline that takes the canvas.
+/// let (counter, _frames) = FrameCounter::new("frames");
+/// let (canvas, ()) = Pipeline::new("canvas", compositor, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// canvas.run()?;
+/// camera.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It composites the latest pictures of any number of D3D12 input pipelines
 /// into one fixed-rate NV12 D3D12 stream, on the GPU — the D3D12 sibling of
-/// [`crate::elements::SwVideoCompositor`] and
-/// `CudaVideoCompositor`, driving the same
-/// [`VideoLayer`]/[`VideoRect`]/[`VideoFit`](video_layer::VideoFit) API, on
-/// any vendor's GPU.
+/// [`crate::elements::SwVideoCompositor`] and `CudaVideoCompositor`, driving
+/// the same [`VideoLayer`]/[`VideoRect`]/[`VideoFit`](video_layer::VideoFit)
+/// API, on any vendor's GPU.
 ///
 /// A source, not a filter: upstream pipelines end at the sinks
 /// [`D3d12VideoCompositorHandle::add_source`] returns, and this element's
@@ -716,7 +782,10 @@ struct Compositing {
 unsafe impl Send for Compositing {}
 
 impl D3d12VideoCompositor {
-    /// A compositor drawing on `gpu` — the same [`D3d12Gpu`] every input
+    /// Creates a compositor drawing on `gpu`, and the handle that adds its
+    /// inputs.
+    ///
+    /// `gpu` must be the same [`D3d12Gpu`] every input
     /// pipeline's D3D12 elements were made with; a picture of another
     /// device is refused by the input sink.
     ///

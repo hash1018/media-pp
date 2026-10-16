@@ -63,8 +63,9 @@ const NONE: u32 = u32::MAX;
 /// the same as integers; each stroke's mask after them.
 const PLANE_VIEWS: usize = 4;
 
-/// Errors specific to `D3d12DetectionOverlay`. Converts into the crate-wide
-/// `Error` via `?`.
+/// Errors specific to `D3d12DetectionOverlay`.
+///
+/// Converts into the crate-wide `Error` via `?`.
 #[derive(Debug, ThisError)]
 pub enum D3d12DetectionOverlayError {
     /// Something other than a decoded picture arrived.
@@ -122,13 +123,54 @@ impl From<TextFontError> for D3d12DetectionOverlayError {
     }
 }
 
-/// Draws the [`Detections`] each D3D12 picture carries onto a copy of it,
-/// on the GPU with compute shaders — a box around each object, and with
+/// Draws boxes around what a detector found, or hides it, on D3D12
+/// pictures without them leaving the GPU.
+///
+/// It draws the [`Detections`] each D3D12 picture carries onto a copy of
+/// it, on the GPU with compute shaders — a box around each object, and with
 /// [`BoxStyle::label`](super::super::BoxStyle::label) its class and score
-/// above it — and hands the copy on, carrying the same `Detections`: what
-/// [`SwDetectionOverlay`](super::super::SwDetectionOverlay) does in system
-/// memory, so that a detector's pictures go on to an encoder or a renderer
-/// without leaving the GPU, on any vendor's.
+/// above it — and hands the copy on, carrying the same `Detections`. It
+/// does what [`SwDetectionOverlay`](super::super::SwDetectionOverlay) does
+/// in system memory, so that a detector's pictures go on to an encoder or a
+/// renderer without leaving the GPU, on any vendor's. Needs the `d3d12`
+/// feature, on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     BoxColors, BoxStyle, D3d12DetectionOverlay, D3d12Gpu, DetectionOverlayOptions, LabelStyle,
+///     Treatment,
+/// };
+/// # use media_pp::{element::{Context, IntoFilter}, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain<M>(
+/// #     ctx: &std::sync::Arc<Context>,
+/// #     detector: impl IntoFilter<M>,
+/// # ) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("drawn", |_buf| Ok(()));
+///
+/// let gpu = D3d12Gpu::new()?;
+/// // Each tracked object in a colour of its own, labelled in a system font.
+/// let style = BoxStyle {
+///     color: BoxColors::ByTrack,
+///     label: Some(LabelStyle::default()),
+///     ..BoxStyle::default()
+/// };
+/// let options = DetectionOverlayOptions {
+///     font: std::fs::read("C:/Windows/Fonts/arial.ttf").ok(),
+///     others: Treatment::boxes(style),
+///     ..DetectionOverlayOptions::default()
+/// };
+/// let overlay = D3d12DetectionOverlay::new("overlay", &gpu, options)?;
+/// let branch = ctx.branch().pipe(detector).pipe(overlay).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// It takes NV12 D3D12 pictures of any size made on the [`D3d12Gpu`] it is
 /// given, and P010 ones where it only hides, as the software overlay does,

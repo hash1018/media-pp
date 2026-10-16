@@ -21,7 +21,10 @@ use crate::{
     render::{SinkStage, sink_stage},
 };
 
-/// What [`MetalRenderer`] needs from an application's own Metal drawing —
+/// Your own Metal drawing code, which a [`MetalRenderer`] hands each
+/// picture to as textures.
+///
+/// It is what [`MetalRenderer`] needs from an application's own Metal drawing —
 /// the Metal sibling of `D3d11FrameRenderer` and `CudaFrameRenderer`.
 ///
 /// It is handed each picture as Metal textures on its own device, made over
@@ -116,8 +119,9 @@ impl MetalFrame {
     }
 }
 
-/// Errors specific to `MetalRenderer`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why a [`MetalRenderer`] could not show a picture.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum MetalRendererError {
     /// The caller-provided renderer rejected frame submission.
@@ -151,7 +155,31 @@ pub enum MetalRendererError {
     Metal(#[from] MetalError),
 }
 
-/// Terminal sink that hands VideoToolbox frames to a caller-supplied
+/// Hands each VideoToolbox picture to Metal drawing code of your own — a
+/// UI's own layer, an offscreen target.
+///
+/// It ends a branch of VideoToolbox frames, NV12 or BGRA, and passes each
+/// as Metal textures over its `IOSurface`, zero-copy, to the
+/// [`MetalFrameRenderer`] you implement. It draws nothing and does not
+/// pace, so a [`Pacer`](crate::elements::Pacer) goes in front. For a window
+/// of its own, use [`MetalWindowRenderer`](crate::elements::MetalWindowRenderer).
+/// Needs the `metal` feature.
+///
+/// # Example
+///
+/// ```ignore
+/// use media_pp::elements::{MetalRenderer, Pacer, VideoToolboxDecoder};
+///
+/// // `layer_renderer` is your own `Box<dyn MetalFrameRenderer>`.
+/// let renderer = MetalRenderer::new("screen", layer_renderer);
+/// let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device)?;
+/// let branch = ctx.branch().pipe(decoder).queue("frames", 8);
+/// let branch = branch.pipe(Pacer::new("pacer")).to(renderer)?;
+/// ```
+///
+/// # How it works
+///
+/// A terminal sink that hands VideoToolbox frames to a caller-supplied
 /// [`MetalFrameRenderer`] as textures on its device — the Metal sibling of
 /// `D3d11Renderer` and `CudaRenderer`, for drawing into something that is
 /// not a window of this crate's: a UI's own layer, an offscreen target.

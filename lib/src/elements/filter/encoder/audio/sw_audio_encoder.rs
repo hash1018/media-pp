@@ -16,8 +16,9 @@ use crate::elements::AudioFormat;
 use crate::elements::filter::audio::audio_resampler::AudioFrameResampler;
 use crate::elements::filter::is_codec_drain_boundary;
 
-/// Errors specific to `SwAudioEncoder`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to `SwAudioEncoder`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwAudioEncoderError {
     /// The requested encoder is unavailable in the linked FFmpeg build.
@@ -85,13 +86,14 @@ impl AudioCodec {
     }
 }
 
-/// Construction-time options for [`SwAudioEncoder::new`]. `sample_rate`/
-/// `channels` must already be known — same convention as
-/// [`crate::elements::SwEncoder`]'s own `width`/`height` — rather than
-/// inferred from the first frame, since `avcodec_open2` needs them set
-/// before this can be opened at all. What's actually *fed* to
-/// this element doesn't have to match `sample_rate`/`channels` exactly —
-/// see [`SwAudioEncoder`]'s own docs on why.
+/// Construction-time options for [`SwAudioEncoder::new`].
+///
+/// `sample_rate`/ `channels` must already be known — same convention as
+/// [`crate::elements::SwEncoder`]'s own `width`/`height` — rather than inferred
+/// from the first frame, since `avcodec_open2` needs them set before this can
+/// be opened at all. What's actually *fed* to this element doesn't have to
+/// match `sample_rate`/`channels` exactly — see [`SwAudioEncoder`]'s own docs
+/// on why.
 #[derive(Debug, Clone, Copy)]
 pub struct SwAudioEncoderOptions {
     /// Compressed audio codec to open.
@@ -108,10 +110,51 @@ pub struct SwAudioEncoderOptions {
     pub bit_rate: usize,
 }
 
-/// Encodes `Audio` frames into `Packet`s via a software encoder (see
-/// [`AudioCodec`]) — the audio sibling of
-/// [`crate::elements::SwEncoder`]. A filter: takes each buffer and
-/// pushes what it produces into its own (single) src pad.
+/// Encodes sound into compressed audio packets (AAC or Opus) on the CPU.
+///
+/// Takes sound in any sample format, rate and channel layout — it resamples
+/// to what [`SwAudioEncoderOptions`] asks for itself — and hands on `Packet`s
+/// for a muxer or a stream. [`AudioCodec::Aac`] is the choice for MP4,
+/// [`AudioCodec::Opus`] for WebRTC. It is the audio sibling of
+/// [`SwEncoder`](crate::elements::SwEncoder).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioCodec, FileMuxer, Mp4Layout, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
+///     TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let encoder = SwAudioEncoder::new("encode", SwAudioEncoderOptions {
+///     codec: AudioCodec::Aac,
+///     sample_rate: 48_000,
+///     channels: 2,
+///     bit_rate: 128_000,
+/// })?;
+///
+/// let mut muxer = FileMuxer::create("tone.m4a", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("audio", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+///
+/// let (pipeline, ()) = Pipeline::new("record", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(encoder).to(sink)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// std::thread::sleep(std::time::Duration::from_secs(5));
+/// pipeline.finish(); // drains the encoder and completes the file
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A filter: takes each buffer and pushes what it produces into its own
+/// (single) src pad.
 ///
 /// Unlike `SwEncoder` (which requires exactly `Pixel::YUV420P` in and
 /// errors on anything else), this resamples whatever it's fed —

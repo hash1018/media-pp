@@ -176,10 +176,11 @@ fn rewritten_packet(packet: &ffmpeg::Packet, payload: &[u8]) -> MediaBuffer {
     MediaBuffer::Packet(Arc::new(rewritten).into())
 }
 
-/// The endpoints a track actually has, which is exactly what its
-/// negotiated [`Direction`] allows — a `SendOnly` track carries no
-/// `WebRtcTrackSource` because nothing will ever arrive on it, and a
-/// `RecvOnly` one carries no [`WebRtcTrackSink`] because str0m has no
+/// The sink, the source, or both that a track has, by its direction.
+///
+/// They are exactly what its negotiated [`Direction`] allows — a `SendOnly`
+/// track carries no `WebRtcTrackSource` because nothing will ever arrive on it,
+/// and a `RecvOnly` one carries no [`WebRtcTrackSink`] because str0m has no
 /// send capability for it.
 ///
 /// The variant *is* the direction, so there is no separate field the two
@@ -220,13 +221,18 @@ pub struct AttachedTrack {
     pub endpoints: TrackEndpoints,
 }
 
-/// Cheaply-cloneable handle for requesting new tracks, completing
+/// Adds tracks to a running [`WebRtcPeer`](crate::elements::WebRtcPeer)
+/// and hands out each track that attaches.
+///
+/// [`WebRtcPeer::new`](crate::elements::WebRtcPeer::new) returns it, and
+/// its example shows it in use.
+///
+/// A cheaply-cloneable handle for requesting new tracks, completing
 /// renegotiation, and picking up newly-attached tracks — same spirit as
-/// [`crate::elements::AppSourceHandle`]. Cloning shares one queue of
-/// pending [`WebRtcHandle::next_track`] results, same as any other
-/// multi-consumer channel — only one clone's call actually receives a
-/// given track, so in practice only one place in the app should be
-/// draining it.
+/// [`crate::elements::AppSourceHandle`]. Cloning shares one queue of pending
+/// [`WebRtcHandle::next_track`] results, same as any other multi-consumer
+/// channel — only one clone's call actually receives a given track, so in
+/// practice only one place in the app should be draining it.
 #[derive(Clone)]
 pub struct WebRtcHandle {
     pub(super) next_id: Arc<AtomicU64>,
@@ -325,6 +331,16 @@ impl WebRtcHandle {
     }
 }
 
+/// Sends the encoded packets it is handed to the remote peer, on one track.
+///
+/// Take it from [`WebRtcHandle::next_track`] and end a chain with it, as
+/// with any sink: `ctx.branch().pipe(encoder).to(sink)`. It takes packets
+/// in the codec the track negotiated — an encoder's output, or packets
+/// relayed from another track. See [`WebRtcPeer`](crate::elements::WebRtcPeer)
+/// for an example. Needs the `webrtc` feature.
+///
+/// # How it works
+///
 /// One outbound track. A plain [`RawSink`] — no bespoke push API, it links
 /// into a [`crate::pipeline::ChainBuilder`] exactly like
 /// [`crate::elements::RtspMuxer`] or any other terminal sink.
@@ -788,6 +804,40 @@ impl WebRtcTrackSink {
     }
 }
 
+/// Hands on the encoded packets the remote peer sends on one track.
+///
+/// Take it from [`WebRtcHandle::next_track`] and start a pipeline of its own
+/// with it, as with any source. [`Self::wait_stream_info`] says which codec the
+/// remote side sends, for the decoder after it. Needs the `webrtc` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use std::time::Duration;
+/// use media_pp::elements::{FrameCounter, SwDecoder, TrackEndpoints, WebRtcHandle};
+/// use media_pp::pipeline::Pipeline;
+/// # fn handle() -> WebRtcHandle { unimplemented!() }
+/// # let handle = handle();
+///
+/// let track = handle.next_track()?; // `handle` is the peer's `WebRtcHandle`
+/// if let TrackEndpoints::Recv(source) = track.endpoints {
+///     let info = source.wait_stream_info(Duration::from_secs(5))?;
+///     let decoder = SwDecoder::new("decoder", info.codec_parameters()?)?;
+///     let (counter, _frames) = FrameCounter::new("counter");
+///     let (pipeline, ()) = Pipeline::new("receive", source, |source, ctx| {
+///         let branch = ctx.branch().pipe(decoder).to(counter)?;
+///         ctx.attach(source, 0, branch)?;
+///         Ok(())
+///     })?;
+///     pipeline.run()?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
 /// One inbound track — the mirror image of [`WebRtcTrackSink`]. A source of
 /// the same shape as [`crate::elements::AppSource`]: it links into its own
 /// [`crate::pipeline::Pipeline`] via `src_pads()` like any other source.

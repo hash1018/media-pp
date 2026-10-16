@@ -39,8 +39,9 @@ use crate::orientation::Orientations;
 const SHADER: &str = include_str!("../../../../shaders/metal/overlay.metal");
 const REDACT: &str = include_str!("../../../../shaders/metal/redact.metal");
 
-/// Errors specific to `MetalDetectionOverlay`. Converts into the crate-wide
-/// `Error` via `?`.
+/// Errors specific to `MetalDetectionOverlay`.
+///
+/// Converts into the crate-wide `Error` via `?`.
 #[derive(Debug, ThisError)]
 pub enum MetalDetectionOverlayError {
     /// Something other than a decoded picture arrived.
@@ -94,14 +95,46 @@ impl From<TextFontError> for MetalDetectionOverlayError {
     }
 }
 
-/// Draws the [`Detections`] each VideoToolbox picture carries onto a copy
-/// of it, on the GPU with Metal — a box around each object, and with
-/// [`BoxStyle::label`](super::super::BoxStyle::label) its class and score
-/// above it — and
-/// hands the copy on, carrying the same `Detections`: what
+/// Draws boxes around what a detector found, or hides it, on VideoToolbox
+/// pictures with Metal.
+///
+/// It draws the [`Detections`] each VideoToolbox picture carries onto a copy of
+/// it, on the GPU — a box around each object, and with
+/// [`BoxStyle::label`](super::super::BoxStyle::label) its class and score above
+/// it — and hands the copy on, carrying the same `Detections`. It does what
 /// [`SwDetectionOverlay`](super::super::SwDetectionOverlay) does in system
-/// memory, so that a detector's pictures go on to an encoder, a renderer or
-/// a compositor without leaving the GPU.
+/// memory, so that a detector's pictures go on to an encoder, a renderer or a
+/// compositor without leaving the GPU. Needs the `metal` feature, on macOS.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ClassRule, DetectionOverlayOptions, MetalDetectionOverlay, RedactStyle, Treatment,
+///     VideoToolboxDevice,
+/// };
+/// # use media_pp::{element::{Context, IntoFilter}, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain<M>(
+/// #     ctx: &std::sync::Arc<Context>,
+/// #     detector: impl IntoFilter<M>,
+/// # ) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("drawn", |_buf| Ok(()));
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let options = DetectionOverlayOptions {
+///     rules: vec![ClassRule::new("face", Treatment::hidden(RedactStyle::mosaic()))],
+///     ..DetectionOverlayOptions::default()
+/// };
+/// let overlay = MetalDetectionOverlay::new("overlay", &device, options)?;
+/// let branch = ctx.branch().pipe(detector).pipe(overlay).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// It takes NV12 or BGRA VideoToolbox pictures of any size, from any
 /// device, since a pixel buffer belongs to none, and draws at that size.

@@ -54,9 +54,10 @@ use crate::{
     stream::StreamEvent,
 };
 
-/// Errors specific to [`VideoDecodeBin`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]); every other failure is the
-/// chosen element's own, from its constructor.
+/// Errors specific to [`VideoDecodeBin`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]);
+/// every other failure is the chosen element's own, from its constructor.
 #[derive(Debug, ThisError)]
 pub enum VideoDecodeBinError {
     /// The stream is not video.
@@ -218,9 +219,52 @@ pub enum SoftwareReason {
     HardwareRefused,
 }
 
-/// One video stream's packets in, its pictures out where the
-/// [`DecodeTarget`] says — decoded by the target's hardware where it takes
-/// the stream, and otherwise in software and uploaded.
+/// Decodes a video stream onto the device you name, on its hardware decoder
+/// where it can and in software otherwise.
+///
+/// Takes one video stream's packets — a [`FileDemuxer`]'s or an
+/// [`RtspSource`]'s — and hands on its pictures where the [`DecodeTarget`]
+/// says: on a device, NV12 or BGRA; in system memory, whatever the stream
+/// decodes to. Choose it over one decoder alone ([`SwDecoder`],
+/// `D3d11Decoder`, `CudaDecoder`, …) when every stream must reach the same
+/// place, whether the hardware takes it or not. [`Self::path`] says which
+/// way it went; [`EncodeInput::for_decoded`] hands its pictures to a
+/// [`VideoEncodeBin`] on the same device.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{DecodeTarget, FileDemuxer, FrameCounter, VideoDecodeBin};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// // `DecodeTarget::D3d11 { gpu, downstream_hw_frames }` and the like decode on a GPU.
+/// let target = DecodeTarget::System;
+/// let decoder = VideoDecodeBin::open("decode", video.parameters.clone(), target, None)?;
+/// println!("{:?} pictures, {:?}", decoder.output_format(), decoder.path());
+/// let decoding = decoder.handle();
+/// let (counter, frames) = FrameCounter::new("count");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(counter)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// // Software from here on, should the hardware refuse the stream after all.
+/// println!("{:?}, {} pictures so far", decoding.path(), frames.get());
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The [`transcode`] example puts it in front of a [`VideoEncodeBin`].
+///
+/// [`FileDemuxer`]: crate::elements::FileDemuxer
+/// [`RtspSource`]: crate::elements::RtspSource
+/// [`EncodeInput::for_decoded`]: crate::elements::EncodeInput::for_decoded
+/// [`VideoEncodeBin`]: crate::elements::VideoEncodeBin
+/// [`transcode`]: https://github.com/hash1018/media-pp/tree/main/examples/core/transcode
 ///
 /// # What it holds
 ///

@@ -28,10 +28,50 @@ use crate::orientation::{Orientation, Orientations};
 /// number at once.
 const MAX_BATCH: usize = 32;
 
-/// Classifies the objects a detector found on each picture with a second
-/// model, on the CPU, and hands the picture on with each answer in its
-/// object's [`Detection::classes`](crate::elements::Detection::classes) —
-/// DeepStream's secondary inference: a car's make, a person's clothes.
+/// Classifies the objects a detector found with a second ONNX model on the
+/// CPU — a car's make, a person's clothes.
+///
+/// It goes after a detector and hands each picture on with each answer in
+/// its object's [`Detection::classes`](crate::elements::Detection::classes)
+/// — DeepStream's secondary inference. It takes decoded pictures in system
+/// memory; `CudaOrtClassifier` and `D3d12OrtClassifier` do the same on GPU
+/// pictures. Needs the `ort` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AppSink, InputScale, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions,
+///     SwOrtClassifier, SwOrtDetector, TrackerOptions,
+/// };
+/// # use media_pp::elements::{FileDemuxer, SwDecoder};
+/// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// # let sink = AppSink::new("found", |_buf| Ok(()));
+///
+/// let detector = SwOrtDetector::new("detector", "yolov10n.onnx", OrtDetectorOptions::default())?;
+/// let tracker = ObjectTracker::new("tracker", TrackerOptions::default());
+/// // A model of car makes, asked only of the detector's cars (COCO class 2).
+/// let options = OrtClassifierOptions {
+///     classes: Some(vec![2]),
+///     input: InputScale::ImageNet,
+///     ..OrtClassifierOptions::default()
+/// };
+/// let classifier = SwOrtClassifier::new("make", "car_make.onnx", options)?;
+/// # let (pipeline, ()) = Pipeline::new("classify", source, |source, ctx| {
+/// let branch = ctx.branch().pipe(decoder).queue("frames", 8)
+///     .pipe(detector).pipe(tracker).pipe(classifier).to(sink)?;
+/// # ctx.attach(source, video.index, branch)?;
+/// # Ok(())
+/// # })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// It goes after a detector, and best after an
 /// [`ObjectTracker`](crate::elements::ObjectTracker): an object the tracker

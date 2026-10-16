@@ -48,13 +48,49 @@ pub enum D3d12DownloadError {
     CopyProperties(i32),
 }
 
-/// Downloads GPU-resident `Pixel::D3D12` video frames to CPU-resident
-/// `Pixel::NV12` frames.
+/// Copies NV12 pictures from a D3D12 GPU back into system memory, for the
+/// CPU elements after it.
 ///
-/// This is the exit from a D3D12VA pipeline for CPU-only stages such as
-/// [`crate::elements::SwScaler`], [`crate::elements::SwEncoder`],
-/// `SwOrtDetector`, and [`crate::elements::AppSink`]:
-/// `D3d12Decoder -> D3d12Download -> SwScaler -> ...`.
+/// Behind the `d3d12` feature on Windows. Put it after a `D3d12Decoder` or
+/// another D3D12 element, in front of something that works in system
+/// memory. It takes NV12 D3D12 frames — from any device — and hands on NV12
+/// pictures in system memory.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d12Download, D3d12Gpu, D3d12Upload, FrameCounter, SwScaler, TestVideoOptions,
+///     TestVideoSource,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let upload = D3d12Upload::new("upload", &gpu)?;
+/// let (encoder, _) = FrameCounter::new("encoder"); // a SwEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("round-trip", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let download = D3d12Download::new("download"); // ... D3D12 work in between ...
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(download).to(encoder)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It downloads GPU-resident `Pixel::D3D12` video frames to CPU-resident
+/// `Pixel::NV12` frames. This is the exit from a D3D12VA pipeline for CPU-only
+/// stages such as [`crate::elements::SwScaler`],
+/// [`crate::elements::SwEncoder`], `SwOrtDetector`, and
+/// [`crate::elements::AppSink`]: `D3d12Decoder -> D3d12Download -> SwScaler ->
+/// ...`.
 ///
 /// A D3D12 device is deliberately not a constructor argument. The source
 /// frame's own `AVHWFramesContext` owns the device and synchronization state,

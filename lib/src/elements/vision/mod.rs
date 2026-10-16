@@ -1,6 +1,10 @@
-//! Video analysis — what DeepStream does for NVIDIA pipelines, as elements
-//! of this crate's own: finding objects in pictures, and doing something
-//! with what was found.
+//! Video analysis: finding objects in pictures, and doing something with
+//! what was found.
+//!
+//! These are what DeepStream does for NVIDIA pipelines, as elements of this
+//! crate's own. A typical chain is `decoder -> detector -> ObjectTracker ->
+//! overlay`, each element handing the picture on and the next reading what
+//! the one before it found.
 //!
 //! What every one of them shares is [`Detections`],
 //! the [`Metadata`](crate::buffer::Metadata) a detector puts on each
@@ -8,11 +12,13 @@
 //! stage, each with its software and GPU members:
 //!
 //! - `infer` — models that look at pictures: ONNX Runtime's, with the
-//!   `ort` features, as `SwOrtDetector`, `CudaOrtDetector` and
-//!   `MetalOrtDetector`.
+//!   `ort` features, as `SwOrtDetector`, `CudaOrtDetector`,
+//!   `D3d12OrtDetector` and `MetalOrtDetector`, and beside each detector a
+//!   classifier and an embedder, which look again at what it found.
 //! - `cut` — where one shot of an edited video ends and the next begins:
-//!   [`SwCutDetector`] and `CudaCutDetector`, which put a [`SceneCut`] on
-//!   the first picture of each shot.
+//!   [`SwCutDetector`], `CudaCutDetector`, `D3d12CutDetector` and
+//!   `MetalCutDetector`, which put a [`SceneCut`] on the first picture of
+//!   each shot.
 //! - `track` — following what was found from picture to picture:
 //!   [`ObjectTracker`], which numbers each object and fills in the pictures
 //!   a detector let by.
@@ -21,6 +27,9 @@
 //! - `overlay` — drawing what was found onto the pictures:
 //!   [`SwDetectionOverlay`], `CudaDetectionOverlay`,
 //!   `D3d12DetectionOverlay` and `MetalDetectionOverlay`.
+//! - `batch` — many streams through one model: [`StreamMux`] gathers a
+//!   picture from each of its inputs into a batch, and
+//!   [`StreamMuxHandle::demux`] splits them out again.
 //!
 //! The data and the overlays need no feature of their own; only inference
 //! brings a runtime with it.

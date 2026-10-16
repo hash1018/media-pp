@@ -149,9 +149,40 @@ pub enum AudioResamplerError {
     NoTimeBase,
 }
 
-/// Converts decoded audio to one fixed [`AudioFormat`] via
-/// `libswresample`. The input definition is learned from each frame and the
-/// conversion context is rebuilt if it changes mid-stream.
+/// Converts sound to one fixed sample rate, channel count and sample format.
+///
+/// Put it in front of whatever needs one exact format: an audio renderer
+/// (its device's format), an audio encoder, a mixer input. It takes decoded
+/// sound in any format — the format may even change mid-stream — and hands
+/// on sound in `target`.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioFormat, AudioResampler, FrameCounter, TestAudioOptions, TestAudioSource,
+/// };
+/// use media_pp::ffmpeg::format::{Sample, sample::Type};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("tone", TestAudioOptions::default());
+/// let target = AudioFormat::new(Sample::I16(Type::Packed), 44_100, 2);
+/// let resampler = AudioResampler::new("resampler", target);
+/// let (speakers, _) = FrameCounter::new("speakers"); // an audio renderer, in a player
+/// let (pipeline, ()) = Pipeline::new("sound", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(resampler).to(speakers)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It converts through `libswresample`. The input definition is learned from
+/// each frame and the conversion context is rebuilt if it changes mid-stream.
 ///
 /// Output timestamps use `1 / target.sample_rate` units and remain
 /// contiguous across resampler buffering. The first output is anchored to

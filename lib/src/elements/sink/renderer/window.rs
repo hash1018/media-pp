@@ -233,6 +233,20 @@ impl Key {
 /// from whichever thread opens them. Opening one when the main thread runs
 /// no loop at all fails after a few seconds rather than hanging.
 ///
+/// # Example
+///
+/// ```ignore
+/// use media_pp::elements::{VideoWindow, WindowOptions, run_with_windows};
+///
+/// fn main() -> media_pp::Result<()> {
+///     run_with_windows(|| {
+///         let (window, events) = VideoWindow::open("window", WindowOptions::default())?;
+///         // ... build and run a pipeline ending in `window`, then wait on `events`.
+///         Ok(())
+///     })
+/// }
+/// ```
+///
 /// # Panics
 ///
 /// If called from any thread other than the main one.

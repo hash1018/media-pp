@@ -25,8 +25,9 @@ use crate::{
 const SHADER: &str = include_str!("../../../../shaders/metal/convert.metal");
 const TONE_MAP: &str = include_str!("../../../../shaders/metal/tone_map.metal");
 
-/// Errors specific to [`MetalConverter`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`MetalConverter`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum MetalConverterError {
     /// FFmpeg could not take a second reference to the frame already in
@@ -56,10 +57,46 @@ impl From<MetalPassError> for MetalConverterError {
     }
 }
 
-/// Turns NV12 and P010 VideoToolbox frames into BGRA ones, on the GPU with
-/// Metal — what a BGRA-only element on Metal, a key or an effect, is put
-/// behind when what arrives is a decoder's or a camera's NV12, and what
-/// brings a 10-bit decode to something `MetalRenderer` shows. The Metal counterpart of
+/// Turns NV12 and 10-bit P010 pictures into BGRA on a Mac's GPU with Metal.
+///
+/// Behind the `metal` feature on macOS. Put it in front of a BGRA-only
+/// Metal element — [`MetalChromaKey`](crate::elements::MetalChromaKey) or
+/// [`MetalVideoEffect`](crate::elements::MetalVideoEffect) — when what
+/// arrives is a decoder's or a camera's NV12, or after a 10-bit decode for
+/// something `MetalRenderer` shows. It takes NV12 or P010 VideoToolbox
+/// frames and hands on BGRA VideoToolbox frames of the same size.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, MetalConverter, SwScaler, TestVideoOptions, TestVideoSource,
+///     VideoToolboxDevice, VideoToolboxUpload,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let source = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let to_bgra = MetalConverter::new("to-bgra", &device)?;
+/// let (key, _) = FrameCounter::new("key"); // a MetalChromaKey, in practice
+/// let (pipeline, ()) = Pipeline::new("convert", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let upload = VideoToolboxUpload::new("upload", &device);
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(to_bgra).to(key)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It turns NV12 and P010 VideoToolbox frames into BGRA ones, on the GPU
+/// with Metal. The Metal counterpart of
 /// `VulkanConverter`; the other direction is the NV12
 /// [`MetalVideoCompositor`](crate::elements::MetalVideoCompositor)'s own.
 ///

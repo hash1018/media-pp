@@ -12,8 +12,9 @@ use crate::{
     produce::{Received, source_stage},
 };
 
-/// Errors specific to `AppSource`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Why an [`AppSourceHandle`] could not hand a buffer to its source.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum AppSourceError {
     /// The source has stopped or end-of-stream was already submitted.
@@ -21,13 +22,46 @@ pub enum AppSourceError {
     Closed,
 }
 
-/// A source whose data comes from application code pushing buffers in,
-/// rather than this element reading them itself — GStreamer's `appsrc`
-/// equivalent, the reverse of [`crate::elements::AppSink`]. Push encoded
-/// [`MediaBuffer::Packet`]s (straight into a decoder) or already-decoded
+/// Starts a pipeline from buffers your own code pushes in, from any thread.
+///
+/// GStreamer's `appsrc` equivalent, the reverse of
+/// [`crate::elements::AppSink`]. Push encoded [`MediaBuffer::Packet`]s
+/// (straight into a decoder) or already-decoded
 /// [`MediaBuffer::Video`]/[`MediaBuffer::Audio`] (e.g. frames from a
-/// camera SDK, or synthetic test data) via [`AppSourceHandle`], from any
-/// thread — a live capture callback, a network receive loop, a test.
+/// camera SDK, or synthetic test data) via [`AppSourceHandle`] — from a live
+/// capture callback, a network receive loop, a test. It has one output, and
+/// says nothing about what it hands on, so it links to anything.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::buffer::{MediaBuffer, set_time_base};
+/// use media_pp::elements::{AppSource, FrameCounter};
+/// use media_pp::ffmpeg::{Rational, format::Pixel, frame};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (source, handle) = AppSource::new("app", 4);
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("app", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+///
+/// for i in 0..30 {
+///     let mut picture = frame::Video::new(Pixel::YUV420P, 320, 240);
+///     picture.set_pts(Some(i));
+///     set_time_base(&mut picture, Rational(1, 30));
+///     handle.push(MediaBuffer::video(picture))?;
+/// }
+/// handle.finish()?; // the end of the stream
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// It waits for the next buffer and for what the pipeline asks together — a
 /// `Stop` (or any other control message) is handled the moment it arrives,
@@ -59,9 +93,10 @@ pub(crate) struct Receiving {
     data_rx: Receiver<Option<MediaBuffer>>,
 }
 
-/// A cheaply-cloneable handle for pushing buffers into an [`AppSource`]
-/// from any thread — `Clone` is just two refcount bumps (`name` and the
-/// channel sender are both cheap to share).
+/// Pushes buffers into an [`AppSource`], and ends its stream, from any thread.
+///
+/// A cheaply-cloneable handle — `Clone` is just two refcount bumps (`name`
+/// and the channel sender are both cheap to share).
 #[derive(Clone)]
 pub struct AppSourceHandle {
     name: Arc<str>,

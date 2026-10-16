@@ -58,8 +58,10 @@ const QUEUED: usize = 3;
 /// still there. One unplugged sends nothing and says nothing.
 const SILENT_DEVICE_CHECK: Duration = Duration::from_secs(2);
 
-/// Errors specific to [`AvFoundationCaptureSource`]. Converts into the
-/// crate-wide [`crate::error::Error`] via `?`.
+/// Why an [`AvFoundationCaptureSource`] could not open a camera or go on
+/// capturing.
+///
+/// Converts into the crate-wide [`crate::error::Error`] via `?`.
 #[derive(Debug, ThisError)]
 pub enum AvFoundationCaptureSourceError {
     /// The user, or a policy, has not let this program use the camera.
@@ -134,7 +136,7 @@ impl From<PixelBufferError> for AvFoundationCaptureSourceError {
     }
 }
 
-/// What to open, and how.
+/// Which camera an [`AvFoundationCaptureSource`] opens, and in which mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvFoundationCaptureOptions {
     /// The camera, as [`AvFoundationCaptureSource::list_devices`] listed it.
@@ -148,15 +150,46 @@ pub struct AvFoundationCaptureOptions {
     pub format: Option<AvFoundationCaptureFormat>,
 }
 
-/// One camera on macOS, delivering NV12 frames — the macOS counterpart of
-/// `MfCaptureSource` and `V4l2CaptureSource`, with the same shape: `open`
-/// answers with the source and the geometry it negotiated, and a camera
-/// that goes away ends the source with an error rather than reconnecting.
+/// Captures a camera on macOS.
 ///
+/// List the cameras with [`Self::list_devices`] and, if the size matters, the
+/// modes of one with [`Self::list_formats`]; then open it with
+/// [`AvFoundationCaptureOptions`]. It hands on NV12 pictures on one output:
 /// [`Self::open`] delivers them in system memory; with `videotoolbox`,
-/// `open_videotoolbox` delivers the pixel buffers the camera filled
-/// themselves, as VideoToolbox frames, for a `VideoToolboxEncoder` to take
-/// with nothing copied.
+/// `open_videotoolbox` delivers the pixel buffers the camera filled themselves,
+/// as VideoToolbox frames, for a `VideoToolboxEncoder` to take with nothing
+/// copied. It is live and needs no pacer. Needs the `avfoundation-capture`
+/// feature and the user's permission to use the camera.
+///
+/// It is the macOS counterpart of `MfCaptureSource` and
+/// `V4l2CaptureSource`, with the same shape: `open` answers with the source
+/// and the geometry it negotiated, and a camera that goes away ends the
+/// source with an error rather than reconnecting.
+///
+/// # Example
+///
+/// Open the default camera in the mode it is in:
+///
+/// ```ignore
+/// use media_pp::elements::{AvFoundationCaptureOptions, AvFoundationCaptureSource, FrameCounter};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let devices = AvFoundationCaptureSource::list_devices();
+/// let Some(device) = devices.into_iter().find(|device| device.is_default) else {
+///     return Ok(());
+/// };
+/// let options = AvFoundationCaptureOptions { device, format: None };
+/// let (source, video) = AvFoundationCaptureSource::open("camera", options)?;
+/// println!("{}x{}", video.width, video.height);
+///
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// ```
 ///
 /// # Timestamps
 ///

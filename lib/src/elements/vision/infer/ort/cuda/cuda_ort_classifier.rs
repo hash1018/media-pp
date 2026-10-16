@@ -38,9 +38,42 @@ use crate::orientation::{Orientation, Orientations};
 const MAX_BATCH: usize = 32;
 
 /// Classifies the objects a detector found on each CUDA picture with a
-/// second model, without the picture leaving the GPU — what
-/// [`SwOrtClassifier`](crate::elements::SwOrtClassifier) does on the CPU:
-/// each object's box is cut from the picture and stretched into the
+/// second ONNX model, without the picture leaving the GPU.
+///
+/// It does what [`SwOrtClassifier`](crate::elements::SwOrtClassifier) does
+/// on the CPU, for NV12 or BGRA CUDA pictures from the same [`CudaDevice`]
+/// as the rest of the pipeline. It goes after a detector, best after an
+/// [`ObjectTracker`](crate::elements::ObjectTracker). Needs the `ort-cuda`
+/// feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CudaDevice, CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, ObjectTracker,
+///     OrtClassifierOptions, TrackerOptions,
+/// };
+/// # use media_pp::{element::Context, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain(ctx: &std::sync::Arc<Context>) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("found", |_buf| Ok(()));
+///
+/// let device = CudaDevice::new()?;
+/// let options = CudaOrtDetectorOptions::default();
+/// let detector = CudaOrtDetector::new("detector", &device, "yolov10n.onnx", options)?;
+/// let tracker = ObjectTracker::new("tracker", TrackerOptions::default());
+/// let classifier =
+///     CudaOrtClassifier::new("make", &device, "car_make.onnx", OrtClassifierOptions::default())?;
+/// let branch = ctx.branch().pipe(detector).pipe(tracker).pipe(classifier).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// Each object's box is cut from the picture and stretched into the
 /// model's input by a kernel, in device memory, several objects to one
 /// run, and ONNX Runtime's CUDA provider reads them there.
 ///

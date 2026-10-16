@@ -1,9 +1,12 @@
-//! Every element that composites multiple video inputs into one output.
-//! [`video_compositor`] is backend-independent CPU code; the D3D11 GPU
-//! implementation lives under [`windows`]. [`video_layer`]'s
-//! `VideoRect`/`VideoLayer`/`VideoFit`/`layer_geometry` and [`text_layer`]'s
-//! `TextLayer` are shared, backend-agnostic pieces the D3D11 compositor
-//! builds on (colors use [`crate::color::Color`], shared crate-wide).
+//! The video compositors, one per backend, and the layer types they share.
+//!
+//! `sw_video_compositor` is backend-independent CPU code; the GPU
+//! implementations live under `windows` (D3D11, D3D12), `cuda`, `vulkan` and
+//! `macos` (Metal). `video_layer`'s
+//! `VideoRect`/`VideoLayer`/`VideoFit`/`layer_geometry` and `text_layer`'s
+//! `TextLayer` are shared, backend-agnostic pieces every compositor
+//! builds on (colors use [`crate::color::Color`], shared crate-wide), and
+//! `control`'s traits are the one API they all answer to.
 
 mod control;
 mod sw_text_layer;

@@ -81,7 +81,7 @@ const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormali
 const FRAME_POOL_BUFFERS: i32 = 2;
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 
-/// Errors specific to [`WgcCaptureSource`].
+/// Why a [`WgcCaptureSource`] could not open or go on capturing.
 #[derive(Debug, ThisError)]
 pub enum WgcCaptureSourceError {
     /// FFmpeg could not allocate the owner used to wrap an output texture.
@@ -154,7 +154,8 @@ pub enum WgcCaptureSourceError {
     FrameNotificationsStopped,
 }
 
-/// Construction options for [`WgcCaptureSource::open`].
+/// The rate a [`WgcCaptureSource`] captures at, and whether the cursor is
+/// drawn.
 #[derive(Debug, Clone)]
 pub struct WgcCaptureOptions {
     /// Constant rate at which the latest captured window image is emitted —
@@ -174,7 +175,38 @@ impl Default for WgcCaptureOptions {
     }
 }
 
-/// Captures one existing Win32 window through Windows Graphics Capture.
+/// Captures one window on Windows, at a steady frame rate, as D3D11 textures.
+///
+/// It takes the window's `HWND` and hands on BGRA pictures in
+/// [`MemoryDomain::D3d11`] on one output, on the device [`Self::open`] returns
+/// — the [`D3d11Gpu`] every other D3D11 element in the pipeline must share. It
+/// is live and needs no pacer. Choose it for one window; `DxgiCaptureSource`
+/// captures a whole monitor. Needs the `wgc-capture` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, WgcCaptureOptions, WgcCaptureSource};
+/// use media_pp::pipeline::Pipeline;
+/// use windows::Win32::Foundation::HWND;
+///
+/// # let raw_handle: isize = 0;
+/// // The window your application chose, by its `HWND`.
+/// let window = HWND(raw_handle as *mut _);
+/// let (source, _gpu) = WgcCaptureSource::open("window", window, WgcCaptureOptions::default())?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("window", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The caller selects the target and passes its `HWND`; this element does not
 /// show `GraphicsCapturePicker` or own application UI. Construction starts a
@@ -284,10 +316,11 @@ struct Session {
 unsafe impl Send for Capturing {}
 
 impl WgcCaptureSource {
-    /// Validates `hwnd`, starts its lifetime watcher, creates the capture's D3D11
-    /// device, and returns both the source and that device as the [`D3d11Gpu`]
-    /// every other D3D11 element in the pipeline is to share. The frame pool and session are activated in
-    /// as the source starts, on its own thread, which owns them.
+    /// Validates `hwnd`, starts its lifetime watcher, creates the capture's
+    /// D3D11 device, and returns both the source and that device as the
+    /// [`D3d11Gpu`] every other D3D11 element in the pipeline is to share. The
+    /// frame pool and session are activated as the source starts, on its own
+    /// thread, which owns them.
     pub fn open(
         name: impl Into<String>,
         hwnd: HWND,

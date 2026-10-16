@@ -24,8 +24,9 @@ use super::super::qos::Qos;
 use super::d3d12_copier::D3d12Copier;
 use crate::elements::filter::is_codec_drain_boundary;
 
-/// Errors specific to `D3d12Decoder`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to `D3d12Decoder`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12DecoderError {
     /// The selected stream is not video.
@@ -60,9 +61,43 @@ pub enum D3d12DecoderError {
     Copy(windows::core::Error),
 }
 
-/// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
-/// via D3D12VA hardware acceleration, instead of [`crate::elements::SwDecoder`]'s
-/// plain libavcodec software path. A filter, the same shape as `SwDecoder`.
+/// Decodes a video stream on the GPU through D3D12VA into D3D12 resources.
+///
+/// Takes one video stream's packets and hands on frames on the pipeline's
+/// one [`D3d12Gpu`] — NV12 for an 8-bit stream — for D3D12 elements after
+/// it: a scaler, a detector, an encoder, a renderer. A codec the GPU has no
+/// decoder for fails at construction; for streams that must reach D3D12
+/// either way, [`VideoDecodeBin`](crate::elements::VideoDecodeBin) falls
+/// back to software and uploads. Needs the `d3d12` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{D3d12Decoder, D3d12Gpu, FileDemuxer, FrameCounter};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let decoder = D3d12Decoder::new("decode", video.parameters.clone(), &gpu)?;
+/// let (counter, frames) = FrameCounter::new("count");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// Uses D3D12VA hardware acceleration instead of
+/// [`crate::elements::SwDecoder`]'s plain libavcodec software path. A
+/// filter, the same shape as `SwDecoder`.
 ///
 /// Frames this produces are still plain `MediaBuffer::Video` — nothing
 /// downstream needs to change to receive them. `Pacer`/`Tee`/

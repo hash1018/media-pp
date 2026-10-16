@@ -24,7 +24,7 @@ fn nanoseconds() -> TimeBase {
 }
 
 #[derive(Debug, ThisError)]
-/// Input this element cannot schedule.
+/// Why a [`VideoSynchronizer`] refused a buffer: input it cannot schedule.
 ///
 /// Scheduling needs a decoded video frame with a PTS and the time base it is
 /// in; anything else is rejected rather than passed through unscheduled.
@@ -58,9 +58,54 @@ enum Decision {
     Hold,
 }
 
-/// Schedules decoded video against the pipeline's current playback master.
+/// Shows each decoded picture when the sound playing beside it reaches it,
+/// so the picture stays in step with the speakers.
 ///
-/// In wall-master mode this replaces [`crate::elements::Pacer`]: the first
+/// Put a `VideoSynchronizer` on the video branch of a player that also
+/// plays the sound through an audio renderer, just before the video
+/// renderer. It takes decoded pictures in any memory and hands on the same
+/// pictures, dropping the ones that come too late. Until a renderer is
+/// playing sound it paces by the clock, as a
+/// [`Pacer`](crate::elements::Pacer) would. For pictures with no sound to
+/// follow, a `Pacer` is the simpler choice; never put both in one branch.
+///
+/// # Example
+///
+/// The video branch of a player; the audio branch ends in an audio renderer
+/// on the same pipeline.
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FileDemuxer, FrameCounter, SwDecoder, VideoSynchronizer};
+/// use media_pp::ffmpeg::media;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// let (window, _) = FrameCounter::new("window"); // a video renderer, in a player
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx
+///         .branch()
+///         .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+///         .queue("frames", 8)
+///         .pipe(VideoSynchronizer::new("sync"))
+///         .to(window)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A complete player with sound is the
+/// [`av_playback`](https://github.com/hash1018/media-pp/tree/main/examples/render/av_playback)
+/// example.
+///
+/// # How it works
+///
+/// It schedules decoded video against the pipeline's current playback
+/// master. In wall-master mode this replaces [`crate::elements::Pacer`]: the first
 /// video PTS establishes the media origin and early frames wait. Once an
 /// audio renderer registers and starts, the same instance automatically
 /// compares video PTS with the played-audio position, waiting for early

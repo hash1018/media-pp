@@ -138,11 +138,11 @@ impl From<Unreadable> for AudioGateError {
     }
 }
 
-/// Thread-safe runtime control for an [`AudioGate`].
+/// Changes an [`AudioGate`]'s thresholds and timings while it runs.
 ///
-/// Cheap to clone. Retaining it keeps only the settings alive, not the
-/// element, its pad or the pipeline; setting options after the element has
-/// gone does nothing and harms nothing.
+/// Thread-safe runtime control. Cheap to clone. Retaining it keeps only the
+/// settings alive, not the element, its pad or the pipeline; setting options
+/// after the element has gone does nothing and harms nothing.
 #[derive(Debug, Clone)]
 pub struct AudioGateHandle {
     control: Arc<Tuning<AudioGateOptions>>,
@@ -219,7 +219,35 @@ impl Rates {
 /// timestamps unchanged — it only scales samples, and adds no delay. One
 /// gate serves every channel of a frame together: the level it listens to
 /// is the loudest channel's, and the gain it applies is the same on all of
-/// them, so a stereo image is never pulled to one side.
+/// them, so a stereo image is never pulled to one side. Put it on a
+/// microphone's branch, before the mixer, to cut the room out between words.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioGate, AudioGateOptions, FrameCounter, TestAudioOptions, TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("mic", TestAudioOptions::default()); // a capture, in practice
+/// let (gate, settings) = AudioGate::new("gate");
+/// let (mixer, _) = FrameCounter::new("mixer"); // a mixer input, in practice
+/// let (pipeline, ()) = Pipeline::new("voice", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(gate).to(mixer)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+///
+/// settings.set_options(AudioGateOptions {
+///     open_threshold_db: -36.0,
+///     close_threshold_db: -42.0,
+///     ..settings.options()
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # How it decides
 ///

@@ -20,8 +20,9 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-/// Errors specific to [`VulkanDecoder`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VulkanDecoder`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VulkanDecoderError {
     /// The selected stream is not video.
@@ -55,10 +56,43 @@ pub enum VulkanDecoderError {
     InvalidSurfaceBudget(i32),
 }
 
-/// Decodes one video stream's `Packet`s into Vulkan frames with Vulkan
-/// Video, on a [`VulkanDevice`] — on any GPU whose driver decodes the codec
-/// through Vulkan: NVIDIA's, and AMD's and Intel's with Mesa. A filter, the same
-/// shape as [`crate::elements::SwDecoder`].
+/// Decodes a video stream on the GPU through Vulkan Video into Vulkan pictures.
+///
+/// Takes one video stream's packets and hands on frames on the pipeline's
+/// one [`VulkanDevice`], for Vulkan elements after it: a scaler, a
+/// compositor, [`VulkanEncoder`](crate::elements::VulkanEncoder), a
+/// renderer. It works on any GPU whose driver decodes the codec through
+/// Vulkan: NVIDIA's, and AMD's and Intel's with Mesa. For streams that must
+/// reach Vulkan either way, [`VideoDecodeBin`](crate::elements::VideoDecodeBin)
+/// falls back to software and uploads. Needs the `vulkan` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FileDemuxer, FrameCounter, VulkanDecoder, VulkanDevice};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let device = VulkanDevice::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// // Room for the 4 pictures the queue after it may hold.
+/// let decoder = VulkanDecoder::new("decode", video.parameters.clone(), &device, 4)?;
+/// let (counter, frames) = FrameCounter::new("count");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A filter, the same shape as [`crate::elements::SwDecoder`].
 ///
 /// Frames this produces are still plain `MediaBuffer::Video`, tagged
 /// [`ffmpeg::format::Pixel::VULKAN`]: `Pacer`, `Tee` and `Queue` take them as

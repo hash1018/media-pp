@@ -45,10 +45,41 @@ use super::protocol::{self, Header};
 /// there is no section to find.
 const LOOK_AGAIN_AFTER: Duration = Duration::from_millis(500);
 
-/// Shows what reaches it as a camera — "Windows Virtual Camera" in every
-/// application that lists cameras: Teams, Zoom, a browser, Windows' own
-/// Camera app. The camera exists from construction until the element is
-/// dropped.
+/// Shows a pipeline's pictures as a camera that Teams, Zoom, a browser or
+/// Windows' own Camera app can open.
+///
+/// It ends a branch of decoded video in system memory, any pixel format and
+/// size, and appears as "Windows Virtual Camera" in every application that
+/// lists cameras, from construction until the element is dropped. It needs
+/// Windows 11, the `mf-virtual-camera` feature and the camera's DLL
+/// registered once — see [Requirements](#requirements). For Linux, see
+/// `V4l2VirtualCamera`.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{MfVirtualCamera, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let camera = MfVirtualCamera::new("camera", "media-pp")?;
+///
+/// let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
+///     let branch = ctx.branch().queue("pictures", 2).to(camera)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It shows what reaches it as a camera — "Windows Virtual Camera" in every
+/// application that lists cameras: Teams, Zoom, a browser, Windows' own Camera
+/// app. The camera exists from construction until the element is dropped.
 ///
 /// It takes decoded video in system memory, any pixel format and size, and
 /// hands each picture on as NV12 at the size the application reading the

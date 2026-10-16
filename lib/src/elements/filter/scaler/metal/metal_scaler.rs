@@ -30,8 +30,9 @@ use crate::{
 
 const SHADER: &str = include_str!("../../../../shaders/metal/scale.metal");
 
-/// Errors specific to [`MetalScaler`]. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`MetalScaler`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum MetalScalerError {
     /// A size of zero was asked for.
@@ -110,7 +111,43 @@ impl MetalScalerInterp {
     }
 }
 
-/// Resizes NV12 and BGRA VideoToolbox frames on the GPU with Metal, into
+/// Resizes pictures on a Mac's GPU with Metal.
+///
+/// Behind the `metal` feature on macOS. Put it after a VideoToolbox decoder,
+/// upload or capture, in front of a VideoToolbox encoder, renderer or
+/// compositor that wants another size. It takes NV12 or BGRA VideoToolbox
+/// frames and hands on frames of the same layout at the size it was built with.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, MetalScaler, MetalScalerInterp, SwScaler, TestVideoOptions,
+///     TestVideoSource, VideoToolboxDevice, VideoToolboxUpload,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let scaler = MetalScaler::new("scale", &device, 1280, 720, MetalScalerInterp::Lanczos)?;
+/// let (encoder, _) = FrameCounter::new("encoder"); // a VideoToolboxEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let upload = VideoToolboxUpload::new("upload", &device);
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(scaler).to(encoder)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It resizes NV12 and BGRA VideoToolbox frames on the GPU with Metal, into
 /// frames of the same layout at the size it was made for — the Metal
 /// counterpart of `VulkanScaler` and `CudaScaler`, and what keeps
 /// `VideoToolboxDecoder -> MetalScaler -> VideoToolboxEncoder`, or a camera

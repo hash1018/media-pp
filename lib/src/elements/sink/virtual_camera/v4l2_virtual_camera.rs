@@ -15,7 +15,40 @@ use crate::{
     render::{SinkStage, sink_stage},
 };
 
-/// Shows what reaches it as a camera, through a [v4l2loopback] device:
+/// Shows a pipeline's pictures as a camera on Linux, through a
+/// v4l2loopback device that browsers, Zoom, Discord or OBS Studio can open.
+///
+/// It ends a branch of decoded video in system memory, any pixel format and
+/// size, and writes each picture at the size the camera was made with. The
+/// camera exists while the element lives. It needs the v4l2loopback module
+/// loaded — see [Requirements](#requirements) — and the
+/// `v4l2-virtual-camera` feature. For Windows, see `MfVirtualCamera`.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use media_pp::elements::{TestVideoOptions, TestVideoSource, V4l2VirtualCamera};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let devices = V4l2VirtualCamera::list_devices()?;
+/// let device = devices.first().ok_or("no v4l2loopback device")?;
+/// let camera = V4l2VirtualCamera::new("camera", &device.id, 1280, 720, ffmpeg::Rational(30, 1))?;
+///
+/// let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
+///     let branch = ctx.branch().queue("pictures", 2).to(camera)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It shows what reaches it as a camera, through a [v4l2loopback] device:
 /// every application that reads cameras through V4L2 — a browser, Zoom,
 /// Discord, OBS Studio — lists it under the device's `card_label`.
 ///

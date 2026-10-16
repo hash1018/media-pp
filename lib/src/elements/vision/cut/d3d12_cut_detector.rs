@@ -72,11 +72,40 @@ pub enum D3d12CutDetectorError {
 }
 
 /// Finds where one shot of an edited video ends and the next begins, in
-/// NV12 or P010 D3D12 pictures made on the [`D3d12Gpu`] it is given, and
-/// hands each picture on — the first of each shot after the stream's first
-/// carrying a [`SceneCut`](crate::elements::SceneCut) — as
+/// D3D12 pictures.
+///
+/// It takes NV12 or P010 D3D12 pictures made on the [`D3d12Gpu`] it is
+/// given and hands each picture on — the first of each shot after the
+/// stream's first carrying a [`SceneCut`](crate::elements::SceneCut) — as
 /// [`SwCutDetector`](crate::elements::SwCutDetector) does in system memory,
-/// the two finding the same cuts in the same pictures.
+/// the two finding the same cuts in the same pictures. Needs the `d3d12`
+/// feature, on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{CutDetectorOptions, D3d12CutDetector, D3d12Decoder, D3d12Gpu};
+/// # use media_pp::elements::{AppSink, FileDemuxer};
+/// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+/// # let sink = AppSink::new("shots", |_buf| Ok(()));
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let cuts = D3d12CutDetector::new("cuts", &gpu, CutDetectorOptions::default())?;
+/// let (pipeline, ()) = Pipeline::new("cuts", source, |source, ctx| {
+///     let decoder = D3d12Decoder::new("decoder", params, &gpu)?;
+///     let branch = ctx.branch().pipe(decoder).pipe(cuts).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The cells of each picture's thumbnail are summed on the GPU, by a
 /// compute shader on the GPU's queue, where the picture is; only the sums,

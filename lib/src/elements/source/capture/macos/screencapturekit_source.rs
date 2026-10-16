@@ -53,8 +53,9 @@ const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 /// has nowhere to draw the next and skips it.
 const QUEUE_DEPTH: isize = 6;
 
-/// Errors specific to [`ScreenCaptureKitSource`]. Converts into the
-/// crate-wide [`crate::error::Error`] via `?`.
+/// Why a [`ScreenCaptureKitSource`] could not open or go on capturing.
+///
+/// Converts into the crate-wide [`crate::error::Error`] via `?`.
 #[derive(Debug, ThisError)]
 pub enum ScreenCaptureKitSourceError {
     /// This program may not record the screen. macOS asks the user the
@@ -127,7 +128,8 @@ impl From<ContentError> for ScreenCaptureKitSourceError {
     }
 }
 
-/// What to capture — see [`ScreenCaptureKitSource::list_displays`] and
+/// Which display or window a [`ScreenCaptureKitSource`] captures — see
+/// [`ScreenCaptureKitSource::list_displays`] and
 /// [`ScreenCaptureKitSource::list_windows`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenCaptureKitTarget {
@@ -139,7 +141,8 @@ pub enum ScreenCaptureKitTarget {
     Window(u32),
 }
 
-/// What to open, and how.
+/// What a [`ScreenCaptureKitSource`] captures, at what rate, and whether the
+/// pointer is drawn.
 #[derive(Debug, Clone)]
 pub struct ScreenCaptureKitOptions {
     /// What to capture.
@@ -167,16 +170,46 @@ impl ScreenCaptureKitOptions {
     }
 }
 
-/// A display or one window on macOS, delivering BGRA frames at a fixed rate
-/// — the macOS counterpart of `DxgiCaptureSource`, `WgcCaptureSource` and
-/// `PipeWireScreenCaptureSource`, in their shape: `open` answers with the
-/// source and the size it captures at, and what it captures going away ends
-/// the source with an error rather than waiting for it to come back.
+/// Captures a display or one window on macOS, at a steady frame rate.
 ///
-/// [`Self::open`] delivers them in system memory; with `videotoolbox`,
-/// `open_videotoolbox` delivers the pixel buffers ScreenCaptureKit drew
-/// themselves, as VideoToolbox frames, for a `VideoToolboxEncoder` to take
-/// with nothing copied.
+/// List what there is with [`Self::list_displays`] and [`Self::list_windows`],
+/// name one in a [`ScreenCaptureKitTarget`], and open it. It hands on BGRA
+/// pictures on one output: [`Self::open`] delivers them in system memory;
+/// with `videotoolbox`, `open_videotoolbox` delivers the pixel buffers
+/// ScreenCaptureKit drew themselves, as VideoToolbox frames, for a
+/// `VideoToolboxEncoder` to take with nothing copied. It is live and needs
+/// no pacer. Needs the `screencapturekit-capture` feature and the user's
+/// permission to record the screen.
+///
+/// It is the macOS counterpart of `DxgiCaptureSource`, `WgcCaptureSource`
+/// and `PipeWireScreenCaptureSource`, in their shape: `open` answers with
+/// the source and the size it captures at, and what it captures going away
+/// ends the source with an error rather than waiting for it to come back.
+///
+/// # Example
+///
+/// ```ignore
+/// use media_pp::elements::{
+///     FrameCounter, ScreenCaptureKitOptions, ScreenCaptureKitSource, ScreenCaptureKitTarget,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let displays = ScreenCaptureKitSource::list_displays()?;
+/// let Some(main) = displays.iter().find(|display| display.is_main) else {
+///     return Ok(());
+/// };
+/// let options = ScreenCaptureKitOptions::new(ScreenCaptureKitTarget::Display(main.id));
+/// let (source, video) = ScreenCaptureKitSource::open("screen", options)?;
+/// println!("{}x{}", video.width, video.height);
+///
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("screen", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// ```
 ///
 /// # A fixed output rate
 ///

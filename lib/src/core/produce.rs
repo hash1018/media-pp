@@ -28,8 +28,61 @@ use crate::{
     pp_log::{PpLog, pp_info},
 };
 
-/// A source written as what it makes alone: asked for the next thing, it
-/// makes it.
+/// A source of your own, written as what it makes alone: asked for the next
+/// thing, it makes it.
+///
+/// Implement [`Self::produce`], waiting only through the [`Wait`] it is
+/// handed, and [`Self::is_live`]. Give it to
+/// [`Pipeline::new`](crate::pipeline::Pipeline::new) as any built-in source.
+/// For buffers another thread of the application hands in, use
+/// [`AppSource`](crate::elements::AppSource) instead.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use std::time::Duration;
+///
+/// use media_pp::buffer::{MediaBuffer, set_time_base};
+/// use media_pp::element::{Produced, Source, Wait};
+/// use media_pp::elements::FrameCounter;
+/// use media_pp::ffmpeg::{self, format::Pixel, frame::Video};
+/// use media_pp::pipeline::Pipeline;
+///
+/// /// Ten black pictures, one every 40 ms.
+/// struct Black(i64);
+///
+/// impl Source for Black {
+///     fn is_live(&self) -> bool {
+///         true
+///     }
+///
+///     fn produce(&mut self, wait: &mut Wait<'_>) -> media_pp::Result<Produced> {
+///         if self.0 == 10 {
+///             return Ok(Produced::End);
+///         }
+///         if !wait.until(wait.now() + Duration::from_millis(40)) {
+///             return Ok(Produced::Nothing); // the pipeline needs the thread
+///         }
+///         let mut picture = Video::new(Pixel::GRAY8, 64, 64);
+///         picture.set_pts(Some(self.0));
+///         set_time_base(&mut picture, ffmpeg::Rational(1, 25));
+///         self.0 += 1;
+///         Ok(Produced::Buffer(MediaBuffer::video(picture)))
+///     }
+/// }
+///
+/// let (counter, _pictures) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("black", Black(0).named("black"), |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().to(counter)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The framework does the rest — the pad, the loop that asks, what the
 /// pipeline asks of the thread in between (a pause, a stop, the end of the
@@ -52,7 +105,7 @@ pub trait Source: Send {
     /// [`RawSource::is_live`].
     fn is_live(&self) -> bool;
 
-    /// The next thing it makes. Blocks, where it has to, only through
+    /// Makes the next thing. Blocks, where it has to, only through
     /// `wait`; let go, it answers [`Produced::Nothing`] and is asked again.
     ///
     /// An `Err` ends the source, as one [`RawSource::run`] returns
@@ -118,13 +171,16 @@ pub trait Source: Send {
     /// default.
     fn stopping(&mut self) {}
 
-    /// Told who it is in the pipeline it is being added to, and that
-    /// pipeline, before it is asked for anything. Keep
-    /// [`Attached::pp_log`] to log; take from [`Attached::context`] what is
-    /// needed of the pipeline — its bus, to post what fails for one part
-    /// of what it makes. Nothing by default.
+    /// Called as it is added to a pipeline, before it is asked for anything.
+    ///
+    /// It is told who it is in the pipeline it is being added to, and that
+    /// pipeline. Keep [`Attached::pp_log`] to log; take from
+    /// [`Attached::context`] what is needed of the pipeline — its bus, to post
+    /// what fails for one part of what it makes. Nothing by default.
     fn attached(&mut self, _cx: &Attached<'_>) {}
 
+    /// Gives this source a name for the log and the bus.
+    ///
     /// This source, going by `name` — to tell two of it apart in the log
     /// and on the bus. One not named goes by its type's name.
     fn named(self, name: impl Into<String>) -> Named<Self>
@@ -319,7 +375,9 @@ pub enum ProduceError {
 }
 
 /// What a [`Source`] is in a pipeline: the source the framework makes of
-/// it, with the pads and the loop. Nothing to call on it — it is what
+/// it, with the pads and the loop.
+///
+/// Nothing to call on it — it is what
 /// [`IntoSource`] hands a pipeline, and what the pipeline's wiring is given.
 pub struct SourceStage<P> {
     /// Who it is — the source's name and log identity, which it does not

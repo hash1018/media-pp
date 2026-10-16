@@ -18,6 +18,35 @@ use crate::{
 /// Stops a branch taking frames, and takes the paused span out of the
 /// timeline of what it does take.
 ///
+/// Use it to pause a recording while the preview beside it keeps running: put
+/// one directly in front of each encoder of the recording (one for the picture,
+/// one for the sound) and pause them through their [`PauseGateHandle`]s. The
+/// file stays open and continues after the pause with no gap in it.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, PauseGate, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (gate, pause) = PauseGate::new("pause");
+/// let (encoder, _) = FrameCounter::new("encoder"); // the recording's encoder
+/// let (pipeline, ()) = Pipeline::new("record", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(gate).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+///
+/// pause.set_paused(true); // from a button, on any thread
+/// pause.set_paused(false);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Video or audio
+///
 /// Video ([`PauseGate::new`]) or audio ([`PauseGate::for_audio`]) — one type
 /// rather than two, because a recording of both needs its two gates to remove
 /// *the same span*, and two implementations would be two chances for them to

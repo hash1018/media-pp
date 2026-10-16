@@ -71,14 +71,52 @@ fn nanoseconds() -> TimeBase {
 /// request needs the owning worker back.
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Delays each buffer until its presentation time, so downstream sees
-/// frames (or, upstream of a decoder, compressed packets) at real playback
-/// speed instead of as fast as demux/decode can produce them. A `RawFilter`:
-/// receives via `RawSink`, waits in short interruptible sleeps inside
-/// `consume`, then pushes the same buffer through its own (single) src pad.
-/// A pending pause/seek/stop interrupts that wait so the owning worker can
-/// process control: pause retains the in-flight buffer for resume, while
-/// seek and stop discard it.
+/// Hands each buffer on when it is due, so a file plays at its own speed
+/// instead of as fast as it decodes.
+///
+/// Put a `Pacer` after the decoder of a stream read from a file, in front of
+/// whatever shows or plays it; it takes pictures, sound or packets in any
+/// memory and hands on the same buffers, unchanged. Every `Pacer` in a
+/// pipeline follows one clock, so a video branch and an audio branch each
+/// with its own stay together. Use it for pictures alone or for a branch
+/// that is not shown; where the picture has to follow a sound card that is
+/// playing the sound, use a [`VideoSynchronizer`](crate::elements::VideoSynchronizer)
+/// on the video branch instead — never both in one branch. A live source
+/// such as a camera is already at its own speed and needs no `Pacer`.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder};
+/// use media_pp::ffmpeg::media;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// let (counter, _) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx
+///         .branch()
+///         .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+///         .queue("frames", 8) // how far decoding may run ahead
+///         .pipe(Pacer::new("pacer"))
+///         .to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A `RawFilter`: receives via `RawSink`, waits in short interruptible sleeps
+/// inside `consume`, then pushes the same buffer through its own (single) src
+/// pad. A pending pause/seek/stop interrupts that wait so the owning worker can
+/// process control: pause retains the in-flight buffer for resume, while seek
+/// and stop discard it.
 ///
 /// It runs on a thread of its own, behind a [`crate::queue::Queue`], so the
 /// paced waits never stall the demuxer or decoder feeding it: a queue put

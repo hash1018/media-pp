@@ -35,11 +35,43 @@ use super::fitting::{Cut, Fitting};
 use super::{DIRECTML_BATCH, directml_memory, host_memory, object_model_session};
 
 /// Classifies the objects a detector found on each D3D12 picture with a
-/// second model — what [`SwOrtClassifier`](crate::elements::SwOrtClassifier)
-/// does on the CPU, with each object's box cut from the picture and
-/// stretched into the model's input by a compute shader where the picture
-/// is, several objects to one run, and the model run by ONNX Runtime's
-/// DirectML provider on the same GPU.
+/// second ONNX model, run by DirectML on the same GPU.
+///
+/// It does what [`SwOrtClassifier`](crate::elements::SwOrtClassifier) does
+/// on the CPU, for NV12 or HDR P010 D3D12 pictures made on the [`D3d12Gpu`]
+/// it is given. Export the model at ONNX opset 20 or lower, as the
+/// detector's. Needs the `ort-directml` feature, on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d12Gpu, D3d12OrtClassifier, D3d12OrtDetector, D3d12OrtDetectorOptions, ObjectTracker,
+///     OrtClassifierOptions, TrackerOptions,
+/// };
+/// # use media_pp::{element::Context, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain(ctx: &std::sync::Arc<Context>) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("found", |_buf| Ok(()));
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let options = D3d12OrtDetectorOptions::default();
+/// let detector = D3d12OrtDetector::new("detector", &gpu, "yolov10n.onnx", options)?;
+/// let tracker = ObjectTracker::new("tracker", TrackerOptions::default());
+/// let classifier =
+///     D3d12OrtClassifier::new("make", &gpu, "car_make.onnx", OrtClassifierOptions::default())?;
+/// let branch = ctx.branch().pipe(detector).pipe(tracker).pipe(classifier).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// Each object's box is cut from the picture and stretched into the model's
+/// input by a compute shader where the picture is, several objects to one run,
+/// and the model is run by ONNX Runtime's DirectML provider on the same GPU.
 ///
 /// It goes after a detector — a
 /// [`D3d12OrtDetector`](crate::elements::D3d12OrtDetector), or any — and

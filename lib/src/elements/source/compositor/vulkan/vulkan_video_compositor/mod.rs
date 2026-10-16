@@ -298,8 +298,10 @@ unsafe impl Send for CompositorShared {}
 // compositor's own.
 unsafe impl Sync for CompositorShared {}
 
-/// A cheaply cloneable handle for adding and removing compositor inputs —
-/// the Vulkan sibling of [`crate::elements::SwVideoCompositorHandle`].
+/// Adds, removes and paces the inputs of a running [`VulkanVideoCompositor`].
+///
+/// Cheap to clone. The Vulkan sibling of
+/// [`crate::elements::SwVideoCompositorHandle`].
 ///
 /// Holds the compositor weakly: once it is dropped, every method reports
 /// [`VulkanVideoCompositorError::Stopped`] or nothing.
@@ -450,9 +452,12 @@ impl VulkanVideoCompositorHandle {
     }
 }
 
-/// The terminal Sink for one compositor input. Keeps only the latest frame:
-/// the compositor emits on its own clock, so an input that runs faster than
-/// the output rate simply has its older frames dropped.
+/// The sink that ends one input's pipeline, handing its pictures to a
+/// [`VulkanVideoCompositor`].
+///
+/// Returned by [`VulkanVideoCompositorHandle::add_source`]. Live, it keeps only
+/// the latest frame: the compositor emits on its own clock, so an input that
+/// runs faster than the output rate simply has its older frames dropped.
 pub struct VulkanVideoCompositorInputSink {
     pp_log: PpLog,
     name: Arc<str>,
@@ -805,7 +810,63 @@ impl Kernels {
     }
 }
 
-/// Composites the latest frames from any number of independent Vulkan input
+/// Composites any number of video inputs into one BGRA (or NV12) picture
+/// stream, on any GPU through Vulkan.
+///
+/// Each input is a pipeline of its own that ends at a sink from
+/// [`VulkanVideoCompositorHandle::add_source`], and must hand on NV12 or BGRA
+/// `Pixel::VULKAN` pictures made on the same [`VulkanDevice`] as the
+/// compositor. The compositor is the source of its own pipeline and hands on
+/// one `Pixel::VULKAN` picture of the canvas per tick, BGRA unless
+/// [`Self::with_format`] asks for NV12 — live at its frame rate, or offline
+/// by the inputs' timestamps. Text layers are added with
+/// [`VulkanVideoCompositorHandle::add_text_layer`]. Needs the `vulkan`
+/// feature; runs on Windows and Linux alike.
+///
+/// # Example
+///
+/// A test pattern uploaded to the GPU fills the canvas, with a label over it:
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use media_pp::elements::{
+///     FrameCounter, TestVideoOptions, TestVideoSource, TextLayer, VideoCompositorOptions,
+///     VideoLayer, VideoRect, VulkanDevice, VulkanUpload, VulkanVideoCompositor,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VulkanDevice::new()?;
+/// let (compositor, handle) =
+///     VulkanVideoCompositor::new("canvas", &device, VideoCompositorOptions::default())?;
+///
+/// // An input: another pipeline's branch, on the same device, ends at its sink.
+/// let input = handle.add_source("camera", VideoLayer::new(VideoRect::new(0, 0, 1920, 1080)))?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let (camera, ()) = Pipeline::new("camera", camera, |source, ctx| {
+///     let branch = ctx.branch().pipe(VulkanUpload::new("upload", &device)).to(input.sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+///
+/// let label = handle.add_text_layer("label", TextLayer::new(std::fs::read("font.ttf")?))?;
+/// label.set_text("LIVE")?;
+///
+/// // The compositor is the source of the pipeline that takes the canvas.
+/// let (counter, _frames) = FrameCounter::new("frames");
+/// let (canvas, ()) = Pipeline::new("canvas", compositor, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// canvas.run()?;
+/// camera.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It composites the latest frames from any number of independent Vulkan input
 /// pipelines into one fixed-rate `Pixel::VULKAN` stream, without any frame
 /// leaving the GPU — the Vulkan sibling of
 /// [`crate::elements::SwVideoCompositor`], `D3d11VideoCompositor` and
@@ -881,8 +942,10 @@ struct Compositing {
 unsafe impl Send for Compositing {}
 
 impl VulkanVideoCompositor {
-    /// A compositor on `device`, composing in BGRA — see
-    /// [`Self::with_format`]. `device` must be the same [`VulkanDevice`]
+    /// Creates a compositor drawing on `device` in BGRA, and the handle that
+    /// adds its inputs.
+    ///
+    /// See [`Self::with_format`] for NV12. `device` must be the same [`VulkanDevice`]
     /// every input's Vulkan elements were built from; a frame from another is
     /// refused by the input sink.
     ///

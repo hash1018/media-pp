@@ -19,9 +19,45 @@ use super::{Pipeline, completion::Completion, seek::PrerollSlot};
 
 pub(super) type SourceEntry = (ElementId, Box<dyn RawSource>);
 
-/// Accumulates one or more sources into a single [`Pipeline`] — the
-/// multi-source generalization of what [`Pipeline::new`] does for exactly
-/// one. Each [`PipelineBuilder::add_source`] call gets its own background
+/// Builds a [`Pipeline`] with several sources that start, pause and stop
+/// together.
+///
+/// Call [`PipelineBuilder::add_source`] once for each source, wiring its
+/// branches as [`Pipeline::new`] does, then [`PipelineBuilder::build`]. Use
+/// it when two live sources, such as a screen capture and a microphone,
+/// feed one recording or one output.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, TestAudioOptions, TestAudioSource};
+/// use media_pp::elements::{TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::PipelineBuilder;
+///
+/// let video = TestVideoSource::new("video", TestVideoOptions::default());
+/// let audio = TestAudioSource::new("audio", TestAudioOptions::default());
+/// let (pictures, _) = FrameCounter::new("pictures");
+/// let (sound, _) = FrameCounter::new("sound");
+///
+/// let (builder, ()) = PipelineBuilder::new("av").add_source(video, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().to(pictures)?)?;
+///     Ok(())
+/// })?;
+/// let (builder, ()) = builder.add_source(audio, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().to(sound)?)?;
+///     Ok(())
+/// })?;
+/// let pipeline = builder.build();
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// This is the multi-source generalization of what [`Pipeline::new`] does
+/// for exactly one. Each [`PipelineBuilder::add_source`] call gets its own background
 /// thread once [`PipelineBuilder::build`]'s [`Pipeline::run`] starts, but
 /// they all share one [`Bus`] (so [`Pipeline::bus`] sees every source's
 /// events on one channel), one [`Clock`] (so every [`crate::elements::Pacer`]

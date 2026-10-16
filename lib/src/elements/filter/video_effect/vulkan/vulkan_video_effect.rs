@@ -24,8 +24,9 @@ use crate::{
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/video_effect.wgsl");
 
-/// Errors specific to [`VulkanVideoEffect`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VulkanVideoEffect`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VulkanVideoEffectError {
     /// FFmpeg could not take a second reference to the frame already in
@@ -55,10 +56,45 @@ impl From<BgraPassError> for VulkanVideoEffectError {
     }
 }
 
-/// Applies a [`VideoEffect`] — a colour correction or a luma key — to a
-/// BGRA Vulkan frame, on the GPU: the Vulkan member of the family whose
-/// software member is [`SwVideoEffect`](crate::elements::SwVideoEffect),
-/// evaluating the same resolved numbers per pixel as every other.
+/// Corrects a picture's colour, or cuts out its dark or bright parts, on a
+/// GPU through Vulkan.
+///
+/// Behind the `vulkan` feature. It applies a [`VideoEffect`] — a colour
+/// correction or a luma key — to BGRA Vulkan frames and hands on BGRA
+/// frames: the Vulkan member of the family whose software member is
+/// [`SwVideoEffect`](crate::elements::SwVideoEffect), evaluating the same
+/// resolved numbers per pixel as every other. Change the effect while it
+/// runs through the [`VideoEffectHandle`] it returns.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ColorCorrection, FrameCounter, SwScaler, TestVideoOptions, TestVideoSource, VideoEffect,
+///     VulkanDevice, VulkanUpload, VulkanVideoEffect,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VulkanDevice::new()?;
+/// let source = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let grey = ColorCorrection { saturation: 0.0, ..Default::default() };
+/// let (effect, _tuning) = VulkanVideoEffect::new("grey", &device, VideoEffect::ColorCorrection(grey))?;
+/// let (layer, _) = FrameCounter::new("layer"); // a compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("corrected", source, |source, ctx| {
+///     let to_bgra = SwScaler::to_format("to-bgra", Pixel::BGRA, Flags::BILINEAR);
+///     let upload = VulkanUpload::new("upload", &device);
+///     let branch = ctx.branch().pipe(to_bgra).pipe(upload).pipe(effect).to(layer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// BGRA in and out, at whatever size the frames arrive in, on the
 /// [`VulkanDevice`] every other Vulkan element in the pipeline uses, with

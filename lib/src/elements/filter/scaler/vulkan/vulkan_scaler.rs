@@ -35,8 +35,9 @@ const SHADER: &str = include_str!("../../../../shaders/vulkan/scale.wgsl");
 /// sizes and the kernel.
 const IMMEDIATES: u32 = 32;
 
-/// Errors specific to [`VulkanScaler`]. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VulkanScaler`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VulkanScalerError {
     /// A size of zero was asked for.
@@ -114,11 +115,47 @@ impl VulkanScalerInterp {
     }
 }
 
-/// Resizes NV12 and BGRA Vulkan frames on the GPU, into frames of the same
-/// layout at the size it was made for — the Vulkan counterpart of
-/// `CudaScaler`, and what keeps
-/// `VulkanDecoder -> VulkanScaler -> VulkanEncoder`, or a compositor into a
-/// smaller encode, on the device, where the alternative was
+/// Resizes pictures on a GPU through Vulkan.
+///
+/// Behind the `vulkan` feature. Put it after a `VulkanDecoder` or a
+/// [`VulkanUpload`](crate::elements::VulkanUpload), in front of a Vulkan
+/// encoder, renderer or compositor that wants another size. It takes NV12
+/// or BGRA Vulkan frames and hands on frames of the same layout at the size
+/// it was built with.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, SwScaler, TestVideoOptions, TestVideoSource, VulkanDevice, VulkanScaler,
+///     VulkanScalerInterp, VulkanUpload,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VulkanDevice::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let scaler = VulkanScaler::new("scale", &device, 1280, 720, VulkanScalerInterp::Lanczos)?;
+/// let (encoder, _) = FrameCounter::new("encoder"); // a VulkanEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let upload = VulkanUpload::new("upload", &device);
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(scaler).to(encoder)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It resizes NV12 and BGRA Vulkan frames on the GPU, into frames of the same
+/// layout at the size it was made for — the Vulkan counterpart of `CudaScaler`,
+/// and what keeps `VulkanDecoder -> VulkanScaler -> VulkanEncoder`, or a
+/// compositor into a smaller encode, on the device, where the alternative was
 /// `VulkanDownload -> SwScaler -> VulkanUpload`.
 ///
 /// Its kernels are this crate's own rather than FFmpeg's `scale_vulkan`,

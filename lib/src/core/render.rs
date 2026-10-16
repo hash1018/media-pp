@@ -19,8 +19,45 @@ use crate::{
     stream::StreamEvent,
 };
 
-/// A terminal written as what it does with each buffer: plays it, shows
-/// it, hands it on out of the pipeline.
+/// A sink of your own, written as what it does with each buffer: plays it,
+/// shows it, hands it on out of the pipeline.
+///
+/// Implement [`Self::render`], and the other hooks only where the sink
+/// holds something or drives a device. End a branch in it with
+/// [`ChainBuilder::to`](crate::pipeline::ChainBuilder::to), as any built-in
+/// sink.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::buffer::MediaBuffer;
+/// use media_pp::element::Sink;
+/// use media_pp::elements::{TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// /// Prints the timestamp of each buffer.
+/// struct PrintPts;
+///
+/// impl Sink for PrintPts {
+///     fn render(&mut self, buf: MediaBuffer) -> media_pp::Result<()> {
+///         println!("{:?}", buf.pts());
+///         Ok(())
+///     }
+/// }
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (pipeline, ()) = Pipeline::new("print", source, |source, ctx| {
+///     let branch = ctx.branch().to(PrintPts.named("print"))?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The framework does the rest — `drain` before the end of the stream is
 /// taken, `reset` when a seek leaves the timeline behind or the stream is
@@ -87,12 +124,16 @@ pub trait Sink: Send {
         true
     }
 
-    /// Told who it is in the pipeline it is being wired into, and that
-    /// pipeline, before any buffer — and again if it is wired anew. Keep
+    /// Called as it is wired into a pipeline, before any buffer.
+    ///
+    /// It is told who it is in the pipeline it is being wired into, and
+    /// that pipeline — and again if it is wired anew. Keep
     /// [`Attached::pp_log`] to log; take from [`Attached::context`] what is
     /// needed of the pipeline. Nothing by default.
     fn attached(&mut self, _cx: &Attached<'_>) {}
 
+    /// Gives this sink a name for the log and the bus.
+    ///
     /// This terminal, going by `name` — to tell two of it apart in the log
     /// and on the bus. One not named goes by its type's name.
     fn named(self, name: impl Into<String>) -> Named<Self>
@@ -247,6 +288,8 @@ mod sealed {
     impl Sealed<AsBoxSink> for BoxSink {}
 }
 
+/// A boxed sink of any kind, for a terminal picked while the program runs.
+///
 /// A terminal of any kind, which kind forgotten: what to hold where the
 /// terminal is picked as the program runs — a window on one machine, a
 /// file on another — and what a muxer's track, a mixer's or a compositor's
@@ -260,7 +303,7 @@ mod sealed {
 pub struct BoxSink(Box<dyn RawSink>);
 
 impl BoxSink {
-    /// `terminal`, whichever kind it is.
+    /// Boxes `terminal`, whichever kind it is.
     pub fn new<M>(terminal: impl IntoTerminal<M>) -> Self {
         terminal.into_terminal()
     }

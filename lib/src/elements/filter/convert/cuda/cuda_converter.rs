@@ -23,8 +23,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `CudaConverter`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `CudaConverter`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaConverterError {
     /// FFmpeg could not take a second reference to the conversion already in
@@ -67,7 +68,42 @@ pub enum CudaConverterError {
     Driver(#[from] CudaDriverError),
 }
 
-/// Converts CUDA-resident BGRA surfaces into CUDA-resident NV12 ones.
+/// Converts pictures on an NVIDIA GPU between BGRA and NV12, either way round.
+///
+/// Behind the `cuda` feature. Built for NV12 it turns a BGRA capture into what
+/// the CUDA compositor and renderer take; built for BGRA it turns a camera's or
+/// decoder's NV12 into what [`CudaChromaKey`](crate::elements::CudaChromaKey)
+/// and the video effects take. It takes CUDA surfaces in the other format (and
+/// HDR P010, going to BGRA) and hands on CUDA surfaces of the same size.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CudaConverter, CudaDevice, CudaFrameFormat, CudaUpload, FrameCounter, SwScaler,
+///     TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CudaDevice::new()?;
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let to_bgra = CudaConverter::new("to-bgra", &device, CudaFrameFormat::Bgra)?;
+/// let (key, _) = FrameCounter::new("key"); // a CudaChromaKey, in practice
+/// let (pipeline, ()) = Pipeline::new("convert", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(to_bgra).to(key)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// A filter: takes each buffer and pushes the converted frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with

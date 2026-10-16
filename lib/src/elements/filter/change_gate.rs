@@ -17,6 +17,32 @@ use crate::{
 /// Forwards a video frame only when its picture is not the one it last
 /// forwarded, and never more often than `min_interval`.
 ///
+/// Put it just before a preview window fed by a screen capture or a compositor,
+/// so a still scene costs nothing to show. It takes decoded pictures in any
+/// memory and hands on the same pictures, fewer of them. Do not put it in front
+/// of an encoder: an encoder needs every picture at its rate, repeats included.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use std::time::Duration;
+///
+/// use media_pp::elements::{ChangeGate, FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (window, _) = FrameCounter::new("window"); // a window renderer, in practice
+/// let gate = ChangeGate::new("changes", Duration::from_millis(16));
+/// let (pipeline, ()) = Pipeline::new("preview", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(gate).to(window)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
 /// # What it is for
 ///
 /// A live source produces frames at a rate, not on change. A screen capture

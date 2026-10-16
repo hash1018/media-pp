@@ -27,9 +27,43 @@ pub enum D3d11GpuError {
     SharedDevice(#[from] D3d11SharedDeviceError),
 }
 
-/// The D3D11 device every D3D11 element of a pipeline shares, and its one
-/// immediate context behind the lock they all take — what every D3D11
-/// element's constructor takes, made once, correctly.
+/// The Direct3D 11 device that all D3D11 elements of a pipeline share.
+///
+/// Make one and pass it to every D3D11 element of that backend in a
+/// pipeline — decoder, upload, scaler, compositor, renderer. Pictures made
+/// on one device cannot be read on another, so one `D3d11Gpu` per pipeline
+/// (or per process) is the rule. Needs the `d3d11` feature, on Windows.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{D3d11Decoder, D3d11Download, D3d11Gpu, FileDemuxer, FrameCounter};
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// // Both elements are made from the same `gpu`.
+/// let decoder = D3d11Decoder::new("decoder", video.parameters.clone(), &gpu, 8)?;
+/// let download = D3d11Download::new("download", &gpu)?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(download).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It holds the device and its one immediate context behind the lock every
+/// D3D11 element takes — what every D3D11 element's constructor takes,
+/// made once, correctly.
 ///
 /// Every D3D11 element here has to be on the same device, and every one that
 /// draws or copies has to go through the same `Arc<Mutex<_>>` around that

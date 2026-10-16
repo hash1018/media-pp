@@ -31,8 +31,9 @@ use crate::{
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/chroma_key_bgra.hlsl");
 
-/// Errors specific to [`D3d11ChromaKey`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`D3d11ChromaKey`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11ChromaKeyError {
     /// A Direct3D resource, shader, or draw operation failed.
@@ -159,12 +160,50 @@ impl ChromaKeyConstants {
     }
 }
 
-/// Keys a solid background color out of a GPU-resident `Pixel::D3D11` BGRA
-/// frame into its alpha channel without ever touching the CPU — the D3D11
-/// half of this crate's chroma-key support, doing through a pixel shader
-/// exactly what [`crate::elements::SwChromaKey`] does per pixel on the CPU.
-/// A filter: takes each buffer and pushes the keyed frame on through its
-/// own single src pad.
+/// Makes a green (or blue, or any solid) background transparent, on a D3D11
+/// GPU.
+///
+/// The D3D11 counterpart of [`SwChromaKey`](crate::elements::SwChromaKey),
+/// behind the `d3d11` feature on Windows: it takes BGRA D3D11 textures and
+/// hands on BGRA textures with the background cut into their alpha, so a keyed
+/// camera or capture reaches a `D3d11VideoCompositor` without leaving the GPU.
+/// Tune it while it runs through the [`ChromaKeyHandle`] it returns.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Gpu, D3d11Scaler,
+///     D3d11ScalerFormat, D3d11Upload, FrameCounter, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let to_bgra = D3d11Scaler::to_format("to-bgra", &gpu, D3d11ScalerFormat::Bgra)?;
+/// let options = ChromaKeyOptions { method: ChromaKeyMethod::Green, threshold: 0.4, smoothing: 0.1 };
+/// let (key, _tuning) = D3d11ChromaKey::new("key", &gpu, options)?;
+/// let (layer, _) = FrameCounter::new("layer"); // a compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("keyed", camera, |source, ctx| {
+///     let upload = D3d11Upload::new("upload", &gpu);
+///     let branch = ctx.branch().pipe(upload).pipe(to_bgra).pipe(key).to(layer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It keys a solid background color out of a GPU-resident `Pixel::D3D11`
+/// BGRA frame into its alpha channel without ever touching the CPU — the
+/// D3D11 half of this crate's chroma-key support, doing through a pixel
+/// shader exactly what [`crate::elements::SwChromaKey`] does per pixel on
+/// the CPU. A filter: takes each buffer and pushes the keyed frame on
+/// through its own single src pad.
 ///
 /// The point is placement: `DxgiCaptureSource -> D3d11ChromaKey ->
 /// D3d11VideoCompositorHandle::add_source` keys a live layer with the frame

@@ -166,8 +166,16 @@ enum Wait {
     Gone,
 }
 
-/// A file played in a window of its own, with its sound — open, play, and
-/// wait for [`PlayerEvent`]s:
+/// Plays a file in a window of its own, with its sound — a whole pipeline
+/// behind one type.
+///
+/// Open it, call [`Self::play`], and wait for [`PlayerEvent`]s;
+/// [`Self::respond_to`] gives the window the usual keys. It needs a GPU
+/// feature and an audio output feature: `d3d11` or `d3d12` with
+/// `wasapi-renderer` on Windows, `vulkan` with `pipewire-audio-renderer` on
+/// Linux, `metal` with `coreaudio-renderer` on macOS.
+///
+/// # Example
 ///
 /// ```no_run
 /// use media_pp::player::{Player, PlayerEvent, PlayerOptions};
@@ -186,6 +194,8 @@ enum Wait {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # How it works
 ///
 /// A file with sound and no picture shows its sound's waveform instead —
 /// see [`AudioWaveform`](crate::elements::AudioWaveform).

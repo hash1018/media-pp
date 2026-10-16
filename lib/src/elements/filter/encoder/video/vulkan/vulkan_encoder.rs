@@ -67,8 +67,9 @@ pub struct VulkanEncoderOptions {
     pub max_b_frames: Option<u32>,
 }
 
-/// Errors specific to [`VulkanEncoder`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VulkanEncoder`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VulkanEncoderError {
     /// The encoder is not in this FFmpeg build.
@@ -129,9 +130,57 @@ pub enum VulkanEncoderError {
     HwDeviceRef,
 }
 
-/// Encodes NV12 Vulkan frames into `Packet`s with Vulkan Video, on a
-/// [`VulkanDevice`] — on any GPU whose driver encodes through Vulkan. The
-/// Vulkan counterpart of `CudaEncoder`, and a filter as it is.
+/// Encodes Vulkan pictures into H.264, HEVC or AV1 on any GPU whose driver
+/// encodes through Vulkan Video.
+///
+/// Takes NV12 frames on the pipeline's one [`VulkanDevice`] and hands on
+/// packets for a muxer, without the pictures coming back to the CPU.
+/// [`VideoEncodeBin`](crate::elements::VideoEncodeBin) opens it for Vulkan
+/// frames where it can. Needs the `vulkan` feature.
+///
+/// # Example
+///
+/// A file decoded and re-encoded on the GPU:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FileDemuxer, FileMuxer, Mp4Layout, VulkanCodec, VulkanDecoder, VulkanDevice,
+///     VulkanEncoder, VulkanEncoderOptions,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let device = VulkanDevice::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
+/// let decoder = VulkanDecoder::new("decode", video.parameters.clone(), &device, 4)?;
+/// let encoder = VulkanEncoder::new("encode", &device, VulkanEncoderOptions {
+///     codec: VulkanCodec::H264,
+///     width,
+///     height,
+///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     bit_rate: 6_000_000,
+///     gop_size: 60,
+///     max_b_frames: None,
+/// })?;
+///
+/// let mut muxer = FileMuxer::create("output.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+/// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// The Vulkan counterpart of `CudaEncoder`, and a filter as it is.
 ///
 /// Fed by [`crate::elements::VulkanDecoder`] this is a transcode that never
 /// brings a pixel to the CPU; fed by an NV12

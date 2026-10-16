@@ -18,7 +18,27 @@ use ffmpeg_next::{self as ffmpeg, ffi};
 
 use crate::pool::{UnboundObjectPool, UnboundObjectPoolRef};
 
-/// The unit of data that flows between elements.
+/// One buffer passed between elements: a packet, a picture or a sound.
+///
+/// Match the variant before reading it. Make one with
+/// [`MediaBuffer::video`], [`MediaBuffer::packet`] or
+/// [`MediaBuffer::audio`]. Cloning one shares the media; it never copies it.
+///
+/// # Example
+///
+/// ```no_run
+/// use media_pp::buffer::MediaBuffer;
+/// use media_pp::ffmpeg::{format::Pixel, frame::Video};
+///
+/// let buf = MediaBuffer::video(Video::new(Pixel::YUV420P, 320, 240));
+/// match &buf {
+///     MediaBuffer::Video(picture) => println!("{}x{}", picture.width(), picture.height()),
+///     MediaBuffer::Audio(sound) => println!("{} samples", sound.samples()),
+///     MediaBuffer::Packet(packet) => println!("{} bytes", packet.size()),
+/// }
+/// ```
+///
+/// # How it works
 ///
 /// Compressed and uncompressed data are kept as distinct variants (rather
 /// than a single opaque `Buffer` type like GStreamer) because ffmpeg-next
@@ -175,7 +195,7 @@ macro_rules! payload_buffer {
         }
 
         impl $name {
-            /// `payload`, carrying nothing yet.
+            /// Wraps `payload`, carrying no metadata yet.
             pub fn new(payload: Arc<$payload>) -> Self {
                 Self {
                     payload,
@@ -258,6 +278,31 @@ payload_buffer!(
 );
 
 /// What has been found out about a buffer, one value per type.
+///
+/// An element that learns something about a buffer — a detector its detections
+/// — puts a value of its own type here, and anything after it reads that value
+/// back by its type. Add to what a buffer already carries with [`Self::with`]
+/// on a copy, and set it with [`MediaBuffer::with_metadata`].
+///
+/// # Example
+///
+/// ```no_run
+/// use media_pp::buffer::{MediaBuffer, Metadata};
+/// use media_pp::ffmpeg::{format::Pixel, frame::Video};
+///
+/// /// What one element found out about a picture.
+/// struct Brightness(f32);
+///
+/// let buf = MediaBuffer::video(Video::new(Pixel::YUV420P, 320, 240));
+/// let found = buf.metadata().cloned().unwrap_or_default().with(Brightness(0.4));
+/// let buf = buf.with_metadata(found);
+///
+/// if let Some(Brightness(level)) = buf.metadata().and_then(Metadata::get::<Brightness>) {
+///     println!("brightness {level}");
+/// }
+/// ```
+///
+/// # How it works
 ///
 /// Open rather than a fixed set of fields, so an element defines the type
 /// of what it finds — a detector its detections, a tracker its tracks — and

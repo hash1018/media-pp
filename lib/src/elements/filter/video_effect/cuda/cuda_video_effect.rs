@@ -25,8 +25,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `CudaVideoEffect`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to `CudaVideoEffect`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaVideoEffectError {
     /// FFmpeg could not take a second reference to the frame already in
@@ -55,8 +56,43 @@ pub enum CudaVideoEffectError {
     Driver(#[from] CudaDriverError),
 }
 
-/// Applies a [`VideoEffect`] — a colour correction or a luma key — to a
-/// CUDA-resident BGRA surface, on the GPU.
+/// Corrects a picture's colour, or cuts out its dark or bright parts, on an
+/// NVIDIA GPU with CUDA.
+///
+/// Behind the `cuda` feature. It applies a [`VideoEffect`] — a colour
+/// correction or a luma key — to BGRA CUDA surfaces and hands on BGRA
+/// surfaces, in front of a CUDA compositor layer or encoder; change the
+/// effect while it runs through the [`VideoEffectHandle`] it returns.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ColorCorrection, CudaDevice, CudaFrameFormat, CudaUpload, CudaVideoEffect, FrameCounter,
+///     SwScaler, TestVideoOptions, TestVideoSource, VideoEffect,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CudaDevice::new()?;
+/// let source = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let brighter = ColorCorrection { brightness: 0.1, gamma: 1.2, ..Default::default() };
+/// let (effect, _tuning) = CudaVideoEffect::new("colour", &device, VideoEffect::ColorCorrection(brighter))?;
+/// let (layer, _) = FrameCounter::new("layer"); // a CUDA compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("corrected", source, |source, ctx| {
+///     let to_bgra = SwScaler::to_format("to-bgra", Pixel::BGRA, Flags::BILINEAR);
+///     let upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
+///     let branch = ctx.branch().pipe(to_bgra).pipe(upload).pipe(effect).to(layer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The CUDA member of the family whose software member is
 /// [`SwVideoEffect`](crate::elements::SwVideoEffect); all of them evaluate

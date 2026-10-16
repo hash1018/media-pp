@@ -28,11 +28,41 @@ use super::fitting::{Cut, Fitting};
 use super::{CORE_ML_BATCH, object_model_session};
 
 /// Classifies the objects a detector found on each VideoToolbox picture
-/// with a second model — what
-/// [`SwOrtClassifier`](crate::elements::SwOrtClassifier) does on the CPU,
-/// with each object's box cut from the picture and stretched into the
-/// model's input by a Metal kernel where the picture is, several objects to
-/// one run, and the model run by ONNX Runtime's Core ML provider on the GPU
+/// with a second ONNX model, run by Core ML.
+///
+/// It does what [`SwOrtClassifier`](crate::elements::SwOrtClassifier) does
+/// on the CPU, for NV12, BGRA or HDR P010 VideoToolbox pictures. Needs the
+/// `ort-coreml` feature, on an Apple silicon Mac.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions, ObjectTracker,
+///     OrtClassifierOptions, TrackerOptions,
+/// };
+/// # use media_pp::{element::Context, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain(ctx: &std::sync::Arc<Context>) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("found", |_buf| Ok(()));
+///
+/// let options = MetalOrtDetectorOptions::default();
+/// let detector = MetalOrtDetector::new("detector", "yolov10n.onnx", options)?;
+/// let tracker = ObjectTracker::new("tracker", TrackerOptions::default());
+/// let classifier =
+///     MetalOrtClassifier::new("make", "car_make.onnx", OrtClassifierOptions::default())?;
+/// let branch = ctx.branch().pipe(detector).pipe(tracker).pipe(classifier).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// Each object's box is cut from the picture and stretched into the model's
+/// input by a Metal kernel where the picture is, several objects to one
+/// run, and the model is run by ONNX Runtime's Core ML provider on the GPU
 /// or the Neural Engine.
 ///
 /// It goes after a detector — a

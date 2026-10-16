@@ -15,6 +15,46 @@ use crate::{
 /// Shifts a packet stream so that its timeline starts at zero, taking the
 /// first packet it sees as the origin.
 ///
+/// Put it between the encoder and the muxer of a recording branch that is
+/// attached to a running [`Tee`](crate::elements::Tee), so the file starts at
+/// zero rather than at however long the source had been running. It takes
+/// packets, video or sound, and hands on the same packets with new timestamps.
+/// A branch with a [`FrameRateLimiter`](crate::elements::FrameRateLimiter)
+/// already starts at zero and does not need one.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// # use media_pp::ffmpeg::{format::Pixel, Rational};
+/// use media_pp::elements::{
+///     FileMuxer, Mp4Layout, SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource,
+///     TimestampOrigin, VideoCodec,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (pipeline, tee) = Pipeline::new("live", source, |source, ctx| {
+///     let (fan_out, tee) = ctx.tee("tee").build_dynamic()?;
+///     ctx.attach(source, 0, fan_out)?;
+///     Ok(tee)
+/// })?;
+/// pipeline.run()?;
+///
+/// // Minutes later, a recording that starts at zero:
+/// # let options = SwEncoderOptions { codec: VideoCodec::OpenH264, width: 640, height: 480,
+/// #     pixel_format: Pixel::YUV420P, frame_rate: Rational(30, 1), bit_rate: 2_000_000,
+/// #     gop_size: 60, max_b_frames: None };
+/// let encoder = SwEncoder::new("encoder", options)?;
+/// let mut muxer = FileMuxer::create("clip.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let file = muxer.open()?.take(track)?;
+/// let origin = TimestampOrigin::new("origin");
+/// tee.attach(tee.branch()?.queue("rec", 8).pipe(encoder).pipe(origin).to(file)?)?;
+/// # Ok(())
+/// # }
+/// ```
+///
 /// # What it is for
 ///
 /// A branch attached to a [`Tee`](crate::elements::Tee) that is already

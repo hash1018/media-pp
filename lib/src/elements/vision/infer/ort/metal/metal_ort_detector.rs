@@ -83,13 +83,47 @@ impl Default for MetalOrtDetectorOptions {
     }
 }
 
-/// Runs a detector — YOLO, or the kind [`OrtDetectorOptions::model`] says
-/// — on each VideoToolbox picture and hands the picture
-/// on unchanged, carrying the [`Detections`] found in it — what
-/// [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU, with the
-/// picture fitted to the model's input by a Metal kernel where it is, and
-/// the model run by ONNX Runtime's Core ML provider on the GPU or the Neural
-/// Engine.
+/// Finds objects in each VideoToolbox picture with an ONNX model run by
+/// Core ML, and hands the picture on carrying what it found.
+///
+/// It takes NV12, BGRA or HDR P010 VideoToolbox pictures, and hands each on
+/// unchanged with the [`Detections`] found in it, as
+/// [`SwOrtDetector`](super::super::SwOrtDetector) does on the CPU. Needs the
+/// `ort-coreml` feature, on an Apple silicon Mac.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AppSink, FileDemuxer, MetalOrtDetector, MetalOrtDetectorOptions, VideoToolboxDecoder,
+///     VideoToolboxDevice,
+/// };
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// # let video = source.best(media::Type::Video)?;
+/// # let params = video.parameters.clone();
+/// # let sink = AppSink::new("found", |_buf| Ok(()));
+/// let device = VideoToolboxDevice::new()?;
+/// let detector =
+///     MetalOrtDetector::new("detector", "yolov10n.onnx", MetalOrtDetectorOptions::default())?;
+/// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
+///     let decoder = VideoToolboxDecoder::new("decoder", params, &device)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// The picture is fitted to the model's input by a Metal kernel where it is,
+/// and the model — YOLO, or the kind [`OrtDetectorOptions::model`] says — is
+/// run by ONNX Runtime's Core ML provider on the GPU or the Neural Engine.
 ///
 /// It takes NV12 or BGRA VideoToolbox pictures of any size — a decoder's, a
 /// camera's, a screen's — from any device, since a pixel buffer belongs to

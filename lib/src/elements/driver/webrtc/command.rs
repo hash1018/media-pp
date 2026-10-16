@@ -12,7 +12,10 @@ use thiserror::Error as ThisError;
 
 use crate::buffer::MediaBuffer;
 
-/// Identifies one outbound track before/after negotiation. str0m's own
+/// Names one track of a [`WebRtcPeer`](crate::elements::WebRtcPeer), from
+/// the moment it is requested.
+///
+/// It identifies one outbound track before/after negotiation. str0m's own
 /// [`Mid`] doesn't exist until the SDP exchange that creates it completes,
 /// so this is a stable handle usable from the moment
 /// [`super::track::WebRtcHandle::add_track`] returns.

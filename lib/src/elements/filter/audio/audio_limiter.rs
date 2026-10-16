@@ -91,8 +91,10 @@ impl From<Unreadable> for AudioLimiterError {
     }
 }
 
-/// Thread-safe runtime control for an [`AudioLimiter`], with the ownership
-/// of [`AudioGateHandle`](crate::elements::AudioGateHandle).
+/// Changes an [`AudioLimiter`]'s ceiling and release while it runs.
+///
+/// Thread-safe runtime control, with the ownership of
+/// [`AudioGateHandle`](crate::elements::AudioGateHandle).
 #[derive(Debug, Clone)]
 pub struct AudioLimiterHandle {
     control: Arc<Tuning<AudioLimiterOptions>>,
@@ -116,14 +118,43 @@ impl AudioLimiterHandle {
     }
 }
 
-/// A limiter: nothing that comes out is louder than a level — the last
-/// thing on a channel, so a shout or a knock cannot clip the mix, the way a
-/// streaming application's limiter is used.
+/// Keeps sound under a ceiling level, so a shout or a knock cannot clip the
+/// mix.
 ///
+/// A limiter: nothing that comes out is louder than a level — the last
+/// thing on a channel, the way a streaming application's limiter is used.
 /// Takes decoded `f32` audio, packed or planar, at any rate and channel
 /// count, and passes it on with its format, rate, layout, sample count and
 /// timestamps unchanged; it only scales samples, and adds no delay. One gain
 /// for every channel, from the loudest, as the other dynamics filters.
+///
+/// # Example
+///
+/// A microphone's usual chain: gate, compressor, then the limiter last.
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     AudioCompressor, AudioGate, AudioLimiter, AudioLimiterOptions, FrameCounter,
+///     TestAudioOptions, TestAudioSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("mic", TestAudioOptions::default()); // a capture, in practice
+/// let (gate, _) = AudioGate::new("gate");
+/// let (compressor, _) = AudioCompressor::new("compressor");
+/// let ceiling = AudioLimiterOptions { threshold_db: -1.0, ..Default::default() };
+/// let (limiter, _) = AudioLimiter::with_options("limiter", ceiling)?;
+/// let (mixer, _) = FrameCounter::new("mixer"); // a mixer input, in practice
+/// let (pipeline, ()) = Pipeline::new("voice", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(gate).pipe(compressor).pipe(limiter).to(mixer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # A ceiling, not a tendency
 ///

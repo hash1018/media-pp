@@ -56,7 +56,41 @@ pub enum VulkanDeviceError {
     },
 }
 
-/// The one Vulkan device every Vulkan element in a pipeline shares.
+/// The Vulkan device that all Vulkan elements of a pipeline share.
+///
+/// Make one and pass it to every Vulkan element of that backend in a
+/// pipeline — decoder, upload, scaler, compositor, encoder. An image made
+/// on one device cannot be used on another. Needs the `vulkan` feature.
+/// On Linux, `VulkanWindowRenderer` draws with a `VulkanGpu` instead.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FileDemuxer, FrameCounter, VulkanDecoder, VulkanDevice, VulkanDownload,
+/// };
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// let device = VulkanDevice::new()?;
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// // Both elements are made from the same `device`.
+/// let decoder = VulkanDecoder::new("decoder", video.parameters.clone(), &device, 8)?;
+/// let download = VulkanDownload::new("download", &device);
+/// let (counter, _frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(download).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The Vulkan counterpart of `CudaDevice`: an image made
 /// on one `VkDevice` cannot be used on another, so every element that makes

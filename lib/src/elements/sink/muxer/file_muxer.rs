@@ -15,8 +15,9 @@ use crate::{
     error::{Error, Result},
 };
 
-/// Errors specific to `FileMuxer`. Converts into the crate-wide `Error` via
-/// `?` (see [`crate::error::Error`]).
+/// What can go wrong creating or writing a [`FileMuxer`]'s file.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum FileMuxerError {
     /// A stream sink received a buffer other than a packet or end-of-stream.
@@ -63,7 +64,61 @@ pub enum FileMuxerError {
     },
 }
 
-/// Builds one container file with one or more tracks, then opens it into
+/// Writes encoded video, sound and subtitle tracks into one file — MP4,
+/// MKV, MOV or any container FFmpeg knows by the file's extension.
+///
+/// It takes packets, one sink per track, and encodes nothing: put an encoder in
+/// front of each track, or copy a demuxer's packets through unchanged. Declare
+/// every track with [`FileMuxer::add_stream`] first, then [`FileMuxer::open`]
+/// writes the header and hands back the tracks' sinks, each of which ends a
+/// chain. The file is finished once every track has reached the end of its
+/// stream — [`Pipeline::finish`](crate::pipeline::Pipeline::finish). For a
+/// recording cut into several files see
+/// [`SegmentedFileMuxer`](crate::elements::SegmentedFileMuxer); for one written
+/// only when asked, [`ReplayBuffer`](crate::elements::ReplayBuffer).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// # use media_pp::ffmpeg;
+/// # use media_pp::elements::{SwEncoderOptions, VideoCodec};
+/// use media_pp::elements::{FileMuxer, Mp4Layout, SwEncoder, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// # let options = SwEncoderOptions {
+/// #     codec: VideoCodec::OpenH264,
+/// #     width: 640,
+/// #     height: 480,
+/// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
+/// #     frame_rate: ffmpeg::Rational(30, 1),
+/// #     bit_rate: 2_000_000,
+/// #     gop_size: 60,
+/// #     max_b_frames: None,
+/// # };
+/// let encoder = SwEncoder::new("encoder", options)?; // H.264, 640x480 at 30 fps
+///
+/// let mut muxer = FileMuxer::create("out.mp4", Mp4Layout::Standard)?;
+/// let video = muxer.add_stream("video", &encoder)?; // more tracks go here
+/// let mut sinks = muxer.open()?; // writes the header
+/// let video_sink = sinks.take(video)?;
+///
+/// let (pipeline, ()) = Pipeline::new("record", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(encoder).to(video_sink)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// // ... later: drain the encoder and write the trailer.
+/// pipeline.finish();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It builds one container file with one or more tracks, then opens it into
 /// one [`RawSink`](crate::element::RawSink) per track.
 ///
 /// Which container is the path's own: `format::output` asks FFmpeg to guess
@@ -78,39 +133,6 @@ pub enum FileMuxerError {
 /// come online (contrast [`crate::elements::AudioMixer`], whose inputs
 /// *can* attach at any time — it has no "known shape before the first
 /// byte" constraint the way a container header does).
-///
-/// ```no_run
-/// # use media_pp::ffmpeg;
-/// # use media_pp::elements::{
-/// #     AudioCodec, FileMuxer, Mp4Layout, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
-/// #     SwEncoderOptions, VideoCodec,
-/// # };
-/// # fn main() -> media_pp::Result<()> {
-/// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
-/// #     codec: VideoCodec::OpenH264,
-/// #     width: 640,
-/// #     height: 360,
-/// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
-/// #     frame_rate: ffmpeg::Rational(30, 1),
-/// #     bit_rate: 2_000_000,
-/// #     gop_size: 30,
-/// #     max_b_frames: None,
-/// # })?;
-/// # let audio_encoder = SwAudioEncoder::new("audio", SwAudioEncoderOptions {
-/// #     codec: AudioCodec::Aac,
-/// #     sample_rate: 48_000,
-/// #     channels: 2,
-/// #     bit_rate: 128_000,
-/// # })?;
-/// let mut muxer = FileMuxer::create("out.mp4", Mp4Layout::Standard)?;
-/// let video = muxer.add_stream("video", &video_encoder)?;
-/// let audio = muxer.add_stream("audio", &audio_encoder)?;
-/// let mut sinks = muxer.open()?; // writes the header
-/// let video_sink = sinks.take(video)?;
-/// let audio_sink = sinks.take(audio)?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct FileMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,
@@ -118,8 +140,9 @@ pub struct FileMuxer {
     layout: Mp4Layout,
 }
 
-/// Where an MP4 or MOV file keeps its index — the `moov` box that says where
-/// every sample is — given to [`FileMuxer::create`]. The samples are
+/// Where an MP4 or MOV file keeps its index, chosen in [`FileMuxer::create`].
+///
+/// The index is the `moov` box that says where every sample is. The samples are
 /// the same in all three; what differs is what can read the file before it
 /// is finished, and how soon one streamed starts to play.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

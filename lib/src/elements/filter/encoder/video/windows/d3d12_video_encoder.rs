@@ -82,8 +82,9 @@ pub struct D3d12VideoEncoderOptions {
     pub max_b_frames: Option<u32>,
 }
 
-/// Errors specific to [`D3d12VideoEncoder`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`D3d12VideoEncoder`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12VideoEncoderError {
     /// The encoder is not in this FFmpeg build.
@@ -135,10 +136,60 @@ pub enum D3d12VideoEncoderError {
     D3d12(#[from] windows::core::Error),
 }
 
-/// Encodes NV12 D3D12 frames into `Packet`s with D3D12 Video, on the
-/// [`D3d12Gpu`] the frames are made on — on any vendor's GPU whose driver
-/// encodes through D3D12. The D3D12 counterpart of `VulkanEncoder`, and a
-/// a filter as it is.
+/// Encodes D3D12 pictures into H.264 or HEVC on any vendor's GPU, through
+/// D3D12 Video.
+///
+/// Takes NV12 frames on the [`D3d12Gpu`] they are made on and hands on
+/// packets for a muxer, without the pictures coming back to the CPU. Use it
+/// for a pipeline on D3D12; on D3D11, `D3d11VideoEncoder` reaches NVENC
+/// and Media Foundation instead. Needs the `d3d12` feature, and a driver
+/// that encodes the codec through D3D12 Video.
+///
+/// # Example
+///
+/// A file decoded and re-encoded on the GPU, with the stream's own colour
+/// written into the new one by [`D3d12VideoEncoder::for_stream`]:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d12Decoder, D3d12Gpu, D3d12VideoCodec, D3d12VideoEncoder, D3d12VideoEncoderOptions,
+///     FileDemuxer, FileMuxer, Mp4Layout,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
+/// let decoder = D3d12Decoder::new("decode", video.parameters.clone(), &gpu)?;
+/// let options = D3d12VideoEncoderOptions {
+///     codec: D3d12VideoCodec::H265,
+///     width,
+///     height,
+///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     bit_rate: 6_000_000,
+///     gop_size: 60,
+///     max_b_frames: None,
+/// };
+/// let encoder = D3d12VideoEncoder::for_stream("encode", &gpu, options, &video)?;
+///
+/// let mut muxer = FileMuxer::create("output.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+/// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// The D3D12 counterpart of `VulkanEncoder`, and a filter as it is.
 ///
 /// Fed by [`crate::elements::D3d12Decoder`] this is a transcode that never
 /// brings a pixel to the CPU; fed by a

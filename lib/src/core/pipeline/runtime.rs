@@ -56,7 +56,49 @@ pub enum PipelineError {
     UnsupportedRate,
 }
 
-/// Top-level pipeline: one or more sources (see [`PipelineBuilder`], with
+/// A media graph you run: one or more sources, the branches wired behind
+/// them, and the bus that reports what happens.
+///
+/// Make one with [`Pipeline::new`] for one source, or with
+/// [`PipelineBuilder`] for several. In the `wire` closure, build each branch
+/// with [`Context::branch`] and attach it to a source's output with
+/// [`Context::attach`]. Then call [`Pipeline::run`], read [`Pipeline::bus`]
+/// until [`BusEvent::Finished`](crate::bus::BusEvent::Finished), and
+/// [`Pipeline::stop`] it.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
+/// use media_pp::elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder};
+/// use media_pp::{ffmpeg::media, pipeline::Pipeline};
+///
+/// let (source, _streams) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let (counter, frames) = FrameCounter::new("counter");
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(Pacer::new("pacer")).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// for event in pipeline.bus().iter() {
+///     println!("{event}");
+///     if matches!(event, BusEvent::Finished) {
+///         pipeline.stop();
+///     }
+/// }
+/// println!("{} pictures", frames.get());
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A pipeline holds one or more sources (see [`PipelineBuilder`], with
 /// everything reachable from each source's own src pads already linked)
 /// plus the bus every source reports events on and the [`Clock`] every
 /// [`crate::elements::Pacer`] in it shares.
@@ -186,6 +228,9 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// Makes a pipeline of one source and calls `wire` to build the branches
+    /// behind it.
+    ///
     /// `id` names this pipeline — stamped into the source's own `pp_log` as
     /// its `pipeline_id` right away, and folded into the [`Context`] handed
     /// to `wire` (see [`super::ChainBuilder`]'s own docs).
@@ -263,13 +308,14 @@ impl Pipeline {
         self.graph().nodes
     }
 
-    /// Human-readable rundown of [`Pipeline::elements`]: one line per
-    /// branch — each element nothing else in the graph feeds into (a
-    /// terminal sink, or an empty [`crate::elements::Tee`] with no sinks
-    /// attached yet) — formatted `Type(name) - Type(name) - ...` by
-    /// walking that element's `upstream` chain back to the source.
-    /// Multiple branches (fan-out across more than one src pad, or a
-    /// `Tee`) are joined by newlines.
+    /// The graph as text, one line per branch.
+    ///
+    /// A human-readable rundown of [`Pipeline::elements`]: one line per branch
+    /// — each element nothing else in the graph feeds into (a terminal sink, or
+    /// an empty [`crate::elements::Tee`] with no sinks attached yet) —
+    /// formatted `Type(name) - Type(name) - ...` by walking that element's
+    /// `upstream` chain back to the source. Multiple branches (fan-out across
+    /// more than one src pad, or a `Tee`) are joined by newlines.
     pub fn topology(&self) -> String {
         self.graph().topology()
     }

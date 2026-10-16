@@ -4,9 +4,11 @@
 use std::fmt;
 use std::sync::Arc;
 
-/// One input of a [`StreamMux`](super::StreamMux), as long as it is
-/// registered: a new registration under a name already in use is a new
-/// stream, with state of its own wherever state is kept per stream.
+/// One input of a [`StreamMux`](super::StreamMux), for as long as it is
+/// registered.
+///
+/// A new registration under a name already in use is a new stream, with
+/// state of its own wherever state is kept per stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StreamId(pub(crate) u64);
 

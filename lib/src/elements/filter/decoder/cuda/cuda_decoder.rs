@@ -20,8 +20,9 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-/// Errors specific to `CudaDecoder`. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to `CudaDecoder`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaDecoderError {
     /// The selected stream is not video.
@@ -52,9 +53,43 @@ pub enum CudaDecoderError {
     InvalidSurfaceBudget(i32),
 }
 
-/// Decodes one video stream's `Packet`s into GPU-resident `Video` frames on
-/// NVDEC, tagged [`ffmpeg::format::Pixel::CUDA`]. A filter, the same shape as
-/// [`crate::elements::SwDecoder`]/`D3d11Decoder`.
+/// Decodes a video stream on an NVIDIA GPU's NVDEC into CUDA pictures.
+///
+/// Takes one video stream's packets and hands on frames on the pipeline's
+/// one [`CudaDevice`], tagged [`ffmpeg::format::Pixel::CUDA`] — NV12, or
+/// P010 for a 10-bit stream — for CUDA elements after it: a scaler, a
+/// compositor, [`CudaEncoder`](crate::elements::CudaEncoder), a renderer.
+/// A codec NVDEC has no decoder for fails at construction; for streams that
+/// must reach CUDA either way, [`VideoDecodeBin`](crate::elements::VideoDecodeBin)
+/// falls back to software and uploads. Needs the `cuda` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{CudaDecoder, CudaDevice, FileDemuxer, FrameCounter};
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let device = CudaDevice::new()?;
+/// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// // Room for the 4 pictures the queue after it may hold.
+/// let decoder = CudaDecoder::new("decode", video.parameters.clone(), &device, 4)?;
+/// let (counter, frames) = FrameCounter::new("count");
+///
+/// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).to(counter)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A filter, the same shape as [`crate::elements::SwDecoder`]/`D3d11Decoder`.
 ///
 /// Frames this produces are still plain `MediaBuffer::Video` — `Pacer`,
 /// `Tee`, `Queue`, and `FrameCounter` only touch `.pts()` or match the enum

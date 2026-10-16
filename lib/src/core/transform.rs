@@ -24,8 +24,49 @@ use crate::{
     stream::StreamEvent,
 };
 
-/// A filter written as its media work alone: each buffer in, what it makes
-/// of it out.
+/// A filter of your own, written as its media work alone: each buffer in,
+/// what it makes of it out.
+///
+/// Implement [`Self::transform`], and [`Self::drain`] if it holds buffers
+/// back. Put it in a branch with
+/// [`ChainBuilder::pipe`](crate::pipeline::ChainBuilder::pipe), as any
+/// built-in filter.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::buffer::MediaBuffer;
+/// use media_pp::element::{Filter, Output};
+/// use media_pp::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// /// Hands on every second buffer.
+/// struct EveryOther(bool);
+///
+/// impl Filter for EveryOther {
+///     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> media_pp::Result<()> {
+///         self.0 = !self.0;
+///         if self.0 {
+///             out.push(buf);
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (counter, _pictures) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("halve", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(EveryOther(false)).to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// The framework does the rest — the one output pad, the buffers handed on
 /// in order, `drain` before the end of the stream goes on, `reset` when a
@@ -66,11 +107,11 @@ use crate::{
 /// one [`Self::named`] gives it, and is told who it is in the pipeline —
 /// and which pipeline — through [`Self::attached`].
 pub trait Filter: Send {
-    /// Makes what `buf` answers to, into `out` — nothing, one buffer, or
-    /// several. Never handed the end of the stream: that is `drain`'s.
+    /// Puts in `out` what this filter makes of `buf`: nothing, one buffer,
+    /// or several. Never handed the end of the stream: that is `drain`'s.
     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> Result<()>;
 
-    /// What it still holds, into `out`, before the end of the stream goes
+    /// Puts in `out` what it still holds, before the end of the stream goes
     /// on — a codec's delayed output. Nothing by default.
     fn drain(&mut self, _out: &mut Output) -> Result<()> {
         Ok(())
@@ -80,11 +121,12 @@ pub trait Filter: Send {
     /// go of it too — see [`Self::stopping`]. Nothing by default.
     fn reset(&mut self) {}
 
-    /// Lets go of what the run as a whole kept, beside what
-    /// [`Self::reset`] does: a stop abandons the run, and a pipeline run
-    /// again begins its output anew, where a seek only moves within it — a
-    /// timeline taken from the first buffer, a count of what went out. What
-    /// `reset` does by default.
+    /// Lets go of what it holds when the pipeline stops.
+    ///
+    /// That is what the run as a whole kept, beside what [`Self::reset`] does:
+    /// a stop abandons the run, and a pipeline run again begins its output
+    /// anew, where a seek only moves within it — a timeline taken from the
+    /// first buffer, a count of what went out. What `reset` does by default.
     fn stopping(&mut self) {
         self.reset();
     }
@@ -106,12 +148,16 @@ pub trait Filter: Send {
         true
     }
 
-    /// Told who it is in the pipeline it is being wired into, and that
-    /// pipeline, before any buffer — and again if it is wired anew. Keep
+    /// Called as it is wired into a pipeline, before any buffer.
+    ///
+    /// It is told who it is in the pipeline it is being wired into, and
+    /// that pipeline — and again if it is wired anew. Keep
     /// [`Attached::pp_log`] to log; take from [`Attached::context`] what is
     /// needed of the pipeline. Nothing by default.
     fn attached(&mut self, _cx: &Attached<'_>) {}
 
+    /// Gives this filter a name for the log and the bus.
+    ///
     /// This filter, going by `name` — to tell two of it apart in the log
     /// and on the bus. One not named goes by its type's name.
     fn named(self, name: impl Into<String>) -> Named<Self>
@@ -393,6 +439,8 @@ mod sealed {
     impl Sealed<AsBoxFilter> for BoxFilter {}
 }
 
+/// A boxed filter of any kind, for a filter picked while the program runs.
+///
 /// A filter of any kind, which kind forgotten: what to hold where the
 /// filter is picked as the program runs — an upload onto whichever device
 /// there is — and what a [`Rack`](crate::elements::Rack) is filled with.
@@ -404,7 +452,7 @@ mod sealed {
 pub struct BoxFilter(Box<dyn RawFilter>);
 
 impl BoxFilter {
-    /// `filter`, whichever kind it is.
+    /// Boxes `filter`, whichever kind it is.
     pub fn new<M>(filter: impl IntoFilter<M>) -> Self {
         filter.into_filter()
     }

@@ -4,11 +4,12 @@
 
 use crate::color::Color;
 
-/// Which background color a chroma key treats as transparent. `Green`/
-/// `Blue` are the two conventional screen colors (mirroring GStreamer's
-/// `alpha` element's `method` property); `Custom` covers anything else —
-/// a differently colored backdrop, or a solid-color background that isn't
-/// a screen at all.
+/// Which background color a chroma key treats as transparent.
+///
+/// `Green`/ `Blue` are the two conventional screen colors (mirroring
+/// GStreamer's `alpha` element's `method` property); `Custom` covers anything
+/// else — a differently colored backdrop, or a solid-color background that
+/// isn't a screen at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChromaKeyMethod {
     /// Key the conventional pure-green screen color.

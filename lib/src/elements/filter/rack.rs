@@ -41,8 +41,50 @@ pub enum RackError {
     },
 }
 
-/// A stretch of chain whose contents can be replaced while frames are
-/// flowing through it.
+/// A stretch of chain whose filters can be swapped while pictures flow
+/// through it, without restarting the source.
+///
+/// Put a `Rack` where the user may add, remove or reorder effects at run time —
+/// a chroma key switched on, a scaler changed — in front of a source that is
+/// costly to reopen, such as a camera or a screen capture. You declare what it
+/// takes and what it hands on, and fill it through the [`RackHandle`] that
+/// [`Rack::new`] returns; an empty rack passes each buffer straight through.
+/// Only filters that make each output from the one buffer in front of them
+/// belong in it — see [What may go in one](#what-may-go-in-one).
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract};
+/// use media_pp::element::BoxFilter;
+/// use media_pp::elements::{FrameCounter, Rack, SwScaler, TestVideoOptions, TestVideoSource};
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let frames = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System);
+/// let (rack, effects) = Rack::new(
+///     "effects",
+///     InputContract::Fixed(frames),
+///     OutputContract::Fixed(frames),
+/// );
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (counter, _) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("live", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(rack).to(counter)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+///
+/// // While it runs: put a scaler in, later take everything out again.
+/// let scaler = SwScaler::new("scale", Pixel::YUV420P, 640, 360, Flags::BILINEAR);
+/// effects.replace(vec![BoxFilter::new(scaler)])?;
+/// effects.replace(Vec::new())?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// Everything else in this crate settles its graph before the pipeline runs:
 /// [`ChainBuilder`](crate::pipeline::ChainBuilder) wires a branch and that
@@ -156,12 +198,13 @@ impl RackControl {
     }
 }
 
-/// Thread-safe runtime control for a [`Rack`].
+/// Replaces what a [`Rack`] holds while the pipeline runs — see the
+/// [`Rack`] example.
 ///
-/// Cloning is cheap, and every clone fills the same rack. Retaining one keeps
-/// only the small shared slot alive — not the rack, its elements, or the
-/// pipeline graph. A handle whose rack has been dropped still accepts a
-/// replacement; nothing picks it up, and nothing fails.
+/// Thread-safe runtime control. Cloning is cheap, and every clone fills the
+/// same rack. Retaining one keeps only the small shared slot alive — not the
+/// rack, its elements, or the pipeline graph. A handle whose rack has been
+/// dropped still accepts a replacement; nothing picks it up, and nothing fails.
 #[derive(Clone)]
 pub struct RackHandle {
     control: Arc<RackControl>,

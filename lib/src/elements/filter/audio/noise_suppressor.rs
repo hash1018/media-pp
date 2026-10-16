@@ -90,14 +90,35 @@ impl Channel {
     }
 }
 
-/// Takes background noise out of speech — fans, keyboards, a room — with
-/// RNNoise, the recurrent network a streaming application's noise
-/// suppression uses. Behind the `rnnoise` feature.
+/// Takes background noise out of speech — fans, keyboards, a room.
 ///
-/// Takes decoded `f32` audio at 48 kHz, packed or planar, any number of
-/// channels, each denoised on its own. What comes out is frame for frame
-/// what went in — the same sample counts, format, layout and timestamps —
-/// with the samples replaced.
+/// It uses RNNoise, the recurrent network a streaming application's noise
+/// suppression uses, and is behind the `rnnoise` feature. Put it on a
+/// microphone's branch, before a gate or compressor. It takes decoded `f32`
+/// audio at 48 kHz ([`NOISE_SUPPRESSOR_SAMPLE_RATE`]), packed or planar, any
+/// number of channels, each denoised on its own — an
+/// [`AudioResampler`](crate::elements::AudioResampler) in front converts
+/// anything else. What comes out is frame for frame what went in — the same
+/// sample counts, format, layout and timestamps — with the samples replaced.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, NoiseSuppressor, TestAudioOptions, TestAudioSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestAudioSource::new("mic", TestAudioOptions::default()); // 48 kHz f32
+/// let (mixer, _) = FrameCounter::new("mixer"); // a mixer input, in practice
+/// let (pipeline, ()) = Pipeline::new("voice", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(NoiseSuppressor::new("denoise")).to(mixer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Delay
 ///

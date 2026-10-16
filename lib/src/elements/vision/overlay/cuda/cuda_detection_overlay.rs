@@ -39,8 +39,9 @@ use crate::elements::Analytics;
 use crate::elements::source::{TextFontError, load_font};
 use crate::orientation::Orientations;
 
-/// Errors specific to `CudaDetectionOverlay`. Converts into the crate-wide
-/// `Error` via `?`.
+/// Errors specific to `CudaDetectionOverlay`.
+///
+/// Converts into the crate-wide `Error` via `?`.
 #[derive(Debug, ThisError)]
 pub enum CudaDetectionOverlayError {
     /// Something other than a decoded picture arrived.
@@ -85,14 +86,46 @@ impl From<TextFontError> for CudaDetectionOverlayError {
     }
 }
 
-/// Draws the [`Detections`] each CUDA picture carries onto a copy of it, on
-/// the GPU — each class as its
-/// [`ClassRule`](super::super::ClassRule) in the options says: its box and label drawn,
-/// or it hidden by a mosaic, a blur or a fill, or both — and
-/// hands the copy on, carrying the same `Detections`: what
-/// [`SwDetectionOverlay`](super::super::SwDetectionOverlay) does in system
-/// memory, so that a detector's pictures can go on to an encoder, a
-/// renderer or a compositor without leaving the GPU.
+/// Draws boxes around what a detector found, or hides it, on CUDA pictures
+/// without them leaving the GPU.
+///
+/// It draws the [`Detections`] each CUDA picture carries onto a copy of it —
+/// each class as its [`ClassRule`](super::super::ClassRule) in the options
+/// says: its box and label drawn, or it hidden by a mosaic, a blur or a fill,
+/// or both — and hands the copy on, carrying the same `Detections`. It does
+/// what [`SwDetectionOverlay`](super::super::SwDetectionOverlay) does in system
+/// memory, so that a detector's pictures can go on to an encoder, a renderer or
+/// a compositor without leaving the GPU. Needs the `cuda` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ClassRule, CudaDetectionOverlay, CudaDevice, DetectionOverlayOptions, RedactStyle,
+///     Treatment,
+/// };
+/// # use media_pp::{element::{Context, IntoFilter}, elements::AppSink, pipeline::DetachedBranch};
+/// # fn chain<M>(
+/// #     ctx: &std::sync::Arc<Context>,
+/// #     detector: impl IntoFilter<M>,
+/// # ) -> media_pp::Result<DetachedBranch> {
+/// # let sink = AppSink::new("drawn", |_buf| Ok(()));
+///
+/// let device = CudaDevice::new()?;
+/// let options = DetectionOverlayOptions {
+///     rules: vec![ClassRule::new("person", Treatment::hidden(RedactStyle::mosaic()))],
+///     ..DetectionOverlayOptions::default()
+/// };
+/// let overlay = CudaDetectionOverlay::new("overlay", &device, options)?;
+/// let branch = ctx.branch().pipe(detector).pipe(overlay).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// It takes NV12 or BGRA CUDA pictures of any size from the same
 /// [`CudaDevice`] as the rest of the pipeline, and draws at that size. The

@@ -7,7 +7,11 @@ use crate::error::Result;
 
 use super::command::WebRtcError;
 
-/// Parameters confirmed from actual payloads on an inbound WebRTC track.
+/// What an inbound WebRTC track carries, confirmed from its first packets.
+///
+/// [`WebRtcTrackSource::wait_stream_info`](crate::elements::WebRtcTrackSource::wait_stream_info)
+/// returns it; [`Self::codec_parameters`] is what a decoder after the source is
+/// built from.
 ///
 /// SDP exposes several possible codecs, while this value identifies the one
 /// the remote sender actually used. Audio payload metadata is sufficient as

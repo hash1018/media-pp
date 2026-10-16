@@ -1,4 +1,5 @@
-//! Elements that produce buffers.
+//! Elements that start a stream: files, network streams, captures, test
+//! generators, and the mixer and compositors that combine branches.
 //!
 //! Three shapes live here. Readers pull from something that already exists —
 //! a container, an RTSP stream, a capture device, or the application itself

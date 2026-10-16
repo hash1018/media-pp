@@ -86,6 +86,51 @@ pub enum D3d11WindowRendererError {
     Present(windows::core::Error),
 }
 
+/// Shows video in a window, from D3D11 textures drawn zero-copy or from
+/// frames in system memory.
+///
+/// It ends a branch of decoded pictures: D3D11 textures (NV12 or BGRA) on
+/// the [`D3d11Gpu`] the rest of the pipeline shares, or frames in system
+/// memory (NV12, YUV420P or BGRA). It draws but does not pace, so a
+/// [`Pacer`](crate::elements::Pacer) or
+/// [`VideoSynchronizer`](crate::elements::VideoSynchronizer) goes in front.
+/// [`D3d11WindowRenderer::open`] opens a window of its own;
+/// [`D3d11WindowRenderer::for_window`] draws into one the application owns.
+/// For system-memory frames on any platform without a `#[cfg]`, see
+/// [`VideoWindow`](crate::elements::VideoWindow). Needs the `d3d11` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     D3d11Decoder, D3d11Gpu, D3d11WindowRenderer, FileDemuxer, Pacer, WindowEvent,
+///     WindowOptions,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let gpu = D3d11Gpu::new()?;
+/// let (screen, events) = D3d11WindowRenderer::open("screen", &gpu, WindowOptions::default())?;
+///
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     // Decoded on the renderer's device; its surfaces cover the queue and a few more.
+///     let decoder = D3d11Decoder::new("decoder", video.parameters.clone(), &gpu, 20)?;
+///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
+///     let branch = branch.pipe(Pacer::new("pacer")).to(screen)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// while events.recv().is_some_and(|event| event != WindowEvent::Closed) {}
+/// pipeline.stop();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
 /// A terminal sink that shows D3D11 video frames in a window — one it opens
 /// for itself, the way a GStreamer video sink does when nobody hands it one,
 /// or one the application gives it.

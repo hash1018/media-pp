@@ -24,8 +24,9 @@ use crate::{
 
 const SHADER: &str = include_str!("../../../../shaders/metal/chroma_key.metal");
 
-/// Errors specific to [`MetalChromaKey`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`MetalChromaKey`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum MetalChromaKeyError {
     /// FFmpeg could not take a second reference to the keyed frame already
@@ -55,11 +56,44 @@ impl From<MetalPassError> for MetalChromaKeyError {
     }
 }
 
-/// Keys a solid background colour out of a BGRA VideoToolbox frame into
-/// alpha, on the GPU with Metal — the Metal member of the family whose
-/// software member is
-/// [`SwChromaKey`](crate::elements::SwChromaKey), computing the same
-/// normalized distance and the same feather band.
+/// Makes a green (or blue, or any solid) background transparent, on a Mac's
+/// GPU with Metal.
+///
+/// Behind the `metal` feature on macOS. The Metal member of the family
+/// whose software member is [`SwChromaKey`](crate::elements::SwChromaKey),
+/// computing the same normalized distance and the same feather band: put it
+/// after a VideoToolbox upload, decode or capture, in front of a Metal
+/// compositor layer.
+///
+/// # Example
+///
+/// ```ignore
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     ChromaKeyMethod, ChromaKeyOptions, FrameCounter, MetalChromaKey, SwScaler,
+///     TestVideoOptions, TestVideoSource, VideoToolboxDevice, VideoToolboxUpload,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VideoToolboxDevice::new()?;
+/// let camera = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let options = ChromaKeyOptions { method: ChromaKeyMethod::Green, threshold: 0.4, smoothing: 0.1 };
+/// let (key, _tuning) = MetalChromaKey::new("key", &device, options)?;
+/// let (layer, _) = FrameCounter::new("layer"); // a compositor layer, in practice
+/// let (pipeline, ()) = Pipeline::new("keyed", camera, |source, ctx| {
+///     let to_bgra = SwScaler::to_format("to-bgra", Pixel::BGRA, Flags::BILINEAR);
+///     let upload = VideoToolboxUpload::new("upload", &device);
+///     let branch = ctx.branch().pipe(to_bgra).pipe(upload).pipe(key).to(layer)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// BGRA in, BGRA out, at whatever size the frames arrive in: only alpha is
 /// written, multiplied by the key; the colour, PTS, duration and colour tags

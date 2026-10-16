@@ -36,16 +36,46 @@ pub enum AudioTempoError {
 }
 
 /// Stretches sound to the pipeline's playback rate without changing its
-/// pitch: at twice the rate, what a pacer hands on in a second is two
-/// seconds of sound, and this makes it one again.
+/// pitch, so faster or slower playback still sounds right.
 ///
-/// What it is for is sound going somewhere that takes it at the wall
-/// clock's pace rather than the pipeline's: an [`crate::elements::AudioMixer`]
-/// input, an encoder. It goes after the [`crate::elements::Pacer`] that
-/// times the sound, and reads the rate from the pipeline's playback clock
-/// as each frame comes, so [`crate::pipeline::Pipeline::set_rate`] reaches
-/// it with nothing of its own to set. The audio renderers stretch their
-/// sound themselves, and need none.
+/// At twice the rate, what a pacer hands on in a second is two seconds of
+/// sound, and this makes it one again. What it is for is sound going
+/// somewhere that takes it at the wall clock's pace rather than the
+/// pipeline's: an [`crate::elements::AudioMixer`] input, an encoder. It
+/// goes after the [`crate::elements::Pacer`] that times the sound, and
+/// reads the rate from the pipeline's playback clock as each frame comes,
+/// so [`crate::pipeline::Pipeline::set_rate`] reaches it with nothing of
+/// its own to set. The audio renderers stretch their sound themselves, and
+/// need none. It takes and hands on decoded sound.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{AudioTempo, FileDemuxer, FrameCounter, Pacer, SwDecoder};
+/// use media_pp::ffmpeg::media;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// let audio = source.best(media::Type::Audio)?;
+/// let (mixer, _) = FrameCounter::new("mixer"); // a mixer input, in practice
+/// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
+///     let branch = ctx
+///         .branch()
+///         .pipe(SwDecoder::new("decoder", audio.parameters.clone())?)
+///         .pipe(Pacer::new("pacer"))
+///         .pipe(AudioTempo::new("tempo"))
+///         .to(mixer)?;
+///     ctx.attach(source, audio.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.set_rate(1.5)?; // half as fast again, at the same pitch
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// At the file's own speed a frame goes on as it came, and nothing else is
 /// done. Stretched, a frame's `pts` is where its first sample is in the

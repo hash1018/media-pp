@@ -23,8 +23,9 @@ use crate::{
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/convert.wgsl");
 
-/// Errors specific to [`VulkanConverter`]. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`VulkanConverter`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum VulkanConverterError {
     /// FFmpeg could not take a second reference to the frame already in
@@ -54,9 +55,44 @@ impl From<BgraPassError> for VulkanConverterError {
     }
 }
 
-/// Turns NV12 Vulkan frames into BGRA ones, on the GPU — what a BGRA-only
-/// element on Vulkan, a key or an effect, is put behind when what arrives is
-/// a decoder's or a camera's NV12. The Vulkan counterpart of
+/// Turns NV12 pictures into BGRA on a GPU through Vulkan.
+///
+/// Behind the `vulkan` feature. Put it in front of a BGRA-only Vulkan
+/// element — [`VulkanChromaKey`](crate::elements::VulkanChromaKey) or
+/// [`VulkanVideoEffect`](crate::elements::VulkanVideoEffect) — when what
+/// arrives is a decoder's or a camera's NV12. It takes NV12 Vulkan frames
+/// and hands on BGRA Vulkan frames of the same size.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, SwScaler, TestVideoOptions, TestVideoSource, VulkanConverter, VulkanDevice,
+///     VulkanUpload,
+/// };
+/// use media_pp::ffmpeg::{format::Pixel, software::scaling::Flags};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = VulkanDevice::new()?;
+/// let source = TestVideoSource::new("camera", TestVideoOptions::default());
+/// let to_bgra = VulkanConverter::new("to-bgra", &device)?;
+/// let (key, _) = FrameCounter::new("key"); // a VulkanChromaKey, in practice
+/// let (pipeline, ()) = Pipeline::new("convert", source, |source, ctx| {
+///     let to_nv12 = SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR);
+///     let upload = VulkanUpload::new("upload", &device);
+///     let branch = ctx.branch().pipe(to_nv12).pipe(upload).pipe(to_bgra).to(key)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It turns NV12 Vulkan frames into BGRA ones, on the GPU. The Vulkan counterpart of
 /// `CudaConverter` built for BGRA; the other direction is the NV12
 /// [`VulkanVideoCompositor`](crate::elements::VulkanVideoCompositor)'s own.
 ///

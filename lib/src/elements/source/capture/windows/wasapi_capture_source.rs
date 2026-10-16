@@ -69,8 +69,9 @@ const PROCESS_LOOPBACK_FORMAT: WAVEFORMATEX = WAVEFORMATEX {
     cbSize: 0,
 };
 
-/// Errors specific to `WasapiCaptureSource`. Converts into the crate-wide
-/// `Error` via `?` (see [`crate::error::Error`]).
+/// Why a [`WasapiCaptureSource`] could not open a device or go on capturing.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum WasapiCaptureSourceError {
     /// A COM or WASAPI operation failed.
@@ -98,7 +99,7 @@ pub enum WasapiCaptureSourceError {
     },
 }
 
-/// Construction-time options for [`WasapiCaptureSource::open`].
+/// Which sound device a [`WasapiCaptureSource`] records.
 #[derive(Debug, Clone)]
 pub struct WasapiCaptureOptions {
     /// Which endpoint to capture from — one entry out of
@@ -107,15 +108,61 @@ pub struct WasapiCaptureOptions {
     pub device: WasapiDevice,
 }
 
-/// Captures audio via WASAPI (`IAudioClient`/`IAudioCaptureClient`) —
+/// Records sound on Windows: a microphone, what a playback device plays, or
+/// what one application plays.
+///
+/// List the devices with [`WasapiCaptureSource::list_devices`] and open one
+/// with [`WasapiCaptureSource::open`]: a [`WasapiDeviceKind::Capture`]
+/// device records its input, a [`WasapiDeviceKind::Render`] device records
+/// what it plays (loopback). [`WasapiCaptureSource::list_processes`] and
+/// [`WasapiCaptureSource::open_process`] record one application instead. It
+/// hands on decoded sound in the device's own format; put an
+/// [`AudioResampler`](crate::elements::AudioResampler) after it where a fixed
+/// format is needed. It is live, and makes silence while the device is
+/// quiet. Needs the `wasapi-capture` feature.
+///
+/// # Example
+///
+/// Record what the default playback device plays:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     FrameCounter, WasapiCaptureOptions, WasapiCaptureSource, WasapiDeviceKind,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let devices = WasapiCaptureSource::list_devices()?;
+/// let Some(device) = devices
+///     .into_iter()
+///     .find(|device| device.kind == WasapiDeviceKind::Render && device.is_default)
+/// else {
+///     return Ok(());
+/// };
+/// let (source, format) = WasapiCaptureSource::open("desktop", WasapiCaptureOptions { device })?;
+/// println!("{} Hz, {} channel(s)", format.sample_rate, format.channels);
+///
+/// let (counter, _sound) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("desktop", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It captures audio via WASAPI (`IAudioClient`/`IAudioCaptureClient`) —
 /// GStreamer's `wasapi2src` equivalent. One src pad, pushing
 /// `MediaBuffer::Audio` frames in the captured device's own native mix
 /// format/rate/channel count — no resampling. Same division of labor as
-/// `DxgiCaptureSource` emitting raw `Pixel::BGRA` and
-/// leaving conversion to a downstream [`crate::elements::SwScaler`]: if
-/// something downstream needs a fixed sample rate/format, use
-/// [`crate::elements::AudioResampler`] rather than hiding conversion in
-/// this element.
+/// `DxgiCaptureSource` emitting raw `Pixel::BGRA` and leaving conversion to a
+/// downstream [`crate::elements::SwScaler`]: if something downstream needs a
+/// fixed sample rate/format, use [`crate::elements::AudioResampler`] rather
+/// than hiding conversion in this element.
 ///
 /// Polls `IAudioCaptureClient::GetNextPacketSize` on a short fixed
 /// interval (`POLL_INTERVAL`) rather than waiting on a WASAPI-signaled

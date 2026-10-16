@@ -41,20 +41,51 @@ const LOOK_DOUBT: f64 = 3.0;
 /// through it.
 const MAX_STEPS: u64 = 120;
 
-/// Numbers the [`Detections`] each picture carries so that one object keeps
-/// one number — [`Detection::track_id`] — and puts on each picture a
-/// detector let by where it expects the objects to be, marked
-/// [`Detections::predicted`]: ByteTrack, a Kalman filter per object and
-/// matching by overlap, confident detections first and then the
-/// unconfident a partly hidden object still gets.
+/// Follows what a detector found from picture to picture, so that one
+/// object keeps one number.
 ///
-/// It goes after a detector: `Detector -> ObjectTracker -> Overlay`. It
-/// reads and writes metadata, and hands each picture on as it came, so it
-/// takes pictures wherever they live — system memory, CUDA, VideoToolbox,
-/// any GPU. With
-/// [`TrackerOptions::visual`] it also follows each object by how it looks,
-/// reading the pixels around it where it can. A picture before any
-/// detection has been seen goes on carrying nothing.
+/// It goes after a detector: `Detector -> ObjectTracker -> Overlay`. It numbers
+/// the [`Detections`] each picture carries — [`Detection::track_id`] — and puts
+/// on each picture a detector let by where it expects the objects to be, marked
+/// [`Detections::predicted`]. It reads and writes metadata, and hands each
+/// picture on as it came, so it takes pictures wherever they live — system
+/// memory, CUDA, VideoToolbox, any GPU. It needs no feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{AppSink, Detections, ObjectTracker, TrackerOptions};
+/// # use media_pp::{element::{Context, IntoFilter}, pipeline::DetachedBranch};
+/// # fn chain<M>(
+/// #     ctx: &std::sync::Arc<Context>,
+/// #     detector: impl IntoFilter<M>,
+/// # ) -> media_pp::Result<DetachedBranch> {
+///
+/// // The detector before it keeps unsure boxes, down to the tracker's low_score.
+/// let tracker = ObjectTracker::new("tracker", TrackerOptions::default());
+/// let sink = AppSink::new("tracks", |buf| {
+///     if let Some(found) = buf.metadata().and_then(|m| m.get::<Detections>()) {
+///         for object in &found.items {
+///             println!("object #{:?} at ({:.2}, {:.2})", object.track_id, object.x, object.y);
+///         }
+///     }
+///     Ok(())
+/// });
+/// let branch = ctx.branch().pipe(detector).pipe(tracker).to(sink)?;
+/// # Ok(branch)
+/// # }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It is ByteTrack: a Kalman filter per object and matching by overlap,
+/// confident detections first and then the unconfident a partly hidden
+/// object still gets. With [`TrackerOptions::visual`] it also follows each
+/// object by how it looks, reading the pixels around it where it can. A
+/// picture before any detection has been seen goes on carrying nothing.
 ///
 /// Pictures missed between two — a dropping queue before the detector —
 /// are told from the timestamps, and the motion is carried through them,

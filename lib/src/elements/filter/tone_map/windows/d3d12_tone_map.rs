@@ -47,8 +47,9 @@ const SHADER: &[u8] = include_bytes!("../../../../shaders/d3d12/tone_map.hlsl");
 /// Each run of the shader is 8 by 8 blocks of 2 by 2 pixels.
 const GROUP: u32 = 8;
 
-/// Errors specific to [`D3d12ToneMap`]. Converts into the crate-wide `Error`
-/// via `?` (see [`crate::error::Error`]).
+/// Errors specific to [`D3d12ToneMap`].
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12ToneMapError {
     /// D3D12 failed: a shader, a resource or a submission.
@@ -91,10 +92,64 @@ pub enum D3d12ToneMapError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Brings a GPU-resident `Pixel::D3D12` HDR picture — P010, or NV12, tagged
-/// PQ or HLG — into SDR BT.709 NV12 by a compute shader, without the picture
-/// leaving video memory: what `D3d11ToneMap`
-/// draws on D3D11, on any vendor's GPU.
+/// Brings HDR video (PQ or HLG) on D3D12 down to SDR BT.709 NV12, on the GPU.
+///
+/// Takes P010 or NV12 pictures tagged PQ or HLG — a
+/// [`D3d12Decoder`](crate::elements::D3d12Decoder)'s of an HDR stream — and
+/// hands on NV12 pictures of the same size, tagged BT.709 limited range,
+/// that every D3D12 element of this crate reads, without the picture
+/// leaving video memory. What `D3d11ToneMap` draws on D3D11, on any
+/// vendor's GPU. Needs the `d3d12` feature.
+///
+/// # Example
+///
+/// An HDR file recorded again as SDR, the new stream told what it now holds
+/// through
+/// [`D3d12VideoEncoder::with_color`](crate::elements::D3d12VideoEncoder::with_color):
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::color::ColorDescription;
+/// use media_pp::elements::{
+///     D3d12Decoder, D3d12Gpu, D3d12ToneMap, D3d12VideoCodec, D3d12VideoEncoder,
+///     D3d12VideoEncoderOptions, FileDemuxer, FileMuxer, Mp4Layout,
+/// };
+/// use media_pp::{ffmpeg, pipeline::Pipeline};
+///
+/// let gpu = D3d12Gpu::new()?;
+/// let (source, _) = FileDemuxer::open("file", "hdr.mp4")?;
+/// let video = source.best(ffmpeg::media::Type::Video)?;
+/// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
+/// let decoder = D3d12Decoder::new("decode", video.parameters.clone(), &gpu)?;
+/// let tone_map = D3d12ToneMap::new("sdr", &gpu)?;
+/// let options = D3d12VideoEncoderOptions {
+///     codec: D3d12VideoCodec::H265,
+///     width,
+///     height,
+///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     bit_rate: 8_000_000,
+///     gop_size: 60,
+///     max_b_frames: None,
+/// };
+/// let color = ColorDescription::BT709_LIMITED; // what the tone map makes
+/// let encoder = D3d12VideoEncoder::with_color("encode", &gpu, options, color)?;
+///
+/// let mut muxer = FileMuxer::create("sdr.mp4", Mp4Layout::Standard)?;
+/// let track = muxer.add_stream("video", &encoder)?;
+/// let sink = muxer.open()?.take(track)?;
+/// let (pipeline, ()) = Pipeline::new("to-sdr", source, |source, ctx| {
+///     let branch = ctx.branch().pipe(decoder).pipe(tone_map).queue("frames", 4);
+///     ctx.attach(source, video.index, branch.pipe(encoder).to(sink)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// A compute shader.
 ///
 /// What it does to each pixel is `core/tone_map.rs`'s definition: BT.2020's
 /// matrix, the picture's transfer into nits, BT.2020's primaries into

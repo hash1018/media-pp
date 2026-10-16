@@ -28,7 +28,13 @@ use windows::core::Interface;
 
 use super::super::com::ComApartment;
 
-/// One process with an audio session of its own.
+/// One running program that plays sound, whose sound alone a capture can
+/// record.
+///
+/// [`WasapiCaptureSource::list_processes`](crate::elements::WasapiCaptureSource::list_processes)
+/// lists them, for a picker; pass its [`id`](Self::id) to
+/// [`WasapiCaptureSource::open_process`](crate::elements::WasapiCaptureSource::open_process).
+/// Needs the `wasapi-capture` feature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasapiProcess {
     /// The process id, which is what a capture is opened against — and only

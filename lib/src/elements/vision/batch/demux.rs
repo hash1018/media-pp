@@ -109,10 +109,36 @@ fn stream(buf: &MediaBuffer) -> Option<StreamId> {
 }
 
 /// Gives each of a [`StreamMux`](super::StreamMux)'s streams a branch of its
-/// own after a demux — see [`StreamMuxHandle::demux`]. Cheap to clone, and
-/// keeps only a weak reference to the demux, as a
+/// own after a demux — see [`StreamMuxHandle::demux`].
+///
+/// Cheap to clone, and keeps only a weak reference to the demux, as a
 /// [`TeeHandle`](crate::elements::TeeHandle) does: a call once it is gone
 /// fails rather than keeping anything alive.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{AppSink, StreamMux, StreamMuxOptions};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (mux, handle) = StreamMux::new("mux", StreamMuxOptions::default())?;
+/// let (batching, demux) = Pipeline::new("batching", mux, |source, ctx| {
+///     let (demuxed, demux) = handle.demux(ctx, "demux")?;
+///     // A model would go here, between the mux and the demux.
+///     let branch = ctx.branch().to_branch(demuxed)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(demux)
+/// })?;
+/// let (input, stream) = handle.add_source("camera 1")?;
+/// // ... a pipeline feeding `input` ...
+/// # drop(input);
+/// let sink = AppSink::new("camera 1 out", |_buf| Ok(()));
+/// demux.attach(stream, demux.branch()?.to(sink)?)?;
+/// batching.run()?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct StreamDemuxHandle {
     tee: TeeHandle,

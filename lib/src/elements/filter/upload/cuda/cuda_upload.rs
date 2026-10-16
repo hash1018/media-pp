@@ -22,8 +22,9 @@ use crate::{
     transform::{FilterStage, filter_stage},
 };
 
-/// Errors specific to `CudaUpload`. Converts into the crate-wide `Error` via
-/// `?` (see [`crate::error::Error`]).
+/// Errors specific to `CudaUpload`.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaUploadError {
     /// FFmpeg could not take a second reference to the upload already in
@@ -88,11 +89,43 @@ impl From<CudaFramesContextError> for CudaUploadError {
     }
 }
 
-/// Uploads CPU-resident `Video` frames into CUDA-resident ones — the
-/// CUDA sibling of `D3d11Upload`, and what lets a CPU
-/// source reach [`crate::elements::CudaEncoder`] or
-/// [`crate::elements::CudaRenderer`] at all.
-/// [`crate::elements::CudaDownload`] is the mirror of this element.
+/// Copies pictures from system memory onto an NVIDIA GPU, so the CUDA
+/// elements after it can work on them.
+///
+/// Behind the `cuda` feature. Put it after a software decoder, a CPU
+/// capture or a test source, in front of a CUDA scaler, key, compositor,
+/// encoder or renderer. It takes NV12, YUV420P or BGRA pictures in system
+/// memory — whichever matches the [`CudaFrameFormat`] it was built for —
+/// and hands on CUDA surfaces in that format.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     CudaDevice, CudaFrameFormat, CudaUpload, FrameCounter, TestVideoOptions, TestVideoSource,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let device = CudaDevice::new()?; // shared by every CUDA element in the pipeline
+/// let source = TestVideoSource::new("source", TestVideoOptions::default()); // YUV420P
+/// let upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
+/// let (encoder, _) = FrameCounter::new("encoder"); // a CudaEncoder, in practice
+/// let (pipeline, ()) = Pipeline::new("upload", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().pipe(upload).to(encoder)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// It uploads CPU-resident `Video` frames into CUDA-resident ones — the CUDA
+/// sibling of `D3d11Upload`, and what lets a CPU source reach
+/// [`crate::elements::CudaEncoder`] or [`crate::elements::CudaRenderer`] at
+/// all. [`crate::elements::CudaDownload`] is the mirror of this element.
 ///
 /// A filter: takes each buffer and pushes the uploaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with

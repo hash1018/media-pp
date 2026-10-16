@@ -49,7 +49,12 @@ impl Drop for MfRuntime {
     }
 }
 
-/// One video capture device Media Foundation currently offers.
+/// One camera Media Foundation currently offers.
+///
+/// [`MfCaptureSource::list_devices`](crate::elements::MfCaptureSource::list_devices)
+/// lists them; pass one as
+/// [`MfCaptureOptions::device`](crate::elements::MfCaptureOptions::device).
+/// Needs the `mf-capture` feature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MfDevice {
     /// The device's symbolic link — the only identity that survives a
@@ -61,7 +66,11 @@ pub struct MfDevice {
     pub name: String,
 }
 
-/// One picture shape a camera offers, as a caller would show it in a picker.
+/// One picture size and rate a camera offers, as a picker would show it.
+///
+/// [`MfCaptureSource::list_formats`](crate::elements::MfCaptureSource::list_formats)
+/// lists a camera's; pass one as
+/// [`MfCaptureOptions::format`](crate::elements::MfCaptureOptions::format).
 ///
 /// Deliberately not the subtype the camera would deliver it in.
 /// [`MfCaptureSource`] always asks for NV12 and lets Media Foundation put

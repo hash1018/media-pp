@@ -51,8 +51,58 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// `try_send`. A disconnected peer still rejects the command; `set_answer`
 /// intentionally treats that case as a no-op.
 const CHANNEL_CAPACITY: usize = 128;
-/// The [`Driver`] — owns the [`Rtc`] session and its [`UdpSocket`], and
-/// drives str0m's sans-I/O poll loop on the dedicated thread
+/// A WebRTC connection to one remote peer, carrying its tracks in and out
+/// of pipelines.
+///
+/// Signalling and the first connection are the application's own, made with
+/// `str0m` directly; the peer then takes over the connected [`Rtc`] and its
+/// socket. It is not a pipeline element: run it with a
+/// [`DriverRunner`](crate::driver::DriverRunner). Each track, added on either
+/// side, comes out of [`WebRtcHandle::next_track`] as a [`WebRtcTrackSink`]
+/// that ends a chain of encoded packets and/or a [`WebRtcTrackSource`] that
+/// starts a pipeline of its own. Needs the `webrtc` feature.
+///
+/// # Example
+///
+/// Sending one H.264 track over a connection already set up through `str0m`:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::driver::DriverRunner;
+/// use media_pp::elements::{TrackEndpoints, WebRtcPeer};
+/// use str0m::{format::Codec, media::{Direction, MediaKind}};
+/// # let rtc = str0m::Rtc::builder().build(std::time::Instant::now());
+/// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+///
+/// let (peer, handle) = WebRtcPeer::new(
+///     "peer",
+///     rtc,    // connected through your own signalling
+///     socket, // the UDP socket it is connected on
+///     |offer| { /* send this renegotiation offer to the remote side */ },
+///     |track| { /* ask the encoder of `track` for a keyframe */ },
+/// );
+/// let driver = DriverRunner::new(peer);
+/// driver.run()?;
+///
+/// handle.add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)?;
+/// // The track attaches once negotiation gives it a `mid`.
+/// let track = handle.next_track()?;
+/// if let TrackEndpoints::Send(sink) = track.endpoints {
+///     // `sink` ends a chain of H.264 packets: `ctx.branch().pipe(encoder).to(sink)`.
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Two peers connected over loopback, with the signalling between them, are in
+/// the
+/// [`webrtc_loopback`](https://github.com/hash1018/media-pp/tree/main/examples/webrtc/webrtc_loopback)
+/// example.
+///
+/// # How it works
+///
+/// It is a [`Driver`] — owns the [`Rtc`] session and its [`UdpSocket`],
+/// and drives str0m's sans-I/O poll loop on the dedicated thread
 /// [`crate::driver::DriverRunner::run`] gives it. Not a
 /// [`crate::element::RawSource`]/[`crate::element::SrcPads`]: it has no `src_pads()`
 /// dataflow graph of its own — see [`Driver`]'s own docs for why a

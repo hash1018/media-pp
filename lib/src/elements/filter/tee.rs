@@ -20,18 +20,64 @@ use crate::{
     stream::{Item, StreamEvent},
 };
 
-/// Fans a single input out to multiple sinks. [`TeeBuilder`] owns the
-/// initial fan-out; later branches are added and removed through a
-/// [`TeeHandle`], which can be cloned and used from any thread, independent
-/// of whatever thread is driving `Tee::consume`
-/// (the pipeline's source/queue-worker thread). That's the whole reason
-/// `Tee` doesn't implement [`crate::element::SrcPads`] like other
-/// multi-pad elements (e.g. [`crate::elements::FileDemuxer`]): its pads
-/// live in individually locked branch slots instead of being a plain
-/// `&mut [SrcPad]`. `consume` only holds the branch-list lock long enough
-/// to take a cheap `Arc` snapshot, so a slow downstream does not block
-/// unrelated attach/detach operations. Detach prevents any push that has
-/// not started yet; one already executing downstream call may finish.
+/// Hands every buffer it is given to several branches, so one stream can be
+/// shown, recorded and analysed at once.
+///
+/// Use a `Tee` wherever one chain has to feed more than one end: a decoded
+/// picture going to a window and an encoder, a file's packets going to a
+/// decoder and a remuxer. It takes anything — packets, pictures, sound, in
+/// any memory — and hands each branch exactly what arrived. You do not
+/// construct one directly: begin it with [`Context::tee`], add its first
+/// branches with [`TeeBuilder::branch`], and end a chain at it with
+/// [`ChainBuilder::to_branch`] (or attach it to a source pad directly).
+/// [`TeeBuilder::build_dynamic`] also returns a [`TeeHandle`] that adds,
+/// finishes and removes branches while the pipeline runs.
+///
+/// Each branch runs on the thread that feeds the `Tee` unless it starts with
+/// a [`queue`](ChainBuilder::queue), so give a slow branch its own queue.
+///
+/// # Example
+///
+/// Decode once, then hand every picture to two branches:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FileDemuxer, FrameCounter, SwDecoder};
+/// use media_pp::ffmpeg::media;
+/// use media_pp::pipeline::Pipeline;
+///
+/// let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
+/// let video = source.best(media::Type::Video)?;
+/// let (preview, _) = FrameCounter::new("preview");
+/// let (analysis, _) = FrameCounter::new("analysis");
+///
+/// let (pipeline, ()) = Pipeline::new("fan-out", source, |source, ctx| {
+///     let first = ctx.branch().queue("preview-queue", 8).to(preview)?;
+///     let second = ctx.branch().queue("analysis-queue", 8).to(analysis)?;
+///     let fan_out = ctx.tee("tee").branch(first).branch(second).build()?;
+///     let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+///     let branch = ctx.branch().pipe(decoder).to_branch(fan_out)?;
+///     ctx.attach(source, video.index, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// [`TeeBuilder`] owns the initial fan-out; later branches are added and
+/// removed through a [`TeeHandle`], which can be cloned and used from any
+/// thread, independent of whatever thread is driving `Tee::consume` (the
+/// pipeline's source/queue-worker thread). That's the whole reason `Tee`
+/// doesn't implement [`crate::element::SrcPads`] like other multi-pad elements
+/// (e.g. [`crate::elements::FileDemuxer`]): its pads live in individually
+/// locked branch slots instead of being a plain `&mut [SrcPad]`. `consume` only
+/// holds the branch-list lock long enough to take a cheap `Arc` snapshot, so a
+/// slow downstream does not block unrelated attach/detach operations. Detach
+/// prevents any push that has not started yet; one already executing downstream
+/// call may finish.
 ///
 /// Cheap to fan out: `MediaBuffer` wraps its payload in an `Arc`, so
 /// cloning a buffer for each output is a refcount bump, not a copy of the
@@ -149,24 +195,59 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// Build-time configuration for a [`Tee`], begun with [`Context::tee`].
-/// Initial branches are merged
-/// with the Tee into one detached subgraph and committed by a single
-/// [`Context::attach`] call. Use [`TeeBuilder::build`] for a fixed fan-out,
-/// or [`TeeBuilder::build_dynamic`] when runtime changes need a
-/// [`TeeHandle`].
+/// Collects a [`Tee`]'s first branches, begun with [`Context::tee`].
+///
+/// Initial branches are merged with the Tee into one detached subgraph and
+/// committed by a single [`Context::attach`] call (or put at the end of a chain
+/// with [`ChainBuilder::to_branch`]). Use [`TeeBuilder::build`] for a fixed
+/// fan-out, or [`TeeBuilder::build_dynamic`] when runtime changes need a
+/// [`TeeHandle`]. See [`Tee`] for an example.
 pub struct TeeBuilder {
     tee: Tee,
     handle: TeeHandle,
     initial_branches: Vec<DetachedBranch>,
 }
 
-/// A cheaply-cloneable handle for adding or removing a [`Tee`]'s sinks
-/// while the pipeline is running. It deliberately keeps only a [`Weak`]
-/// reference to the `Tee`'s shared state: retaining a handle after the
-/// pipeline finishes must not keep downstream sinks or the pipeline's
-/// [`crate::bus::Bus`] sender alive. Once the `Tee` is gone,
-/// [`TeeHandle::branch`] returns `None`.
+/// Adds, finishes and removes a [`Tee`]'s branches while the pipeline runs.
+///
+/// Returned by [`TeeBuilder::build_dynamic`]. Start a recording with
+/// [`attach`](Self::attach), end it cleanly with
+/// [`finish_branch`](Self::finish_branch) — the file gets its trailer — or
+/// drop a failing branch at once with [`detach`](Self::detach). The other
+/// branches keep running throughout.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (preview, _) = FrameCounter::new("preview");
+/// let (pipeline, tee) = Pipeline::new("live", source, |source, ctx| {
+///     let first = ctx.branch().to(preview)?;
+///     let (fan_out, tee) = ctx.tee("tee").branch(first).build_dynamic()?;
+///     ctx.attach(source, 0, fan_out)?;
+///     Ok(tee)
+/// })?;
+/// pipeline.run()?;
+///
+/// // Later, from any thread: add a branch, then end it cleanly.
+/// let (counter, _) = FrameCounter::new("extra");
+/// let id = tee.attach(tee.branch()?.queue("extra-queue", 8).to(counter)?)?;
+/// tee.finish_branch(id)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Ownership
+///
+/// Cloning is cheap. It deliberately keeps only a [`Weak`] reference to the
+/// `Tee`'s shared state: retaining a handle after the pipeline finishes must
+/// not keep downstream sinks or the pipeline's [`crate::bus::Bus`] sender
+/// alive. Once the `Tee` is gone, [`TeeHandle::branch`] and
+/// [`TeeHandle::attach`] fail with [`GraphError::ParentNotAttached`].
 #[derive(Clone)]
 pub struct TeeHandle {
     id: ElementId,
@@ -255,7 +336,8 @@ impl Context {
     /// why a Tee is begun here rather than handed a context.
     ///
     /// Add its initial branches with [`TeeBuilder::branch`], then attach the
-    /// result through [`Context::attach`] like any other branch.
+    /// result through [`Context::attach`] like any other branch, or end a chain
+    /// at it with [`ChainBuilder::to_branch`]. See [`Tee`] for an example.
     pub fn tee(self: &Arc<Self>, name: impl Into<String>) -> TeeBuilder {
         TeeBuilder::new(name, self.clone())
     }

@@ -10,8 +10,11 @@ use crate::pool::UnboundObjectPoolRef;
 
 use super::super::super::video_layer::{self, VideoLayer};
 
-/// Thread-safe runtime placement control for one [`super::D3d11VideoCompositor`]
-/// input — the GPU sibling of [`crate::elements::SwVideoLayerHandle`].
+/// Moves, sizes, restacks and shows or hides one input of a
+/// [`D3d11VideoCompositor`](super::D3d11VideoCompositor) while it runs.
+///
+/// Thread-safe and cheap to clone; it holds the input only weakly. The GPU
+/// sibling of [`crate::elements::SwVideoLayerHandle`].
 ///
 /// Fields are `pub(super)` rather than fully private: `D3d11VideoCompositorHandle::register_input`
 /// (defined in the parent module) constructs and reads this struct

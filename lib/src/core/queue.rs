@@ -41,8 +41,9 @@ use crate::{
     stream::{Item, StreamEvent},
 };
 
-/// Errors specific to `Queue`. Converts into the crate-wide `Error` via
-/// `?` (see [`crate::error::Error`]).
+/// Why a [`Queue`] could not start or hand a buffer on.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum QueueError {
     /// The operating system could not create the queue's worker thread.
@@ -135,7 +136,40 @@ impl Default for OverflowPolicy {
     }
 }
 
-/// An explicit thread boundary.
+/// A thread boundary in a branch: what follows it runs on a worker thread
+/// of its own.
+///
+/// Put one in a branch with
+/// [`ChainBuilder::queue`](crate::pipeline::ChainBuilder::queue), or with
+/// [`ChainBuilder::queue_with_policy`](crate::pipeline::ChainBuilder::queue_with_policy)
+/// and [`OverflowPolicy::DropNewest`] where a live source must not be held up.
+/// Its capacity is in buffers. A failure after a queue is reported on the
+/// pipeline's bus instead of being returned.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+/// use media_pp::queue::OverflowPolicy;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (counter, _pictures) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("live", source, |source, ctx| {
+///     let branch = ctx
+///         .branch()
+///         .queue_with_policy("frames", 4, OverflowPolicy::DropNewest)
+///         .to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
 ///
 /// Pushing into a `Queue` hands the buffer off through a bounded channel
 /// and returns immediately — it never blocks the caller on whatever is
@@ -233,6 +267,9 @@ pub struct Queue {
 }
 
 impl Queue {
+    /// Starts a queue by hand, in front of `downstream`; in a pipeline use
+    /// [`ChainBuilder::queue`](crate::pipeline::ChainBuilder::queue) instead.
+    ///
     /// Spawns with [`OverflowPolicy::default`]. Use
     /// [`Queue::spawn_with_policy`] to drop instead of blocking when full.
     ///
@@ -256,6 +293,8 @@ impl Queue {
         )
     }
 
+    /// Starts a queue by hand with the given overflow policy.
+    ///
     /// Spawns the worker thread that owns `downstream` and starts pulling
     /// from the channel immediately. `pipeline_id` (typically the owning
     /// [`crate::pipeline::Pipeline`]'s own id — see

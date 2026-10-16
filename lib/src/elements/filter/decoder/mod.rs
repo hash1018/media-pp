@@ -1,5 +1,6 @@
-//! Every element that turns `Packet`s into `Video`/`Audio` frames. The
-//! backend-independent software decoder stays here, while Windows-specific
+//! Decoders: the elements that turn compressed packets into pictures and sound.
+//!
+//! The backend-independent software decoder stays here, while Windows-specific
 //! D3D11VA/D3D12VA implementations live under [`windows`]. Shared hardware-frame
 //! ABI helpers live under `crate::platform::windows`.
 

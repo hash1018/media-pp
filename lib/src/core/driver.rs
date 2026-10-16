@@ -25,6 +25,8 @@ use crate::{
     error::{Result, ThreadSpawnError},
 };
 
+/// Tells a running [`Driver`] whether it has been asked to stop.
+///
 /// Checked, not blocked on: a [`Driver`] owns a single self-contained loop
 /// with no downstream dataflow graph to cascade a stop through (unlike
 /// [`crate::pipeline::Pipeline`]'s `control` channel, which has to reach
@@ -48,15 +50,16 @@ impl StopReceiver {
     }
 }
 
-/// A background task with no `RawSink`/`SrcPads` ports of its own — nothing to
-/// push into, nothing to pull out of *this* object; whatever it produces
-/// or consumes happens through other `RawSink`/`SrcPads` pairs it mints on the
-/// side (e.g. `WebRtcPeer` handing out
-/// `WebRtcTrackSink`/`WebRtcTrackSource`). Reach for
-/// [`crate::pipeline::Pipeline`]/[`crate::element::RawSource`] instead
-/// for anything that actually has a `src_pads()` dataflow graph to wire —
-/// `Driver` deliberately has no `Pause`/`Seek`/`Clock`, none of which have
-/// a sensible meaning for a connection that isn't part of one.
+/// A background task with no ports of its own, such as a WebRTC peer.
+///
+/// A `Driver` has no `RawSink`/`SrcPads` ports of its own — nothing to push
+/// into, nothing to pull out of *this* object; whatever it produces or consumes
+/// happens through other `RawSink`/`SrcPads` pairs it mints on the side (e.g.
+/// `WebRtcPeer` handing out `WebRtcTrackSink`/`WebRtcTrackSource`). Reach for
+/// [`crate::pipeline::Pipeline`]/[`crate::element::RawSource`] instead for
+/// anything that actually has a `src_pads()` dataflow graph to wire — `Driver`
+/// deliberately has no `Pause`/`Seek`/`Clock`, none of which have a sensible
+/// meaning for a connection that isn't part of one.
 pub trait Driver: Element {
     /// Drives this task until it ends on its own or `stop.is_stopped()`
     /// says to abandon — check it periodically, in the same spirit as a

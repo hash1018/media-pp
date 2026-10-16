@@ -21,6 +21,41 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{element::ElementType, error::Error, graph::ElementId};
 
+/// Something that happened in a running pipeline: an element ended, failed,
+/// dropped a buffer or was sought, or the whole pipeline finished.
+///
+/// Read them from [`Pipeline::bus`](crate::pipeline::Pipeline::bus). Each
+/// prints as one line naming the element. A pipeline that has played to
+/// its end posts [`BusEvent::Finished`]; that is where to stop it.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
+/// use media_pp::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (counter, _pictures) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("watch", source, |source, ctx| {
+///     ctx.attach(source, 0, ctx.branch().to(counter)?)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+/// for event in pipeline.bus().iter() {
+///     match event {
+///         BusEvent::Error { name, error, .. } => eprintln!("{name} failed: {error}"),
+///         BusEvent::Finished => pipeline.stop(),
+///         other => println!("{other}"),
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Non-exhaustive
+///
 /// Marked `#[non_exhaustive]`: this grows as elements gain conditions worth
 /// reporting, and a caller acting on `Eos`/`Error` should not stop compiling
 /// because some unrelated element learned to report a stall. Within this crate
@@ -128,6 +163,13 @@ impl fmt::Display for BusEvent {
     }
 }
 
+/// The sending half of a pipeline's event channel, which elements post
+/// [`BusEvent`]s on.
+///
+/// A program reads the other half, [`BusReceiver`], from
+/// [`Pipeline::bus`](crate::pipeline::Pipeline::bus); an element of its own
+/// takes this one from the pipeline's [`Context`](crate::element::Context).
+///
 /// Cross-thread event channel. Once a buffer crosses a `Queue` boundary,
 /// errors can no longer be propagated up the call stack with `?` — they're
 /// posted here instead so the owner of the `Pipeline` can observe them.
@@ -194,15 +236,6 @@ impl Bus {
         }
     }
 
-    /// Logs and enqueues an event without blocking on the receiver.
-    ///
-    /// If the receiving half has already been dropped, the event is discarded;
-    /// posting never turns pipeline teardown into another error.
-    ///
-    /// `pp_log` is the posting element's own [`crate::element::Element::pp_log`]
-    /// — used (via `crate::pp_log`'s `pp_log:` macro form) instead of `event`'s
-    /// own `name` so the element's full identity, pipeline id included, reaches
-    /// the log record rather than just the name carried in the event.
     /// Posts a failure that arrived from somewhere downstream, attributed
     /// to whichever element raised it.
     ///
@@ -239,6 +272,16 @@ impl Bus {
 
     /// Puts `event` on the bus for whoever reads it, and records it in the
     /// log under the identity in `pp_log` — the posting element's own.
+    ///
+    /// Never blocks on the receiver. If the receiving half has already been
+    /// dropped, the event is discarded; posting never turns pipeline
+    /// teardown into another error.
+    ///
+    /// `pp_log` — [`crate::element::Element::pp_log`], or
+    /// [`Attached::pp_log`](crate::element::Attached::pp_log) for a `Source`,
+    /// `Filter` or `Sink` of your own — is used instead of `event`'s own `name`
+    /// so the element's full identity, pipeline id included, reaches the log
+    /// record rather than just the name carried in the event.
     pub fn post(&self, pp_log: &PpLog, event: BusEvent) {
         // Each `pp_*` macro checks `crate::log::enabled` before evaluating its
         // arguments, so posting to a bus nobody is logging costs no `format!`

@@ -49,8 +49,9 @@ const SHARED_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 /// than the calling thread.
 const KEYED_MUTEX_WAIT: u32 = 100;
 
-/// Errors specific to `D3d11SharedTextureSource`. Converts into the
-/// crate-wide `Error` via `?` (see [`crate::error::Error`]).
+/// Why a [`D3d11SharedTextureSource`] could not take a shared texture.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11SharedTextureSourceError {
     /// The handle could not be opened on this pipeline's device: it does
@@ -111,14 +112,41 @@ pub enum D3d11SharedTextureSourceError {
     Closed,
 }
 
-/// Brings another device's shared textures into this pipeline, as
-/// `Pixel::D3D11` video frames on this pipeline's own device.
+/// Brings pictures another D3D11 device or process draws — a browser engine,
+/// another renderer — into a pipeline, as frames on the pipeline's own device.
 ///
 /// A pushed source rather than a reading one: whoever produces the pictures
 /// calls [`D3d11SharedTextureHandle::push`] with a shared-texture handle per
 /// picture, and this emits one frame downstream for each. That is
 /// [`crate::elements::AppSource`]'s shape, which this is built on — the
-/// difference is the copy, which is the whole point of the element.
+/// difference is the copy, which is the whole point of the element. It takes
+/// BGRA textures of one fixed size and hands on `Pixel::D3D11` BGRA frames,
+/// usually to a [`D3d11VideoCompositor`](crate::elements::D3d11VideoCompositor)
+/// layer. Needs the `d3d11` feature.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{D3d11Gpu, D3d11SharedTextureSource, FrameCounter};
+/// use media_pp::pipeline::Pipeline;
+///
+/// let gpu = D3d11Gpu::new()?;
+/// let (source, pictures) = D3d11SharedTextureSource::new("page", &gpu, 1920, 1080, 4)?;
+/// let (counter, _frames) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("page", source, |source, ctx| {
+///     let branch = ctx.branch().to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// pipeline.run()?;
+///
+/// // In the producer's paint callback, with the handle it hands over:
+/// # let shared_handle: isize = 0;
+/// pictures.try_push(shared_handle, None)?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Why it copies
 ///
