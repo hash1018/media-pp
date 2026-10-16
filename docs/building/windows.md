@@ -17,12 +17,29 @@ FFmpeg, and why that one — is in
 ## FFmpeg
 
 The short way: [`scripts/`](../../scripts) builds the FFmpeg CI uses and
-points the build at it, then `cargo run -p doctor` checks what it found.
+points the build at it. Run the setup from the **repository root** (clone
+it first as [Getting started](../getting-started.md#1-get-the-repository)
+shows):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-ffmpeg.ps1 -Persist
+```
+
+**Open a new PowerShell terminal**, then return to the checkout and check
+the machine. This path assumes you cloned into your home directory; use
+your checkout's path if different:
+
+```powershell
+cd "$env:USERPROFILE\media-pp"
 cargo run -p doctor
 ```
+
+The setup runs in a child process. `-Persist` saves `FFMPEG_DIR` and the
+DLL search path for your account, but does not update the terminal it was
+launched from. If a new tab still has the old environment, restart the
+terminal application or editor, or set the paths printed by the script in
+the current shell. A previously configured machine can hide this missing
+step.
 
 By hand, the way CI does it: vcpkg at the tag CI pins, into a dynamic tree:
 

@@ -12,6 +12,10 @@ let player = Player::open("video.mp4", PlayerOptions::default())?;
 player.play()?;
 ```
 
+This is an excerpt, not a complete program: keep the player alive by
+handling its events. [Getting started][getting-started] has the complete
+program and the platform features it needs.
+
 ## What it does
 
 - **Pipelines you can read.** Elements are connected in the order media
@@ -33,19 +37,32 @@ player.play()?;
 
 ## Getting started
 
-1. Install Rust, a C toolchain, libclang and **FFmpeg 8.0** —
-   [`scripts/setup-ffmpeg`][scripts] builds the right FFmpeg.
-2. Add the crate, with the features for your platform:
+1. Clone this repository, then install Rust, a C toolchain, libclang and
+   **FFmpeg 8.0** — [`scripts/setup-ffmpeg`][scripts] builds the right
+   FFmpeg. [Getting started][getting-started] gives the commands and where
+   to run them. On Windows, open a new terminal after running the setup
+   script with `-Persist`.
+2. In the repository, run `cargo run -p doctor` to check the machine.
+3. In your own Cargo project, add the crate. These platform-specific
+   dependencies enable the `Player` shown above:
 
    ```toml
-   [dependencies]
-   media-pp = { version = "0.4", features = ["d3d11"] }
+   [target.'cfg(target_os = "windows")'.dependencies]
+   media-pp = { version = "0.4", features = ["d3d11", "wasapi-renderer"] }
+
+   [target.'cfg(target_os = "linux")'.dependencies]
+   media-pp = { version = "0.4", features = ["vulkan", "pipewire-audio-renderer"] }
+
+   [target.'cfg(target_os = "macos")'.dependencies]
+   media-pp = { version = "0.4", features = ["metal", "coreaudio-renderer"] }
    ```
 
-3. Check the machine with `cargo run -p doctor` in this repository.
+   Linux playback also needs FFmpeg built with Vulkan and PipeWire's
+   development files; the guide covers those before building the player.
 
 [Getting started][getting-started] goes through it step by step,
-with a first pipeline and a first player.
+starting with a software pipeline that needs no video file and no GPU
+features, then reading a file and playing it.
 
 ## Documentation
 

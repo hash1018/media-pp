@@ -61,7 +61,7 @@ the driver and starts on any machine. See [features](../features.md).
 **On macOS, a window never appears.**
 Windows belong to the main thread there. Run your code inside
 `media_pp::elements::run_with_windows`, as
-[getting started](../getting-started.md#5-playing-a-file) shows.
+[getting started](../getting-started.md#7-playing-a-file) shows.
 
 ## Wiring
 
