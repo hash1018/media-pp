@@ -36,8 +36,8 @@ fn main() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]

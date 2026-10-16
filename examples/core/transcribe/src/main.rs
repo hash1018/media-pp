@@ -51,8 +51,8 @@
 //! `--release` matters more than usual: a debug build of the inference is
 //! slower than real time even on a GPU.
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod example {

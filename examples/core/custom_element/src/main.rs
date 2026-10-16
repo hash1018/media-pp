@@ -26,8 +26,8 @@
 //! [`Filter`]: media_pp::element::Filter
 //! [`Sink`]: media_pp::element::Sink
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod example {

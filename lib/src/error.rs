@@ -1029,3 +1029,77 @@ impl Error {
 
 /// The crate's `Result`, with [`enum@Error`] as the error type.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// An [`enum@Error`] as a program's `main` reports it: what went wrong and
+/// what to do, in the words of its `Display`.
+///
+/// A `main` that returns a `Result` prints its error in `Debug`, and the
+/// error's `Debug` is its structure — variant by variant, as a developer
+/// matching on it wants it. What `Display` says is meant for whoever runs
+/// the program, and says more: a refused link names the element to put
+/// between. `main` returning this prints that instead, and `?` turns an
+/// [`enum@Error`] into one, so the body of `main` is written as before:
+///
+/// ```no_run
+/// use media_pp::elements::{FileDemuxer, PacketCounter};
+///
+/// fn main() -> Result<(), media_pp::Report> {
+///     let (source, _) = FileDemuxer::open("file", "video.mp4")?;
+///     # let _ = source;
+///     Ok(())
+/// }
+/// ```
+///
+/// A failure then reads `Error: could not open video.mp4: No such file or
+/// directory` rather than the variants that hold it.
+///
+/// Not an [`std::error::Error`] itself, as `std`'s own unstable `Report`
+/// is not: it is where an error ends, not something to pass on.
+pub struct Report(Error);
+
+impl Report {
+    /// The error it reports.
+    pub fn into_inner(self) -> Error {
+        self.0
+    }
+}
+
+/// Whatever `?` would turn into an [`enum@Error`] — an element's own error,
+/// as [`crate::elements::FileDemuxer::open`] returns — so that a `main`
+/// returning a report is written as one returning [`Result`] would be.
+impl<E: Into<Error>> From<E> for Report {
+    fn from(error: E) -> Self {
+        Self(error.into())
+    }
+}
+
+/// `Display`, because this is what a `main` returning it prints.
+impl std::fmt::Debug for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a `main` returning a `Report` prints is the error's `Display`,
+    /// where the error's own `Debug` would print its variants.
+    #[test]
+    fn a_report_debugs_as_the_error_displays() {
+        let error = Error::Other("no picture size".into());
+        let shown = error.to_string();
+        let structure = format!("{error:?}");
+        let report = Report::from(error);
+        assert_eq!(format!("{report:?}"), shown);
+        assert_ne!(format!("{report:?}"), structure);
+        assert_eq!(report.to_string(), shown);
+    }
+}

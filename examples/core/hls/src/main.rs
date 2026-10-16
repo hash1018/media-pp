@@ -3,8 +3,8 @@
 //!
 //!     cargo run -p hls -- [output-directory] [seconds]
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod example {

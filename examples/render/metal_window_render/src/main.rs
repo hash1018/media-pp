@@ -22,8 +22,8 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
-fn main() -> media_pp::Result<()> {
-    macos_example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(macos_example::run()?)
 }
 
 #[cfg(target_os = "macos")]

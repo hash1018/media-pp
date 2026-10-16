@@ -126,7 +126,7 @@ impl fmt::Display for MediaKind {
 /// subset of the latter. A demuxer feeding a muxer may emit either
 /// encoded kind, while a video decoder accepts only one of them — a
 /// distinction a single kind could not express.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct MediaKindSet(u8);
 
 impl MediaKindSet {
@@ -163,6 +163,15 @@ impl MediaKindSet {
     /// producer-into-consumer direction the link check asks about.
     pub const fn is_subset_of(self, other: Self) -> bool {
         self.0 & !other.0 == 0
+    }
+}
+
+/// By name, as [`fmt::Display`] puts it — `MediaKindSet(VideoFrame)` rather than
+/// the bits it is kept in, which say nothing to someone reading why a link
+/// was refused.
+impl fmt::Debug for MediaKindSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MediaKindSet({self})")
     }
 }
 
@@ -256,7 +265,7 @@ impl fmt::Display for MemoryDomain {
 /// care — one that never reads the pixels — declares [`Self::ALL`], which
 /// is a claim rather than an omission: there is no "unstated" domain to
 /// forget, because [`PortContract::Frames`] has nowhere to leave it out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct MemoryDomainSet(u8);
 
 impl MemoryDomainSet {
@@ -301,6 +310,15 @@ impl MemoryDomainSet {
     /// producer-into-consumer direction the link check asks about.
     pub const fn is_subset_of(self, other: Self) -> bool {
         self.0 & !other.0 == 0
+    }
+}
+
+/// By name, as [`fmt::Display`] puts it — `MemoryDomainSet(System)` rather than
+/// the bits it is kept in, which say nothing to someone reading why a link
+/// was refused.
+impl fmt::Debug for MemoryDomainSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MemoryDomainSet({self})")
     }
 }
 
@@ -429,7 +447,7 @@ impl fmt::Display for PixelLayout {
 /// NV12 or P010 as the stream turns out — the set holds every one it may
 /// be, and where it follows the input frame by frame, the port says
 /// [`OutputContract::SameLayout`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PixelLayoutSet(u8);
 
 impl PixelLayoutSet {
@@ -516,6 +534,15 @@ impl PixelLayoutSet {
         } else {
             arrived
         }
+    }
+}
+
+/// By name, as [`fmt::Display`] puts it — `PixelLayoutSet(NV12|BGRA)` rather than
+/// the bits it is kept in, which say nothing to someone reading why a link
+/// was refused.
+impl fmt::Debug for PixelLayoutSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PixelLayoutSet({self})")
     }
 }
 
@@ -988,6 +1015,24 @@ pub fn check_link(produced: &OutputContract, accepted: &InputContract) -> LinkCh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused link's error is often read in `Debug` — an `unwrap`, a
+    /// `{:?}` — and the sets in it name what they hold.
+    #[test]
+    fn a_set_debugs_by_name() {
+        assert_eq!(
+            format!("{:?}", MediaKindSet::PACKETS),
+            "MediaKindSet(VideoPacket|AudioPacket)"
+        );
+        assert_eq!(
+            format!("{:?}", MemoryDomainSet::of(MemoryDomain::System)),
+            "MemoryDomainSet(System)"
+        );
+        assert_eq!(
+            format!("{:?}", PixelLayoutSet::ALL),
+            "PixelLayoutSet(any layout)"
+        );
+    }
 
     /// An upload lists what it puts out; YUV420P given to one listing NV12
     /// leaves as NV12, and everything else as it came.

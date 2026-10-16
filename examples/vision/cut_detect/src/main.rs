@@ -15,8 +15,8 @@
 //!
 //!     cargo run --release -p cut_detect -- path/to/video.mp4 [--cuda | --metal]
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod example {

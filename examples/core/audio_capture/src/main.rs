@@ -21,18 +21,18 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
-fn main() -> impl std::process::Termination {
-    windows_example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(windows_example::run()?)
 }
 
 #[cfg(target_os = "linux")]
-fn main() -> impl std::process::Termination {
-    linux_example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(linux_example::run()?)
 }
 
 #[cfg(target_os = "macos")]
-fn main() -> impl std::process::Termination {
-    macos_example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(macos_example::run()?)
 }
 
 #[cfg(target_os = "windows")]

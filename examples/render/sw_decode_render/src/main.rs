@@ -19,15 +19,15 @@ fn main() {
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 /// A window is the main thread's on macOS: the main thread runs AppKit's
 /// event loop, and the example runs beside it.
 #[cfg(target_os = "macos")]
-fn main() -> impl std::process::Termination {
-    media_pp::elements::run_with_windows(example::run)
+fn main() -> Result<(), media_pp::Report> {
+    Ok(media_pp::elements::run_with_windows(example::run)?)
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

@@ -8,8 +8,8 @@
 //!     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
 //!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod example {

@@ -76,8 +76,8 @@ const FONTS: [&str; 5] = [
     "/System/Library/Fonts/Supplemental/Arial.ttf",
 ];
 
-fn main() -> impl std::process::Termination {
-    run()
+fn main() -> std::result::Result<(), media_pp::Report> {
+    Ok(run()?)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

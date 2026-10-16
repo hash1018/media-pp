@@ -185,7 +185,7 @@ use media_pp::{
     pipeline::Pipeline,
 };
 
-fn main() -> media_pp::Result<()> {
+fn main() -> Result<(), media_pp::Report> {
     let _log = media_pp::log::init("hello", "logs", media_pp::log::Level::Trace, 7)?;
     let source = TestVideoSource::new("source", TestVideoOptions::default());
     let (counter, frames) = FrameCounter::new("counter");
@@ -217,7 +217,10 @@ frames: 15
 ```
 
 The exact count depends on scheduling; a positive count shows pictures
-reached the counter. Diagnostics are written under your application's
+reached the counter. `main` returns `media_pp::Report` rather than
+`media_pp::Result`: Rust prints an error `main` returns in its `Debug` form,
+which is the error's structure, and a `Report` prints what went wrong and
+what to do instead. `?` works on media-pp's errors inside it as anywhere. Diagnostics are written under your application's
 `logs/` directory; the `_log` guard keeps the logger alive until `main`
 returns. What each pipeline adds — decoders, queues, GPUs, seeking — is in
 [how media-pp works](guide/concepts.md).
@@ -237,7 +240,7 @@ use media_pp::{
     pipeline::Pipeline,
 };
 
-fn main() -> media_pp::Result<()> {
+fn main() -> Result<(), media_pp::Report> {
     let _log = media_pp::log::init("hello", "logs", media_pp::log::Level::Trace, 7)?;
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: cargo run -- <video-path>");
@@ -268,7 +271,7 @@ fn main() -> media_pp::Result<()> {
             }
             BusEvent::Error { error, .. } => {
                 pipeline.stop();
-                return Err(error);
+                return Err(error.into());
             }
             _ => {}
         }
@@ -341,14 +344,14 @@ the player inside `media_pp::elements::run_with_windows`:
 use media_pp::player::{Player, PlayerEvent, PlayerOptions};
 
 #[cfg(not(target_os = "macos"))]
-fn main() -> media_pp::Result<()> {
-    play()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(play()?)
 }
 
 // AppKit's event loop runs on the main thread; the player runs beside it.
 #[cfg(target_os = "macos")]
-fn main() -> media_pp::Result<()> {
-    media_pp::elements::run_with_windows(play)
+fn main() -> Result<(), media_pp::Report> {
+    Ok(media_pp::elements::run_with_windows(play)?)
 }
 
 fn play() -> media_pp::Result<()> {

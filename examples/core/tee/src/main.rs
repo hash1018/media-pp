@@ -8,8 +8,8 @@
 //!
 //!     cargo run -p tee -- path/to/video.mp4
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod example {

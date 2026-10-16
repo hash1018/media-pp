@@ -19,8 +19,8 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn main() -> media_pp::Result<()> {
-    linux_example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(linux_example::run()?)
 }
 
 #[cfg(target_os = "linux")]

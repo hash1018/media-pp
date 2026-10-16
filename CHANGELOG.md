@@ -8,6 +8,25 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
+## Unreleased
+
+### Added
+
+- **`media_pp::Report`, for `main` to return.** A `main` that returns a
+  `Result` prints its error in `Debug`, which for `Error` is its structure;
+  a `main` returning `Result<(), media_pp::Report>` prints what the error's
+  `Display` says instead — `Error: could not open video.mp4: No such file
+  or directory`, or a refused link naming the element to put between. `?`
+  turns any of this crate's errors into one, so the body of `main` is
+  written as before. Getting started and the examples' `main`s use it.
+
+### Changed
+
+- **`MediaKindSet`, `MemoryDomainSet` and `PixelLayoutSet` debug by name** —
+  `MediaKindSet(VideoPacket)` and `PixelLayoutSet(any layout)` rather than
+  `MediaKindSet(1)` and `PixelLayoutSet(63)` — so a refused link read in
+  `Debug` says what did not fit.
+
 ## 0.4.0
 
 macOS, every GPU, and video analysis. The crate runs on macOS —

@@ -34,8 +34,8 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 #[cfg(target_os = "macos")]

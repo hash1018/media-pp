@@ -419,7 +419,7 @@ pub(crate) use core::timing::{schedule, time};
 pub(crate) use core::tone_map;
 pub(crate) use core::transform;
 
-pub use error::{Error, Result};
+pub use error::{Error, Report, Result};
 
 /// The [`ffmpeg-next`](https://docs.rs/ffmpeg-next) this crate is built on.
 ///

@@ -17,8 +17,8 @@
 //!     cargo run -p cuda_text_overlay -- [output.mp4] [seconds]
 //!     (use the arrow keys to move the text, or `q` to stop early)
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod terminal;

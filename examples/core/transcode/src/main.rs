@@ -22,8 +22,8 @@
 //!
 //!     cargo run -p transcode -- input.mp4 [output.mp4]
 
-fn main() -> impl std::process::Termination {
-    example::run()
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
 }
 
 mod example {
