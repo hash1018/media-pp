@@ -152,6 +152,7 @@ pub enum D3d12VideoEncoderError {
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
 /// use media_pp::elements::{
 ///     D3d12Decoder, D3d12Gpu, D3d12VideoCodec, D3d12VideoEncoder, D3d12VideoEncoderOptions,
 ///     FileDemuxer, FileMuxer, Mp4Layout,
@@ -183,6 +184,12 @@ pub enum D3d12VideoEncoderError {
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
+/// // The file is written to its end once the pipeline has finished.
+/// for event in pipeline.bus().iter() {
+///     if matches!(event, BusEvent::Finished) {
+///         pipeline.stop();
+///     }
+/// }
 /// # Ok(())
 /// # }
 /// ```

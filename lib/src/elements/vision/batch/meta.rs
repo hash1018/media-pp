@@ -27,7 +27,7 @@ impl fmt::Display for StreamId {
 
 /// Which input of a [`StreamMux`](super::StreamMux) a picture came from —
 /// the [`Metadata`](crate::buffer::Metadata) it puts on each. Read it with
-/// `buffer.metadata()?.get::<StreamOrigin>()`.
+/// `buffer.metadata().and_then(|m| m.get::<StreamOrigin>())`.
 ///
 /// An element that keeps state from one picture to the next — a tracker,
 /// analytics, a classifier's memory — keeps it for each `id`, and starts a

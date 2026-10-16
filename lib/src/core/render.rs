@@ -75,7 +75,8 @@ use crate::{
 /// A terminal is not an [`Element`]: the stage the framework makes of it
 /// keeps its name and log identity. It goes by its type's name, or by the
 /// one [`Self::named`] gives it, and is told who it is through
-/// [`Self::attached`].
+/// [`Self::attached`]. Its log records and bus events give its kind as
+/// [`ElementType::Other`](crate::element::ElementType::Other).
 pub trait Sink: Send {
     /// Does with `buf` what this terminal is for. Never handed the end of
     /// the stream: that is `drain`'s.

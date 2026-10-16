@@ -272,10 +272,11 @@ impl Chunker {
 
     /// Takes more audio, and answers the inference it now wants run.
     ///
-    /// `pts` places the samples on the timeline of the audio itself, in
-    /// that timeline's own units — which for the [`SAMPLE_RATE`] mono this
-    /// accepts is a sample index. `None` means "where the last frame
-    /// ended", which is what a source that stamps nothing amounts to.
+    /// `pts` places the samples on the timeline of the audio itself, in that
+    /// timeline's own units — which for the
+    /// [`WHISPER_SAMPLE_RATE`](SAMPLE_RATE) mono this accepts is a sample
+    /// index. `None` means "where the last frame ended", which is what a source
+    /// that stamps nothing amounts to.
     ///
     /// Answers `None` while there is not yet a full chunk. One call yields
     /// at most one inference, so a caller handing over more than a chunk at
@@ -538,11 +539,12 @@ fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTra
 /// Turns speech into timed text with a whisper.cpp model, handing each
 /// line to a callback of yours.
 ///
-/// It ends a branch of decoded sound at [`SAMPLE_RATE`], mono, 32-bit float —
-/// an [`AudioResampler`](crate::elements::AudioResampler) in front gets it
-/// there — behind a [`Queue`](crate::queue::Queue), since inference is slow.
-/// Each [`Segment`] is reported once, settled, with its time on the audio's own
-/// timeline. Needs the `whisper` feature (`whisper-vulkan` for the GPU). The
+/// It ends a branch of decoded sound at [`WHISPER_SAMPLE_RATE`](SAMPLE_RATE),
+/// mono, 32-bit float — an [`AudioResampler`](crate::elements::AudioResampler)
+/// in front gets it there — behind a [`Queue`](crate::queue::Queue), since
+/// inference is slow. Each [`Segment`] is reported once, settled, with its time
+/// on the audio's own timeline. Needs the `whisper` feature (`whisper-vulkan`
+/// for the GPU). The
 /// [`transcribe`](https://github.com/hash1018/media-pp/tree/main/examples/core/transcribe)
 /// example writes the lines into a file as subtitles.
 ///
@@ -589,7 +591,7 @@ fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTra
 ///
 /// # What it takes
 ///
-/// [`SAMPLE_RATE`] mono `f32`, and nothing else. An
+/// [`WHISPER_SAMPLE_RATE`](SAMPLE_RATE) mono `f32`, and nothing else. An
 /// [`AudioResampler`](crate::elements::AudioResampler) in front is how
 /// audio gets into that shape; this refuses anything else rather than
 /// resampling badly on its own.

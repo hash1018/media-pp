@@ -34,10 +34,10 @@ const MARGIN: f32 = 114.0 / 255.0;
 ///
 /// It takes decoded pictures in system memory, any format and size, and hands
 /// each on unchanged with the [`Detections`] found in it; read them downstream
-/// with `buffer.metadata()?.get::<Detections>()`. The model is YOLO by default,
-/// or the kind [`OrtDetectorOptions::model`] says. Choose it where pictures are
-/// in system memory; `CudaOrtDetector` and `D3d12OrtDetector` do the same on
-/// GPU pictures. Needs the `ort` feature.
+/// with `buffer.metadata().and_then(|m| m.get::<Detections>())`. The model is
+/// YOLO by default, or the kind [`OrtDetectorOptions::model`] says. Choose it
+/// where pictures are in system memory; `CudaOrtDetector` and
+/// `D3d12OrtDetector` do the same on GPU pictures. Needs the `ort` feature.
 ///
 /// # Example
 ///

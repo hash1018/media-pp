@@ -99,6 +99,10 @@ use crate::{
 /// [`IntoSource`]). One output by default; a source with several — a
 /// stream each, as a demuxer has — says what they are in
 /// [`Self::outputs`] and which each buffer is for in [`Produced::On`].
+///
+/// It goes by its type's name, or by the one [`Self::named`] gives it, and is
+/// told who it is through [`Self::attached`]. Its log records and bus events
+/// give its kind as [`ElementType::Other`](crate::element::ElementType::Other).
 pub trait Source: Send {
     /// Whether it makes what it makes at a rate of its own — a camera, a
     /// clock of its own — rather than as fast as it is asked: see

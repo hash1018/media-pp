@@ -71,8 +71,9 @@ enum Decision {
 ///
 /// # Example
 ///
-/// The video branch of a player; the audio branch ends in an audio renderer
-/// on the same pipeline.
+/// A player's two branches off one file, each attached to its own stream:
+/// the pictures through the synchronizer to a window, the sound to the
+/// speakers it follows.
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
@@ -82,15 +83,26 @@ enum Decision {
 ///
 /// let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// let video = source.best(media::Type::Video)?;
-/// let (window, _) = FrameCounter::new("window"); // a video renderer, in a player
+/// let audio = source.best(media::Type::Audio)?;
+/// // Stand-ins: in a player, a window renderer such as `D3d11WindowRenderer`,
+/// // and an `AudioResampler` to the device's format followed by an audio
+/// // renderer such as `WasapiRenderer`.
+/// let (window, _) = FrameCounter::new("window");
+/// let (speakers, _) = FrameCounter::new("speakers");
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
-///     let branch = ctx
+///     let pictures = ctx
 ///         .branch()
-///         .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+///         .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
 ///         .queue("frames", 8)
 ///         .pipe(VideoSynchronizer::new("sync"))
 ///         .to(window)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index, pictures)?;
+///     let sound = ctx
+///         .branch()
+///         .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+///         .queue("sound", 16)
+///         .to(speakers)?;
+///     ctx.attach(source, audio.index, sound)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

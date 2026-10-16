@@ -19,14 +19,9 @@ pub struct TestVideoOptions {
     pub width: u32,
     /// Height of each generated frame in pixels.
     pub height: u32,
-    /// How fast `pts` advances per generated frame, and — since
-    /// [`TestVideoSource`] self-paces to this same rate on a drift-free
-    /// absolute schedule (see its own docs) — how fast frames actually
-    /// get generated/pushed in real time, precisely enough that a
-    /// downstream [`crate::elements::Pacer`] against
-    /// [`TestVideoSource::time_base`] turns out not to be needed purely
-    /// for smooth `D3d12Renderer` output (confirmed in
-    /// `examples/render/test_video`).
+    /// How many pictures a second it makes: both how fast `pts` advances
+    /// and how fast pictures actually come, since it keeps its own time —
+    /// no [`crate::elements::Pacer`] is needed after it.
     pub frame_rate: ffmpeg::Rational,
 }
 
@@ -71,43 +66,21 @@ impl Default for TestVideoOptions {
 ///
 /// # How it works
 ///
-/// No real decode/demux involved: `run()` fabricates one `Pixel::YUV420P` frame
-/// per tick, stamps it with an increasing `pts` (one tick per frame, in
-/// [`TestVideoSource::time_base`]'s units), and pushes it straight downstream —
-/// useful for exercising `SwScaler`/`Pacer`/`D3d12Renderer`/etc. without a real
-/// file or camera. `D3d12Renderer` in particular already handles
-/// `Pixel::YUV420P` on its CPU-upload path, so this can feed a renderer
-/// directly, no decoder needed.
+/// No decode or demux is involved: each time the pipeline asks, it makes
+/// one `Pixel::YUV420P` picture, stamped with a `pts` one higher than the
+/// last in [`TestVideoSource::time_base`]'s units, and hands it on — enough
+/// to exercise a scaler, an upload or a renderer without a file or a camera.
 ///
-/// Self-paces to `options.frame_rate` on a drift-free absolute schedule
-/// (`next_due += frame_interval` each tick in `run`, not "sleep
-/// `frame_interval` since the last push" — the latter accumulates drift,
-/// since generation itself always takes some nonzero time) — unlike
-/// `FileDemuxer`/`RtspSource` (which push as fast as they can and leave
-/// real-time pacing entirely to a downstream `Pacer`), this element's
-/// "real time" isn't defined by anything external; it's whatever
-/// `frame_rate` says it should be, so there's no reason not to generate at
-/// exactly that rate itself.
+/// It keeps its own time at `options.frame_rate`, on an absolute schedule:
+/// each picture is due one frame interval after the one before was *due*,
+/// not after it was made, so the time making one takes never adds up into
+/// drift. A file source hands its pictures on as fast as it reads them and
+/// leaves the pace to a `Pacer`; this one has no outside clock to follow, so
+/// it keeps the rate itself, and a renderer after it shows it smoothly with
+/// no `Pacer` between. It is live, like a camera.
 ///
-/// Confirmed (`examples/render/test_video`, with and without a
-/// downstream `Pacer`) that this is actually enough on its own for
-/// smooth `D3d12Renderer` output, vsync-locked presentation included — an
-/// earlier version of this doc claimed self-pacing alone was *not*
-/// enough and a `Pacer` was still required, reasoning that only the
-/// *average* rate was being kept correct, not *when* each frame lines up
-/// against the vsync grid. That reasoning wasn't wrong about the
-/// mechanism, but the fix turned out to already be in place here: a
-/// relative "since last push" schedule genuinely can drift out of phase
-/// over time, but this element was rewritten to the absolute schedule
-/// described above specifically to close that gap, and testing without a
-/// `Pacer` afterward showed no judder. See
-/// `crate::elements::DxgiCaptureSource`'s own docs for the same
-/// conclusion reached the same way, including a case (`SwScaler` sitting
-/// between source and renderer) this element doesn't have.
-///
-/// Runs until `Stop` — never reaches `Eos` on its own (no frame-count
-/// limit is exposed, deliberately, mirroring a live camera source more
-/// than a file).
+/// It runs until stopped — it never ends its stream on its own, as a camera
+/// does not.
 pub struct TestVideoSource(SourceStage<Generating>);
 
 source_stage!(TestVideoSource);
@@ -174,8 +147,9 @@ impl TestVideoSource {
         ))
     }
 
-    /// The unit each generated frame's `pts` is expressed in — what you
-    /// need to construct a matching [`crate::elements::Pacer`].
+    /// The unit each picture's `pts` counts in: one frame interval. Each
+    /// picture carries it as well, so nothing after the source needs to be
+    /// told it.
     pub fn time_base(&self) -> ffmpeg::Rational {
         self.0.inner().time_base()
     }

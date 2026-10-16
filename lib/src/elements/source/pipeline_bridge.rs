@@ -298,9 +298,9 @@ impl PipelineBridge {
         let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
-            "created: depth={}, policy={:?}",
+            "created: depth={}, policy={}",
             options.depth,
-            options.policy
+            options.policy.log_label()
         );
         // One ring is enough: the bridge looks at everything there is each
         // time it is woken.

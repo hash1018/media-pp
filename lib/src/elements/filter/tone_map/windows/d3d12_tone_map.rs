@@ -109,6 +109,7 @@ pub enum D3d12ToneMapError {
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
 /// use media_pp::color::ColorDescription;
 /// use media_pp::elements::{
 ///     D3d12Decoder, D3d12Gpu, D3d12ToneMap, D3d12VideoCodec, D3d12VideoEncoder,
@@ -143,6 +144,12 @@ pub enum D3d12ToneMapError {
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
+/// // The file is written to its end once the pipeline has finished.
+/// for event in pipeline.bus().iter() {
+///     if matches!(event, BusEvent::Finished) {
+///         pipeline.stop();
+///     }
+/// }
 /// # Ok(())
 /// # }
 /// ```

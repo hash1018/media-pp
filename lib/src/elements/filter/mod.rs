@@ -1,9 +1,11 @@
 //! The elements in the middle of a chain: they take buffers and hand on
 //! what they make of them.
 //!
-//! Most are both a [`RawSink`](crate::element::RawSink) and a
-//! [`SrcPads`](crate::element::SrcPads), and go into a chain with
-//! [`ChainBuilder::pipe`](crate::pipeline::ChainBuilder::pipe).
+//! Each goes into a chain with
+//! [`ChainBuilder::pipe`](crate::pipeline::ChainBuilder::pipe). Most are a
+//! [`Filter`](crate::element::Filter) underneath — the media work alone, run by
+//! the framework; those that route the stream themselves, such as a [`Tee`] or
+//! a [`Rack`], implement [`RawSink`](crate::element::RawSink) directly.
 //!
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
 //! resampling, gain, gating, compression, limiting and noise suppression,

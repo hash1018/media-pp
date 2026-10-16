@@ -214,7 +214,10 @@ pub struct TeeBuilder {
 /// [`attach`](Self::attach), end it cleanly with
 /// [`finish_branch`](Self::finish_branch) — the file gets its trailer — or
 /// drop a failing branch at once with [`detach`](Self::detach). The other
-/// branches keep running throughout.
+/// branches keep running throughout. A recording attached while the source
+/// runs is handed timestamps from where the source already is; put a
+/// [`TimestampOrigin`](crate::elements::TimestampOrigin) between its encoder
+/// and its muxer so the file starts at zero.
 ///
 /// # Example
 ///

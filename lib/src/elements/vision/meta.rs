@@ -222,7 +222,7 @@ impl Detection {
 ///
 /// It is the [`Metadata`](crate::buffer::Metadata) a detector puts on the
 /// picture it hands on. Read it downstream with
-/// `buffer.metadata()?.get::<Detections>()`.
+/// `buffer.metadata().and_then(|m| m.get::<Detections>())`.
 ///
 /// An empty list is an answer — the detector looked and found nothing —
 /// where a picture carrying no `Detections` was not looked at.
@@ -304,7 +304,7 @@ pub struct SceneCut {
 /// objects inside, and for each of its lines how many objects have crossed it
 /// so far and which crossed on this picture — the
 /// [`Metadata`](crate::buffer::Metadata) it puts beside them. Read it with
-/// `buffer.metadata()?.get::<Analytics>()`.
+/// `buffer.metadata().and_then(|m| m.get::<Analytics>())`.
 ///
 /// The zones and lines are in the order the element was given them.
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -163,6 +163,29 @@ impl fmt::Display for BusEvent {
     }
 }
 
+/// Logs a failure under the identity of the element that failed — the one
+/// the event names — rather than only the one posting it. A queue, a tee or
+/// a demuxer posts what went wrong after it, and a record filed under the
+/// poster alone named the queue where the bus named the sink. The poster is
+/// kept in the message, as the place the failure stopped being returnable.
+fn log_error(pp_log: &PpLog, element_type: ElementType, name: &str, error: &Error) {
+    if !crate::log::enabled(crate::log::Level::Error) {
+        return;
+    }
+    let element = format!("{element_type:?}");
+    if pp_log.element() == element && pp_log.name() == name {
+        pp_error!(pp_log: pp_log, "{error}");
+    } else {
+        let failed = PpLog::new(&element, name, pp_log.pipeline_id());
+        pp_error!(
+            pp_log: &failed,
+            "{error} (reported by {}({}))",
+            pp_log.element(),
+            pp_log.name()
+        );
+    }
+}
+
 /// The sending half of a pipeline's event channel, which elements post
 /// [`BusEvent`]s on.
 ///
@@ -271,7 +294,9 @@ impl Bus {
     }
 
     /// Puts `event` on the bus for whoever reads it, and records it in the
-    /// log under the identity in `pp_log` — the posting element's own.
+    /// log under the identity in `pp_log` — the posting element's own, or,
+    /// for an error the event says another element raised, that element's,
+    /// so the log names what failed as the bus does.
     ///
     /// Never blocks on the receiver. If the receiving half has already been
     /// dropped, the event is discarded; posting never turns pipeline
@@ -290,7 +315,11 @@ impl Bus {
             BusEvent::Eos { .. } => {
                 pp_info!(pp_log: pp_log, "event=eos phase=reported")
             }
-            BusEvent::Error { error, .. } => pp_error!(pp_log: pp_log, "{error}"),
+            BusEvent::Error {
+                element_type,
+                name,
+                error,
+            } => log_error(pp_log, *element_type, name, error),
             BusEvent::Dropped { .. } => {
                 pp_warn!(pp_log: pp_log, "dropped a buffer (queue full)")
             }

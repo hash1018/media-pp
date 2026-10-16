@@ -147,6 +147,7 @@ struct ToneMapConstants {
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
 /// use media_pp::elements::{
 ///     D3d11Decoder, D3d11Gpu, D3d11ToneMap, D3d11VideoCodec, D3d11VideoEncoder,
 ///     D3d11VideoEncoderOptions, D3d11VideoInputFormat, FileDemuxer, FileMuxer, Mp4Layout,
@@ -179,6 +180,12 @@ struct ToneMapConstants {
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
+/// // The file is written to its end once the pipeline has finished.
+/// for event in pipeline.bus().iter() {
+///     if matches!(event, BusEvent::Finished) {
+///         pipeline.stop();
+///     }
+/// }
 /// # Ok(())
 /// # }
 /// ```

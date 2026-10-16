@@ -262,6 +262,7 @@ impl EncodePath {
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
 /// use media_pp::elements::{
 ///     DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, Mp4Layout, VideoDecodeBin,
 ///     VideoEncodeBin, VideoEncodeOptions,
@@ -295,6 +296,12 @@ impl EncodePath {
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
+/// // The file is written to its end once the pipeline has finished.
+/// for event in pipeline.bus().iter() {
+///     if matches!(event, BusEvent::Finished) {
+///         pipeline.stop();
+///     }
+/// }
 /// # Ok(())
 /// # }
 /// ```

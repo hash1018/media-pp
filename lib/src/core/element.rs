@@ -613,6 +613,43 @@ impl<'a> Attached<'a> {
 /// The name is the one it goes by in the pipeline's log and on its bus. One
 /// given no name goes by its type's, which is enough until the same element
 /// is wired twice.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::buffer::MediaBuffer;
+/// use media_pp::element::{Filter, Output};
+/// use media_pp::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+/// use media_pp::pipeline::Pipeline;
+///
+/// /// Hands every buffer on as it came.
+/// struct Pass;
+///
+/// impl Filter for Pass {
+///     fn transform(&mut self, buf: MediaBuffer, out: &mut Output) -> media_pp::Result<()> {
+///         out.push(buf);
+///         Ok(())
+///     }
+/// }
+///
+/// let source = TestVideoSource::new("source", TestVideoOptions::default());
+/// let (counter, _pictures) = FrameCounter::new("counter");
+/// let (pipeline, ()) = Pipeline::new("named", source, |source, ctx| {
+///     // Two of the same filter, told apart in the log and on the bus.
+///     let branch = ctx
+///         .branch()
+///         .pipe(Pass.named("first"))
+///         .pipe(Pass.named("second"))
+///         .to(counter)?;
+///     ctx.attach(source, 0, branch)?;
+///     Ok(())
+/// })?;
+/// // TestVideoSource(source) - Other(first) - Other(second) - FrameCounter(counter)
+/// println!("{}", pipeline.topology());
+/// # Ok(())
+/// # }
+/// ```
 pub struct Named<T> {
     pub(crate) name: String,
     pub(crate) inner: T,

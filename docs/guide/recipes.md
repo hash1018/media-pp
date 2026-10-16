@@ -61,6 +61,17 @@ each decoded picture.
 MP4 can be fast-start (plays while downloading) or fragmented (still opens
 after a crash) — `Mp4Layout`.
 
+To keep only the first part of a file — its first ten seconds, say — there is
+no option to set: put a [`Filter`](#write-your-own-element) of your own on each
+stream, after its decoder, that hands on each picture or sound until its time
+(`buf.pts()` in `buf.time_base()`) reaches the end, drops every one after,
+and tells your program the first time it drops one. Once every stream has
+told it, `pipeline.finish()` ends the file there. For a part that begins
+later, have the same filter drop what comes before its start too, and put a
+`TimestampOrigin` between each encoder and the muxer so the file begins at
+zero. The file is still read and decoded from its beginning: `Pipeline::seek`
+is refused while a recording muxer is attached.
+
 ## Record the screen
 
 | Platform | Capture |
@@ -106,7 +117,10 @@ sources; `NoiseSuppressor`, `AudioGate`, `AudioCompressor` and
 
 To record and stream at once, split with a `Tee`: each output gets its own
 branch, and either can be finished while the other runs —
-[`dynamic_tee`](../../examples/core/dynamic_tee).
+[`dynamic_tee`](../../examples/core/dynamic_tee). A recording started while
+the source is already running gets the source's timestamps, so its file
+would begin seconds in; put a `TimestampOrigin` between each track's encoder
+and the muxer and it begins at zero.
 
 ## Combine several sources into one picture
 

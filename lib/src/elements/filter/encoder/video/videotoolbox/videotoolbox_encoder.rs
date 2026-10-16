@@ -172,6 +172,7 @@ pub enum VideoToolboxEncoderError {
 /// colour (HDR10 included) through [`VideoToolboxEncoder::for_stream`]:
 ///
 /// ```ignore
+/// use media_pp::bus::BusEvent;
 /// use media_pp::elements::{
 ///     FileDemuxer, FileMuxer, Mp4Layout, VideoToolboxCodec, VideoToolboxDecoder,
 ///     VideoToolboxDevice, VideoToolboxEncoder, VideoToolboxEncoderOptions,
@@ -205,6 +206,12 @@ pub enum VideoToolboxEncoderError {
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
+/// // The file is written to its end once the pipeline has finished.
+/// for event in pipeline.bus().iter() {
+///     if matches!(event, BusEvent::Finished) {
+///         pipeline.stop();
+///     }
+/// }
 /// ```
 ///
 /// # How it works

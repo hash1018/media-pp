@@ -72,8 +72,11 @@ pub enum FileMuxerError {
 /// every track with [`FileMuxer::add_stream`] first, then [`FileMuxer::open`]
 /// writes the header and hands back the tracks' sinks, each of which ends a
 /// chain. The file is finished once every track has reached the end of its
-/// stream — [`Pipeline::finish`](crate::pipeline::Pipeline::finish). For a
-/// recording cut into several files see
+/// stream — [`Pipeline::finish`](crate::pipeline::Pipeline::finish) — or the
+/// pipeline is stopped, which finishes it with what it was handed so far. A
+/// recording added to a running [`Tee`](crate::elements::Tee) starts at zero
+/// with a [`TimestampOrigin`](crate::elements::TimestampOrigin) in front of
+/// each track. For a recording cut into several files see
 /// [`SegmentedFileMuxer`](crate::elements::SegmentedFileMuxer); for one written
 /// only when asked, [`ReplayBuffer`](crate::elements::ReplayBuffer).
 ///

@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_trace};
+use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace, pp_warn};
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use thiserror::Error as ThisError;
 
@@ -54,7 +54,10 @@ pub enum QueueError {
 
     /// The worker has exited and can no longer receive media buffers.
     ///
-    /// A queue does not restart its worker; stop or rebuild the owning pipeline.
+    /// Answered once, for the first buffer handed over after the worker
+    /// ended; what comes after is dropped without an error, so a dead branch
+    /// does not report itself for every buffer. A queue does not restart its
+    /// worker; stop or rebuild the owning pipeline.
     #[error("downstream channel closed")]
     ChannelClosed,
 
@@ -133,6 +136,18 @@ pub enum OverflowPolicy {
 impl Default for OverflowPolicy {
     fn default() -> Self {
         OverflowPolicy::Block(Duration::MAX)
+    }
+}
+
+impl OverflowPolicy {
+    /// How the log names this policy: the default wait, which never times
+    /// out, as a plain `block` rather than `Duration::MAX` in seconds.
+    pub(crate) fn log_label(&self) -> String {
+        match self {
+            OverflowPolicy::Block(Duration::MAX) => "block".to_owned(),
+            OverflowPolicy::Block(timeout) => format!("block, timeout {timeout:?}"),
+            OverflowPolicy::DropNewest => "drop newest".to_owned(),
+        }
     }
 }
 
@@ -264,6 +279,11 @@ pub struct Queue {
     /// is not carried across again; see [`crate::control::Direct`]. `None`
     /// for one spawned by hand, which carries every request across itself.
     direct: Option<Registration>,
+    /// Whether this queue has already answered that its worker is gone. Short
+    /// of a stop, a worker ends only by a panic, which it posts itself; after
+    /// saying so once, what reaches the queue is dropped without an error
+    /// each time, so a dead branch cannot flood the bus and the log.
+    told_gone: bool,
 }
 
 impl Queue {
@@ -442,7 +462,6 @@ impl Queue {
                 }));
                 if let Err(payload) = worked {
                     let error = crate::error::Error::panicked(payload.as_ref());
-                    pp_error!(pp_log: &panic_log, "worker: {error}");
                     panic_bus.post(
                         &panic_log,
                         BusEvent::Error {
@@ -455,7 +474,11 @@ impl Queue {
             }),
         )
         .map_err(|source| QueueError::ThreadSpawn(ThreadSpawnError::new(thread_name, source)))?;
-        pp_info!(pp_log: &pp_log, "spawned: capacity={capacity}, policy={policy:?}");
+        pp_info!(
+            pp_log: &pp_log,
+            "spawned: capacity={capacity}, policy={}",
+            policy.log_label()
+        );
 
         Ok(Queue {
             name,
@@ -473,6 +496,7 @@ impl Queue {
             ends_owed,
             state,
             direct,
+            told_gone: false,
         })
     }
 }
@@ -605,15 +629,13 @@ impl RawSink for Queue {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match self.take(buf) {
-            // Stopped, and the worker gone before this could be handed over:
-            // a stop reaches this queue's worker directly — see
+            // The worker gone before this could be handed over. Stopped, a
+            // stop reaches this queue's worker directly — see
             // `crate::control::Direct` — so it can end before the thread
             // handing it this has heard, and what it hands over now is
-            // abandoned, as a stop means.
-            Err(crate::error::Error::QueueError(QueueError::ChannelClosed))
-                if self.state.as_deref().is_some_and(PlaybackState::is_stopped) =>
-            {
-                Ok(())
+            // abandoned, as a stop means; otherwise see `answer_closed`.
+            Err(crate::error::Error::QueueError(QueueError::ChannelClosed)) => {
+                self.answer_closed("buffer")
             }
             taken => taken,
         }
@@ -660,11 +682,9 @@ impl RawSink for Queue {
         );
         if matches!(event, StreamEvent::Eos) {
             return match self.take_end() {
-                // Abandoned, as `consume` abandons a buffer once stopped.
-                Err(crate::error::Error::QueueError(QueueError::ChannelClosed))
-                    if self.state.as_deref().is_some_and(PlaybackState::is_stopped) =>
-                {
-                    Ok(())
+                // As `consume` answers for a buffer.
+                Err(crate::error::Error::QueueError(QueueError::ChannelClosed)) => {
+                    self.answer_closed("end of stream")
                 }
                 taken => taken,
             };
@@ -677,9 +697,8 @@ impl RawSink for Queue {
         };
         let result = match result {
             Ok(()) => Ok(()),
-            // Abandoned, as `consume` abandons a buffer once stopped.
-            Err(()) if self.state.as_deref().is_some_and(PlaybackState::is_stopped) => Ok(()),
-            Err(()) => Err(QueueError::ChannelClosed.into()),
+            // As `consume` answers for a buffer.
+            Err(()) => self.answer_closed("event"),
         };
         match &result {
             Ok(()) => pp_trace!(
@@ -733,6 +752,26 @@ impl Queue {
     /// over.
     fn worker_gone(&self) -> bool {
         self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// What a handover answers once its worker is gone: nothing once the
+    /// pipeline has stopped, which abandons what it carries; otherwise the
+    /// closed channel, the first time only. Short of a stop, the worker ended
+    /// by a panic it posted itself, so each later buffer is dropped quietly
+    /// rather than reported again — one error per buffer from a dead branch for
+    /// as long as its siblings run would bury everything else on the bus.
+    fn answer_closed(&mut self, what: &str) -> Result<()> {
+        if self.state.as_deref().is_some_and(PlaybackState::is_stopped) {
+            return Ok(());
+        }
+        if std::mem::replace(&mut self.told_gone, true) {
+            return Ok(());
+        }
+        pp_warn!(
+            pp_log: &self.pp_log,
+            "worker gone: dropping this {what} and everything after it"
+        );
+        Err(QueueError::ChannelClosed.into())
     }
 
     /// Puts `buf` in the channel once there is room, waiting up to `timeout`
@@ -2061,6 +2100,102 @@ mod tests {
             errors, 1,
             "expected exactly one Error event, for the one buffer that failed"
         );
+    }
+
+    /// A downstream that panics on the first packet it is handed, ending
+    /// the queue's worker with it.
+    struct PanicOnFirst {
+        pp_log: PpLog,
+    }
+
+    impl Element for PanicOnFirst {
+        fn name(&self) -> Arc<str> {
+            "panics".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl RawSink for PanicOnFirst {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Packet(_) = buf {
+                panic!("simulated panic downstream");
+            }
+            Ok(())
+        }
+    }
+
+    /// A queue whose worker a panic ended says so once, not once per
+    /// buffer. Before, every buffer handed to it answered the closed
+    /// channel, which a `Tee` in front posted each time — thirty errors a
+    /// second from one dead branch, for as long as its siblings ran.
+    #[test]
+    fn a_dead_worker_is_reported_once_not_for_every_buffer() {
+        let (bus, bus_rx) = Bus::new();
+        let sink = PanicOnFirst {
+            pp_log: element_pp_log(ElementType::Other, "panics", None),
+        };
+        let mut queue = Queue::spawn_with_policy(
+            "dead",
+            4,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        )
+        .unwrap();
+        queue.consume(packet()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !queue.worker_gone() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never ended"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            matches!(
+                queue.consume(packet()),
+                Err(crate::error::Error::QueueError(QueueError::ChannelClosed))
+            ),
+            "the first buffer after the worker ended must say the channel closed"
+        );
+        for _ in 0..5 {
+            queue
+                .consume(packet())
+                .expect("later buffers are dropped quietly");
+        }
+        queue
+            .stream_event(&StreamEvent::Eos)
+            .expect("so is the end of the stream");
+        drop(queue);
+
+        let errors: Vec<_> = bus_rx
+            .iter()
+            .filter(|e| matches!(e, BusEvent::Error { .. }))
+            .collect();
+        assert_eq!(errors.len(), 1, "only the panic itself: {errors:?}");
+    }
+
+    #[test]
+    fn the_default_policy_is_logged_without_its_endless_timeout() {
+        assert_eq!(OverflowPolicy::default().log_label(), "block");
+        assert_eq!(
+            OverflowPolicy::Block(Duration::from_millis(5)).log_label(),
+            "block, timeout 5ms"
+        );
+        assert_eq!(OverflowPolicy::DropNewest.log_label(), "drop newest");
     }
 
     /// A downstream failure is reported as the downstream element's, not as

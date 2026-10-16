@@ -144,6 +144,7 @@ pub enum VulkanEncoderError {
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
+/// use media_pp::bus::BusEvent;
 /// use media_pp::elements::{
 ///     FileDemuxer, FileMuxer, Mp4Layout, VulkanCodec, VulkanDecoder, VulkanDevice,
 ///     VulkanEncoder, VulkanEncoderOptions,
@@ -174,6 +175,12 @@ pub enum VulkanEncoderError {
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
+/// // The file is written to its end once the pipeline has finished.
+/// for event in pipeline.bus().iter() {
+///     if matches!(event, BusEvent::Finished) {
+///         pipeline.stop();
+///     }
+/// }
 /// # Ok(())
 /// # }
 /// ```
