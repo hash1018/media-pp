@@ -73,6 +73,10 @@ scripts/setup-ffmpeg.sh
 . ~/.local/share/media-pp/ffmpeg/env.sh
 ```
 
+If you mean to play files ([step 7](#7-playing-a-file)), run
+`scripts/setup-ffmpeg.sh --vulkan` here instead: playback on Linux needs
+FFmpeg built with Vulkan, and adding it later builds FFmpeg a second time.
+
 **macOS — from the repository root:**
 
 ```sh
@@ -153,7 +157,6 @@ Run steps 5–7 here. In its generated `Cargo.toml`, add this line under the
 existing `[dependencies]` heading:
 
 ```toml
-[dependencies]
 media-pp = "0.4"
 ```
 
@@ -302,7 +305,8 @@ an audio renderer.
 
 **Linux only:** before building this program, install PipeWire 0.3.50 or
 newer development files (`libpipewire-0.3-dev` on Debian/Ubuntu), and enable
-Vulkan in FFmpeg. From the **media-pp repository root** run:
+Vulkan in FFmpeg — already done if you passed `--vulkan` in step 2. If not,
+from the **media-pp repository root** run:
 
 ```sh
 cd ~/media-pp
