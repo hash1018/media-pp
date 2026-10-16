@@ -8,7 +8,13 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
-## Unreleased
+## 0.4.1
+
+`Report`, which the getting-started guide's programs return from `main` and
+0.4.0 did not have, so that the guide builds against the release it tells
+a reader to install; a dead branch reported once, and a failure logged as
+the element that failed. crates.io's README now links the documentation of
+the version it belongs to.
 
 ### Added
 
@@ -26,6 +32,27 @@ compile error with no explanation.
   `MediaKindSet(VideoPacket)` and `PixelLayoutSet(any layout)` rather than
   `MediaKindSet(1)` and `PixelLayoutSet(63)` — so a refused link read in
   `Debug` says what did not fit.
+- **crates.io's README links the documentation of its own version.** Its
+  links to the guides, the changelog and the rest of the repository named
+  `main`, which can be ahead of the release: 0.4.0's sent a reader to a
+  guide using `Report` before it was published. They now name the
+  release's tag, and its docs.rs link the release's own version rather than
+  the newest (`scripts/crate-readme.sh`); the repository's README links
+  relatively, to the branch being read.
+
+### Fixed
+
+- **A dead branch says so once.** A `Queue` whose worker a panic had ended
+  answered every buffer after it with the closed channel, and a `Tee` in
+  front posted each one — thirty errors a second from one branch, for as
+  long as its siblings ran. The panic is posted once, by the worker; the
+  first buffer after it is answered with the closed channel and the rest
+  are dropped quietly.
+- **A failure is logged as the element that failed.** An error a queue, a
+  tee or a demuxer posted for an element after it went to the bus under
+  that element's name but into the log under the poster's alone; the record
+  now carries the failing element's identity and names the one that
+  reported it.
 
 ## 0.4.0
 

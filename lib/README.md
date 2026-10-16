@@ -1,5 +1,5 @@
 <!-- Written by scripts/crate-readme.sh from README.md, with its
-     links at the v0.4.0 tag. Edit README.md, not this file. -->
+     links at the v0.4.1 tag. Edit README.md, not this file. -->
 
 # media-pp
 
@@ -83,10 +83,12 @@ features, then reading a file and playing it.
 | [All documentation][all-docs] | Building, design records, benchmarks, contributing |
 
 API documentation: the [Windows], [macOS] and [Linux] API pages, each with
-everything on that platform; [docs.rs] has what every platform shares. Both
-document the latest release. The guides above follow the repository's
-`main`, which can be ahead of it; what is not released yet, when there is
-anything, is under *Unreleased* in the changelog.
+everything on that platform, document the latest release; [docs.rs] has what
+every platform shares. Read on GitHub, this page's guides follow the
+repository's `main`, which can be ahead of the release — what is not
+released yet is under *Unreleased* in the changelog — and docs.rs shows the
+latest release. Read on crates.io, the guides and docs.rs are the version
+shown there.
 
 The library is in `lib/`, and each directory under `examples/` is a crate of
 its own. [`CONTRIBUTING.md`][contributing] says how to test a change, and
@@ -101,23 +103,23 @@ Licensed under either the [Apache License, Version 2.0][apache] or the
 `media-pp` does not bundle FFmpeg. You are responsible for complying with the
 license of your FFmpeg build and the codecs you enable.
 
-[scripts]: https://github.com/hash1018/media-pp/tree/v0.4.0/scripts
-[getting-started]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/getting-started.md
-[concepts]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/guide/concepts.md
-[choosing-a-backend]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/guide/choosing-a-backend.md
-[recipes]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/guide/recipes.md
-[troubleshooting]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/guide/troubleshooting.md
-[elements]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/elements.md
-[features]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/features.md
-[examples]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/examples.md
-[all-docs]: https://github.com/hash1018/media-pp/blob/v0.4.0/docs/README.md
-[contributing]: https://github.com/hash1018/media-pp/blob/v0.4.0/CONTRIBUTING.md
-[agents]: https://github.com/hash1018/media-pp/blob/v0.4.0/AGENTS.md
-[apache]: https://github.com/hash1018/media-pp/blob/v0.4.0/LICENSE-APACHE
-[mit]: https://github.com/hash1018/media-pp/blob/v0.4.0/LICENSE-MIT
-[`CHANGELOG.md`]: https://github.com/hash1018/media-pp/blob/v0.4.0/CHANGELOG.md
+[scripts]: https://github.com/hash1018/media-pp/tree/v0.4.1/scripts
+[getting-started]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/getting-started.md
+[concepts]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/guide/concepts.md
+[choosing-a-backend]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/guide/choosing-a-backend.md
+[recipes]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/guide/recipes.md
+[troubleshooting]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/guide/troubleshooting.md
+[elements]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/elements.md
+[features]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/features.md
+[examples]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/examples.md
+[all-docs]: https://github.com/hash1018/media-pp/blob/v0.4.1/docs/README.md
+[contributing]: https://github.com/hash1018/media-pp/blob/v0.4.1/CONTRIBUTING.md
+[agents]: https://github.com/hash1018/media-pp/blob/v0.4.1/AGENTS.md
+[apache]: https://github.com/hash1018/media-pp/blob/v0.4.1/LICENSE-APACHE
+[mit]: https://github.com/hash1018/media-pp/blob/v0.4.1/LICENSE-MIT
+[`CHANGELOG.md`]: https://github.com/hash1018/media-pp/blob/v0.4.1/CHANGELOG.md
 [`ffmpeg-next`]: https://github.com/zmwangx/rust-ffmpeg
-[docs.rs]: https://docs.rs/media-pp
+[docs.rs]: https://docs.rs/media-pp/0.4.1
 [Windows]: https://hash1018.github.io/media-pp/windows/media_pp/
 [macOS]: https://hash1018.github.io/media-pp/macos/media_pp/
 [Linux]: https://hash1018.github.io/media-pp/linux/media_pp/

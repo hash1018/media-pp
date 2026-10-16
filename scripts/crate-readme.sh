@@ -8,7 +8,8 @@
 # against the crate's directory, lib/, where none of them are, and against
 # the default branch, which can be ahead of the release: a guide using API
 # not yet published. So lib/README.md links each of those files at the tag
-# of the version lib/Cargo.toml says, and a reader who came from crates.io
+# of the version lib/Cargo.toml says, and its link to docs.rs at that
+# version rather than whichever is newest: a reader who came from crates.io
 # reads the documentation of the version they installed.
 #
 #   scripts/crate-readme.sh          write lib/README.md
@@ -33,17 +34,19 @@ case ${1:-} in
 esac
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+name=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$root/lib/Cargo.toml" | head -n 1)
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/lib/Cargo.toml" | head -n 1)
 repository=$(sed -n 's/^repository = "\(.*\)"$/\1/p' "$root/lib/Cargo.toml" | head -n 1)
-if [ -z "$version" ] || [ -z "$repository" ]; then
-    echo "no version or repository in lib/Cargo.toml" >&2
+if [ -z "$name" ] || [ -z "$version" ] || [ -z "$repository" ]; then
+    echo "no name, version or repository in lib/Cargo.toml" >&2
     exit 1
 fi
 
 written=$(mktemp)
 trap 'rm -f "$written"' EXIT
 
-awk -v root="$root" -v base="$repository" -v tag="v$version" '
+awk -v root="$root" -v base="$repository" -v tag="v$version" \
+    -v docs="https://docs.rs/$name" -v version="$version" '
     BEGIN {
         print "<!-- Written by scripts/crate-readme.sh from README.md, with its"
         print "     links at the " tag " tag. Edit README.md, not this file. -->"
@@ -76,6 +79,8 @@ awk -v root="$root" -v base="$repository" -v tag="v$version" '
                     failed = 1
                 }
                 line = label base "/" kind "/" tag "/" target
+            } else if (target == docs || target == docs "/") {
+                line = label docs "/" version
             }
         }
         print line
@@ -84,9 +89,14 @@ awk -v root="$root" -v base="$repository" -v tag="v$version" '
 ' "$root/README.md" > "$written"
 
 if [ $check -eq 1 ]; then
-    if ! cmp -s "$written" "$root/lib/README.md"; then
+    # Compared without carriage returns: a Windows checkout holds the file
+    # with CRLF line ends, which git stores as LF, the ends written here.
+    committed=$(mktemp)
+    trap 'rm -f "$written" "$committed"' EXIT
+    tr -d '\r' < "$root/lib/README.md" > "$committed"
+    if ! cmp -s "$written" "$committed"; then
         echo "lib/README.md is not what README.md and version $version make:" >&2
-        diff "$root/lib/README.md" "$written" >&2 || true
+        diff "$committed" "$written" >&2 || true
         echo "run scripts/crate-readme.sh and commit lib/README.md" >&2
         exit 1
     fi

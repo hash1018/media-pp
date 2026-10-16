@@ -80,10 +80,12 @@ features, then reading a file and playing it.
 | [All documentation][all-docs] | Building, design records, benchmarks, contributing |
 
 API documentation: the [Windows], [macOS] and [Linux] API pages, each with
-everything on that platform; [docs.rs] has what every platform shares. Both
-document the latest release. The guides above follow the repository's
-`main`, which can be ahead of it; what is not released yet, when there is
-anything, is under *Unreleased* in the changelog.
+everything on that platform, document the latest release; [docs.rs] has what
+every platform shares. Read on GitHub, this page's guides follow the
+repository's `main`, which can be ahead of the release — what is not
+released yet is under *Unreleased* in the changelog — and docs.rs shows the
+latest release. Read on crates.io, the guides and docs.rs are the version
+shown there.
 
 The library is in `lib/`, and each directory under `examples/` is a crate of
 its own. [`CONTRIBUTING.md`][contributing] says how to test a change, and
