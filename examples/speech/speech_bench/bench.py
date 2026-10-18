@@ -12,6 +12,7 @@ every 200 ms.
 
     python3 bench.py --dir path/to/clips-and-models --bin path/to/builds \
         [--backends cpu,cuda,vulkan] [--reps 3] [--only S0,S2] [--csv results.csv]
+    python3 bench.py --report results.csv
 
 --bin holds speech_bench and model_only, built with the GPU backends to
 compare (`--features cuda,vulkan`, or `metal` on a Mac). --dir holds the
@@ -216,14 +217,22 @@ def run_one(bindir, binary, directory, args, scratch):
 
 
 def main():
+    # The tables are UTF-8 whatever the console's code page, which on a
+    # Korean Windows cannot write them.
+    sys.stdout.reconfigure(encoding="utf-8")
     p = argparse.ArgumentParser()
-    p.add_argument("--dir", required=True)
-    p.add_argument("--bin", required=True)
+    p.add_argument("--report", metavar="CSV", help="print the tables of a finished run and stop")
+    p.add_argument("--dir")
+    p.add_argument("--bin")
     p.add_argument("--backends", default="cpu,metal" if MACOS else "cpu,cuda,vulkan")
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--only")
     p.add_argument("--csv", default="speech-bench.csv")
     a = p.parse_args()
+    if a.report:
+        return report(a.report)
+    if not (a.dir and a.bin):
+        p.error("--dir and --bin are needed to run the matrix")
     # Each run starts in a directory of its own, for its logs.
     a.dir, a.bin = os.path.abspath(a.dir), os.path.abspath(a.bin)
 
@@ -257,14 +266,25 @@ def main():
                 f.flush()
                 print(f"  {rep} {exp} {label}: {r['speed']}x, CER {r['cer']}%, WER {r['wer']}%", file=sys.stderr)
 
+    report(a.csv)
+
+
+def report(path):
+    """A Markdown table for each experiment in a CSV this wrote, in the
+    order the configurations ran: the median of each, and the spread of
+    the speed."""
+    groups = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            groups.setdefault((r["experiment"], r["configuration"]), []).append(r)
+
     def median(rs, key, digits=0):
-        values = [float(r[key]) for r in rs if r.get(key, "-") not in ("-", "")]
+        values = [float(r[key]) for r in rs if r.get(key, "") not in ("-", "")]
         return f"{statistics.median(values):.{digits}f}" if values else "-"
 
     current = None
-    for i, (exp, label, binary, args) in enumerate(rows):
-        rs = results[i]
-        live = "--realtime" in args
+    for (exp, label), rs in groups.items():
+        live = any(r.get("lag") for r in rs)
         if exp != current:
             current = exp
             print(f"\n### {exp}\n")
@@ -274,9 +294,6 @@ def main():
             else:
                 print("| configuration | × real time | CER % | WER % | CPU cores | GPU % | GPU MiB | load, s |")
                 print("|---|---:|---:|---:|---:|---:|---:|---:|")
-        if not rs:
-            print(f"| {label} | failed |")
-            continue
         if live:
             print(f"| {label} | {median(rs, 'lag', 2)} | {median(rs, 'lag_p90', 2)} | {median(rs, 'lag_max', 2)} | "
                   f"{median(rs, 'cer', 1)} | {median(rs, 'cpu', 2)} | {median(rs, 'gpu')} | {median(rs, 'mem')} |")
