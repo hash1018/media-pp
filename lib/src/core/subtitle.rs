@@ -179,6 +179,24 @@ impl Codec {
     /// decode order distinct from presentation order.
     #[must_use]
     pub fn packet(self, text: &str, pts: i64, duration: i64) -> MediaBuffer {
+        MediaBuffer::Packet(Arc::new(self.raw_packet(text, pts, duration)).into())
+    }
+
+    /// [`Codec::packet`], stamped with the time base its times are in, as
+    /// every packet an element of this crate hands on is.
+    pub(crate) fn packet_in(
+        self,
+        text: &str,
+        pts: i64,
+        duration: i64,
+        time_base: ffmpeg::Rational,
+    ) -> MediaBuffer {
+        let mut packet = self.raw_packet(text, pts, duration);
+        packet.set_time_base(time_base);
+        MediaBuffer::Packet(Arc::new(packet).into())
+    }
+
+    fn raw_packet(self, text: &str, pts: i64, duration: i64) -> ffmpeg::Packet {
         let payload = match self {
             Self::MovText => mov_text_sample(text),
             Self::SubRip => cue_text(text).into_bytes(),
@@ -188,7 +206,7 @@ impl Codec {
         packet.set_pts(Some(pts));
         packet.set_dts(Some(pts));
         packet.set_duration(duration);
-        MediaBuffer::Packet(Arc::new(packet).into())
+        packet
     }
 }
 

@@ -70,7 +70,7 @@ fails.
 | Mix | `AudioMixer`: any number of inputs, added and removed while it runs |
 | Convert, adjust | `AudioResampler`, `AudioVolume`, `AudioTempo` (speed at the same pitch) |
 | Clean up a microphone | `AudioGate`, `NoiseSuppressor`, `AudioCompressor`, `AudioLimiter` |
-| Look at | `AudioWaveform`; `WhisperTranscriber`, speech to timed text |
+| Look at | `AudioWaveform`; speech to timed text is under [Speech](#speech) |
 | Encode | `SwAudioEncoder` |
 | Play | `WasapiRenderer` (Windows), `PipeWireAudioRenderer` (Linux), `CoreAudioRenderer` (macOS) |
 
@@ -115,6 +115,17 @@ element after the detector can read it.
 | **Cut detectors** — `SwCutDetector`, `CudaCutDetector`, `D3d12CutDetector`, `MetalCutDetector` | Mark the first picture of each shot of an edited video with a `SceneCut`, where a tracker starts over |
 | `StreamMux` | Gathers a picture of each of several streams into one batch for a model; the demux its handle makes splits them out again |
 | **Overlays** — `SwDetectionOverlay`, `CudaDetectionOverlay`, `D3d12DetectionOverlay`, `MetalDetectionOverlay` | Draw boxes and labels, and an `ObjectAnalytics`'s zones and lines with their counts, as `OverlayParts` says; or hide what was found — faces, number plates — with a mosaic, a blur or a fill, of the box or the ellipse inside it, hard-edged or faded, each class as its `ClassRule` says |
+
+## Speech
+
+What is heard travels with the sound as `Transcript` metadata — each line,
+and each word in it, with its time — so any element after the transcriber
+can read it.
+
+| | |
+|---|---|
+| **Transcribers** — `SwWhisperTranscriber`, `CudaWhisperTranscriber`, `VulkanWhisperTranscriber`, `MetalWhisperTranscriber` | Speech to timed text with a whisper.cpp model, on the CPU or a GPU: lines reported once, settled, never overlapping; the language detected or given, a prompt for the names to spell as given, or the lines in English (`WhisperOptions`). Each holds the sound until its words are settled and hands it on carrying them |
+| `SubtitleEncoder` | The lines as subtitle packets: `mov_text` for an MP4's track, SubRip or WebVTT for an `.srt` or `.vtt` of their own |
 
 ## Whole pipelines
 

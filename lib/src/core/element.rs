@@ -347,8 +347,16 @@ pub enum ElementType {
     ObjectTracker,
     /// Counts a detector's objects in zones of the picture and across lines.
     ObjectAnalytics,
-    /// Speech-to-text sink, through whisper.cpp.
-    WhisperTranscriber,
+    /// Speech to timed text through whisper.cpp, on the CPU.
+    SwWhisperTranscriber,
+    /// The same on an NVIDIA GPU with CUDA.
+    CudaWhisperTranscriber,
+    /// The same on any GPU through Vulkan.
+    VulkanWhisperTranscriber,
+    /// The same on a Mac's GPU with Metal.
+    MetalWhisperTranscriber,
+    /// Turns a transcriber's lines into subtitle packets.
+    SubtitleEncoder,
     /// HTTP Live Streaming muxer sink.
     HlsMuxer,
     /// Container file muxer sink — the container is whichever one

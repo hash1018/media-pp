@@ -22,8 +22,6 @@ mod muxer;
 mod packet_counter;
 mod renderer;
 mod virtual_camera;
-#[cfg(feature = "whisper")]
-mod whisper_transcriber;
 
 pub use app_sink::AppSink;
 pub use counter::CounterHandle;
@@ -79,8 +77,3 @@ pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use virtual_camera::{MfVirtualCamera, MfVirtualCameraError};
 #[cfg(all(target_os = "linux", feature = "v4l2-virtual-camera"))]
 pub use virtual_camera::{V4l2VirtualCamera, V4l2VirtualCameraError};
-#[cfg(feature = "whisper")]
-pub use whisper_transcriber::{
-    ChunkPolicy, SAMPLE_RATE as WHISPER_SAMPLE_RATE, Segment, TokenTiming, WhisperTranscriber,
-    WhisperTranscriberError,
-};

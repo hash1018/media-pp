@@ -572,10 +572,9 @@ rnnoise = ["dep:nnnoiseless"]
 # which every CI runner already has; the model is a file the caller
 # supplies, since nothing that size belongs in a crate.
 whisper = ["dep:whisper-rs"]
-# The same, on the GPU. Vulkan rather than CUDA deliberately: the CUDA
-# backend needs the toolkit to build and only serves NVIDIA, while this
-# needs the Vulkan SDK's shader compiler at build time — the runtime ships
-# with every driver — and serves AMD and Intel too. Measured at ~13x real
+# `VulkanWhisperTranscriber`: the same, on any GPU. It needs the Vulkan
+# SDK's shader compiler at build time — the runtime ships with every
+# driver — and serves NVIDIA, AMD and Intel alike. Measured at ~13x real
 # time against ~0.4x on the CPU for the same model.
 #
 # Building this on Windows needs two things, and neither alone is enough.
@@ -594,7 +593,23 @@ whisper = ["dep:whisper-rs"]
 # breaks the ExternalProject's step ordering instead, so it is not a way
 # round (2). The CPU `whisper` feature needs none of this, and neither does
 # Linux.
-whisper-vulkan = ["whisper", "whisper-rs/vulkan"]
+#
+# Each GPU feature also turns on `raw-api`, whose `whisper_rs_sys` the GPU
+# elements read ggml's device list through, to pick their own backend's GPU.
+whisper-vulkan = ["whisper", "whisper-rs/vulkan", "whisper-rs/raw-api"]
+# `CudaWhisperTranscriber`: the same, on an NVIDIA GPU with CUDA. Building
+# it compiles whisper.cpp's CUDA kernels, so it needs the CUDA toolkit's
+# `nvcc`, headers, runtime and cuBLAS — `CUDA_PATH` names where — and a
+# program built with it does not start without CUDA's runtime and cuBLAS
+# DLLs. On Windows, build with `CMAKE_GENERATOR=Ninja` from a Visual Studio
+# developer prompt: the Visual Studio generator wants CUDA's MSBuild
+# integration, which only the toolkit's installer puts there. Setting
+# `CMAKE_CUDA_ARCHITECTURES` (`86` for an RTX 30) keeps the kernels to the
+# card at hand; left unset, every architecture is built, for much longer.
+whisper-cuda = ["whisper", "whisper-rs/cuda", "whisper-rs/raw-api"]
+# `MetalWhisperTranscriber`: the same, on a Mac's GPU. Metal is part of
+# macOS, and needs nothing installed.
+whisper-metal = ["whisper", "whisper-rs/metal", "whisper-rs/raw-api"]
 webrtc = ["dep:str0m"]
 
 [dev-dependencies]

@@ -10,7 +10,42 @@ compile error with no explanation.
 
 ## Unreleased
 
+### Changed
+
+- **Speech is a family of elements, as vision is: `elements::speech`.**
+  `WhisperTranscriber`, a terminal sink handing each line to a callback, is
+  gone; a transcriber is now a filter per backend — `SwWhisperTranscriber`,
+  and `CudaWhisperTranscriber`, `VulkanWhisperTranscriber` and
+  `MetalWhisperTranscriber` on a GPU — that hands the sound on, holding it
+  until its words are settled, each buffer carrying the lines that begin in
+  it as a `Transcript`. `SubtitleEncoder` makes those lines a subtitle track,
+  which took a hundred lines of the `transcribe` example before.
+
+  ```rust
+  // before
+  let transcriber = WhisperTranscriber::new(name, model, policy, |segment| { /* … */ Ok(()) })?
+      .with_language("ko")?;
+  // after
+  let options = WhisperOptions { chunk: policy, language: Some("ko".into()), ..Default::default() };
+  let transcriber = SwWhisperTranscriber::new(name, model, options)?; // GPUs: …::new(name, model, options, 0)
+  // then `.pipe(transcriber).pipe(SubtitleEncoder::new("text", subtitle::Codec::MovText))`,
+  // or read `buf.metadata().and_then(|m| m.get::<Transcript>())` in an `AppSink`.
+  ```
+
+  `Segment` is `Utterance`, which carries its `words` with their times too,
+  and no longer shares its name with `stream::Segment`. `WhisperOptions`
+  also gives the model a `prompt` — the names and terms to spell as given —
+  and can write the lines in English (`translate`). A GPU that is not there
+  is now an error rather than whisper.cpp's silent fall back to the CPU.
+  `ElementType::WhisperTranscriber` is one variant per backend, and
+  `SubtitleEncoder`. The `transcribe` example is in `examples/speech` now,
+  and picks its backend with `--gpu cuda|vulkan|metal`.
+
 ### Added
+
+- **`whisper-cuda` and `whisper-metal`.** whisper.cpp on an NVIDIA GPU
+  with CUDA, and on a Mac's GPU, beside `whisper-vulkan`; see
+  [features](docs/features.md) for what `whisper-cuda` needs to build.
 
 - **`resize`, a saved software resize with sound.**
   `cargo run -p resize -- input.mp4 output.mp4 --width 160` decodes, scales

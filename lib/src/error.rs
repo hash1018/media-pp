@@ -910,6 +910,10 @@ pub enum Error {
     #[error(transparent)]
     WhisperTranscriberError(#[from] WhisperTranscriberError),
 
+    /// A subtitle encoder was handed something other than sound.
+    #[error(transparent)]
+    SubtitleEncoderError(#[from] crate::elements::SubtitleEncoderError),
+
     /// A WebRTC peer operation failed.
     #[cfg(feature = "webrtc")]
     #[error(transparent)]

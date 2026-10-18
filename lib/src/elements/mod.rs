@@ -2,8 +2,9 @@
 //!
 //! [`source`] produces buffers, [`filter`] transforms them, [`sink`] consumes
 //! them, and [`driver`] holds the background tasks that have no pads at all.
-//! [`vision`] is grouped by what it is for rather than by role: finding
-//! objects in pictures, following them, counting them and drawing them.
+//! [`vision`] and [`speech`] are grouped by what they are for rather than by
+//! role: finding objects in pictures, following them, counting them and
+//! drawing them; hearing what is said, and writing it down.
 //! These are built *on* the framework re-exported at the crate root, not part
 //! of it — anything here could equally be written outside this crate against
 //! the same traits.
@@ -23,6 +24,7 @@ pub mod filter;
 pub(crate) mod rtsp;
 pub mod sink;
 pub mod source;
+pub mod speech;
 mod video_format;
 pub mod vision;
 
@@ -182,11 +184,6 @@ pub use sink::{
     RtmpMuxerError, RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError,
     TrackFormat,
 };
-#[cfg(feature = "whisper")]
-pub use sink::{
-    ChunkPolicy, Segment, TokenTiming, WHISPER_SAMPLE_RATE, WhisperTranscriber,
-    WhisperTranscriberError,
-};
 #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
 pub use sink::{CoreAudioRenderer, CoreAudioRendererError, CoreAudioRendererOptions};
 #[cfg(feature = "cuda")]
@@ -303,6 +300,18 @@ pub use source::{
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
 pub use source::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};
+#[cfg(feature = "whisper-cuda")]
+pub use speech::CudaWhisperTranscriber;
+#[cfg(all(target_os = "macos", feature = "whisper-metal"))]
+pub use speech::MetalWhisperTranscriber;
+#[cfg(feature = "whisper-vulkan")]
+pub use speech::VulkanWhisperTranscriber;
+#[cfg(feature = "whisper")]
+pub use speech::{
+    ChunkPolicy, SwWhisperTranscriber, TokenTiming, WHISPER_SAMPLE_RATE, WhisperOptions,
+    WhisperTranscriberError,
+};
+pub use speech::{SubtitleEncoder, SubtitleEncoderError, Transcript, Utterance, Word};
 #[cfg(feature = "ort-tensorrt")]
 pub use vision::UseTensorRtPolicy;
 #[cfg(feature = "ort")]

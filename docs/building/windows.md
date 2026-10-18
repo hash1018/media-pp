@@ -71,7 +71,7 @@ to start with `STATUS_DLL_NOT_FOUND`.
   [features](../features.md).
 - `whisper-vulkan`: the Vulkan SDK's shader compiler at build time, long
   paths enabled, and a short target directory — see
-  [`transcribe`](../../examples/core/transcribe/README.md).
+  [`transcribe`](../../examples/speech/transcribe/README.md).
 - The soak scenarios' D3D11 live-object count needs the D3D11 debug layer,
   which the optional Windows feature *Graphics Tools* installs; without it
   those scenarios skip.

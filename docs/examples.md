@@ -78,7 +78,6 @@ their keys, arguments and how each ends.
 | [`remux`](../examples/core/remux) | A new container with no re-encoding | All |
 | [`resize`](../examples/core/resize) | Software resize saved as H.264, preserving the best audio track by copying it | All |
 | [`scale`](../examples/vision/scale) | Converting and resizing with `SwScaler` | All |
-| [`transcribe`](../examples/core/transcribe) | Speech turned into a subtitle track with Whisper | All |
 | [`audio_record`](../examples/core/audio_record) | A tone encoded to AAC in an MP4 | All |
 | [`nvenc_record`](../examples/render/nvenc_record) | D3D11 pictures encoded with NVENC | Windows |
 | [`cuda_record`](../examples/cuda/cuda_record) | CUDA pictures encoded with NVENC | Linux, Windows |
@@ -143,6 +142,12 @@ The models are not included; each README says which to download.
 | [`metal_multi_detect`](../examples/vision/metal_multi_detect) | Several files batched through one detector | macOS |
 | [`cut_detect`](../examples/vision/cut_detect) | Where each shot of an edited video begins — on the CPU, CUDA or Metal | All |
 | [`vision_bench`](../examples/vision/vision_bench) | The harness the [vision benchmarks](benchmarks/vision/) are measured with | All |
+
+## Speech
+
+| Example | Shows | Platform |
+|---|---|---|
+| [`transcribe`](../examples/speech/transcribe) | Speech turned into a subtitle track with Whisper, on the CPU, CUDA, Vulkan or Metal | All |
 
 ## WebRTC
 

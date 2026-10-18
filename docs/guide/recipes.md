@@ -56,7 +56,7 @@ each decoded picture.
 | Change container only, no re-encoding | `FileDemuxer -> FileMuxer` | [`remux`](../../examples/core/remux) |
 | Resize and save a file, copying its sound | `SwDecoder -> SwScaler -> SwEncoder -> FileMuxer` | [`resize`](../../examples/core/resize) |
 | Inspect resized frames without saving | `SwScaler`, or a GPU scaler | [`scale`](../../examples/vision/scale) |
-| Add subtitles from speech | `WhisperTranscriber` | [`transcribe`](../../examples/core/transcribe) |
+| Add subtitles from speech | `SwWhisperTranscriber` (or its GPU siblings), then `SubtitleEncoder` | [`transcribe`](../../examples/speech/transcribe) |
 
 `FileMuxer` writes MP4, MOV, Matroska and more, by the file's extension; an
 MP4 can be fast-start (plays while downloading) or fragmented (still opens

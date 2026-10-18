@@ -6,6 +6,7 @@ members = [
     "examples/cuda/*",
     "examples/render/*",
     "examples/rtsp/*",
+    "examples/speech/*",
     "examples/vision/*",
     "examples/webrtc/*",
     "vcam",

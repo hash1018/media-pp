@@ -1,0 +1,18 @@
+[package]
+name = "transcribe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# Each builds one GPU backend of whisper.cpp in beside the CPU, chosen at run
+# time with `--gpu`. None is the default because each is a build
+# requirement of its own — the CUDA toolkit, the Vulkan SDK — and the CPU
+# path needs nothing. On this hardware the difference was ~0.4x real time
+# against ~13x, so anyone transcribing more than a clip wants one.
+cuda = ["media-pp/whisper-cuda"]
+vulkan = ["media-pp/whisper-vulkan"]
+metal = ["media-pp/whisper-metal"]
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["whisper"] }

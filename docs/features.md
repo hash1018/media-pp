@@ -52,7 +52,10 @@ choice.
 | `ort-coreml` | Object detection, classification and embedding on VideoToolbox pictures, `MetalOrtDetector`, `MetalOrtClassifier` and `MetalOrtEmbedder`, through ONNX Runtime's Core ML provider; enables `ort` and `metal` | macOS (Apple silicon) |
 | `ort-directml` | Object detection, classification and embedding on D3D12 pictures, `D3d12OrtDetector`, `D3d12OrtClassifier` and `D3d12OrtEmbedder`, through ONNX Runtime's DirectML provider on any vendor's GPU; enables `ort` and `d3d12` | Windows |
 | `rnnoise` | Speech noise suppression (pure Rust, no model file) | All |
-| `whisper`, `whisper-vulkan` | Speech to timed text through whisper.cpp, on the CPU or any Vulkan GPU | All |
+| `whisper` | Speech to timed text through whisper.cpp on the CPU, `SwWhisperTranscriber`; `Transcript` and `SubtitleEncoder` need no feature | All |
+| `whisper-vulkan` | `VulkanWhisperTranscriber`, on any GPU through Vulkan; enables `whisper` | Linux, Windows |
+| `whisper-cuda` | `CudaWhisperTranscriber`, on an NVIDIA GPU with CUDA; enables `whisper` | Linux, Windows |
+| `whisper-metal` | `MetalWhisperTranscriber`, on a Mac's GPU; enables `whisper` | macOS |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All |
 
 ## What a feature needs
@@ -72,7 +75,15 @@ Beyond FFmpeg 8.0 and Rust 1.88, which everything needs — see building on
   run time.
 - **`whisper-vulkan`**: the Vulkan SDK's shader compiler at build time; on
   Windows also long paths and a short target directory — see
-  [`transcribe`](../examples/core/transcribe/README.md).
+  [`transcribe`](../examples/speech/transcribe/README.md).
+- **`whisper-cuda`**: the CUDA toolkit to build — `nvcc`, its headers, the
+  runtime and cuBLAS, found through `CUDA_PATH` — since whisper.cpp's CUDA
+  kernels are compiled with the crate; CUDA's redistributable archives are
+  enough, nothing need be installed. On Windows build with
+  `CMAKE_GENERATOR=Ninja` from a Visual Studio developer prompt, and set
+  `CMAKE_CUDA_ARCHITECTURES` to the card's (`86` for an RTX 30) unless every
+  architecture is wanted. The program does not start without CUDA's runtime
+  and cuBLAS DLLs on `PATH`.
 - **`ort`**: a model exported to ONNX — YOLOv8 and YOLO11, or YOLOv10
   and YOLO26, RetinaFace, or a DETR-family detector. Building downloads
   ONNX Runtime's prebuilt library, a few hundred megabytes and silent while

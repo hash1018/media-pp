@@ -59,7 +59,7 @@ binary fails to start.
   libraries they link must be found when the program starts — see
   [features](../features.md).
 - `whisper-vulkan`: the Vulkan SDK's shader compiler at build time — see
-  [`transcribe`](../../examples/core/transcribe/README.md).
+  [`transcribe`](../../examples/speech/transcribe/README.md).
 - Screen capture goes through xdg-desktop-portal, whose picker opens on the
   first run. The restore token it prints can be passed on later runs, and
   the capture soak scenarios need one in `MEDIA_PP_SOAK_RESTORE_TOKEN`.
