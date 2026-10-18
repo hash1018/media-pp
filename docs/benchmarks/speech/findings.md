@@ -102,6 +102,25 @@ opposite:
 A change to the transcriber is judged on clips like these, not on the
 benchmark's own.
 
+## The same clip heard on another system can lose a sentence
+
+Run on Linux on the same machine ([linux-rtx3050.md](linux-rtx3050.md)),
+`large-v3-turbo` through CUDA heard the long Korean clip at once at 8.7%
+where Windows had heard it at 3.3%. It had passed over one sentence whole,
+*한 실험용 백신이 에볼라 사망률을 줄일 수 있을 것처럼 보이지만…*, and
+heard every other line exactly as Vulkan did on the same machine, at 3.3%.
+cuBLAS 13.2.2, 13.3.0 and 13.4.2 all passed it over, so the difference is
+in the driver (595 under Linux, 610 under Windows) or in whisper.cpp's
+CUDA kernels as built there; FFmpeg and the clip are ruled out by Vulkan
+hearing it from the same decoded samples.
+
+Greedy decoding takes the likeliest token at every step, so arithmetic
+that differs in its last bits — another driver, another compiler — can
+send it down another path, and passing over a sentence whole is a path
+whisper takes readily. Streamed, the same model through the same CUDA heard the
+sentence. A difference of a sentence between two systems is not a
+difference between them, as one between two runs of a change is not.
+
 ## Half of FLEURS's English recordings are all but silent
 
 The first English numbers had the whole clip heard at once missing 73% of

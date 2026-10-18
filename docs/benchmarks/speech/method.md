@@ -175,7 +175,12 @@ What each backend needs to build is in [`docs/features.md`](../../features.md)
 under `whisper-cuda`, `whisper-vulkan` and `whisper-metal`:
 
 - **Linux.** `cuda` needs the CUDA toolkit (`nvcc`, cuBLAS) where CMake
-  finds it, `vulkan` the Vulkan SDK's headers and `glslc`. Nothing else.
+  finds it, `vulkan` the Vulkan SDK's headers and `glslc`. `whisper-rs-sys`
+  links CUDA's libraries from `/usr/local/cuda` or `/opt/cuda` only, and
+  links `culibos` as well: a toolkit elsewhere — NVIDIA's pip wheels, as
+  [linux-rtx3050.md](linux-rtx3050.md#the-machine) put together without
+  root — needs `LIBRARY_PATH` naming its `lib/` and `lib/stubs/`, and a
+  `libculibos.a` there, which may be an empty archive.
 - **macOS.** `metal` needs only Xcode's command-line tools; there is no CUDA
   or Vulkan there, and no `nvidia-smi`, so the GPU columns stay empty.
 - **Windows.** `vulkan` needs the Vulkan SDK, long paths enabled and a

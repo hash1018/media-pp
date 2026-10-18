@@ -13,6 +13,7 @@ comparisons are the ones a caller has to make:
 |---|---|
 | [method.md](method.md) | The harness, the clips and models and how to fetch them on Linux, macOS and Windows, what is scored, and the experiments S0–S6 |
 | [windows-rtx3050.md](windows-rtx3050.md) | The machine, and every experiment's results on it, each read |
+| [linux-rtx3050.md](linux-rtx3050.md) | The same machine under Ubuntu, beside the Windows figures |
 | [findings.md](findings.md) | What measuring turned up: words lost at every seam, a model repeating itself, cuts inside words, silence that was speech — each fixed — and what was tried and dropped |
 
 ## In short
@@ -38,8 +39,10 @@ stream a model that hears Korean well: `small` runs at 0.6x real time.
 Before the fixes [findings.md](findings.md) describes, the same stream
 missed 25% of the characters.
 
-Linux and macOS have not been measured yet; [method.md](method.md#running-it)
-says how.
+The same machine under Linux hears the same but for a sentence here and
+there, and runs a little faster: the large models 2–7% on the GPU, the
+CPU rows 40% — [linux-rtx3050.md](linux-rtx3050.md). macOS has not been
+measured yet; [method.md](method.md#running-it) says how.
 
 ## Running it
 
