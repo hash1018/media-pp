@@ -399,11 +399,34 @@ impl Transcribing {
     }
 
     /// Runs one round and hands what it heard to the chunker, which
-    /// commits what it agrees on.
+    /// commits what it agrees on — the tail heard again on its own first
+    /// where the chunker asks for it (`Chunker::tail`).
     fn transcribe(&mut self, inference: &Inference) -> Result<()> {
         if inference.audio.is_empty() {
             return Ok(());
         }
+        let mut segments = self.hear(inference)?;
+        let again = self.chunker.tail(inference, &segments);
+        if let Some(tail) = &again {
+            segments.extend(self.hear(tail)?);
+        }
+        let round = self.chunker.heard(inference, &segments);
+        pp_trace!(
+            self,
+            "event=round heard_ms={} tail_again={} committed={} tentative={} forced={} looped={}",
+            inference.audio.len() as i64 * 1000 / i64::from(SAMPLE_RATE),
+            again.is_some(),
+            round.committed,
+            round.tentative,
+            round.forced,
+            round.looped
+        );
+        Ok(())
+    }
+
+    /// What the model hears in `inference`: each segment's tokens, placed
+    /// on the stream's timeline.
+    fn hear(&mut self, inference: &Inference) -> Result<Vec<Vec<Heard>>> {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_progress(false);
         params.set_print_special(false);
@@ -432,21 +455,10 @@ impl Transcribing {
         self.state
             .full(params, &inference.audio)
             .map_err(WhisperTranscriberError::Inference)?;
-
-        let segments: Vec<Vec<Heard>> = (0..self.state.full_n_segments())
+        Ok((0..self.state.full_n_segments())
             .filter_map(|index| self.state.get_segment(index))
             .map(|segment| self.heard(&segment, inference.offset_ms))
-            .collect();
-        let round = self.chunker.heard(inference, &segments);
-        pp_trace!(
-            self,
-            "event=round heard_ms={} committed={} tentative={} forced={}",
-            inference.audio.len() as i64 * 1000 / i64::from(SAMPLE_RATE),
-            round.committed,
-            round.tentative,
-            round.forced
-        );
-        Ok(())
+            .collect())
     }
 
     /// The text tokens of one segment, placed on the stream's timeline.

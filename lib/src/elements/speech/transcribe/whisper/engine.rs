@@ -50,6 +50,17 @@ const LINE_MAX_CHARS: usize = 42;
 const CUT_SEARCH_MS: i64 = 600;
 const CUT_WINDOW_MS: i64 = 40;
 
+/// How long a stretch of sound is measured over, and how far below the
+/// loudest stretch heard so far one may be and still be sound rather than
+/// silence: −30 dB.
+const SOUND_WINDOW_MS: i64 = 100;
+const SOUND_FLOOR: f32 = 0.0316;
+
+/// How much sound after the last word the model heard, short of the edge,
+/// makes the tail worth hearing again on its own: whisper now and then
+/// ends a window early, with seconds of speech still in it.
+const TAIL_GAP_MS: i64 = 2_000;
+
 /// How far short of the end of what was heard silence is believed: a word
 /// only just begun at the very end is not heard as one yet.
 const QUIET_EDGE_MS: i64 = 1_000;
@@ -81,6 +92,14 @@ fn unspaced(c: char) -> bool {
         | '\u{4E00}'..='\u{9FFF}' // CJK unified ideographs
         | '\u{F900}'..='\u{FAFF}' // CJK compatibility ideographs
     )
+}
+
+/// The RMS of some samples.
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
 /// Whether two words' keys are the same word heard twice: the same, or
@@ -349,6 +368,9 @@ pub(super) struct Chunker {
     committed_until_ms: i64,
     /// Whether the next audio begins the timeline again, after a reset.
     restart: bool,
+    /// The loudest [`SOUND_WINDOW_MS`] stretch heard, as RMS: what sound is
+    /// measured against.
+    loudest: f32,
     /// Where the last round first heard something not committed, or short
     /// of the end of its audio where it heard nothing: how far it believed
     /// the silence ran. `None` before a round, which one round alone does
@@ -375,6 +397,7 @@ impl Chunker {
             committed_until_ms: i64::MIN,
             restart: false,
             heard_from: None,
+            loudest: 0.0,
         }
     }
 
@@ -427,6 +450,10 @@ impl Chunker {
                 self.committed_until_ms = self.committed_until_ms.max(Self::samples_to_ms(pts));
             }
             Some(_) => {}
+        }
+        let window = (SAMPLE_RATE as i64 * SOUND_WINDOW_MS / 1000) as usize;
+        for stretch in samples.chunks(window) {
+            self.loudest = self.loudest.max(rms(stretch));
         }
         self.audio.extend_from_slice(samples);
         self.fresh += samples.len();
@@ -482,9 +509,15 @@ impl Chunker {
             self.history.clear();
         }
         let agreed = if inference.last {
-            let count = fresh.len();
-            self.commit_all(fresh);
-            count
+            // The fuller of this hearing and the last, then whatever this one
+            // heard after it: a last round that passed over the end of the
+            // stream would otherwise take with it what the round before
+            // heard there.
+            let count = self.commit_longest(fresh, i64::MAX);
+            let rest = std::mem::take(&mut self.tentative);
+            let more = rest.len();
+            self.commit_all(rest);
+            count + more
         } else if forced {
             self.commit_longest(fresh, audio_end - self.step_ms)
         } else if fresh.is_empty() {
@@ -511,7 +544,16 @@ impl Chunker {
             Some(word) => word.start_ms - QUIET_EDGE_MS / 2,
             None => audio_end - QUIET_EDGE_MS,
         };
-        let quiet = self.heard_from.map(|before| before.min(heard_from));
+        // And only where the audio is quiet too: two rounds both passed
+        // over a sentence begun near the end of what they heard, nine
+        // seconds of it, and it was settled as silence.
+        let quiet = self.heard_from.map(|before| {
+            let quiet = before.min(heard_from);
+            match self.sound_from(self.committed_until_ms, quiet) {
+                Some(sound) => quiet.min(sound - QUIET_EDGE_MS / 2),
+                None => quiet,
+            }
+        });
         self.heard_from = Some(heard_from);
         if let Some(quiet) = quiet {
             self.committed_until_ms = self.committed_until_ms.max(quiet.min(audio_end));
@@ -786,6 +828,56 @@ impl Chunker {
         if let Some(cut) = cut {
             self.cut(cut);
         }
+    }
+
+    /// Where sound begins between `from_ms` and `to_ms` in the audio held:
+    /// the first [`SOUND_WINDOW_MS`] stretch within [`SOUND_FLOOR`] of the
+    /// loudest heard.
+    fn sound_from(&self, from_ms: i64, to_ms: i64) -> Option<i64> {
+        let rate = SAMPLE_RATE as i64;
+        let window = (rate * SOUND_WINDOW_MS / 1000) as usize;
+        let at = |ms: i64| {
+            (ms * rate / 1000 - self.audio_start).clamp(0, self.audio.len() as i64) as usize
+        };
+        let (from, to) = (at(from_ms), at(to_ms));
+        let floor = self.loudest * SOUND_FLOOR;
+        (from..to.saturating_sub(window).max(from))
+            .step_by(window)
+            .find(|&start| rms(&self.audio[start..(start + window).min(self.audio.len())]) > floor)
+            .map(|start| (self.audio_start + start as i64) * 1000 / rate)
+    }
+
+    /// The tail of `inference` to hear again on its own, where the model
+    /// heard nothing in seconds of sound after its last word: whisper ends a
+    /// window early now and then, and hearing what it left out without the
+    /// rest — and without the prompt — is what gets it heard.
+    pub(super) fn tail(&self, inference: &Inference, segments: &[Vec<Heard>]) -> Option<Inference> {
+        let audio_end =
+            inference.offset_ms + inference.audio.len() as i64 * 1000 / SAMPLE_RATE as i64;
+        let heard_until = segments
+            .iter()
+            .flatten()
+            .map(|token| token.end_ms)
+            .max()
+            .unwrap_or(inference.offset_ms)
+            .clamp(inference.offset_ms, audio_end);
+        let edge = if inference.last {
+            audio_end
+        } else {
+            audio_end - QUIET_EDGE_MS
+        };
+        if edge - heard_until < TAIL_GAP_MS {
+            return None;
+        }
+        let sound = self.sound_from(heard_until, edge)?;
+        let from = (sound - QUIET_EDGE_MS / 2).max(heard_until);
+        let skip = ((from - inference.offset_ms) * SAMPLE_RATE as i64 / 1000) as usize;
+        Some(Inference {
+            offset_ms: inference.offset_ms + skip as i64 * 1000 / SAMPLE_RATE as i64,
+            audio: inference.audio.get(skip..)?.to_vec(),
+            prompt: String::new(),
+            last: inference.last,
+        })
     }
 
     /// The quietest moment within [`CUT_SEARCH_MS`] of `guess_ms`, and
@@ -1656,6 +1748,95 @@ mod tests {
             next.prompt.is_empty(),
             "the prompt that kept it going is gone"
         );
+    }
+
+    /// `ms` of sound, as loud as speech.
+    fn loud(ms: usize) -> Vec<f32> {
+        (0..ms * SAMPLE_RATE as usize / 1000)
+            .map(|n| if n % 2 == 0 { 0.3 } else { -0.3 })
+            .collect()
+    }
+
+    /// Two rounds that hear nothing in sound — whisper passing over a
+    /// sentence begun near the end of what it heard — do not settle it as
+    /// silence: the next round that hears it reports it where it is.
+    #[test]
+    fn rounds_that_hear_nothing_in_sound_do_not_settle_it() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = chunker.push(None, &loud(4_000)).unwrap();
+        chunker.heard(&first, &[]);
+        let second = chunker.push(None, &loud(4_000)).unwrap();
+        chunker.heard(&second, &[]);
+        assert!(
+            chunker.settled_until_ms() <= 0,
+            "sound is not silence: {}",
+            chunker.settled_until_ms()
+        );
+        let said = [segment(&[(" 미국", 1_000, 1_400), (" 체조", 1_400, 1_900)])];
+        let third = chunker.push(None, &loud(4_000)).unwrap();
+        chunker.heard(&third, &said);
+        let last = chunker.flush().unwrap();
+        chunker.heard(&last, &said);
+        let lines = chunker.take_lines();
+        assert_eq!(texts(&lines), ["미국 체조"]);
+        assert_eq!(lines[0].start_ms, 1_000, "where it was said");
+    }
+
+    /// Seconds of sound after the last word a round heard are heard again on
+    /// their own, without the prompt; a round that heard to its edge, or
+    /// silence after its last word, is not.
+    #[test]
+    fn the_unheard_tail_of_sound_is_heard_again_on_its_own() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = chunker.push(None, &loud(8_000)).unwrap();
+        let heard = [segment(&[
+            (" 입증되지", 500, 1_200),
+            (" 않았습니다.", 1_200, 2_000),
+        ])];
+        let tail = chunker
+            .tail(&first, &heard)
+            .expect("six seconds of sound unheard");
+        assert!(
+            tail.offset_ms >= 2_000 && tail.offset_ms < 3_000,
+            "{}",
+            tail.offset_ms
+        );
+        assert!(tail.prompt.is_empty());
+        assert_eq!(
+            tail.audio.len() as i64,
+            (8_000 - tail.offset_ms) * SAMPLE_RATE as i64 / 1000
+        );
+        let to_the_edge = [segment(&[(" 말", 500, 6_800)])];
+        assert_eq!(chunker.tail(&first, &to_the_edge), None);
+
+        let mut quiet = Chunker::new(POLICY);
+        let mut audio = loud(2_000);
+        audio.extend(samples(6_000));
+        let round = quiet.push(None, &audio).unwrap();
+        assert_eq!(
+            quiet.tail(&round, &heard),
+            None,
+            "silence after the last word"
+        );
+    }
+
+    /// A last round that passes over the end of the stream does not take
+    /// with it what the round before heard there.
+    #[test]
+    fn a_last_round_hearing_less_keeps_what_the_round_before_heard() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(
+            &first,
+            &[segment(&[
+                (" 선수들이", 1_000, 1_600),
+                (" 안전하고", 1_600, 2_400),
+            ])],
+        );
+        push_on(&mut chunker, 500);
+        let last = chunker.flush().unwrap();
+        chunker.heard(&last, &[segment(&[(" 선수들이", 1_000, 1_600)])]);
+        assert_eq!(texts(&chunker.take_lines()), ["선수들이 안전하고"]);
     }
 
     /// Words are cut where whisper's tokens mark them: at a leading space,

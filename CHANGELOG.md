@@ -72,9 +72,12 @@ compile error with no explanation.
   then passes over a sentence. The audio is cut at the quietest moment near
   where the model says two words part, and the model repeating itself — a
   line it made up, said again every round because the prompt held it — is
-  passed over and the prompt dropped. The same clip misses 5%, at 6x real
-  time where it was 7x; `medium` on Vulkan, which a loop had taken to 40%,
-  misses 15%.
+  passed over and the prompt dropped. Silence is believed only where the
+  audio is quiet as well, a tail of sound the model left unheard is heard
+  again on its own, and the last round keeps whichever of its hearing and
+  the one before it holds more. The same clip misses 3.5%, at 6x real time
+  where it was 7x; `medium`, which a loop had taken to 40% on Vulkan,
+  misses 8%.
 
 - **`AudioResampler` resamples a WAV with no channel mask.** A sound that
   says how many channels it has but not which — what such a WAV decodes to
