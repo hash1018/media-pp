@@ -27,12 +27,28 @@ const PROMPT_CHARS: usize = 200;
 /// and short of a word said again a sentence later.
 const SAME_WORD_MS: i64 = 1_500;
 
+/// How many of the words last cut away are still looked for at the start
+/// of what is heard: their times were guesses, and the sound of the last
+/// of them may still be in the audio.
+const CUT_AWAY_WORDS: usize = 8;
+
+/// How many of the last words committed a round's are checked against for
+/// the model repeating itself, and how long a run of words repeated is a
+/// loop rather than speech.
+const LOOP_WINDOW: usize = 60;
+const LOOP_RUN: usize = 4;
+
 /// A line ends at a pause this long between two words.
 const LINE_PAUSE_MS: i64 = 600;
 /// A line ends once it is this long, in time or in characters, whatever
 /// else: a subtitle any longer is not read before it is gone.
 const LINE_MAX_MS: i64 = 6_000;
 const LINE_MAX_CHARS: usize = 42;
+
+/// How far either side of where the model says two words part a cut looks
+/// for the quietest moment, and how long a moment is.
+const CUT_SEARCH_MS: i64 = 600;
+const CUT_WINDOW_MS: i64 = 40;
 
 /// How far short of the end of what was heard silence is believed: a word
 /// only just begun at the very end is not heard as one yet.
@@ -239,6 +255,9 @@ pub(super) struct Round {
     /// Whether the round committed what it heard without agreement — the
     /// last round, or audio grown to [`MAX_AUDIO_MS`].
     pub(super) forced: bool,
+    /// Whether what the round would have committed repeated what was just
+    /// committed, and was refused as the model looping.
+    pub(super) looped: bool,
 }
 
 /// Decides what to transcribe and which of the answer to believe.
@@ -270,9 +289,22 @@ pub(super) struct Round {
 /// again each round; it is found at the start of what the model says by
 /// its text and passed over. Once the audio is longer than
 /// [`TRIM_AFTER_MS`] it is cut after a committed word that ended a
-/// segment, and the text before the cut is given as the prompt instead.
-/// It stays shorter than Whisper's thirty seconds by committing what it
-/// heard at [`MAX_AUDIO_MS`], agreed or not.
+/// segment, two committed words left after the cut, at the quietest moment
+/// near where the model says the words part — its times are a second out
+/// in a small model, and a round begun inside a word passed over the
+/// sentence it began. The text before the cut is given as the prompt
+/// instead, and the last [`CUT_AWAY_WORDS`] words cut away are still passed
+/// over where the model says them again. It stays shorter than Whisper's
+/// thirty seconds by committing what it heard at [`MAX_AUDIO_MS`], agreed
+/// or not.
+///
+/// # The model repeating itself
+///
+/// A line the model makes up, committed, goes into the prompt, and the
+/// model then says it again, every round, with growing confidence — and
+/// every round agrees. A run of [`LOOP_RUN`] words the last
+/// [`LOOP_WINDOW`] committed words already hold is passed over, and the
+/// prompt is dropped so that the next round hears the audio alone.
 ///
 /// # Lines
 ///
@@ -300,6 +332,11 @@ pub(super) struct Chunker {
     committed: Vec<HeardWord>,
     /// What was committed before `audio`, its end, for the prompt.
     history: String,
+    /// The last words cut away with the audio — see [`CUT_AWAY_WORDS`].
+    cut_away: Vec<HeardWord>,
+    /// The keys of the last words committed, for telling the model
+    /// repeating itself from speech — see [`LOOP_WINDOW`].
+    recent: std::collections::VecDeque<String>,
     /// What the last round heard after what is committed: what this round
     /// has to agree with.
     tentative: Vec<HeardWord>,
@@ -330,6 +367,8 @@ impl Chunker {
             next_pts: None,
             committed: Vec::new(),
             history: String::new(),
+            cut_away: Vec::new(),
+            recent: std::collections::VecDeque::new(),
             tentative: Vec::new(),
             line: Vec::new(),
             lines: Vec::new(),
@@ -434,6 +473,14 @@ impl Chunker {
         let fresh = self.after_committed(hypothesis);
 
         let forced = inference.last || audio_end - inference.offset_ms >= MAX_AUDIO_MS;
+        // The model repeating itself — a line it made up, then said again
+        // and again because the prompt now holds it — is agreed on by every
+        // round, since every round hears it the same. What it repeats is
+        // passed over, and the prompt that keeps it going is dropped.
+        let (fresh, looped) = self.without_repeats(fresh);
+        if looped {
+            self.history.clear();
+        }
         let agreed = if inference.last {
             let count = fresh.len();
             self.commit_all(fresh);
@@ -481,6 +528,7 @@ impl Chunker {
             committed: agreed,
             tentative: self.tentative.len(),
             forced,
+            looped,
         }
     }
 
@@ -536,18 +584,19 @@ impl Chunker {
     /// word heard alike anywhere lined a committed word the cut had left
     /// out against the new word after it, which was then lost.
     fn after_committed(&self, mut heard: Vec<HeardWord>) -> Vec<HeardWord> {
-        if self.committed.is_empty() {
+        let reference: Vec<&HeardWord> = self.cut_away.iter().chain(&self.committed).collect();
+        if reference.is_empty() {
             return heard;
         }
         let near = |a: &HeardWord, b: &HeardWord| (a.start_ms - b.start_ms).abs() <= SAME_WORD_MS;
         let same = |a: &HeardWord, b: &HeardWord| a.key == b.key && near(a, b);
         // The longest common subsequence of every start of the committed
         // words and every start of what was heard.
-        let (done, heard_len) = (&self.committed, heard.len());
+        let (done, heard_len) = (&reference, heard.len());
         let mut table = vec![vec![0usize; heard_len + 1]; done.len() + 1];
         for i in 0..done.len() {
             for j in 0..heard_len {
-                table[i + 1][j + 1] = if same(&done[i], &heard[j]) {
+                table[i + 1][j + 1] = if same(done[i], &heard[j]) {
                     table[i][j] + 1
                 } else {
                     table[i][j + 1].max(table[i + 1][j])
@@ -565,7 +614,7 @@ impl Chunker {
         let mut matched = 0;
         let (mut i, mut j) = (done.len(), skip);
         while i > 0 && j > 0 {
-            if same(&done[i - 1], &heard[j - 1]) && table[i][j] == table[i - 1][j - 1] + 1 {
+            if same(done[i - 1], &heard[j - 1]) && table[i][j] == table[i - 1][j - 1] + 1 {
                 matched = i;
                 break;
             } else if table[i - 1][j] >= table[i][j - 1] {
@@ -578,7 +627,7 @@ impl Chunker {
         // was, the cut may have taken them all, and a new word alike one of
         // them would be passed over in its place.
         if most > 0 {
-            for word in &done[matched..] {
+            for &word in &done[matched..] {
                 if heard
                     .get(skip)
                     .is_some_and(|next| alike(&next.key, &word.key) && near(next, word))
@@ -591,6 +640,39 @@ impl Chunker {
         heard
     }
 
+    /// `heard` without the words that repeat what was just committed or
+    /// said before them in it — each run of [`LOOP_RUN`] words that the
+    /// last [`LOOP_WINDOW`] committed words, or the words before it, already
+    /// hold — and whether there were any.
+    ///
+    /// Only the repeats go: refusing a whole round for one lost the words
+    /// around it, and on the last round the end of the stream with them.
+    fn without_repeats(&self, heard: Vec<HeardWord>) -> (Vec<HeardWord>, bool) {
+        let keys: Vec<&str> = self
+            .recent
+            .iter()
+            .map(String::as_str)
+            .chain(heard.iter().map(|w| w.key.as_str()))
+            .collect();
+        let new_from = self.recent.len();
+        let mut repeated = vec![false; heard.len()];
+        let mut seen = std::collections::HashSet::new();
+        for (at, run) in keys.windows(LOOP_RUN).enumerate() {
+            if !seen.insert(run) {
+                for index in at.max(new_from)..at + LOOP_RUN {
+                    repeated[index - new_from] = true;
+                }
+            }
+        }
+        let looped = repeated.contains(&true);
+        let kept = heard
+            .into_iter()
+            .zip(repeated)
+            .filter_map(|(word, repeated)| (!repeated).then_some(word))
+            .collect();
+        (kept, looped)
+    }
+
     /// Reports `word`, never to change, as part of the line in progress.
     fn commit(&mut self, mut word: HeardWord) {
         word.start_ms = word.start_ms.max(self.committed_until_ms);
@@ -601,6 +683,10 @@ impl Chunker {
             self.finish_line();
         }
         self.committed_until_ms = word.end_ms;
+        if self.recent.len() == LOOP_WINDOW {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(word.key.clone());
         self.committed.push(word.clone());
         let ends = word.ends_sentence() || word.ends_segment;
         self.line.push(word);
@@ -660,7 +746,13 @@ impl Chunker {
             .or(between.checked_sub(1))
             .map(|at| {
                 let (end, next) = (self.committed[at].end_ms, self.committed[at + 1].start_ms);
-                end + (next - end).max(0) / 2
+                // Where the model says the words part, moved to where the
+                // sound is quietest near it — but never into the second word
+                // kept, which the cut must leave whole to line up by.
+                let guess = end + (next - end).max(0) / 2;
+                let low = self.committed[at].start_ms + CUT_SEARCH_MS / 4;
+                let high = self.committed[at + 2].start_ms;
+                self.quietest(guess, low, high)
             })
             .or_else(|| {
                 // At the longest, past whatever is committed, however little:
@@ -696,6 +788,48 @@ impl Chunker {
         }
     }
 
+    /// The quietest moment within [`CUT_SEARCH_MS`] of `guess_ms`, and
+    /// between `low_ms` and `high_ms`: where to cut so that what is heard
+    /// next begins in a pause rather than inside a word.
+    ///
+    /// The model's times for its words are guesses, a second out in a
+    /// small model; a cut on one left the round after it to begin with the
+    /// end of a word, and whisper, handed that, passed over the sentence it
+    /// began — two rounds running, so that it was agreed away.
+    fn quietest(&self, guess_ms: i64, low_ms: i64, high_ms: i64) -> i64 {
+        let rate = SAMPLE_RATE as i64;
+        let window = (rate * CUT_WINDOW_MS / 1000) as usize;
+        let at = |ms: i64| {
+            (ms * rate / 1000 - self.audio_start).clamp(0, self.audio.len() as i64) as usize
+        };
+        let from = at(low_ms.max(guess_ms - CUT_SEARCH_MS));
+        let to = at(high_ms.min(guess_ms + CUT_SEARCH_MS));
+        if to < from + window {
+            return guess_ms;
+        }
+        let step = window / 4;
+        let energy = |start: usize| -> f32 {
+            self.audio[start..start + window]
+                .iter()
+                .map(|s| s * s)
+                .sum()
+        };
+        let mut best = (f32::INFINITY, guess_ms);
+        let mut start = from;
+        while start + window <= to {
+            let e = energy(start);
+            let centre = (self.audio_start + (start + window / 2) as i64) * 1000 / rate;
+            // The nearer to the guess of two alike, so silence is cut in the
+            // middle rather than at its edge.
+            let closer = (centre - guess_ms).abs() < (best.1 - guess_ms).abs();
+            if e < best.0 * 0.999 || (e <= best.0 * 1.001 && closer) {
+                best = (e, centre);
+            }
+            start += step.max(1);
+        }
+        best.1
+    }
+
     /// Lets go of the audio before `cut_ms`, the committed words in it
     /// going into the prompt.
     fn cut(&mut self, cut_ms: i64) {
@@ -711,7 +845,10 @@ impl Chunker {
         };
         for word in gone {
             self.history.extend(word.raw.chars().filter(|&c| c != '\0'));
+            self.cut_away.push(word);
         }
+        let excess = self.cut_away.len().saturating_sub(CUT_AWAY_WORDS);
+        self.cut_away.drain(..excess);
         let excess = self.history.chars().count().saturating_sub(PROMPT_CHARS);
         if excess > 0 {
             let from = self
@@ -747,6 +884,8 @@ impl Chunker {
         self.audio.clear();
         self.committed.clear();
         self.history.clear();
+        self.cut_away.clear();
+        self.recent.clear();
         self.heard_from = None;
         self.fresh = 0;
     }
@@ -767,6 +906,8 @@ impl Chunker {
         self.tentative.clear();
         self.line.clear();
         self.lines.clear();
+        self.cut_away.clear();
+        self.recent.clear();
         self.heard_from = None;
         self.fresh = 0;
     }
@@ -1441,6 +1582,80 @@ mod tests {
         let lines = chunker.take_lines();
         assert_eq!(texts(&lines), ["여행"]);
         assert_eq!(lines[0].start_ms, 10_500);
+    }
+
+    /// The model's word times are guesses, and a word cut away with the
+    /// audio may still be heard at the start of what is left: it is passed
+    /// over, not reported twice.
+    #[test]
+    fn a_word_cut_away_and_heard_again_is_not_reported_again() {
+        let mut chunker = Chunker::new(POLICY);
+        let said = [
+            segment(&[(" 하나", 1_000, 1_500), (" 둘.", 1_500, 2_000)]),
+            segment(&[(" 셋", 5_000, 5_500), (" 넷.", 5_500, 6_000)]),
+            segment(&[(" 다섯", 9_000, 9_500), (" 여섯", 9_500, 10_000)]),
+        ];
+        for _ in 0..4 {
+            let round = push_on(&mut chunker, 4_000).unwrap();
+            let end = round.offset_ms + round.audio.len() as i64 * 1000 / 16_000;
+            chunker.heard(&round, &by(&said, end));
+        }
+        let round = push_on(&mut chunker, 4_000).unwrap();
+        assert!(round.offset_ms > 6_000, "넷 is cut away");
+        chunker.take_lines();
+        // The end of 넷 is still in the audio, and heard as the word.
+        let heard = [
+            segment(&[(" 넷.", round.offset_ms, round.offset_ms + 200)]),
+            segment(&[
+                (" 다섯", 9_000, 9_500),
+                (" 여섯", 9_500, 10_000),
+                (" 일곱", 18_000, 18_500),
+            ]),
+        ];
+        chunker.heard(&round, &heard);
+        let last = chunker.flush().unwrap();
+        chunker.heard(&last, &heard);
+        assert_eq!(texts(&chunker.take_lines()), ["일곱"]);
+    }
+
+    /// A model that makes up a line and then says it again, round after
+    /// round, because the prompt now holds it: every round agrees, and the
+    /// repeats are passed over instead, the prompt dropped.
+    #[test]
+    fn the_model_repeating_itself_is_passed_over_and_its_prompt_dropped() {
+        let mut chunker = Chunker::new(POLICY);
+        let words = ["이", "인공위성을", "찾을", "수", "있는", "기술을"];
+        let looping = |offset: i64, times: usize| -> Vec<Vec<Heard>> {
+            (0..times)
+                .map(|n| {
+                    let at = offset + 300 + n as i64 * 2_000;
+                    words
+                        .iter()
+                        .enumerate()
+                        .map(|(k, w)| Heard {
+                            bytes: format!(" {w}").into_bytes(),
+                            start_ms: at + k as i64 * 300,
+                            end_ms: at + k as i64 * 300 + 280,
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let mut looped = false;
+        for n in 0..6 {
+            let round = push_on(&mut chunker, 4_000).unwrap();
+            looped |= chunker
+                .heard(&round, &looping(round.offset_ms, 1 + n))
+                .looped;
+        }
+        assert!(looped);
+        let said: Vec<String> = chunker.take_lines().into_iter().map(|l| l.text).collect();
+        assert!(said.len() <= 1, "said once at most: {said:?}");
+        let next = push_on(&mut chunker, 4_000).unwrap();
+        assert!(
+            next.prompt.is_empty(),
+            "the prompt that kept it going is gone"
+        );
     }
 
     /// Words are cut where whisper's tokens mark them: at a leading space,

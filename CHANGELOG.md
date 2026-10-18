@@ -69,8 +69,12 @@ compile error with no explanation.
   text (LocalAgreement, after whisper_streaming), what is reported staying
   in the audio heard until it is cut away and given as the prompt; and
   silence is believed only once two rounds hear it, since whisper now and
-  then passes over a sentence. The same clip misses 7%, at 6x real time
-  where it was 7x.
+  then passes over a sentence. The audio is cut at the quietest moment near
+  where the model says two words part, and the model repeating itself — a
+  line it made up, said again every round because the prompt held it — is
+  passed over and the prompt dropped. The same clip misses 5%, at 6x real
+  time where it was 7x; `medium` on Vulkan, which a loop had taken to 40%,
+  misses 15%.
 
 - **`AudioResampler` resamples a WAV with no channel mask.** A sound that
   says how many channels it has but not which — what such a WAV decodes to
