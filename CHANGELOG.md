@@ -77,7 +77,7 @@ compile error with no explanation.
   again on its own, and the last round keeps whichever of its hearing and
   the one before it holds more. The same clip misses 3.5%, at 6x real time
   where it was 7x; `medium`, which a loop had taken to 40% on Vulkan,
-  misses 8%.
+  misses 8%. See [the speech benchmarks](docs/benchmarks/speech/).
 
 - **`AudioResampler` resamples a WAV with no channel mask.** A sound that
   says how many channels it has but not which — what such a WAV decodes to

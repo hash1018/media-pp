@@ -58,13 +58,14 @@ A whisper.cpp GGML file, from
 `--features vulkan` builds whisper.cpp's Vulkan backend (`whisper-vulkan`),
 for any GPU; `--features cuda` its CUDA backend (`whisper-cuda`), for an
 NVIDIA one; `--features metal` its Metal backend, on a Mac. On an i5-12400F
-with an RTX 3050, against a minute of dense Korean speech with
-`--language ko`:
+with an RTX 3050, streaming five minutes of Korean from FLEURS with
+`--language ko` ([the speech benchmarks](../../../docs/benchmarks/speech/windows-rtx3050.md)
+have every model):
 
-| model | CPU | Vulkan |
-|---|---|---|
-| `small` | — | 9.7x real time |
-| `large-v3-turbo` | slower than 0.07x — stopped after 14 minutes | 6.4x |
+| model | CPU | CUDA | Vulkan | characters missed |
+|---|---|---|---|---:|
+| `small` | 0.6x real time | 8.9x | 9.7x | 11–13% |
+| `large-v3-turbo` | too slow to stream | 5.8x | 6.9x | 3.3–3.5% |
 
 A whole file in one pass is several times faster; the streaming loop pays for
 a 30-second encoder window to hear each few seconds (see `ChunkPolicy`). The

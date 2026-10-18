@@ -187,8 +187,9 @@ under `whisper-cuda`, `whisper-vulkan` and `whisper-metal`:
   cuBLAS DLLs on `PATH`, and `PYTHONUTF8=1` where the system's code page is
   not UTF-8, as a Korean Windows's is not.
 
-The whole matrix takes about an hour and a half on an RTX 3050, most of it
-the CPU rows and `large-v3`.
+The whole matrix takes two and a half hours on an RTX 3050, most of it the
+CPU rows, `large-v3` and the live rows, which take as long as their clip.
+`--report results.csv` prints the tables of a finished run again.
 
 ## The experiments
 
