@@ -10,11 +10,13 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch or pull request cancels the run under way.
+# The newest commit holds everything before it, so its run passing verifies
+# the branch as it stands; the commits it superseded keep no result of their
+# own, which a bisect then has to make up for locally.
 concurrency:
   group: ci-${{ github.ref }}
-  # A superseded pull-request run is wasted work; a superseded push to main
-  # would leave that commit unverified.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   windows:

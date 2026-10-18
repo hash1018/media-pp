@@ -26,6 +26,14 @@ permissions:
   pages: write
   id-token: write
 
+# A newer push cancels the documentation build under way: only the newest
+# commit's says anything, and nothing is published from a push. A tag and a
+# run by hand are groups of their own, so a push to main never cancels a
+# publish; the deploy job also queues on `pages` rather than cancelling.
+concurrency:
+  group: api-docs-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-2025
