@@ -148,6 +148,7 @@ The models are not included; each README says which to download.
 | Example | Shows | Platform |
 |---|---|---|
 | [`transcribe`](../examples/speech/transcribe) | Speech turned into a subtitle track with Whisper, on the CPU, CUDA, Vulkan or Metal | All |
+| [`speech_bench`](../examples/speech/speech_bench) | The harness the [speech benchmarks](benchmarks/speech/method.md) are measured with | All |
 
 ## WebRTC
 

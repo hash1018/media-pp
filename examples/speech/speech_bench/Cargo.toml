@@ -1,0 +1,28 @@
+[package]
+name = "speech_bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+default-run = "speech_bench"
+
+[features]
+# Each builds one GPU backend of whisper.cpp in beside the CPU, chosen at
+# run time with `--backend`. Built together, one binary compares them.
+cuda = ["media-pp/whisper-cuda"]
+vulkan = ["media-pp/whisper-vulkan"]
+metal = ["media-pp/whisper-metal"]
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["whisper"] }
+# model_only runs whisper.cpp directly: the version media-pp takes, so the
+# same build of it, with `raw-api` to find a backend's GPU as the elements
+# do.
+whisper-rs = { version = "0.16", features = ["raw-api"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The process's CPU time, as getrusage gives it on Unix: the version the
+# library takes, so nothing new is fetched.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading"] }
