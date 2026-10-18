@@ -38,6 +38,10 @@ final source of truth when documentation and implementation differ.
 - A direct `RawSink::consume` call is synchronous and may return `Err`. A `Queue`
   is the explicit thread and recovery boundary: it reports a downstream data
   error as `BusEvent::Error`, drops that buffer, and continues its worker.
+  A worker a panic ended is posted once, by the worker; the first buffer
+  after it is answered with the closed channel and the rest are dropped
+  quietly. Nothing posts one error per buffer for a branch that is gone — a
+  `Tee` in front once posted thirty a second (8eb6fc99).
   The one exception to "explicit": an element that waits on the clock
   inside `consume` — `Pacer`, `VideoSynchronizer` — answers
   `RawSink::own_queue`, and a chain runs it behind the `.queue()` straight in
@@ -59,7 +63,10 @@ final source of truth when documentation and implementation differ.
   processed. Avoid `try_for_each`, an unreviewed `?`, or an early return that
   turns one item's error into termination of the whole loop.
 - Attribute bus errors to the most specific failing element/branch available,
-  using the existing `PpLog` and stable graph identity conventions.
+  using the existing `PpLog` and stable graph identity conventions. Where a
+  queue, a tee or a demuxer posts what failed after it, the log record goes
+  under the failing element's identity, as the bus event names it, and
+  names the poster in its message — never under the poster alone.
 - Plain control-plane objects that are not `Element`s have no bus identity;
   their operations should return a typed error directly to the caller.
 
@@ -360,6 +367,17 @@ final source of truth when documentation and implementation differ.
 
   Select other features according to the files changed. Also check the default
   build when changing feature-gated exports.
+- A change to a platform's files is compiled on that platform before it
+  lands on `main`. Windows, Linux and macOS code is each compiled only on
+  its own OS, so an edit made elsewhere — a rename carried across every
+  backend by script — is checked by nothing until it is: push it to a
+  branch and let CI build all three. 32ca08c5 landed with its macOS and
+  Linux halves uncompiled, and `main` did not build on either until three
+  fixes followed it.
+- A Metal shader (`lib/src/shaders/metal/*.metal`) is compiled when its
+  element is opened, not by `cargo build`: clippy is clean over a shader
+  that does not compile. A change to one runs that element's tests on a Mac
+  (32acfa8b put an integer `dot()` in one, and only a Mac found it).
 - Hardware-dependent tests use a `try_device()`-style helper and skip with a
   clear reason when the required device is unavailable. Detect absence rather
   than panicking whenever a system font, device, or media file is unavoidable.
@@ -370,9 +388,22 @@ final source of truth when documentation and implementation differ.
   `AudioCodec::Aac`). Nothing there shells out to an `ffmpeg` binary; CI
   installs FFmpeg's development libraries and no command-line tool at all. So
   these tests run everywhere, and everywhere against the same file.
-- `MEDIA_PP_TEST_VIDEO` is now read by `lib/tests/soak.rs` alone, where a real
-  recording is the point — what a real workload costs is not what a 320x240
-  clip costs. Do not reintroduce it in the library's own tests.
+- `MEDIA_PP_TEST_VIDEO` is read where the synthetic fixture cannot serve:
+  `lib/tests/soak.rs`, where what a real workload costs is the point, and
+  the inference tests of the ORT detectors, classifiers and embedders on
+  every backend, which need a recording with people or objects in it and a
+  model — `MEDIA_PP_TEST_YOLO`, `MEDIA_PP_TEST_RETINAFACE`,
+  `MEDIA_PP_TEST_CLASSIFIER` (with `MEDIA_PP_TEST_CLASSIFIER_LABELS`) and
+  `MEDIA_PP_TEST_EMBEDDER` — and skip with a reason without them. CI sets
+  none of these, so such a test runs only where someone has the files, and
+  a change to inference code is run against them before it lands. Nowhere
+  else does a library test read a file of the caller's.
+- A test comparing two backends' inference compares only what the reference
+  is well sure of. Where it is barely sure — a person cut off by the
+  picture's edge — two boxes of one object score alike, and a different
+  scaling to the model's input picks the other one: the backend is right and
+  the test fails on that clip alone (a9a87c48). Choose the picture by the
+  reference's confidence, never take the first that has anything in it.
 - Know what the fixture cannot show. It has no B-frames, no edit list, constant
   frame duration and a start time of exactly zero, so demuxing, seeking and
   decoding are exercised against this crate's own encoder output and no other.
@@ -415,6 +446,10 @@ final source of truth when documentation and implementation differ.
   guide in `docs/guide/` where a concept, recipe or fix it describes
   changes. `docs/README.md` indexes them all. `README.md` stays a
   short overview with a table of those files; detail goes into `docs/`. Keep volatile roadmap ideas out of agent instruction files.
+- The getting-started guide tells a reader to install the release, so its
+  programs use only API the release has: a guide using what `main` added
+  since does not build for its readers until the next release (`Report`,
+  0.4.0). New API goes into the guide with the release that publishes it.
 - `lib/README.md`, which crates.io shows, is written from `README.md` by
   `scripts/crate-readme.sh`, its links at the release's tag. Edit
   `README.md` only, keep its links to repository files relative and

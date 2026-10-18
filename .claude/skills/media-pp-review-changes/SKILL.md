@@ -56,6 +56,16 @@ working tree.
 - For public and gated code, compare module declarations, imports, flat
   re-exports, error conversions, Cargo features/dependencies, platform cfgs,
   the inventory and feature table in `docs/`, examples, and both enabled and disabled builds.
+- For a change to another platform's files, check it was compiled there —
+  its own OS's CI on a branch, not a script's edit on this one. A `cfg`
+  this machine does not build is unchecked by every local command.
+- For a Metal shader, check the element's tests ran on a Mac: a `.metal`
+  file compiles when the element opens, and clippy is clean over one that
+  does not.
+- For the documentation, check that a guide that tells the reader to
+  install the release uses no API added since it, and that a change to
+  `README.md` or the version came with `lib/README.md` written again
+  (`scripts/crate-readme.sh --check`).
 
 ## Evaluate evidence and coverage
 

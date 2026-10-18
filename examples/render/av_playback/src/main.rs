@@ -42,32 +42,34 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
-fn main() -> media_pp::Result<()> {
+fn main() -> Result<(), media_pp::Report> {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: av_playback <video-with-audio.mp4>");
         std::process::exit(2);
     };
-    windows_example::play(path)
+    Ok(windows_example::play(path)?)
 }
 
 #[cfg(target_os = "linux")]
-fn main() -> media_pp::Result<()> {
+fn main() -> Result<(), media_pp::Report> {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: av_playback <video-with-audio.mp4>");
         std::process::exit(2);
     };
-    linux_example::play(path)
+    Ok(linux_example::play(path)?)
 }
 
 /// A window is the main thread's on macOS: the main thread runs AppKit's
 /// event loop, and the example runs beside it.
 #[cfg(target_os = "macos")]
-fn main() -> media_pp::Result<()> {
+fn main() -> Result<(), media_pp::Report> {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: av_playback <video-with-audio.mp4>");
         std::process::exit(2);
     };
-    media_pp::elements::run_with_windows(move || macos_example::play(path))
+    Ok(media_pp::elements::run_with_windows(move || {
+        macos_example::play(path)
+    })?)
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

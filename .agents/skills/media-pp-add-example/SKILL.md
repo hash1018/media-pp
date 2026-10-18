@@ -33,6 +33,13 @@ pipeline from its wiring closure rather than from imports or filenames.
   Cargo package name as prefix, and retain the returned guard through shutdown.
 - Reuse `render_common` or another existing shared helper when its ownership and
   event-loop contract match. Do not create a helper abstraction for one caller.
+- An example that writes a file goes through `file_common`, as `remux`,
+  `transcode` and `resize` do: `FileArgs` for the paths and `--overwrite`,
+  `SafeOutput` so that the export is staged beside the destination, an
+  existing file or the input itself is never written over without
+  `--overwrite`, and a failed run leaves no partial file; `run_to_end` so
+  that the first failure on the bus is the exit status, not a success over
+  half a file.
 - Keep target-specific dependencies and library features under compatible Cargo
   target tables and Rust `cfg`s so unsupported platforms do not resolve or
   compile the backend path.
@@ -44,7 +51,14 @@ pipeline from its wiring closure rather than from imports or filenames.
   and CLI. Put the `main` function or `cfg`-selected `main` functions
   immediately after those docs, before imports and module declarations.
 - Keep `main` as a thin delegate to `example::run()` or the selected
-  `windows_example::run()`/`linux_example::run()`. Put imports, constants, and
+  `windows_example::run()`/`linux_example::run()`, returning
+  `Result<(), media_pp::Report>` as `Ok(example::run()?)` with `run`
+  returning `media_pp::Result<()>`: an error `main` returns is printed in
+  `Debug`, which for `media_pp::Error` is its structure, and a `Report`
+  prints what its `Display` says. One whose exit status carries more than
+  success or failure — `doctor`'s — returns its own, and one whose `run`
+  mixes other crates' errors in (the WebRTC examples', a `winit` loop's)
+  keeps its own type. Put imports, constants, and
   implementation in that module; declarations for shared file modules may
   follow the `main` functions. Do not attach the example overview as `///`
   item docs to `main` or an internal `run`; reserve item docs for contracts
@@ -69,6 +83,11 @@ pipeline from its wiring closure rather than from imports or filenames.
   arguments. A successful compile or process exit is not sufficient.
 - Exercise missing-argument behavior and confirm the usage text and non-zero
   exit status.
+- An example whose output can be checked without a device keeps that check
+  as tests in its own `tests/`, running the built binary
+  (`CARGO_BIN_EXE_<name>`) on a fixture it makes itself — `file_common`'s
+  `test_support` for a media file: missing arguments, the output's streams,
+  and what a refused or failed run leaves behind. No media is checked in.
 - For recorded audio or video, inspect streams, codecs, timestamps, duration,
   and finalization with `ffprobe`. Use assertions that follow from the example
   rather than from one particular media fixture.
