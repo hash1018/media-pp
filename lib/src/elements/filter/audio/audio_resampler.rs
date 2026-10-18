@@ -151,9 +151,7 @@ fn with_named_order(frame: &ffmpeg::frame::Audio) -> Option<ffmpeg::frame::Audio
     }
     // An unspecified layout holds nothing to free: overwriting it leaks
     // nothing.
-    named.set_channel_layout(ffmpeg::ChannelLayout::default(i32::from(
-        frame.channels(),
-    )));
+    named.set_channel_layout(ffmpeg::ChannelLayout::default(i32::from(frame.channels())));
     Some(named)
 }
 
