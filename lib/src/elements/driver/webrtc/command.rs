@@ -216,8 +216,9 @@ pub enum WebRtcError {
     Closed,
 }
 
-/// One command sent from a [`WebRtcHandle`]/[`WebRtcTrackSink`] (any
-/// thread) into [`super::peer::WebRtcPeer::run`]'s own thread.
+/// One command sent from a [`super::track::WebRtcHandle`] or a
+/// [`super::track::WebRtcTrackSink`] (any thread) into the thread
+/// [`super::peer::WebRtcPeer`] runs on as a driver.
 pub(super) enum Command {
     AddTrack(TrackId, MediaKind, Direction, Codec),
     Push(TrackId, Option<Codec>, MediaBuffer),

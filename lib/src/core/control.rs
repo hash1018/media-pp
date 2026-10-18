@@ -443,7 +443,7 @@ pub(crate) enum RequestKind {
 /// [`ControlSender::send`] synchronous. Fields are `pub(crate)` so
 /// [`crate::queue::Queue`]'s worker loop can match on one directly out of
 /// a `crossbeam_channel::select!` arm (which needs the raw `Receiver`,
-/// not the [`ControlReceiver::try_recv`]/[`ControlReceiver::recv`]
+/// not the `ControlReceiver::try_recv`/[`ControlReceiver::recv`]
 /// wrappers used everywhere else).
 pub(crate) struct Request {
     pub(crate) kind: RequestKind,
@@ -687,7 +687,7 @@ impl ControlReceiver {
     }
 
     /// The next request if there is one — `Err(Gone)` where every sender
-    /// has been dropped, which [`Self::try_recv`] cannot tell from an empty
+    /// has been dropped, which `Self::try_recv` cannot tell from an empty
     /// channel.
     pub(crate) fn try_take(
         &self,
@@ -717,7 +717,7 @@ impl ControlReceiver {
 /// [`crate::elements::AudioMixer`], or an absolute next-tick deadline like
 /// [`crate::elements::TestVideoSource`]/`DxgiCaptureSource`)
 /// has to fold `paused_for` back into its own schedule after every
-/// [`drain_control`] call — real (`Instant`) time keeps moving during a
+/// `drain_control` call — real (`Instant`) time keeps moving during a
 /// `Pause`, but the media timeline must not, or `Resume` would look like a
 /// burst of catch-up work owed all at once.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -779,7 +779,7 @@ pub fn drain_control<S: RawSource>(
 
 /// Handles one request a source has taken off its control channel — the
 /// one way every source does, whether it drains the channel between buffers
-/// ([`drain_control`]) or selects on it beside its data: `Finish` ends the
+/// (`drain_control`) or selects on it beside its data: `Finish` ends the
 /// stream in order, `Pause` pauses the source until it is resumed or stopped
 /// (see [`RawSource::pausing`] and [`RawSource::resuming`]), and
 /// anything else is applied and passed on.
@@ -877,7 +877,7 @@ pub(crate) fn apply_finish<S: RawSource>(
 /// it first on `Seek` (see [`apply_seek`]), then forwards `msg` to every
 /// one of `source`'s pads (so it cascades through the graph exactly like
 /// a data buffer would), then acks. Returns `true` for `Stop` — same
-/// meaning as [`drain_control`]'s own return.
+/// meaning as `drain_control`'s own return.
 pub(crate) fn apply_one<S: RawSource>(
     source: &mut S,
     bus: &Bus,

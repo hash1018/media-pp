@@ -379,7 +379,7 @@ impl<T: Element> FlowTracer<T> {
     /// This is where an error stops being anonymous. A chain is a stack of
     /// these, each wrapping the rest, so a failure five stages down is seen
     /// first by the tracer around the element that raised it — and
-    /// [`Error::traced_at`] keeps the first answer. By the time it reaches
+    /// [`crate::error::Error::traced_at`] keeps the first answer. By the time it reaches
     /// the `Queue` that has to report it, it knows where it came from.
     fn trace_origin(&self, result: Result<()>) -> Result<()> {
         result.map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()))

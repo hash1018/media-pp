@@ -66,7 +66,7 @@ impl TimeBase {
         Self(value)
     }
 
-    /// Only [`crate::elements::driver::webrtc::peer::to_str0m_media_time`]
+    /// Only `to_str0m_media_time`, in the WebRTC driver's peer,
     /// needs the raw `ffmpeg::Rational` back out today — `#[cfg]`-gated
     /// rather than left for a hypothetical future caller (this module has
     /// no `#[allow(dead_code)]` precedent elsewhere in this crate).
@@ -86,7 +86,7 @@ pub struct MediaTimestamp {
 }
 
 impl MediaTimestamp {
-    /// Only [`crate::elements::driver::webrtc::peer::packet_rtp_time`]
+    /// Only `packet_rtp_time`, in the WebRTC driver's peer,
     /// builds a `MediaTimestamp` straight from an unvalidated
     /// `ffmpeg::Rational` today; [`Pacer`] already holds a validated
     /// [`TimeBase`] and uses [`MediaTimestamp::new_unchecked`] instead. See

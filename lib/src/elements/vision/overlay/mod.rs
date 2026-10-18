@@ -1101,7 +1101,7 @@ pub(crate) struct Mark {
 }
 
 /// One box to hide, in pixels of the picture: all of `rect`, or with
-/// `ellipse` the samples [`inside_ellipse`] of it.
+/// `ellipse` the samples inside the ellipse that touches its four sides.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Hide {
     /// `rect` cut into `cells` — across, down — each painted the mean of
