@@ -37,7 +37,7 @@ pub struct InvalidTimeBase {
 }
 
 /// An [`ffmpeg::Rational`] known to have a positive numerator and
-/// denominator — the only two values [`InvalidTimeBase::try_new`]
+/// denominator — the only two values [`TimeBase::try_new`]
 /// rejects, `try_new` is the only way to build one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeBase(ffmpeg::Rational);

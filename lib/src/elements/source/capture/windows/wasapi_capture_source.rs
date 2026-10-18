@@ -40,10 +40,10 @@ use crate::{
 /// event-driven signaling is well documented as unreliable specifically
 /// for loopback capture (Microsoft's own WASAPILoopbackCapture sample
 /// polls for exactly this reason, rather than using
-/// `AUDCLNT_STREAMFLAGS_EVENTCALLBACK`). Using the same poll loop for
-/// `AudioCaptureMode::Microphone` too keeps one code path instead of
-/// branching between event-driven and polled just for a latency
-/// difference that doesn't matter at these timescales.
+/// `AUDCLNT_STREAMFLAGS_EVENTCALLBACK`). Using the same poll loop for a
+/// microphone — a `WasapiDeviceKind::Capture` device — too keeps one code
+/// path instead of branching between event-driven and polled just for a
+/// latency difference that doesn't matter at these timescales.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// WASAPI shared-mode buffer size, in 100ns units (200ms) — comfortably

@@ -156,7 +156,7 @@ pub struct Pacer {
     /// clock replaces the rate the position advances at.
     playback_clock: Option<Arc<PlaybackClock>>,
     /// The latest pipeline interrupt this pacer has acknowledged through
-    /// `control()`. A newer clock epoch means pause/seek/stop is waiting for
+    /// its control hook (`RawSink::flow`). A newer clock epoch means pause/seek/stop is waiting for
     /// the current `consume()` call to return. `Queue`'s own worker only
     /// checks its control channel *between* buffers (see its type docs) —
     /// it can't preempt a `consume()` call already in flight, and this
@@ -172,7 +172,7 @@ pub struct Pacer {
     state: Option<Arc<PlaybackState>>,
     /// Buffers whose paced wait was interrupted before the owning worker
     /// could process pause/seek/stop. Pause retains them for resume; seek
-    /// and stop discard them in `control()`.
+    /// and stop discard them in its control hook.
     pending: VecDeque<MediaBuffer>,
     /// How late the buffer the last wait let go was — zero for one on
     /// time, untimed, or let through by a preroll.

@@ -111,7 +111,7 @@ struct Forwarded {
     /// own docs on why a frame reference is not enough.
     _frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     /// The earliest the next picture may be forwarded — see
-    /// [`ChangeGate::remember`] for why this is a deadline rather than the
+    /// [`Gating::remember`] for why this is a deadline rather than the
     /// moment this one went out.
     due: Instant,
 }

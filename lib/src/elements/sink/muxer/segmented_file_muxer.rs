@@ -1289,7 +1289,7 @@ mod tests {
         }
     }
 
-    /// Every segment of a recording made with `create_fragmented` is
+    /// Every segment of a recording made with `Mp4Layout::Fragmented` is
     /// written in fragments, and so is the one under way: cut off — its
     /// sinks dropped with no `Eos` and no `Stop` — it still opens, where a
     /// plain segment would not open at all.

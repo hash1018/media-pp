@@ -376,14 +376,13 @@ mod tests {
         }
     }
 
-    /// Regression test for the pause/resume scheduling bug: `next_due` is
-    /// an absolute `Instant` deadline, and real time keeps moving while
-    /// [`Pipeline::pause`] blocks this source's own loop inside
-    /// `drain_control`. Without shifting `next_due` forward by however
-    /// long the pause actually lasted (`ControlOutcome::paused_for`),
-    /// `Resume` would find a deadline that's been sitting in the past the
-    /// whole time it was frozen and dump every "missed" frame back to
-    /// back instead of picking the steady framerate back up.
+    /// Regression test for the pause/resume scheduling bug: the
+    /// `LiveSchedule`'s deadline is absolute, and real time keeps moving
+    /// while [`Pipeline::pause`] holds this source. The framework keeps a
+    /// pause out of the clock `Wait::now` reads; counted in, `Resume`
+    /// would find a deadline that had been sitting in the past the whole
+    /// time it was frozen and dump every "missed" frame back to back
+    /// instead of picking the steady frame rate back up.
     #[test]
     fn resuming_after_a_pause_does_not_dump_a_burst_of_catch_up_frames() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -474,19 +473,17 @@ mod tests {
         }
     }
 
-    /// Regression test for the missing processing-delay clamp:
-    /// `next_due += self.frame_interval` alone (no follow-up "did that
+    /// Regression test for the missing processing-delay clamp: adding the
+    /// frame interval to the last deadline alone (no follow-up "did that
     /// still land in the past?" check) let one abnormally slow downstream
-    /// `consume()` call leave `next_due` many intervals behind `now`, and
-    /// every one of those intervals would fire back-to-back with no sleep
-    /// between them as soon as the loop got a chance to run again — a
-    /// burst of catch-up frames. `SwVideoCompositor::run` already guarded
-    /// its own composition step this way; `TestVideoSource::run` now
-    /// applies the same clamp right after advancing `next_due` — and only
-    /// *after* generate+push (this test's other regression: advancing
-    /// before push meant the clamp couldn't see the slow tick's own delay
-    /// until the following iteration, letting exactly one immediate
-    /// catch-up frame slip through right after the slow one finished).
+    /// push leave the deadline many intervals behind now, and every one of
+    /// those intervals would fire back-to-back with no wait between them —
+    /// a burst of catch-up frames. `LiveSchedule`, which the compositors
+    /// and the screen captures share, drops the missed ticks instead, and only *after*
+    /// generate+push (this test's other regression: advancing before push
+    /// meant the clamp couldn't see the slow tick's own delay until the
+    /// following one, letting exactly one immediate catch-up frame slip
+    /// through right after the slow one finished).
     #[test]
     fn a_slow_sink_does_not_cause_a_burst_of_catch_up_frames() {
         let (tx, rx) = crossbeam_channel::unbounded();

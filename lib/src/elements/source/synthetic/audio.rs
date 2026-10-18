@@ -349,11 +349,12 @@ mod tests {
         assert!(source.as_seekable().is_none());
     }
 
-    /// Regression test for the pause/resume timing bug: `start.elapsed()`
-    /// keeps advancing while [`Pipeline::pause`] blocks this source's own
-    /// loop inside `drain_control`. Without subtracting the accumulated
-    /// `ControlOutcome::paused_for` back out, `Resume` would find the
-    /// whole pause suddenly counted as owed samples and emit one wildly
+    /// Regression test for the pause/resume timing bug: the samples owed
+    /// are counted from the time `Wait::now` says has passed since the
+    /// first tick, and real time keeps moving while [`Pipeline::pause`]
+    /// holds this source. The framework keeps a pause out of that clock;
+    /// counted in, `Resume` would find the whole pause suddenly counted
+    /// as owed samples and emit one wildly
     /// oversized frame to cover it, instead of resuming its steady
     /// per-tick sample count — each frame's `pts` is a running sample
     /// count, so a healthy run never has two consecutive frames whose

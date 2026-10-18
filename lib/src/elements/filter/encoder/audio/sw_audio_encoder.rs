@@ -206,7 +206,7 @@ struct Encoding {
     /// sample type, always `f32` — see [`SwAudioEncoderError::NoF32Format`])
     /// samples waiting for a full `frame_size`-sample chunk. Channel-major
     /// regardless of whether `target_format` itself is packed or planar —
-    /// [`SwAudioEncoder::absorb_resampled`]/[`SwAudioEncoder::drain_pending`]
+    /// [`absorb_resampled`]/[`Encoding::drain_pending`]
     /// are the only two places that ever reshape into/out of
     /// `target_format`'s actual on-the-wire layout.
     pending: Vec<VecDeque<f32>>,

@@ -1,10 +1,13 @@
 //! The pipeline's shared, pause-aware wall-clock reference.
 //!
-//! One [`Clock`] per [`Pipeline`](crate::pipeline::Pipeline), shared with
-//! every [`Pacer`](crate::elements::Pacer) at wiring time. Whichever branch
-//! processes a frame first anchors t=0 and the others read that same anchor,
-//! which is what keeps video and audio from each drifting away from their own
-//! first frame.
+//! One [`Clock`] per [`Pipeline`](crate::pipeline::Pipeline), handed to
+//! every element in its [`Context`](crate::element::Context). Elements do
+//! not pace on it directly: the pipeline's
+//! [`PlaybackClock`](crate::playback_clock::PlaybackClock) reads the wall
+//! time it measures, which a [`Pacer`](crate::elements::Pacer) waits on
+//! until an audio renderer takes the position over. Whichever reads it first
+//! anchors t=0 and the rest read that same anchor, which is what keeps video
+//! and audio from each drifting away from their own first frame.
 
 use std::{
     sync::Mutex,
@@ -18,11 +21,12 @@ use std::{
 /// anchor; every other branch reads the same one, so they agree on t=0
 /// instead of each drifting from its own first frame.
 ///
-/// Owned by [`crate::pipeline::Pipeline`] (one per pipeline, shared with
-/// every [`crate::elements::Pacer`] via the `wire` closure) so
-/// `Pipeline::pause`/`resume` can keep it in sync with the rest of the
-/// pipeline — see those for why a `Pacer`, mid-playback, needs this to be
-/// pause-aware and not just a fixed anchor.
+/// Owned by [`crate::pipeline::Pipeline`] (one per pipeline, in every
+/// element's [`crate::element::Context`] and under its
+/// [`crate::playback_clock::PlaybackClock`]) so `Pipeline::pause`/`resume`
+/// can keep it in sync with the rest of the pipeline: a pause must not count
+/// as time played, or a `Pacer` would find every deadline behind it on
+/// resume.
 pub struct Clock {
     state: Mutex<State>,
 }
@@ -115,15 +119,11 @@ impl Clock {
     /// startup (see the type docs). Unconditional, regardless of current
     /// state.
     ///
-    /// Called on a seek
-    /// (see [`crate::pipeline::Pipeline::seek`]): the old anchor measured
-    /// real time elapsed *for the pre-seek position* — after a jump, a
-    /// `Pacer`'s `elapsed_secs` (relative to its own now-reset
-    /// `first_pts`) starts over from ~0 too, so pairing it with the
-    /// stale anchor would compute a `due` far in the past and skip
-    /// sleeping entirely, dumping every post-seek frame with no pacing.
-    /// This is the wall-clock half of that same fix — `Pacer::first_pts`
-    /// resetting is the pts half; both are needed together.
+    /// A pipeline never calls it: a seek starts the media position over in
+    /// its [`crate::playback_clock::PlaybackClock`], which re-anchors on
+    /// this clock's elapsed time rather than restarting it, so the pause
+    /// accounting here goes on across the seek. It is for a caller driving
+    /// a `Clock` of its own.
     pub fn reset(&self) {
         let mut state = self.state.lock().unwrap();
         *state = State::Unset;
