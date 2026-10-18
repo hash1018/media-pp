@@ -12,7 +12,7 @@ use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
 
-use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_trace, pp_warn};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -47,8 +47,6 @@ pub use vulkan::VulkanWhisperTranscriber;
 
 use engine::{Chunker, Heard, Inference};
 use hold::Held;
-
-use crate::elements::speech::meta::Utterance;
 
 /// The rate Whisper's own front end works at. Nothing else is accepted, and
 /// nothing here resamples: put an
@@ -108,70 +106,51 @@ pub enum WhisperTranscriberError {
     },
 }
 
-/// How much audio to gather before running inference, and how much of the
-/// result to trust.
+/// How often to hear the audio again, and how to time its words.
 ///
-/// # Why a chunk at all
+/// # Why rounds at all
 ///
 /// Whisper's encoder takes exactly 30 seconds of audio: the positional
 /// embeddings are sized for it, so a shorter input is padded and a longer
-/// one cannot be given at all. Transcribing a stream is therefore a loop,
-/// and these two numbers are what the loop is made of.
+/// one cannot be given at all. Transcribing a stream is therefore a loop:
+/// every [`chunk_ms`](Self::chunk_ms) the audio not yet settled is heard
+/// again, with what has arrived since, and a word is reported once two
+/// rounds in a row agree on it — so a word, once reported, never changes,
+/// and a caller never has to withdraw text it has already written to a
+/// file or drawn on a screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkPolicy {
-    /// How much new audio to gather before each inference, in milliseconds.
+    /// How much new audio to gather before each round, in milliseconds.
     ///
-    /// This is the floor on how late a line can be: nothing is transcribed
-    /// until this much has arrived. Larger chunks give the model more to
-    /// work with and cost more delay.
+    /// A word is reported in the round after the one that first heard it,
+    /// so a line is one to two of these behind the speech, before whatever
+    /// inference itself costs. Each round costs about the same however
+    /// much it hears, since Whisper hears thirty seconds either way: half
+    /// this is twice the work for half the delay.
     pub chunk_ms: u32,
-    /// How much of the newest audio to distrust, in milliseconds.
-    ///
-    /// The model's output near the end of what it was given is unstable —
-    /// a word half-heard is guessed at, and the guess changes once the rest
-    /// of it arrives. Rather than emit that and correct it later, this much
-    /// of the tail is left alone and picked up on the next round, when it
-    /// is no longer at the edge.
-    ///
-    /// The cost is that a line waits this much longer. What it buys is that
-    /// a line, once reported, never changes — so a caller never has to
-    /// withdraw text it has already written to a file or drawn on a screen.
-    pub live_edge_ms: u32,
-    /// How each word's time is worked out — which is what decides where a
-    /// line is cut between one round and the next.
+    /// How each word's time is worked out.
     pub token_timing: TokenTiming,
 }
 
 impl Default for ChunkPolicy {
-    /// Four seconds of audio, holding back the last one, with estimated
-    /// token times.
+    /// A round every four seconds, with estimated word times.
     ///
-    /// The delay a caller sees is the sum of the two, so this is text about
-    /// five seconds behind the speech — before whatever inference itself
-    /// costs. For a recording that is nothing, because a subtitle's place
-    /// in the file is its timestamp and not its arrival. For captions on a
-    /// screen it is very visible, and the numbers are here to be changed.
+    /// For a recording the delay is nothing, because a subtitle's place in
+    /// the file is its timestamp and not its arrival. For captions on a
+    /// screen it is very visible, and the number is here to be changed.
     fn default() -> Self {
         Self {
             chunk_ms: 4_000,
-            live_edge_ms: 1_000,
             token_timing: TokenTiming::Estimated,
         }
     }
 }
 
-/// How the time of each token is worked out.
+/// How the time of each word is worked out.
 ///
-/// Every round hears the round before it again as context, and what it
-/// reports is cut from what it heard by those times: the words inside its
-/// window are its own, the ones before were said already. So the times
-/// decide whether a word at the seam is reported once, twice or not at all.
-/// Measured on a minute of dense Korean speech with `large-v3-turbo`:
-///
-/// | | real time | at the seams |
-/// |---|---|---|
-/// | [`Estimated`](Self::Estimated) | 6.4x | pieces said twice — "13시간 / 시간 정도" |
-/// | [`Aligned`](Self::Aligned) | 6.1x | one piece said twice in the minute |
+/// Which words are reported does not depend on it — two rounds agree on
+/// words by their text — but where each line and word starts and ends
+/// does, and so does where the audio already reported is cut away.
 ///
 /// The first aligned run on a GPU also compiles the alignment's own
 /// shaders, which took as long again as the inference here — a cost the
@@ -179,28 +158,18 @@ impl Default for ChunkPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenTiming {
     /// whisper.cpp's own estimate, from the timestamps it predicts beside
-    /// the text. Costs nothing, and is rough enough that the same word
-    /// heard in two rounds gets two different times.
+    /// the text. Costs nothing, and is rough: the same word heard in two
+    /// rounds gets times hundreds of milliseconds apart.
     Estimated,
     /// Aligned against the audio by dynamic time warping over the model's
-    /// alignment heads. A few percent more inference time, and a line cut
-    /// where the speech actually is.
+    /// alignment heads. A few percent more inference time, and a line
+    /// timed where the speech actually is.
     ///
     /// Which heads to read depends on the model, and is worked out from the
     /// model file's own dimensions. For a model this does not recognise it
     /// falls back to [`Estimated`](Self::Estimated) and says so in the log,
     /// rather than aligning against the wrong heads.
     Aligned,
-}
-
-impl ChunkPolicy {
-    fn chunk_samples(&self) -> usize {
-        (self.chunk_ms as usize * SAMPLE_RATE as usize) / 1000
-    }
-
-    fn live_edge_samples(&self) -> usize {
-        (self.live_edge_ms as usize * SAMPLE_RATE as usize) / 1000
-    }
 }
 
 /// What a whisper transcriber is to hear, and how — the same for every
@@ -211,8 +180,7 @@ impl ChunkPolicy {
 /// says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WhisperOptions {
-    /// How much audio to gather for each inference, and how much of the
-    /// answer to trust.
+    /// How often to hear the audio again, and how to time its words.
     pub chunk: ChunkPolicy,
     /// The language spoken, as whisper.cpp names it — a code such as `"en"`
     /// or `"ko"`, or the English name, `"korean"` — or `None` to detect it.
@@ -233,7 +201,7 @@ pub struct WhisperOptions {
     /// terms it is to spell as given. A word the model has never seen —
     /// a company's name, a place — is otherwise heard as the nearest one it
     /// knows. Keep it to a sentence or two of the vocabulary; it is given
-    /// before every chunk.
+    /// before every round, ahead of what was said before.
     pub prompt: Option<String>,
     /// How many CPU threads whisper.cpp runs on, or `None` for its own
     /// choice. On a GPU backend the CPU only feeds the GPU, and this matters
@@ -290,9 +258,6 @@ pub(super) struct Transcribing {
     /// Whether the context was loaded with alignment heads, so each token
     /// carries an aligned time — see [`TokenTiming::Aligned`].
     aligned: bool,
-    /// Reported once, because it is the same answer every time and a line
-    /// per chunk would bury the log.
-    reported_zero_length: bool,
 }
 
 impl Transcribing {
@@ -377,10 +342,9 @@ impl Transcribing {
 
         pp_info!(
             pp_log: &pp_log,
-            "model loaded: path={path}, on {on}, chunk={}ms, live_edge={}ms, token_timing={}, \
+            "model loaded: path={path}, on {on}, chunk={}ms, token_timing={}, \
              language={}, translate={}, prompt={}",
             options.chunk.chunk_ms,
-            options.chunk.live_edge_ms,
             match &heads {
                 Some(preset) => format!("aligned({preset:?})"),
                 None => "estimated".to_owned(),
@@ -409,7 +373,6 @@ impl Transcribing {
                 threads: options.threads,
                 end_of_text,
                 aligned: heads.is_some(),
-                reported_zero_length: false,
             },
         ))
     }
@@ -435,10 +398,11 @@ impl Transcribing {
         Ok(frame.plane::<f32>(0))
     }
 
-    /// Runs one inference and answers the lines inside its window.
-    fn transcribe(&mut self, inference: Inference) -> Result<Vec<Utterance>> {
+    /// Runs one round and hands what it heard to the chunker, which
+    /// commits what it agrees on.
+    fn transcribe(&mut self, inference: &Inference) -> Result<()> {
         if inference.audio.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_progress(false);
@@ -449,45 +413,40 @@ impl Transcribing {
         // whisper.cpp assumes English — see `WhisperOptions::language`.
         params.set_language(self.language);
         params.set_translate(self.translate);
-        if let Some(prompt) = &self.prompt {
-            params.set_initial_prompt(prompt);
+        // The caller's vocabulary, then what was said before the audio this
+        // round hears, which keeps a sentence the cut ran through going on
+        // as one.
+        let prompt = match &self.prompt {
+            Some(vocabulary) => format!("{vocabulary}{}", inference.prompt),
+            None => inference.prompt.trim_start().to_owned(),
+        };
+        if !prompt.is_empty() {
+            params.set_initial_prompt(&prompt);
         }
         if let Some(threads) = self.threads {
             params.set_n_threads(i32::from(threads));
         }
-        // What lets a segment be cut where this round's window is rather
-        // than kept or dropped whole — see `Chunker::place`.
+        // Each word's time, which places its line.
         params.set_token_timestamps(true);
 
         self.state
             .full(params, &inference.audio)
             .map_err(WhisperTranscriberError::Inference)?;
 
-        let mut lines = Vec::new();
-        for index in 0..self.state.full_n_segments() {
-            let Some(segment) = self.state.get_segment(index) else {
-                continue;
-            };
-            let tokens = self.heard(&segment, inference.offset_ms);
-            let Some(line) = self.chunker.place(&inference, &tokens) else {
-                pp_trace!(
-                    self,
-                    "event=segment phase=skipped tokens={} \
-                     outcome=outside-window-or-already-reported",
-                    tokens.len()
-                );
-                continue;
-            };
-            if line.end_ms <= line.start_ms && !self.reported_zero_length {
-                self.reported_zero_length = true;
-                pp_debug!(
-                    self,
-                    "a segment arrived with no duration; keeping it anyway"
-                );
-            }
-            lines.push(line);
-        }
-        Ok(lines)
+        let segments: Vec<Vec<Heard>> = (0..self.state.full_n_segments())
+            .filter_map(|index| self.state.get_segment(index))
+            .map(|segment| self.heard(&segment, inference.offset_ms))
+            .collect();
+        let round = self.chunker.heard(inference, &segments);
+        pp_trace!(
+            self,
+            "event=round heard_ms={} committed={} tentative={} forced={}",
+            inference.audio.len() as i64 * 1000 / i64::from(SAMPLE_RATE),
+            round.committed,
+            round.tentative,
+            round.forced
+        );
+        Ok(())
     }
 
     /// The text tokens of one segment, placed on the stream's timeline.
@@ -549,31 +508,29 @@ impl Filter for Transcribing {
         let end = start + samples.len() as i64;
         self.next_sample = Some(end);
 
-        // One push can complete more than one chunk, when whoever is
-        // upstream hands over a long frame.
-        let mut inference = self.chunker.push(frame.pts(), samples);
+        let inference = self.chunker.push(frame.pts(), samples);
         self.held
             .hold(buf, Self::samples_to_ms(start), Self::samples_to_ms(end));
-        while let Some(next) = inference {
-            let lines = self.transcribe(next)?;
-            self.held.heard(lines);
-            inference = self.chunker.take_chunk();
+        if let Some(inference) = inference {
+            self.transcribe(&inference)?;
         }
+        // A gap in the audio finishes a line too, with no round run.
+        self.held.heard(self.chunker.take_lines());
         for settled in self.held.release(self.chunker.settled_until_ms()) {
             out.push(settled);
         }
         Ok(())
     }
 
-    /// Transcribes the tail held back at the live edge — nothing more is
-    /// coming, so nothing can change what the model hears — and hands on
+    /// Hears the tail one last time — nothing more is coming, so what it
+    /// hears is committed without a round to agree with — and hands on
     /// everything held.
     fn drain(&mut self, out: &mut Output) -> Result<()> {
         pp_trace!(self, "event=eos phase=received");
         if let Some(inference) = self.chunker.flush() {
-            let lines = self.transcribe(inference)?;
-            self.held.heard(lines);
+            self.transcribe(&inference)?;
         }
+        self.held.heard(self.chunker.take_lines());
         let (going, stray) = self.held.release_all();
         if stray > 0 {
             pp_warn!(

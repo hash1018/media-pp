@@ -70,8 +70,8 @@ use super::super::{Compute, Transcribing, WhisperOptions, WhisperTranscriberErro
 /// # How it works
 ///
 /// The loop is [`SwWhisperTranscriber`](crate::elements::SwWhisperTranscriber)'s
-/// — the same chunks, the same seams, the same holding of the sound until
-/// its words are settled; see there. What differs is where whisper.cpp runs
+/// — the same rounds, the same agreement between them, the same holding of
+/// the sound until its words are settled; see there. What differs is where whisper.cpp runs
 /// the model, which is settled as it is loaded. Vulkan needs nothing at run time beyond the graphics driver.
 ///
 /// whisper.cpp numbers its GPUs across every backend it was built with, so

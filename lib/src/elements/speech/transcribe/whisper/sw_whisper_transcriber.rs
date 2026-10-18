@@ -77,15 +77,17 @@ use super::{Compute, Transcribing, WhisperOptions, WhisperTranscriberError};
 /// # How it works
 ///
 /// Whisper's encoder hears thirty seconds at a time, so a stream is
-/// transcribed in chunks — [`ChunkPolicy`](super::ChunkPolicy) says how much
-/// each is and how much of the newest audio to distrust. Each chunk is heard
-/// with the one before it as context, and only the words in its own window
-/// are reported: so a word at the seam is said once, and a line, once
-/// reported, never changes.
+/// transcribed in rounds — every [`ChunkPolicy::chunk_ms`](super::ChunkPolicy::chunk_ms),
+/// four seconds by default, the audio not yet settled is heard again with
+/// what has arrived since. A word is reported once two rounds in a row
+/// agree on the words up to it, by their text rather than by the times the
+/// model gives them, which move between rounds: so a word is said once,
+/// and a line, once reported, never changes. What is reported stays in the
+/// audio heard, as context, until the audio is long, and is then cut away
+/// and given to the model as its prompt instead.
 ///
-/// The sound is held until the speech in it is settled — about the chunk
-/// and the live edge together, five seconds by default — so that the line
-/// can ride on the sound it was said in. For a file that costs nothing: the
+/// The sound is held until the speech in it is settled — one to two rounds
+/// behind it — so that the line can ride on the sound it was said in. For a file that costs nothing: the
 /// file is written by timestamp, not by when a buffer arrives. For sound
 /// that is also being played, split it with a [`Tee`](crate::elements::Tee)
 /// in front of this and play the other branch.
@@ -109,8 +111,8 @@ use super::{Compute, Transcribing, WhisperOptions, WhisperTranscriberError};
 ///
 /// # The end, a seek and a stop
 ///
-/// The end of the stream transcribes whatever is left, including the stretch
-/// held back at the live edge, and hands on everything held. A seek lets go
+/// The end of the stream hears what is left once more and reports it
+/// without a round to agree with, and hands on everything held. A seek lets go
 /// of the held audio, which is from before it; a stop abandons it, as a stop
 /// does everywhere in this crate.
 pub struct SwWhisperTranscriber(FilterStage<Transcribing>);

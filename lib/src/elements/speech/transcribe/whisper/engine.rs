@@ -1,12 +1,42 @@
 //! The whisper.cpp end of every transcriber: what to run, and what of the
 //! answer to keep.
 //!
-//! Kept apart from the elements so that the awkward part — the arithmetic
-//! of overlapping windows — is tested without a model, and so that every
+//! Kept apart from the elements so that the awkward part — deciding which
+//! words two rounds agree on — is tested without a model, and so that every
 //! backend runs exactly the same loop.
 
 use super::{ChunkPolicy, SAMPLE_RATE, WhisperTranscriberError};
 use crate::elements::speech::meta::{Utterance, Word};
+
+/// Once the audio being heard again is this long, what is committed in it
+/// is cut away, at the end of a segment where there is one.
+const TRIM_AFTER_MS: i64 = 15_000;
+
+/// The longest the audio being heard again may grow: past it, a round
+/// commits everything it heard, agreed or not. Whisper hears thirty seconds
+/// at most, and audio two rounds keep disagreeing about — music, noise, a
+/// model looping — must not grow until it cannot be heard at all.
+const MAX_AUDIO_MS: i64 = 25_000;
+
+/// How much of what was committed before the audio being heard is given to
+/// the model as what came before it, in characters.
+const PROMPT_CHARS: usize = 200;
+
+/// How far apart, in the model's own times, a committed word and one heard
+/// again may be and be the same word: well past how far its guesses wander,
+/// and short of a word said again a sentence later.
+const SAME_WORD_MS: i64 = 1_500;
+
+/// A line ends at a pause this long between two words.
+const LINE_PAUSE_MS: i64 = 600;
+/// A line ends once it is this long, in time or in characters, whatever
+/// else: a subtitle any longer is not read before it is gone.
+const LINE_MAX_MS: i64 = 6_000;
+const LINE_MAX_CHARS: usize = 42;
+
+/// How far short of the end of what was heard silence is believed: a word
+/// only just begun at the very end is not heard as one yet.
+const QUIET_EDGE_MS: i64 = 1_000;
 
 /// One token of what the model said, and when, in stream milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,71 +56,286 @@ fn starts_mid_character(token: &Heard) -> bool {
         .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
 }
 
-/// What the [`Chunker`] wants run, and which of the answer to keep.
+/// Whether a character belongs to a script written without spaces, where
+/// each token is a unit of its own rather than a piece of a word.
+fn unspaced(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{30FF}' // Hiragana, Katakana
+        | '\u{3400}'..='\u{4DBF}' // CJK extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK unified ideographs
+        | '\u{F900}'..='\u{FAFF}' // CJK compatibility ideographs
+    )
+}
+
+/// Whether two words' keys are the same word heard twice: the same, or
+/// differing in one character, or a third of the longer's — "업기" and
+/// "없기". A word of one character has to be the same.
+fn alike(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let longer = a.len().max(b.len());
+    if longer < 2 {
+        return false;
+    }
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.iter().enumerate() {
+        let mut next = vec![i + 1; b.len() + 1];
+        for (j, y) in b.iter().enumerate() {
+            next[j + 1] = (row[j] + usize::from(x != y))
+                .min(row[j + 1] + 1)
+                .min(next[j] + 1);
+        }
+        row = next;
+    }
+    row[b.len()] <= (longer / 3).max(1)
+}
+
+/// How many words two hearings agree on from their start: words the same,
+/// and a word heard otherwise in one of them where the word after it is the
+/// same in both — one word misheard, not the two hearings parting.
+///
+/// Word for word, by place, and nothing else: a round that passed over a
+/// stretch the other heard is out of step with it from there, and agrees
+/// with it on nothing after.
+fn agreement(now: &[HeardWord], before: &[HeardWord]) -> usize {
+    let same = |at: usize| match (now.get(at), before.get(at)) {
+        (Some(a), Some(b)) => a.key == b.key,
+        _ => false,
+    };
+    let mut agreed = 0;
+    while agreed < now.len().min(before.len()) {
+        if !same(agreed) && !same(agreed + 1) {
+            break;
+        }
+        agreed += 1;
+    }
+    agreed
+}
+
+/// One word of what the model heard, on the stream's timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HeardWord {
+    /// As the model wrote it, with the space in front of it.
+    raw: String,
+    /// What two rounds compare it by: its letters and digits, lower-cased,
+    /// so a comma or a capital the model changed its mind about is the same
+    /// word still.
+    key: String,
+    start_ms: i64,
+    end_ms: i64,
+    /// Whether the model ended a segment with it — where a line and a cut
+    /// of the audio are best made.
+    ends_segment: bool,
+}
+
+impl HeardWord {
+    fn new(raw: String, start_ms: i64, end_ms: i64) -> Self {
+        let key = raw
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        Self {
+            raw,
+            key,
+            start_ms,
+            end_ms,
+            ends_segment: false,
+        }
+    }
+
+    /// Whether it ends a sentence.
+    fn ends_sentence(&self) -> bool {
+        self.raw
+            .trim_end()
+            .ends_with(['.', '?', '!', '。', '？', '！', '…'])
+    }
+}
+
+/// Each segment's tokens as words: a word begins at each token that starts
+/// with a space, which is how whisper's tokens mark one, and runs on
+/// through the tokens after it that do not — except in a script written
+/// without spaces, where each token is a word of its own. A token that is
+/// only punctuation, or the rest of a character split between tokens, goes
+/// with the word before it.
+fn words_of(segments: &[Vec<Heard>]) -> Vec<HeardWord> {
+    let mut words = Vec::new();
+    for segment in segments {
+        let mut groups: Vec<Vec<&Heard>> = Vec::new();
+        for token in segment {
+            let text = String::from_utf8_lossy(&token.bytes);
+            let begins = match groups.last() {
+                None => true,
+                Some(_) if starts_mid_character(token) => false,
+                Some(_) => {
+                    token.bytes.first() == Some(&b' ') || text.chars().next().is_some_and(unspaced)
+                }
+            };
+            let punctuation = !text.chars().any(char::is_alphanumeric);
+            match groups.last_mut() {
+                Some(group) if !begins || (punctuation && !text.starts_with(' ')) => {
+                    group.push(token)
+                }
+                _ => groups.push(vec![token]),
+            }
+        }
+        let before = words.len();
+        for group in groups {
+            let bytes: Vec<u8> = group
+                .iter()
+                .flat_map(|token| token.bytes.iter().copied())
+                .collect();
+            let raw = String::from_utf8_lossy(&bytes).into_owned();
+            let start = group[0].start_ms;
+            let end = group[group.len() - 1].end_ms.max(start);
+            let word = HeardWord::new(raw, start, end);
+            if !word.key.is_empty() {
+                words.push(word);
+            } else if words.len() > before {
+                // Punctuation on its own, after a space: the end of the
+                // word before it, not a word.
+                let last = words.last_mut().expect("a word of this segment");
+                last.raw.push_str(word.raw.trim_start());
+                last.end_ms = last.end_ms.max(word.end_ms);
+            }
+        }
+        if words.len() > before
+            && let Some(last) = words.last_mut()
+        {
+            last.ends_segment = true;
+        }
+    }
+    words
+}
+
+/// What the [`Chunker`] wants run.
 #[derive(Debug, PartialEq)]
 pub(super) struct Inference {
     /// Where `audio` starts, in milliseconds from the first sample ever
     /// given to the chunker. Whisper reports its segments relative to the
     /// audio it was handed, so this is what turns those into stream time.
     pub(super) offset_ms: i64,
-    /// Everything to feed the model: the chunk to transcribe, with the one
-    /// before it in front as context.
+    /// Everything not yet cut away: what was committed in it, heard again
+    /// so that the words after it are heard in their sentence, and what
+    /// was not.
     pub(super) audio: Vec<f32>,
-    /// What starts before this was reported by an earlier round.
-    accept_from_ms: i64,
-    /// What starts at or after this is too near the edge to trust; the next
-    /// round will cover it.
-    accept_until_ms: i64,
-    /// Where `audio` ends. Nothing the model says can have been said later.
-    audio_end_ms: i64,
+    /// What was committed before `audio`, the end of it, for the model to
+    /// read as what came before.
+    pub(super) prompt: String,
+    /// Whether this is the last round, once nothing more is coming: what it
+    /// hears is committed whether or not a round agrees with it.
+    last: bool,
 }
 
-/// Decides what to transcribe and what of the result to believe.
+/// What one round did, for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Round {
+    /// Words committed.
+    pub(super) committed: usize,
+    /// Words heard and left for the next round to agree with.
+    pub(super) tentative: usize,
+    /// Whether the round committed what it heard without agreement — the
+    /// last round, or audio grown to [`MAX_AUDIO_MS`].
+    pub(super) forced: bool,
+}
+
+/// Decides what to transcribe and which of the answer to believe.
 ///
-/// Separated from the model so that the awkward part — the arithmetic of
-/// overlapping windows — can be tested without one. Every decision this
-/// makes is a function of sample counts, and none of it needs whisper.cpp
-/// to be present, let alone a multi-gigabyte model file.
+/// Separated from the model so that the awkward part can be tested without
+/// one. Every decision it makes is a function of sample counts and of the
+/// words it is handed, and none of it needs whisper.cpp to be present.
 ///
-/// # The overlap
+/// # Agreement
 ///
-/// Each inference is given the previous chunk as well as the current one.
-/// A word spanning the boundary is otherwise seen half by one round and
-/// half by the next, and comes out mangled or twice. Feeding the context
-/// costs a second pass over audio already transcribed — roughly doubling
-/// the work — and buys words that survive the seam.
+/// The audio not yet committed is kept and heard again every round, a
+/// [`ChunkPolicy::chunk_ms`] more of it each time. A word is committed —
+/// reported, never to change — once two rounds in a row hear the same
+/// words up to it: the words both rounds begin with, after what is
+/// committed already, compared by their text and not by when the model
+/// says they were said ("LocalAgreement", from Macháček et al.'s
+/// whisper_streaming). What the two disagree about is left for the next
+/// round, which hears it again with more after it.
+///
+/// Cutting each round by the times the model gives its words lost them and
+/// repeated them: the same word heard in two rounds is given two times
+/// hundreds of milliseconds apart, so one at the seam fell before both
+/// rounds' windows, or inside both. Text that two rounds agree on is said
+/// once, wherever its times fall.
+///
+/// # What is heard again
+///
+/// What was committed stays in the audio heard, and the model says it
+/// again each round; it is found at the start of what the model says by
+/// its text and passed over. Once the audio is longer than
+/// [`TRIM_AFTER_MS`] it is cut after a committed word that ended a
+/// segment, and the text before the cut is given as the prompt instead.
+/// It stays shorter than Whisper's thirty seconds by committing what it
+/// heard at [`MAX_AUDIO_MS`], agreed or not.
+///
+/// # Lines
+///
+/// Committed words are gathered into lines, which end at a sentence's end,
+/// a segment's end, a pause of [`LINE_PAUSE_MS`], or past
+/// [`LINE_MAX_MS`] or [`LINE_MAX_CHARS`]. Lines come in order and never
+/// overlap. The times are the model's, kept in order: a word starts no
+/// earlier than the one before it ends.
 pub(super) struct Chunker {
-    policy: ChunkPolicy,
-    /// New audio, not yet transcribed.
-    pending: Vec<f32>,
-    /// Where `pending` starts on the timeline of the audio itself.
-    pending_start: i64,
-    /// The chunk before `pending`, kept to feed as context. Empty when what
-    /// came before did not join onto this.
-    context: Vec<f32>,
-    /// Where `context` starts on the same timeline.
-    context_start: i64,
-    /// Everything before this has been reported.
-    accepted_until: i64,
+    /// How much new audio each round waits for, in samples and in
+    /// milliseconds.
+    step: usize,
+    step_ms: i64,
+    /// The audio heard each round, from `audio_start`.
+    audio: Vec<f32>,
+    /// Where `audio` starts on the timeline of the audio itself.
+    audio_start: i64,
+    /// Samples arrived since the last round.
+    fresh: usize,
     /// Where the next sample is expected to land, so one arriving anywhere
     /// else is recognised as a gap. `None` before the first.
     next_pts: Option<i64>,
-    /// Where the last reported segment ended, in milliseconds — see
-    /// [`Chunker::place`].
-    reported_until_ms: i64,
+    /// Words committed whose audio is still in `audio`: what each round
+    /// says again and is not to report twice.
+    committed: Vec<HeardWord>,
+    /// What was committed before `audio`, its end, for the prompt.
+    history: String,
+    /// What the last round heard after what is committed: what this round
+    /// has to agree with.
+    tentative: Vec<HeardWord>,
+    /// Committed words not yet made a line.
+    line: Vec<HeardWord>,
+    /// Lines finished and not yet taken.
+    lines: Vec<Utterance>,
+    /// Where the last committed word ends — or, where nothing was heard,
+    /// how far the silence is believed to run — in milliseconds.
+    committed_until_ms: i64,
+    /// Whether the next audio begins the timeline again, after a reset.
+    restart: bool,
+    /// Where the last round first heard something not committed, or short
+    /// of the end of its audio where it heard nothing: how far it believed
+    /// the silence ran. `None` before a round, which one round alone does
+    /// not settle.
+    heard_from: Option<i64>,
 }
 
 impl Chunker {
     pub(super) fn new(policy: ChunkPolicy) -> Self {
         Self {
-            policy,
-            pending: Vec::new(),
-            pending_start: 0,
-            context: Vec::new(),
-            context_start: 0,
-            accepted_until: 0,
+            step: (policy.chunk_ms as usize * SAMPLE_RATE as usize / 1000).max(1),
+            step_ms: i64::from(policy.chunk_ms),
+            audio: Vec::new(),
+            audio_start: 0,
+            fresh: 0,
             next_pts: None,
-            reported_until_ms: i64::MIN,
+            committed: Vec::new(),
+            history: String::new(),
+            tentative: Vec::new(),
+            line: Vec::new(),
+            lines: Vec::new(),
+            committed_until_ms: i64::MIN,
+            restart: false,
+            heard_from: None,
         }
     }
 
@@ -98,7 +343,11 @@ impl Chunker {
         (samples * 1000) / SAMPLE_RATE as i64
     }
 
-    /// Takes more audio, and answers the inference it now wants run.
+    fn audio_end_ms(&self) -> i64 {
+        Self::samples_to_ms(self.audio_start + self.audio.len() as i64)
+    }
+
+    /// Takes more audio, and answers the round it now wants run.
     ///
     /// `pts` places the samples on the timeline of the audio itself, in that
     /// timeline's own units — which for the
@@ -106,18 +355,16 @@ impl Chunker {
     /// index. `None` means "where the last frame ended", which is what a source
     /// that stamps nothing amounts to.
     ///
-    /// Answers `None` while there is not yet a full chunk. One call yields
-    /// at most one inference, so a caller handing over more than a chunk at
-    /// a time keeps calling [`Chunker::take_chunk`] until it answers `None`.
+    /// Answers `None` until another [`ChunkPolicy::chunk_ms`] has arrived.
     ///
-    /// # A gap throws away what was pending
+    /// # A gap ends what was being heard
     ///
     /// Audio that does not continue where the last left off — a queue that
     /// dropped buffers because this is behind, a source that jumped —
-    /// leaves what is buffered unjoinable to what follows. Transcribing
-    /// across the seam would put one sentence over two moments that are not
-    /// adjacent, so the buffer goes and the timeline picks up where the new
-    /// audio actually is.
+    /// cannot be heard as one with what came before: one sentence would run
+    /// over two moments that are not adjacent. What the last round heard is
+    /// committed as it was heard, the line in progress ends, and the
+    /// timeline picks up where the new audio actually is.
     ///
     /// The alternative, counting samples and letting positions slide, is
     /// worse in the way that matters: every line after the loss would be
@@ -126,200 +373,403 @@ impl Chunker {
     pub(super) fn push(&mut self, pts: Option<i64>, samples: &[f32]) -> Option<Inference> {
         let pts = pts.or(self.next_pts).unwrap_or(0);
         match self.next_pts {
+            _ if self.restart => {
+                self.restart = false;
+                self.audio_start = pts;
+                self.committed_until_ms = Self::samples_to_ms(pts);
+            }
             None => {
-                self.pending_start = pts;
-                self.accepted_until = pts;
+                self.audio_start = pts;
+                self.committed_until_ms = Self::samples_to_ms(pts);
             }
             Some(expected) if pts != expected => {
-                self.pending.clear();
-                self.context.clear();
-                self.pending_start = pts;
-                self.accepted_until = self.accepted_until.max(pts);
+                self.break_off();
+                self.audio_start = pts;
+                self.committed_until_ms = self.committed_until_ms.max(Self::samples_to_ms(pts));
             }
             Some(_) => {}
         }
-        self.pending.extend_from_slice(samples);
+        self.audio.extend_from_slice(samples);
+        self.fresh += samples.len();
         self.next_pts = Some(pts + samples.len() as i64);
-        self.take_chunk()
-    }
-
-    pub(super) fn take_chunk(&mut self) -> Option<Inference> {
-        let chunk = self.policy.chunk_samples();
-        if self.pending.len() < chunk {
+        if self.fresh < self.step {
             return None;
         }
-        let rest = self.pending.split_off(chunk);
-        let current = std::mem::replace(&mut self.pending, rest);
-        let current_start = self.pending_start;
-        self.pending_start = current_start + chunk as i64;
-
-        // The edge is where the audio runs out, and the last stretch before
-        // it is what the model is least sure of.
-        let current_end = current_start + current.len() as i64;
-        let accept_until = current_end - self.policy.live_edge_samples() as i64;
-
-        let inference = self.inference(current_start, &current, accept_until);
-
-        self.context_start = current_start;
-        self.context = current;
-        self.accepted_until = accept_until.max(self.accepted_until);
-        Some(inference)
+        self.fresh = 0;
+        Some(self.inference(false))
     }
 
-    /// The last inference, once no more audio is coming.
-    ///
-    /// Whatever is left is transcribed however short it is, and the live
-    /// edge is not held back: there is no later round to pick it up, and
-    /// nothing more will arrive to change what the model hears. `None` when
-    /// everything has already been reported.
+    /// The last round, once no more audio is coming: what it hears is
+    /// committed as it is heard, since no later round will hear more.
+    /// `None` when there is nothing left to hear — and then the line in
+    /// progress is finished here.
     pub(super) fn flush(&mut self) -> Option<Inference> {
-        let current = std::mem::take(&mut self.pending);
-        let current_start = self.pending_start;
-        let current_end = current_start + current.len() as i64;
-        if current_end <= self.accepted_until {
+        if self.audio.is_empty() || (self.fresh == 0 && self.tentative.is_empty()) {
+            self.finish_line();
             return None;
         }
-        let inference = self.inference(current_start, &current, current_end);
-        self.pending_start = current_end;
-        self.context_start = current_start;
-        self.context = current;
-        self.accepted_until = current_end;
-        Some(inference)
+        self.fresh = 0;
+        Some(self.inference(true))
     }
 
-    /// Builds the request: context then the chunk, and the window of the
-    /// answer that is neither already said nor too new to trust.
-    fn inference(&self, current_start: i64, current: &[f32], accept_until: i64) -> Inference {
-        // There is no context before the first chunk, nor after a gap, and
-        // then what the model is handed begins where this chunk does.
-        let audio_start = if self.context.is_empty() {
-            current_start
-        } else {
-            self.context_start
-        };
-        let mut audio = Vec::with_capacity(self.context.len() + current.len());
-        audio.extend_from_slice(&self.context);
-        audio.extend_from_slice(current);
-        let audio_end = audio_start + audio.len() as i64;
+    fn inference(&self, last: bool) -> Inference {
         Inference {
-            offset_ms: Self::samples_to_ms(audio_start),
-            audio,
-            accept_from_ms: Self::samples_to_ms(self.accepted_until),
-            accept_until_ms: Self::samples_to_ms(accept_until),
-            audio_end_ms: Self::samples_to_ms(audio_end),
+            offset_ms: Self::samples_to_ms(self.audio_start),
+            audio: self.audio.clone(),
+            prompt: self.history.clone(),
+            last,
         }
     }
 
-    /// The part of one segment that belongs to this round, as the line to
-    /// report — or `None` when none of it does.
-    ///
-    /// Cut by token, because cutting by segment lost speech and repeated it.
-    /// A segment is whatever stretch the model chose to call one, and it
-    /// often opens in the context — audio already reported — and runs on
-    /// into the new window. Kept by where it started, such a segment was
-    /// dropped every round, and a minute of Korean lost its last fifteen
-    /// seconds that way; kept whole, it would say again what the last round
-    /// said. So each token is judged by where *it* starts: the ones in the
-    /// window are this round's, the ones before it were reported, and the
-    /// ones at the edge are left for the next round, which hears them again
-    /// in its context.
-    ///
-    /// The window starts at whichever is later of where this round's window
-    /// does and where the last line ended, so what reaches the caller is in
-    /// order and never overlaps — an MP4's text track cannot hold overlap,
-    /// and its muxer wrote negative durations for it. A line ends no later
-    /// than the audio it was heard in.
-    ///
-    /// A character can be split between tokens — a Korean syllable is three
-    /// bytes, and a token boundary can fall inside one — so a cut that lands
-    /// mid-character is moved to include the whole of it.
-    pub(super) fn place(&mut self, inference: &Inference, tokens: &[Heard]) -> Option<Utterance> {
-        let from = inference.accept_from_ms.max(self.reported_until_ms);
-        let until = inference.accept_until_ms;
-        let inside = |token: &Heard| token.start_ms >= from && token.start_ms < until;
-        let mut first = tokens.iter().position(inside)?;
-        let mut last = tokens.iter().rposition(inside)?;
-        while first > 0 && starts_mid_character(&tokens[first]) {
-            first -= 1;
+    /// Takes what the model heard in `inference`, its segments' tokens
+    /// placed on the stream's timeline, and commits what this round agrees
+    /// with the last on.
+    pub(super) fn heard(&mut self, inference: &Inference, segments: &[Vec<Heard>]) -> Round {
+        let audio_end = self.audio_end_ms();
+        let mut hypothesis = words_of(segments);
+        for word in &mut hypothesis {
+            word.start_ms = word.start_ms.clamp(inference.offset_ms, audio_end);
+            word.end_ms = word.end_ms.clamp(word.start_ms, audio_end);
         }
-        while last + 1 < tokens.len() && starts_mid_character(&tokens[last + 1]) {
-            last += 1;
+        let fresh = self.after_committed(hypothesis);
+
+        let forced = inference.last || audio_end - inference.offset_ms >= MAX_AUDIO_MS;
+        let agreed = if inference.last {
+            let count = fresh.len();
+            self.commit_all(fresh);
+            count
+        } else if forced {
+            self.commit_longest(fresh, audio_end - self.step_ms)
+        } else if fresh.is_empty() {
+            // A round that heard nothing new leaves what the last one heard
+            // to be agreed with: it more likely passed over the speech than
+            // heard it end.
+            0
+        } else {
+            let agreed = agreement(&fresh, &self.tentative);
+            let mut fresh = fresh.into_iter();
+            for word in fresh.by_ref().take(agreed) {
+                self.commit(word);
+            }
+            self.tentative = fresh.collect();
+            agreed
+        };
+
+        // Silence is agreed on as words are: what this round and the last
+        // both heard nothing new in, up to where either heard something, is
+        // settled. One round alone is not believed — whisper now and then
+        // passes over a stretch of speech whole, and the next round hears
+        // it — and what one round's silence cut away was lost.
+        let heard_from = match self.tentative.first() {
+            Some(word) => word.start_ms - QUIET_EDGE_MS / 2,
+            None => audio_end - QUIET_EDGE_MS,
+        };
+        let quiet = self.heard_from.map(|before| before.min(heard_from));
+        self.heard_from = Some(heard_from);
+        if let Some(quiet) = quiet {
+            self.committed_until_ms = self.committed_until_ms.max(quiet.min(audio_end));
         }
 
-        let kept = &tokens[first..=last];
-        let bytes: Vec<u8> = kept
-            .iter()
-            .flat_map(|token| token.bytes.iter().copied())
-            .collect();
-        let text = String::from_utf8_lossy(&bytes).trim().to_owned();
-        if text.is_empty() {
-            return None;
+        if inference.last {
+            self.finish_line();
+            self.committed_until_ms = self.committed_until_ms.max(audio_end);
+            self.cut(audio_end);
+        } else {
+            self.trim(quiet);
         }
-        let start = kept[0].start_ms.max(from);
-        let end = kept[kept.len() - 1]
-            .end_ms
-            .min(inference.audio_end_ms)
-            .max(start);
-        self.reported_until_ms = end;
-        Some(Utterance {
+        Round {
+            committed: agreed,
+            tentative: self.tentative.len(),
+            forced,
+        }
+    }
+
+    /// Commits everything heard, once nothing more will be: the last round.
+    fn commit_all(&mut self, fresh: Vec<HeardWord>) {
+        for word in fresh {
+            self.commit(word);
+        }
+        self.tentative.clear();
+    }
+
+    /// Commits, at the longest the audio may grow, what is older than
+    /// `edge` in whichever of this round's hearing and the last one's holds
+    /// more of it — the one less likely to have passed something over —
+    /// and keeps this round's newer words in doubt. Answers how many were
+    /// committed.
+    fn commit_longest(&mut self, fresh: Vec<HeardWord>, edge: i64) -> usize {
+        let older = |words: &[HeardWord]| words.iter().take_while(|w| w.end_ms <= edge).count();
+        let (now, before) = (older(&fresh), older(&self.tentative));
+        let (committing, until) = if before > now {
+            let words: Vec<HeardWord> = self.tentative.drain(..before).collect();
+            let until = words.last().map_or(i64::MIN, |w| w.end_ms);
+            (words, until)
+        } else {
+            let until = fresh[..now].last().map_or(i64::MIN, |w| w.end_ms);
+            (fresh[..now].to_vec(), until)
+        };
+        let count = committing.len();
+        for word in committing {
+            self.commit(word);
+        }
+        // What this round heard after what was committed, by time: the two
+        // hearings are not in step, which is why this round is forced.
+        self.tentative = fresh.into_iter().filter(|w| w.start_ms >= until).collect();
+        count
+    }
+
+    /// What the model heard after what is committed: the committed words
+    /// it said again, found at its start by their text, passed over — and
+    /// with them whatever it said before them, its prompt said again
+    /// included.
+    ///
+    /// Found as the shortest start of what was heard that holds as many of
+    /// the committed words, in order, as any — each heard the same and near
+    /// where it was before (`SAME_WORD_MS`) — so a committed word the model
+    /// now hears otherwise, or not at all, still lines the rest up, and a
+    /// round that says none of them again passes over nothing.
+    ///
+    /// Only a word heard the same counts, but for the committed words after
+    /// the last of those, which a round may have committed as it heard them
+    /// — "업기" where the next hears "없기" — and which are otherwise
+    /// reported again: each heard alike next is passed over too. Counting a
+    /// word heard alike anywhere lined a committed word the cut had left
+    /// out against the new word after it, which was then lost.
+    fn after_committed(&self, mut heard: Vec<HeardWord>) -> Vec<HeardWord> {
+        if self.committed.is_empty() {
+            return heard;
+        }
+        let near = |a: &HeardWord, b: &HeardWord| (a.start_ms - b.start_ms).abs() <= SAME_WORD_MS;
+        let same = |a: &HeardWord, b: &HeardWord| a.key == b.key && near(a, b);
+        // The longest common subsequence of every start of the committed
+        // words and every start of what was heard.
+        let (done, heard_len) = (&self.committed, heard.len());
+        let mut table = vec![vec![0usize; heard_len + 1]; done.len() + 1];
+        for i in 0..done.len() {
+            for j in 0..heard_len {
+                table[i + 1][j + 1] = if same(&done[i], &heard[j]) {
+                    table[i][j] + 1
+                } else {
+                    table[i][j + 1].max(table[i + 1][j])
+                };
+            }
+        }
+        let most = table[done.len()][heard_len];
+        let mut skip = table[done.len()]
+            .iter()
+            .position(|&found| found == most)
+            .unwrap_or(0);
+        // The committed words after the last one heard the same, which a
+        // round may have committed as it heard them: each heard alike next
+        // is passed over too.
+        let mut matched = 0;
+        let (mut i, mut j) = (done.len(), skip);
+        while i > 0 && j > 0 {
+            if same(&done[i - 1], &heard[j - 1]) && table[i][j] == table[i - 1][j - 1] + 1 {
+                matched = i;
+                break;
+            } else if table[i - 1][j] >= table[i][j - 1] {
+                i -= 1;
+            } else {
+                j -= 1;
+            }
+        }
+        // Only where some committed word was heard the same: where none
+        // was, the cut may have taken them all, and a new word alike one of
+        // them would be passed over in its place.
+        if most > 0 {
+            for word in &done[matched..] {
+                if heard
+                    .get(skip)
+                    .is_some_and(|next| alike(&next.key, &word.key) && near(next, word))
+                {
+                    skip += 1;
+                }
+            }
+        }
+        heard.drain(..skip);
+        heard
+    }
+
+    /// Reports `word`, never to change, as part of the line in progress.
+    fn commit(&mut self, mut word: HeardWord) {
+        word.start_ms = word.start_ms.max(self.committed_until_ms);
+        word.end_ms = word.end_ms.max(word.start_ms);
+        if let Some(last) = self.line.last()
+            && word.start_ms - last.end_ms >= LINE_PAUSE_MS
+        {
+            self.finish_line();
+        }
+        self.committed_until_ms = word.end_ms;
+        self.committed.push(word.clone());
+        let ends = word.ends_sentence() || word.ends_segment;
+        self.line.push(word);
+
+        let chars: usize = self.line.iter().map(|w| w.raw.chars().count()).sum();
+        let span = self.line[self.line.len() - 1].end_ms - self.line[0].start_ms;
+        if ends || chars >= LINE_MAX_CHARS || span >= LINE_MAX_MS {
+            self.finish_line();
+        }
+    }
+
+    /// Makes the words gathered so far a line.
+    fn finish_line(&mut self) {
+        if self.line.is_empty() {
+            return;
+        }
+        let words = std::mem::take(&mut self.line);
+        let text: String = words.iter().map(|w| w.raw.as_str()).collect();
+        let start = words[0].start_ms;
+        let end = words[words.len() - 1].end_ms.max(start);
+        self.lines.push(Utterance {
             start_ms: start,
             end_ms: end,
-            text,
-            words: words(kept, start, end),
-        })
+            text: text.trim().to_owned(),
+            words: words
+                .into_iter()
+                .map(|w| Word {
+                    start_ms: w.start_ms,
+                    end_ms: w.end_ms,
+                    text: w.raw.trim().to_owned(),
+                })
+                .collect(),
+        });
     }
 
-    /// Where everything before has been transcribed and reported, in
-    /// milliseconds: what audio up to here holds will not change.
-    pub(super) fn settled_until_ms(&self) -> i64 {
-        Self::samples_to_ms(self.accepted_until)
-    }
-
-    /// Forgets everything, for a seek or a stop.
+    /// Cuts away what is committed once the audio has grown long: between
+    /// two committed words, after the last one that ended a segment where
+    /// one did — or, where nothing is in doubt, as far as two rounds agree
+    /// there was silence (`quiet`), and at the longest the audio may grow,
+    /// past whatever is committed.
     ///
-    /// The timeline is not reset: positions stay where they were, because
-    /// what the caller does with a seek is its own business and inventing a
-    /// new zero here would only disagree with it.
-    pub(super) fn reset(&mut self) {
-        self.pending.clear();
-        self.context.clear();
-    }
-}
-
-/// A line's tokens as words: a word begins at each token that starts with a
-/// space, which is how whisper's tokens mark one — and runs on through the
-/// tokens after it that do not.
-///
-/// The times are kept inside the line's own, `start` to `end`, since those
-/// are what was cut to the window and the audio.
-fn words(tokens: &[Heard], start: i64, end: i64) -> Vec<Word> {
-    let mut groups: Vec<Vec<&Heard>> = Vec::new();
-    for token in tokens {
-        match groups.last_mut() {
-            Some(group) if token.bytes.first() != Some(&b' ') => group.push(token),
-            _ => groups.push(vec![token]),
+    /// Never in the last two committed words: the times are the model's
+    /// guesses, and a cut on one can fall inside the word after it. With
+    /// committed words after the cut, whatever of a word the cut leaves to
+    /// be heard again is heard among words already committed and passed
+    /// over with them — two, so that one the cut took out entirely leaves
+    /// another to line up by.
+    fn trim(&mut self, quiet: Option<i64>) {
+        let audio_end = self.audio_end_ms();
+        if audio_end - Self::samples_to_ms(self.audio_start) < TRIM_AFTER_MS {
+            return;
+        }
+        let between = self.committed.len().saturating_sub(2);
+        let cut = self.committed[..between]
+            .iter()
+            .rposition(|word| word.ends_segment)
+            .or(between.checked_sub(1))
+            .map(|at| {
+                let (end, next) = (self.committed[at].end_ms, self.committed[at + 1].start_ms);
+                end + (next - end).max(0) / 2
+            })
+            .or_else(|| {
+                // At the longest, past whatever is committed, however little:
+                // the audio must not outgrow what Whisper can hear.
+                let longest = audio_end - Self::samples_to_ms(self.audio_start) >= MAX_AUDIO_MS;
+                match (self.tentative.first(), self.committed.last()) {
+                    // Nothing in doubt: what was heard is all committed, and
+                    // the silence after it as far as two rounds agree on it.
+                    (None, last) => quiet.max(last.filter(|_| longest).map(|w| w.end_ms)),
+                    (Some(first), Some(last)) if longest => {
+                        Some(last.end_ms + (first.start_ms - last.end_ms).max(0) / 2)
+                    }
+                    (Some(first), None) if longest => Some(first.start_ms - QUIET_EDGE_MS / 2),
+                    _ => None,
+                }
+            });
+        // At the longest, back to what a round may grow from, whatever the
+        // cut found: everything older is committed by then, and only the
+        // newest chunk's words are in doubt.
+        let longest = audio_end - Self::samples_to_ms(self.audio_start) >= MAX_AUDIO_MS;
+        let cut = if longest {
+            let floor = audio_end - TRIM_AFTER_MS;
+            let ceiling = self
+                .tentative
+                .first()
+                .map_or(audio_end, |first| first.start_ms - QUIET_EDGE_MS / 2);
+            Some(cut.unwrap_or(floor).max(floor).min(ceiling))
+        } else {
+            cut
+        };
+        if let Some(cut) = cut {
+            self.cut(cut);
         }
     }
-    groups
-        .into_iter()
-        .filter_map(|group| {
-            let bytes: Vec<u8> = group
-                .iter()
-                .flat_map(|token| token.bytes.iter().copied())
-                .collect();
-            let text = String::from_utf8_lossy(&bytes).trim().to_owned();
-            if text.is_empty() {
-                return None;
-            }
-            let word_start = group[0].start_ms.clamp(start, end);
-            let word_end = group[group.len() - 1].end_ms.clamp(word_start, end);
-            Some(Word {
-                start_ms: word_start,
-                end_ms: word_end,
-                text,
-            })
-        })
-        .collect()
+
+    /// Lets go of the audio before `cut_ms`, the committed words in it
+    /// going into the prompt.
+    fn cut(&mut self, cut_ms: i64) {
+        let cut = (cut_ms * SAMPLE_RATE as i64 / 1000)
+            .clamp(self.audio_start, self.audio_start + self.audio.len() as i64);
+        self.audio.drain(..(cut - self.audio_start) as usize);
+        self.audio_start = cut;
+        let cut_ms = Self::samples_to_ms(cut);
+        let kept = self.committed.iter().position(|w| w.end_ms > cut_ms);
+        let gone: Vec<HeardWord> = match kept {
+            Some(at) => self.committed.drain(..at).collect(),
+            None => std::mem::take(&mut self.committed),
+        };
+        for word in gone {
+            self.history.extend(word.raw.chars().filter(|&c| c != '\0'));
+        }
+        let excess = self.history.chars().count().saturating_sub(PROMPT_CHARS);
+        if excess > 0 {
+            let from = self
+                .history
+                .char_indices()
+                .nth(excess)
+                .map_or(self.history.len(), |(at, _)| at);
+            self.history.drain(..from);
+        }
+    }
+
+    /// The lines finished since the last call, in order.
+    pub(super) fn take_lines(&mut self) -> Vec<Utterance> {
+        std::mem::take(&mut self.lines)
+    }
+
+    /// Where everything before is committed and made a line, in
+    /// milliseconds: what audio up to here holds will not change.
+    pub(super) fn settled_until_ms(&self) -> i64 {
+        match self.line.first() {
+            Some(word) => self.committed_until_ms.min(word.start_ms),
+            None => self.committed_until_ms,
+        }
+    }
+
+    /// Ends what was being heard at a gap: what the last round heard is
+    /// committed as it was heard, since nothing more will be heard with it.
+    fn break_off(&mut self) {
+        for word in std::mem::take(&mut self.tentative) {
+            self.commit(word);
+        }
+        self.finish_line();
+        self.audio.clear();
+        self.committed.clear();
+        self.history.clear();
+        self.heard_from = None;
+        self.fresh = 0;
+    }
+
+    /// Forgets everything, for a seek or a stop — what was heard and not
+    /// yet taken included, since `Stop` abandons and a seek's audio is from
+    /// elsewhere.
+    ///
+    /// The timeline is not reset: the next audio is placed where its own
+    /// timestamps say, wherever that is, because what the caller does with
+    /// a seek is its own business and inventing a new zero here would only
+    /// disagree with it.
+    pub(super) fn reset(&mut self) {
+        self.restart = true;
+        self.audio.clear();
+        self.committed.clear();
+        self.history.clear();
+        self.tentative.clear();
+        self.line.clear();
+        self.lines.clear();
+        self.heard_from = None;
+        self.fresh = 0;
+    }
 }
 
 /// The dimensions a whisper.cpp model file states at its start.
@@ -416,7 +866,6 @@ mod tests {
 
     const POLICY: ChunkPolicy = ChunkPolicy {
         chunk_ms: 4_000,
-        live_edge_ms: 1_000,
         token_timing: TokenTiming::Estimated,
     };
 
@@ -434,184 +883,9 @@ mod tests {
         chunker.push(None, &samples(ms))
     }
 
-    /// Nothing is transcribed until a whole chunk has arrived, because a
-    /// shorter one is padded to thirty seconds and the model was not
-    /// trained to hear the padding as silence at the end of a sentence.
-    #[test]
-    fn a_partial_chunk_is_not_transcribed() {
-        let mut chunker = Chunker::new(POLICY);
-        assert_eq!(push_on(&mut chunker, 3_999), None);
-        assert!(push_on(&mut chunker, 1).is_some(), "and now it is full");
-    }
-
-    /// The window that is believed starts where the last one stopped and
-    /// ends short of the edge, so every millisecond is reported once.
-    #[test]
-    fn the_believed_window_stops_short_of_the_edge_and_resumes_there() {
-        let mut chunker = Chunker::new(POLICY);
-
-        let first = push_on(&mut chunker, 4_000).expect("a full chunk");
-        assert_eq!(first.offset_ms, 0);
-        assert_eq!(first.accept_from_ms, 0);
-        assert_eq!(
-            first.accept_until_ms, 3_000,
-            "the last second is not trusted"
-        );
-
-        let second = push_on(&mut chunker, 4_000).expect("another");
-        assert_eq!(
-            second.accept_from_ms, 3_000,
-            "the second held back before is picked up here"
-        );
-        assert_eq!(second.accept_until_ms, 7_000);
-    }
-
-    /// A word across the seam is heard whole because the round that reports
-    /// it was given the audio before it too.
-    #[test]
-    fn each_inference_carries_the_previous_chunk_as_context() {
-        let mut chunker = Chunker::new(POLICY);
-
-        let first = push_on(&mut chunker, 4_000).expect("a full chunk");
-        assert_eq!(
-            first.audio.len(),
-            samples(4_000).len(),
-            "nothing precedes the first"
-        );
-
-        let second = push_on(&mut chunker, 4_000).expect("another");
-        assert_eq!(
-            second.audio.len(),
-            samples(8_000).len(),
-            "four seconds of context and four of new audio"
-        );
-        assert_eq!(second.offset_ms, 0, "and it starts where the context does");
-    }
-
-    /// A caller handing over more than a chunk at once must not have the
-    /// surplus swallowed.
-    #[test]
-    fn a_long_push_yields_one_inference_per_chunk() {
-        let mut chunker = Chunker::new(POLICY);
-        assert!(push_on(&mut chunker, 12_000).is_some());
-        assert!(chunker.take_chunk().is_some());
-        assert!(chunker.take_chunk().is_some());
-        assert_eq!(chunker.take_chunk(), None, "three chunks and no more");
-    }
-
-    /// At the end there is no later round, so the tail is transcribed
-    /// however short it is and the live edge is not held back.
-    #[test]
-    fn the_tail_is_transcribed_at_eos_without_holding_the_edge_back() {
-        let mut chunker = Chunker::new(POLICY);
-        push_on(&mut chunker, 4_000).expect("a full chunk");
-        push_on(&mut chunker, 500);
-
-        let last = chunker.flush().expect("the tail is worth hearing");
-        assert_eq!(
-            last.accept_from_ms, 3_000,
-            "starting where the chunk stopped"
-        );
-        assert_eq!(last.accept_until_ms, 4_500, "and running to the very end");
-        assert_eq!(
-            last.audio.len(),
-            samples(4_500).len(),
-            "the whole chunk before it, as context, then the tail"
-        );
-    }
-
-    /// Flushing twice must not transcribe the tail again and report every
-    /// line of it a second time.
-    #[test]
-    fn a_second_flush_has_nothing_left_to_say() {
-        let mut chunker = Chunker::new(POLICY);
-        push_on(&mut chunker, 4_000);
-        push_on(&mut chunker, 500);
-        assert!(chunker.flush().is_some());
-        assert_eq!(chunker.flush(), None);
-    }
-
-    /// A stream that ends on an exact chunk boundary has already had every
-    /// millisecond transcribed except the second held at the edge.
-    #[test]
-    fn a_stream_ending_on_a_boundary_still_reports_its_held_back_edge() {
-        let mut chunker = Chunker::new(POLICY);
-        push_on(&mut chunker, 4_000).expect("a full chunk");
-
-        let last = chunker.flush().expect("the held-back second is still owed");
-        assert_eq!(last.accept_from_ms, 3_000);
-        assert_eq!(last.accept_until_ms, 4_000);
-    }
-    /// The whole reason positions come from the timestamps: audio that
-    /// arrives late in its own timeline, because a queue dropped what was
-    /// between, must not drag everything after it earlier.
-    #[test]
-    fn a_gap_leaves_a_hole_rather_than_shifting_what_follows() {
-        let mut chunker = Chunker::new(POLICY);
-        push_on(&mut chunker, 4_000).expect("a full chunk");
-
-        // Ten seconds went missing. What arrives is stamped where it really
-        // is, not where counting would have put it.
-        let after = chunker
-            .push(Some(at(14_000)), &samples(4_000))
-            .expect("a full chunk again");
-        assert_eq!(
-            after.offset_ms, 14_000,
-            "the audio is placed where its timestamps say"
-        );
-        assert_eq!(
-            after.accept_from_ms, 14_000,
-            "and nothing before it is claimed"
-        );
-        assert_eq!(after.accept_until_ms, 17_000);
-    }
-
-    /// Across a gap the audio before it is not context for the audio after:
-    /// they are not adjacent, and feeding them together would let one
-    /// sentence run over a hole.
-    #[test]
-    fn audio_before_a_gap_is_not_context_for_what_follows() {
-        let mut chunker = Chunker::new(POLICY);
-        push_on(&mut chunker, 4_000).expect("a full chunk");
-
-        let after = chunker
-            .push(Some(at(14_000)), &samples(4_000))
-            .expect("a full chunk again");
-        assert_eq!(
-            after.audio.len(),
-            samples(4_000).len(),
-            "the new chunk alone, with nothing in front of it"
-        );
-    }
-
-    /// A source whose audio does not start at zero — a file seeked into, a
-    /// mixer that has been running — reports where it actually is.
-    #[test]
-    fn a_timeline_that_does_not_start_at_zero_is_reported_as_it_is() {
-        let mut chunker = Chunker::new(POLICY);
-        let first = chunker
-            .push(Some(at(60_000)), &samples(4_000))
-            .expect("a full chunk");
-        assert_eq!(first.offset_ms, 60_000);
-        assert_eq!(first.accept_from_ms, 60_000);
-        assert_eq!(first.accept_until_ms, 63_000);
-    }
-
-    /// The rounds that produced the overlapping lines, as a minute of Korean
-    /// speech had them: the chunk ending at 36 s, heard with the one before
-    /// it, and then the next.
-    fn rounds_to_36_and_40() -> (Chunker, Inference, Inference) {
-        let mut chunker = Chunker::new(POLICY);
-        push_on(&mut chunker, 32_000);
-        while chunker.take_chunk().is_some() {}
-        let to_36 = push_on(&mut chunker, 4_000).expect("the chunk ending at 36 s");
-        let to_40 = push_on(&mut chunker, 4_000).expect("and the one after");
-        (chunker, to_36, to_40)
-    }
-
-    /// Tokens as the model hands them over: text, then start and end in
-    /// stream milliseconds.
-    fn tokens(spec: &[(&str, i64, i64)]) -> Vec<Heard> {
+    /// One segment's tokens as the model hands them over: text, then start
+    /// and end in stream milliseconds.
+    fn segment(spec: &[(&str, i64, i64)]) -> Vec<Heard> {
         spec.iter()
             .map(|&(text, start_ms, end_ms)| Heard {
                 bytes: text.as_bytes().to_vec(),
@@ -621,166 +895,630 @@ mod tests {
             .collect()
     }
 
-    /// The loss this exists to stop. A segment opening in the context and
-    /// running into the new window used to be dropped whole, every round,
-    /// because of where it started; the small model lost the last fifteen
-    /// seconds of a minute of Korean that way. Its words in the window are
-    /// this round's.
+    fn texts(lines: &[Utterance]) -> Vec<&str> {
+        lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    /// Nothing is heard until a whole chunk has arrived, and then the
+    /// round hears everything not yet cut away.
     #[test]
-    fn a_segment_opening_in_the_context_keeps_what_falls_in_the_window() {
-        let (mut chunker, _, to_40) = rounds_to_36_and_40();
+    fn a_round_waits_for_a_chunk_and_hears_all_that_is_not_cut_away() {
+        let mut chunker = Chunker::new(POLICY);
+        assert_eq!(push_on(&mut chunker, 3_999), None);
+        let first = push_on(&mut chunker, 1).expect("a whole chunk");
         assert_eq!(
-            (to_40.accept_from_ms, to_40.accept_until_ms),
-            (35_000, 39_000)
+            (first.offset_ms, first.audio.len()),
+            (0, samples(4_000).len())
         );
+        chunker.heard(&first, &[]);
 
-        let line = chunker
-            .place(
-                &to_40,
-                &tokens(&[
-                    (" 이번에는", 33_000, 34_000),
-                    (" 패키지", 34_000, 35_500),
-                    (" 여행으로", 35_500, 37_000),
-                    (" 다녀왔어요", 37_000, 38_500),
-                    (".", 39_000, 39_200),
-                ]),
-            )
-            .expect("the words inside the window are reported");
-        assert_eq!(line.text, "여행으로 다녀왔어요");
-        assert_eq!((line.start_ms, line.end_ms), (35_500, 38_500));
-    }
-
-    /// And the other half of cutting by segment: words said before the
-    /// window were reported last round and are not said again. A seam used
-    /// to read "한 5일에서 / 한 5일에서 열흘 정도".
-    #[test]
-    fn what_was_already_reported_is_not_said_again() {
-        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
-        let first = chunker
-            .place(
-                &to_36,
-                &tokens(&[(" 한", 33_000, 33_800), (" 5일에서", 33_800, 34_900)]),
-            )
-            .expect("reported");
-        assert_eq!(first.text, "한 5일에서");
-
-        let second = chunker
-            .place(
-                &to_40,
-                &tokens(&[
-                    (" 한", 33_000, 33_800),
-                    (" 5일에서", 33_800, 34_900),
-                    (" 열흘", 35_100, 35_800),
-                    (" 정도", 35_800, 36_400),
-                ]),
-            )
-            .expect("reported");
-        assert_eq!(second.text, "열흘 정도");
-    }
-
-    /// What starts at the edge is left alone — and the next round, which
-    /// hears it again as context, is the one that reports it.
-    #[test]
-    fn the_edge_is_left_for_the_next_round_and_reported_there() {
-        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
-        let at_the_edge = tokens(&[(" 사진이", 35_300, 36_000)]);
-        assert_eq!(chunker.place(&to_36, &at_the_edge), None);
+        let second = push_on(&mut chunker, 4_000).expect("another");
         assert_eq!(
-            chunker.place(&to_40, &at_the_edge).map(|line| line.text),
-            Some("사진이".to_owned())
+            (second.offset_ms, second.audio.len()),
+            (0, samples(8_000).len()),
+            "nothing was committed, so nothing was cut away"
         );
     }
 
-    /// A line cannot end after the audio it was heard in. The model said
-    /// 32.8 to 40 of audio that ended at 36.
+    /// A word is reported once two rounds in a row hear the words up to
+    /// it; what they disagree about waits for the next.
     #[test]
-    fn a_line_ending_past_its_audio_is_cut_where_the_audio_ends() {
-        let (mut chunker, to_36, _) = rounds_to_36_and_40();
-        assert_eq!(to_36.audio_end_ms, 36_000);
-        let line = chunker
-            .place(&to_36, &tokens(&[(" 그런데", 32_800, 40_000)]))
-            .expect("reported");
-        assert_eq!(line.end_ms, 36_000);
-    }
+    fn what_two_rounds_agree_on_is_committed_and_the_rest_waits() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        let round = chunker.heard(
+            &first,
+            &[segment(&[
+                (" 재입국", 200, 900),
+                (" 충격은", 900, 1_600),
+                (" 신혼", 1_600, 3_900),
+            ])],
+        );
+        assert_eq!(
+            (round.committed, round.tentative),
+            (0, 3),
+            "nothing to agree with yet"
+        );
 
-    /// Consecutive lines are in order and never overlap — the overlap that
-    /// made the MP4 muxer write negative durations.
-    #[test]
-    fn lines_from_consecutive_rounds_never_overlap() {
-        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
-        let first = chunker
-            .place(&to_36, &tokens(&[(" 그런데", 33_000, 36_500)]))
-            .expect("reported");
-        let second = chunker
-            .place(
-                &to_40,
-                &tokens(&[(" 강이나", 35_500, 36_200), (" 호수도", 36_200, 37_000)]),
-            )
-            .expect("reported");
+        let second = push_on(&mut chunker, 4_000).unwrap();
+        let round = chunker.heard(
+            &second,
+            &[segment(&[
+                (" 재입국", 300, 1_000),
+                (" 충격은", 1_000, 1_700),
+                (" 신혼", 1_700, 2_300),
+                (" 단계가", 2_300, 3_000),
+                (" 업기", 3_000, 3_500),
+            ])],
+        );
+        assert_eq!((round.committed, round.tentative), (3, 2));
+        assert!(chunker.take_lines().is_empty(), "the line runs on");
         assert!(
-            second.start_ms >= first.end_ms,
-            "{second:?} starts before {first:?} ends"
-        );
-        assert_eq!(
-            second.text, "호수도",
-            "and what starts inside the last line is its, not this one's"
+            chunker.settled_until_ms() <= 300,
+            "and the audio it began in is held until it is a line"
         );
     }
 
-    /// A syllable split between two tokens is kept whole rather than cut
-    /// through: 스 is three bytes, and here the token boundary falls after
-    /// the second of them.
+    /// The loss this exists to stop. The same words heard in two rounds
+    /// are given times hundreds of milliseconds apart; cut by time, a word
+    /// at the seam fell outside both rounds or inside both. Agreed by text,
+    /// each is said once.
     #[test]
-    fn a_character_split_between_tokens_is_kept_whole() {
-        let (mut chunker, _, to_40) = rounds_to_36_and_40();
+    fn times_that_move_between_rounds_lose_and_repeat_nothing() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(
+            &first,
+            &[segment(&[
+                (" 빠르게", 2_400, 3_100),
+                (" 발생", 3_100, 3_900),
+            ])],
+        );
+        let second = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(
+            &second,
+            &[segment(&[
+                (" 빠르게", 2_900, 3_600),
+                (" 발생하며", 3_600, 4_400),
+                (" 더", 4_400, 4_600),
+            ])],
+        );
+        let third = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(
+            &third,
+            &[segment(&[
+                (" 빠르게", 2_600, 3_300),
+                (" 발생하며", 3_300, 4_100),
+                (" 더", 4_100, 4_300),
+                (" 오래", 4_300, 4_900),
+                (" 지속하고.", 4_900, 6_000),
+            ])],
+        );
+        let last = chunker.flush().expect("the tail is heard");
+        chunker.heard(
+            &last,
+            &[segment(&[
+                (" 빠르게", 2_700, 3_400),
+                (" 발생하며", 3_400, 4_200),
+                (" 더", 4_200, 4_400),
+                (" 오래", 4_400, 5_000),
+                (" 지속하고.", 5_000, 6_100),
+            ])],
+        );
+        assert_eq!(
+            texts(&chunker.take_lines()).join(" "),
+            "빠르게 발생하며 더 오래 지속하고."
+        );
+    }
+
+    /// A tiny, seeded generator: the same run every time, and no crate for
+    /// it.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            self.0 >> 33
+        }
+
+        fn below(&mut self, n: u64) -> i64 {
+            (self.next() % n) as i64
+        }
+    }
+
+    /// Three hundred words, said one after another with pauses, heard
+    /// round after round the way a model hears them: the times off by up
+    /// to 300 ms each time, the words near the end of the audio missing or
+    /// misheard, now and then a word already committed heard differently,
+    /// and now and then a round passing over all it heard or a segment of
+    /// it — though never what the round before it passed over: two rounds
+    /// that agree a stretch was not said are believed. Every word comes out once, in order, and every line
+    /// after the one before it — for each of twenty seeded runs: one seed
+    /// alone passed while others lost a sentence. Over three hundred seeds,
+    /// three runs of three hundred words still lose or repeat some.
+    #[test]
+    fn a_long_stream_heard_unsteadily_comes_out_word_for_word() {
+        for seed in 1..=20 {
+            heard_unsteadily(seed);
+        }
+    }
+
+    fn heard_unsteadily(seed: u64) {
+        let mut rng = Lcg(seed);
+        let mut said = Vec::new();
+        let mut t = 300;
+        for n in 0..300 {
+            let length = 300 + rng.below(400);
+            said.push((format!(" w{n}"), t, t + length));
+            t += length + if rng.below(8) == 0 { 700 } else { 60 };
+        }
+        let total_ms = t + 1_000;
+
+        let mut chunker = Chunker::new(POLICY);
+        let mut lines = Vec::new();
+        // What the last round passed over, as indexes into `said`: the next
+        // does not pass over it too. Two rounds that both pass over the
+        // same words agree they were not said, and agreement is final.
+        let mut passed_over = 0..0;
+        let mut hear = |chunker: &mut Chunker, inference: &Inference, rng: &mut Lcg| {
+            let end = inference.offset_ms + inference.audio.len() as i64 * 1000 / 16_000;
+            let edge = if inference.last { 0 } else { rng.below(900) };
+            let mut segments = Vec::new();
+            let mut current = Vec::new();
+            let mut indexes = Vec::new();
+            for (n, (text, start, stop)) in said.iter().enumerate() {
+                if *start < inference.offset_ms || *stop > end - edge {
+                    continue;
+                }
+                indexes.push(n);
+                let jitter = |rng: &mut Lcg| rng.below(601) - 300;
+                let mut text = text.clone();
+                // A word near the end of what was heard, guessed at.
+                if !inference.last && *stop > end - 1_500 && rng.below(2) == 0 {
+                    text = format!(" guess{}", rng.below(1_000));
+                }
+                // A word heard before, heard otherwise this time.
+                if !inference.last && *stop < end - 4_000 && rng.below(25) == 0 {
+                    text.push('x');
+                }
+                current.push(Heard {
+                    bytes: text.into_bytes(),
+                    start_ms: start + jitter(rng),
+                    end_ms: stop + jitter(rng),
+                });
+                if n % 7 == 6 {
+                    segments.push(std::mem::take(&mut current));
+                }
+            }
+            if !current.is_empty() {
+                segments.push(current);
+            }
+            // Now and then a round passes over speech whole: all of it, or
+            // one segment — never what the round before passed over.
+            let mut spans = Vec::new();
+            let mut at = 0;
+            for tokens in &segments {
+                spans.push(indexes[at]..indexes[at + tokens.len() - 1] + 1);
+                at += tokens.len();
+            }
+            let free = |span: &std::ops::Range<usize>| {
+                span.end <= passed_over.start || span.start >= passed_over.end
+            };
+            let mut skipped = 0..0;
+            if !inference.last && !segments.is_empty() {
+                match rng.below(12) {
+                    0 if spans.iter().all(free) => {
+                        skipped = spans[0].start..spans[spans.len() - 1].end;
+                        segments.clear();
+                    }
+                    1 => {
+                        let at = rng.below(segments.len() as u64) as usize;
+                        if free(&spans[at]) {
+                            skipped = spans[at].clone();
+                            segments.remove(at);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            passed_over = skipped;
+            chunker.heard(inference, &segments);
+        };
+
+        let mut fed = 0;
+        while fed < total_ms {
+            let step = 1_000.min(total_ms - fed) as usize;
+            fed += step as i64;
+            if let Some(inference) = push_on(&mut chunker, step) {
+                assert!(
+                    inference.audio.len() <= samples(MAX_AUDIO_MS as usize + 4_000).len(),
+                    "the audio heard stays inside Whisper's window"
+                );
+                hear(&mut chunker, &inference, &mut rng);
+            }
+            lines.extend(chunker.take_lines());
+        }
+        if let Some(inference) = chunker.flush() {
+            hear(&mut chunker, &inference, &mut rng);
+        }
+        lines.extend(chunker.take_lines());
+
+        // A word heard otherwise in a round that agreed with the one before
+        // is committed as that round heard it: a word misheard, not lost.
+        let heard: Vec<&str> = lines
+            .iter()
+            .flat_map(|line| {
+                line.words
+                    .iter()
+                    .map(|word| word.text.trim_end_matches('x'))
+            })
+            .collect();
+        let expected: Vec<String> = (0..300).map(|n| format!("w{n}")).collect();
+        assert_eq!(heard, expected, "seed {seed}");
+        for pair in lines.windows(2) {
+            assert!(
+                pair[1].start_ms >= pair[0].end_ms,
+                "{:?} overlaps {:?}",
+                pair[1],
+                pair[0]
+            );
+        }
+    }
+
+    /// Lines end where a reader would want them to: at the end of a
+    /// sentence, at a pause, and before they grow too long to read.
+    #[test]
+    fn lines_end_at_a_sentence_a_pause_or_a_length() {
+        let mut chunker = Chunker::new(POLICY);
+        let words = segment(&[
+            (" 안녕하세요.", 0, 800),
+            (" 오늘은", 900, 1_300),
+            (" 비가", 2_500, 2_900),
+            (" 옵니다", 2_900, 3_300),
+        ]);
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(&first, std::slice::from_ref(&words));
+        let last = chunker.flush().unwrap();
+        chunker.heard(&last, &[words]);
+        assert_eq!(
+            texts(&chunker.take_lines()),
+            ["안녕하세요.", "오늘은", "비가 옵니다"],
+            "the sentence ends one, the pause of 1.2 s another"
+        );
+
+        let mut chunker = Chunker::new(POLICY);
+        let long: Vec<(String, i64, i64)> = (0..12)
+            .map(|n| (format!(" word{n:02}"), n * 300, n * 300 + 250))
+            .collect();
+        let spec: Vec<(&str, i64, i64)> =
+            long.iter().map(|(t, s, e)| (t.as_str(), *s, *e)).collect();
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(&first, &[segment(&spec)]);
+        let last = chunker.flush().unwrap();
+        chunker.heard(&last, &[segment(&spec)]);
+        let lines = chunker.take_lines();
+        assert!(lines.len() > 1, "{:?}", texts(&lines));
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.text.chars().count() <= LINE_MAX_CHARS + 7),
+            "{:?}",
+            texts(&lines)
+        );
+    }
+
+    /// What a model hears of `segments` in audio ending at `end_ms`: the
+    /// words said by then.
+    fn by(segments: &[Vec<Heard>], end_ms: i64) -> Vec<Vec<Heard>> {
+        segments
+            .iter()
+            .map(|tokens| {
+                tokens
+                    .iter()
+                    .filter(|token| token.end_ms <= end_ms)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|tokens| !tokens.is_empty())
+            .collect()
+    }
+
+    /// Once the audio is long, what is committed is cut away after a
+    /// segment's end, two committed words left after the cut, and given
+    /// as the prompt instead — so the audio stays short and the model
+    /// still knows what came before.
+    #[test]
+    fn long_audio_is_cut_inside_what_is_committed_and_becomes_the_prompt() {
+        let mut chunker = Chunker::new(POLICY);
+        let said = [
+            segment(&[(" 하나", 1_000, 1_500), (" 둘.", 1_500, 2_000)]),
+            segment(&[(" 셋", 5_000, 5_500), (" 넷.", 5_500, 6_000)]),
+            segment(&[(" 다섯", 9_000, 9_500), (" 여섯", 9_500, 10_000)]),
+        ];
+        for _ in 0..4 {
+            let round = push_on(&mut chunker, 4_000).unwrap();
+            assert_eq!(round.offset_ms, 0, "not yet long enough to cut");
+            let end = round.offset_ms + round.audio.len() as i64 * 1000 / 16_000;
+            chunker.heard(&round, &by(&said, end));
+        }
+        let next = push_on(&mut chunker, 4_000).unwrap();
+        assert_eq!(
+            next.offset_ms, 7_500,
+            "halfway between the segment's end and the word after it"
+        );
+        assert_eq!(next.prompt, " 하나 둘. 셋 넷.");
+        assert_eq!(
+            texts(&chunker.take_lines()),
+            ["하나 둘.", "셋 넷.", "다섯 여섯"]
+        );
+    }
+
+    /// The model sometimes says its prompt again before the committed words
+    /// it hears again; all of it is passed over, and only what is new is
+    /// reported.
+    #[test]
+    fn the_prompt_said_again_is_not_reported_again() {
+        let mut chunker = Chunker::new(POLICY);
+        let said = [
+            segment(&[(" 알프스", 1_000, 1_600), (" 산맥.", 1_600, 2_200)]),
+            segment(&[(" 스위스는", 9_000, 9_800), (" 작은", 9_800, 10_300)]),
+        ];
+        for _ in 0..4 {
+            let round = push_on(&mut chunker, 4_000).unwrap();
+            chunker.heard(&round, &said);
+        }
+        let round = push_on(&mut chunker, 4_000).unwrap();
+        assert!(round.offset_ms > 2_200, "what was said first is cut away");
+        assert_eq!(round.prompt, " 알프스 산맥.");
+        chunker.take_lines();
+
+        let echo = [segment(&[
+            (" 알프스", round.offset_ms, round.offset_ms + 100),
+            (" 산맥.", round.offset_ms + 100, round.offset_ms + 200),
+            (" 스위스는", 9_000, 9_800),
+            (" 작은", 9_800, 10_300),
+            (" 나라", 10_300, 10_900),
+        ])];
+        chunker.heard(&round, &echo);
+        let last = chunker.flush().unwrap();
+        chunker.heard(&last, &echo);
+        assert_eq!(texts(&chunker.take_lines()), ["나라"]);
+    }
+
+    /// Rounds that never agree — music, noise, a model looping — still
+    /// commit at the longest the audio may grow, so it stays inside the
+    /// thirty seconds Whisper can hear.
+    #[test]
+    fn rounds_that_never_agree_commit_at_the_longest_the_audio_may_grow() {
+        let mut chunker = Chunker::new(POLICY);
+        let mut forced = false;
+        let unlike = [
+            "사과", "하늘", "구름", "나무", "파도", "기차", "우산", "연필", "시계", "의자",
+        ];
+        for word in unlike {
+            let round = push_on(&mut chunker, 4_000).unwrap();
+            assert!(round.audio.len() <= samples(MAX_AUDIO_MS as usize + 4_000).len());
+            let text = format!(" {word}");
+            let words = [segment(&[(
+                text.as_str(),
+                round.offset_ms + 500,
+                round.offset_ms + 900,
+            )])];
+            forced |= chunker.heard(&round, &words).forced;
+        }
+        assert!(forced);
+        assert!(!chunker.take_lines().is_empty());
+    }
+
+    /// At the end there is no later round: what the last one hears is
+    /// committed as it is heard, and a second flush has nothing to say.
+    #[test]
+    fn the_last_round_commits_what_it_hears_and_only_once() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(&first, &[segment(&[(" 감사합니다", 3_000, 3_900)])]);
+        push_on(&mut chunker, 500);
+        let last = chunker.flush().expect("the tail is worth hearing");
+        assert!(last.last);
+        chunker.heard(&last, &[segment(&[(" 감사합니다", 3_000, 4_000)])]);
+        assert_eq!(texts(&chunker.take_lines()), ["감사합니다"]);
+        assert_eq!(
+            chunker.settled_until_ms(),
+            4_500,
+            "everything heard is settled"
+        );
+        assert_eq!(chunker.flush(), None);
+    }
+
+    /// The audio a line in progress began in is not settled until the line
+    /// is finished, so the line still has a buffer to go on.
+    #[test]
+    fn a_line_in_progress_holds_the_audio_it_began_in() {
+        let mut chunker = Chunker::new(POLICY);
+        let words = [segment(&[
+            (" 그런데", 1_000, 1_500),
+            (" 강이나", 1_500, 2_100),
+        ])];
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(&first, &words);
+        let second = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(
+            &second,
+            &[segment(&[
+                (" 그런데", 1_000, 1_500),
+                (" 강이나", 1_500, 2_100),
+                (" 호수", 2_100, 2_600),
+            ])],
+        );
+        assert!(chunker.take_lines().is_empty());
+        assert_eq!(chunker.settled_until_ms(), 1_000);
+    }
+
+    /// Silence is agreed on as words are: two rounds that hear nothing let
+    /// the audio go up to a second short of where the first of them ended,
+    /// and one alone lets nothing go.
+    #[test]
+    fn silence_is_settled_once_two_rounds_hear_it() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(&first, &[]);
+        assert_eq!(chunker.settled_until_ms(), 0, "one round is not believed");
+        let second = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(&second, &[]);
+        assert_eq!(chunker.settled_until_ms(), 3_000);
+    }
+
+    /// The loss one round's silence made: whisper passed over a stretch of
+    /// speech whole, the round heard nothing, and what the round before had
+    /// heard there was cut away as silence. The next round hears it again,
+    /// and it is reported.
+    #[test]
+    fn a_round_that_hears_nothing_loses_nothing() {
+        let mut chunker = Chunker::new(POLICY);
+        let said = [segment(&[
+            (" 합금은", 13_000, 13_600),
+            (" 혼합물이다.", 13_600, 14_500),
+        ])];
+        let mut lines = Vec::new();
+        for n in 0..6 {
+            let round = push_on(&mut chunker, 4_000).unwrap();
+            let end = round.offset_ms + round.audio.len() as i64 * 1000 / 16_000;
+            // The round ending at 20 s passes over everything.
+            let heard = if n == 4 { Vec::new() } else { by(&said, end) };
+            chunker.heard(&round, &heard);
+            lines.extend(chunker.take_lines());
+        }
+        assert_eq!(
+            texts(&lines),
+            ["합금은 혼합물이다."],
+            "agreed across the round that heard nothing"
+        );
+    }
+
+    /// The whole reason positions come from the timestamps: audio that
+    /// arrives late in its own timeline, because a queue dropped what was
+    /// between, must not drag everything after it earlier. What the last
+    /// round heard before the gap is reported as it was heard.
+    #[test]
+    fn a_gap_ends_what_was_heard_and_places_what_follows_where_it_is() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = push_on(&mut chunker, 4_000).unwrap();
+        chunker.heard(&first, &[segment(&[(" 사진이", 1_000, 1_700)])]);
+
+        // Ten seconds went missing.
+        let after = chunker
+            .push(Some(at(14_000)), &samples(4_000))
+            .expect("a whole chunk again");
+        assert_eq!(texts(&chunker.take_lines()), ["사진이"]);
+        assert_eq!(after.offset_ms, 14_000, "placed where its timestamps say");
+        assert_eq!(
+            after.audio.len(),
+            samples(4_000).len(),
+            "with nothing from before the gap in front of it"
+        );
+        assert!(chunker.settled_until_ms() >= 14_000);
+    }
+
+    /// After a seek the audio is placed where its own timestamps say, even
+    /// earlier than before, and nothing heard before it is said.
+    #[test]
+    fn a_reset_forgets_and_the_next_audio_places_itself() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = chunker.push(Some(at(60_000)), &samples(4_000)).unwrap();
+        chunker.heard(&first, &[segment(&[(" 패키지", 61_000, 61_800)])]);
+        chunker.reset();
+        assert!(chunker.take_lines().is_empty());
+
+        let after = chunker.push(Some(at(10_000)), &samples(4_000)).unwrap();
+        assert_eq!(after.offset_ms, 10_000);
+        assert!(after.prompt.is_empty());
+        chunker.heard(&after, &[segment(&[(" 여행", 10_500, 11_000)])]);
+        let last = chunker.flush().unwrap();
+        chunker.heard(&last, &[segment(&[(" 여행", 10_500, 11_000)])]);
+        let lines = chunker.take_lines();
+        assert_eq!(texts(&lines), ["여행"]);
+        assert_eq!(lines[0].start_ms, 10_500);
+    }
+
+    /// Words are cut where whisper's tokens mark them: at a leading space,
+    /// with punctuation and the rest of a split character kept on the word
+    /// before — and, in a script written without spaces, at every token.
+    #[test]
+    fn words_are_whole_and_unspaced_scripts_go_token_by_token() {
         let syllable = "스".as_bytes();
-        assert_eq!(syllable.len(), 3);
-        let split = vec![
+        let words = words_of(&[vec![
             Heard {
                 bytes: [b" ".as_slice(), &syllable[..2]].concat(),
-                start_ms: 34_600,
-                end_ms: 35_100,
+                start_ms: 0,
+                end_ms: 100,
             },
             Heard {
                 bytes: [&syllable[2..], "위스는".as_bytes()].concat(),
-                start_ms: 35_100,
-                end_ms: 36_000,
+                start_ms: 100,
+                end_ms: 400,
             },
-        ];
-        let line = chunker.place(&to_40, &split).expect("reported");
-        assert_eq!(line.text, "스위스는");
+            Heard {
+                bytes: b",".to_vec(),
+                start_ms: 400,
+                end_ms: 450,
+            },
+            Heard {
+                bytes: " 東京".as_bytes().to_vec(),
+                start_ms: 500,
+                end_ms: 700,
+            },
+            Heard {
+                bytes: "です".as_bytes().to_vec(),
+                start_ms: 700,
+                end_ms: 900,
+            },
+        ]]);
+        let raw: Vec<&str> = words.iter().map(|w| w.raw.as_str()).collect();
+        assert_eq!(raw, [" 스위스는,", " 東京", "です"]);
+        assert!(words[2].ends_segment && !words[0].ends_segment);
+    }
+
+    /// Two hearings agree past a word misheard in either, but not past two
+    /// in a row, nor past a stretch one passed over.
+    #[test]
+    fn hearings_agree_past_one_misheard_word_only() {
+        let words = |text: &str| -> Vec<HeardWord> {
+            text.split(' ')
+                .map(|word| HeardWord::new(format!(" {word}"), 0, 0))
+                .collect()
+        };
+        let before = words("a b c d e f");
+        assert_eq!(agreement(&words("a b c d e f g"), &before), 6);
+        assert_eq!(agreement(&words("a x c d e f"), &before), 6, "b misheard");
+        assert_eq!(agreement(&words("a x y d e f"), &before), 1, "two in a row");
         assert_eq!(
-            line.start_ms, 35_000,
-            "though it starts no earlier than the window"
+            agreement(&words("a b e f"), &before),
+            2,
+            "c and d passed over"
+        );
+        assert_eq!(
+            agreement(&words("a x c y e f"), &before),
+            6,
+            "b and d, apart"
+        );
+        assert_eq!(
+            agreement(&words("a b c d e x"), &before),
+            5,
+            "nothing after to agree"
         );
     }
 
-    /// Nothing in the window is nothing to report — and it leaves nothing
-    /// behind that would hold the next line back.
+    /// A word heard a little differently the second time is still the
+    /// word it was; a different short word is not.
     #[test]
-    fn a_segment_with_nothing_in_the_window_reports_nothing() {
-        let (mut chunker, _, to_40) = rounds_to_36_and_40();
-        assert_eq!(
-            chunker.place(&to_40, &tokens(&[(" 알프스", 33_000, 34_500)])),
-            None
-        );
-        assert_eq!(chunker.place(&to_40, &tokens(&[])), None);
-        assert!(
-            chunker
-                .place(&to_40, &tokens(&[(" 산맥이", 35_000, 36_000)]))
-                .is_some()
-        );
-    }
-
-    /// A line the model gave no length keeps none, rather than being lost
-    /// or made to run backwards.
-    #[test]
-    fn a_line_with_no_length_is_kept_with_none() {
-        let (mut chunker, to_36, _) = rounds_to_36_and_40();
-        let line = chunker
-            .place(&to_36, &tokens(&[(" 네", 33_000, 33_000)]))
-            .expect("reported");
-        assert_eq!((line.start_ms, line.end_ms), (33_000, 33_000));
+    fn words_heard_slightly_differently_are_alike() {
+        assert!(alike("없기", "업기"));
+        assert!(alike("발생하며", "발생하면"));
+        assert!(!alike("더", "또"));
+        assert!(!alike("오래", "지속하고"));
     }
 
     /// A model file's header, as whisper.cpp writes it.

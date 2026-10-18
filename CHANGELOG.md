@@ -41,6 +41,10 @@ compile error with no explanation.
   `SubtitleEncoder`. The `transcribe` example is in `examples/speech` now,
   and picks its backend with `--gpu cuda|vulkan|metal`.
 
+- **`ChunkPolicy::live_edge_ms` is gone.** Holding back the newest second
+  was how a round decided what to trust; two rounds agreeing does that now
+  (below). Leave the field out: `ChunkPolicy { chunk_ms, token_timing }`.
+
 ### Added
 
 - **`whisper-cuda` and `whisper-metal`.** whisper.cpp on an NVIDIA GPU
@@ -53,6 +57,20 @@ compile error with no explanation.
   aspect ratio and copying its best audio stream without resetting time.
 
 ### Fixed
+
+- **A transcriber no longer loses words and repeats them where its rounds
+  meet.** Each round heard the one before it again and kept the words the
+  model timed inside its own window; the model times the same word hundreds
+  of milliseconds apart in two rounds, so a word at the seam fell in
+  neither window or in both — "재입국 충[격은 신혼 단계가 없]기", "빠르게 /
+  빠르게". `large-v3-turbo` on FLEURS's Korean, streamed, missed 25% of the
+  characters where the whole clip heard at once missed 3%. A word is now
+  reported once two rounds in a row agree on the words up to it, by their
+  text (LocalAgreement, after whisper_streaming), what is reported staying
+  in the audio heard until it is cut away and given as the prompt; and
+  silence is believed only once two rounds hear it, since whisper now and
+  then passes over a sentence. The same clip misses 7%, at 6x real time
+  where it was 7x.
 
 - **`AudioResampler` resamples a WAV with no channel mask.** A sound that
   says how many channels it has but not which — what such a WAV decodes to

@@ -88,8 +88,8 @@ built. Running it needs CUDA's runtime and cuBLAS DLLs on `PATH`.
 
 ## Why the subtitles arrive late
 
-The transcriber gathers a few seconds before transcribing, holds back the
-newest second as too uncertain to report, and holds the sound until its
+The transcriber hears the sound again every four seconds and reports a
+word once two rounds in a row agree on it, holding the sound until its
 words are settled, so at the end of a file the last lines arrive after every
 video and audio packet has been muxed. That is
 fine: a sample's place in an MP4 is its timestamp, not its arrival. The
