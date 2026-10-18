@@ -46,6 +46,14 @@ impl AudioFrameResampler {
         &mut self,
         frame: &ffmpeg::frame::Audio,
     ) -> std::result::Result<Vec<ffmpeg::frame::Audio>, ffmpeg::Error> {
+        let named;
+        let frame = match with_named_order(frame) {
+            Some(frame) => {
+                named = frame;
+                &named
+            }
+            None => frame,
+        };
         let mut output_frames = Vec::new();
         if !self.context_matches(frame) {
             output_frames.extend(self.flush()?);
@@ -119,6 +127,34 @@ impl AudioFrameResampler {
     pub(crate) fn reset(&mut self) {
         self.context = None;
     }
+}
+
+/// `frame` with the default layout for its channels, where its own says
+/// how many there are and not which — as a WAV with no channel mask
+/// decodes — or `None` where it names them.
+///
+/// libswresample makes such a layout the default when it builds a context,
+/// and then refuses every frame still saying "unspecified" as an input that
+/// has changed. The copy is a new reference to the same samples.
+fn with_named_order(frame: &ffmpeg::frame::Audio) -> Option<ffmpeg::frame::Audio> {
+    // SAFETY: the frame is a valid AVFrame for as long as it is borrowed,
+    // and its layout is read, not changed.
+    let order = unsafe { (*frame.as_ptr()).ch_layout.order };
+    if order != ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_UNSPEC {
+        return None;
+    }
+    let mut named = ffmpeg::frame::Audio::empty();
+    // SAFETY: both are valid frames, the new one empty as av_frame_ref
+    // requires; on failure it is left empty and dropped as one.
+    if unsafe { ffmpeg::ffi::av_frame_ref(named.as_mut_ptr(), frame.as_ptr()) } < 0 {
+        return None;
+    }
+    // An unspecified layout holds nothing to free: overwriting it leaks
+    // nothing.
+    named.set_channel_layout(ffmpeg::ChannelLayout::default(i32::from(
+        frame.channels(),
+    )));
+    Some(named)
 }
 
 /// Errors specific to [`AudioResampler`].
@@ -361,6 +397,53 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         (resampler, received)
+    }
+
+    /// A sound that says how many channels it has and not which — what a
+    /// WAV with no channel mask decodes to — is resampled, every buffer of
+    /// it. libswresample takes such a layout as the default for that many
+    /// when it builds a context, then refused each frame still saying
+    /// "unspecified" as an input that had changed, so a mono WAV made
+    /// nothing at all.
+    #[test]
+    fn converts_a_layout_of_no_named_order() {
+        let (mut resampler, received) = new_resampler(AudioFormat::new(
+            ffmpeg::format::Sample::F32(Type::Packed),
+            16_000,
+            1,
+        ));
+        for at in 0..3 {
+            let MediaBuffer::Audio(named) = f32_packed_frame(48_000, 1, 960, at * 960) else {
+                unreachable!("an audio frame");
+            };
+            let mut frame = ffmpeg::frame::Audio::new(named.format(), 960, named.channel_layout());
+            frame.clone_from(&named);
+            // SAFETY: a zeroed AVChannelLayout is the empty one, which
+            // holds nothing to free; this one says only that it has one
+            // channel.
+            let unspecified = unsafe {
+                let mut layout: ffmpeg::ffi::AVChannelLayout = std::mem::zeroed();
+                layout.order = ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_UNSPEC;
+                layout.nb_channels = 1;
+                ffmpeg::ChannelLayout::from(layout)
+            };
+            frame.set_channel_layout(unspecified);
+            resampler
+                .consume(MediaBuffer::Audio(Arc::new(frame).into()))
+                .expect("a layout of no named order is resampled");
+        }
+        crate::stream::deliver(&mut resampler, &crate::stream::StreamEvent::Eos).unwrap();
+
+        let samples: usize = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|buffer| match buffer {
+                MediaBuffer::Audio(frame) => Some(frame.samples()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(samples, 3 * 960 / 3, "every buffer was resampled");
     }
 
     #[test]

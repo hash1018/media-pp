@@ -54,6 +54,13 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`AudioResampler` resamples a WAV with no channel mask.** A sound that
+  says how many channels it has but not which — what such a WAV decodes to
+  — was refused buffer after buffer as an input that had changed, so a mono
+  float WAV made nothing at all. Such a layout is now taken as the default
+  for that many channels, as libswresample itself takes it. `SwAudioEncoder`
+  and `AudioMixer`'s inputs, which resample the same way, are fixed with it.
+
 - **File-export examples protect their inputs and existing outputs.**
   `remux`, `transcode` and `resize` refuse input/output aliases and require
   `--overwrite` for an existing destination. They write beside it to a
