@@ -1,0 +1,234 @@
+//! A publisher's stream written into its path's broadcast: [`Recording`].
+
+use std::ptr;
+use std::time::{Duration, Instant};
+
+use ffmpeg_next::{self as ffmpeg, ffi};
+
+use crate::buffer::MediaBuffer;
+use crate::element::RawSink;
+use crate::elements::{Broadcast, BroadcastError, BroadcastSink, TrackFormat};
+use crate::error::Error;
+
+use super::announce::{Announced, Payload};
+use super::depacketize::{Depacketizer, key_unit, nal_units};
+
+/// How long a recording holds what it is sent while it waits for every
+/// picture's size, and how much — past either, it publishes without.
+const HOLD_FOR: Duration = Duration::from_secs(10);
+const HOLD_AT_MOST: usize = 4096;
+
+/// Why a recording cannot go on.
+pub(crate) enum Stopped {
+    /// The broadcast was closed, or published again by someone else.
+    Broadcast(BroadcastError),
+}
+
+/// A publisher's tracks being written into a broadcast.
+///
+/// What the description does not say — a picture's size, and parameter
+/// sets a publisher sends only in band — is read from each picture track's
+/// first keyframe before the broadcast is published, so that what reads it,
+/// a player's description or a recording's file, has it.
+pub(crate) struct Recording {
+    broadcast: Broadcast,
+    tracks: Vec<Announced>,
+    depacketizers: Vec<Depacketizer>,
+    parameters: Vec<ffmpeg::codec::Parameters>,
+    /// Whether each track's parameters are complete.
+    complete: Vec<bool>,
+    /// What came before they all were.
+    held: Vec<(usize, ffmpeg::Packet)>,
+    began: Instant,
+    sinks: Option<Vec<BroadcastSink>>,
+}
+
+// SAFETY: every field is `Send` but the codec parameters, which are this
+// value's own copies, used only through `&mut self`.
+unsafe impl Send for Recording {}
+
+impl Recording {
+    pub(crate) fn new(broadcast: Broadcast, tracks: Vec<Announced>) -> Self {
+        let complete = tracks
+            .iter()
+            .map(|track| track.medium != ffmpeg::media::Type::Video)
+            .collect();
+        Self {
+            broadcast,
+            depacketizers: tracks
+                .iter()
+                .map(|track| Depacketizer::new(track.payload))
+                .collect(),
+            parameters: tracks.iter().map(Announced::parameters).collect(),
+            tracks,
+            complete,
+            held: Vec::new(),
+            began: Instant::now(),
+            sinks: None,
+        }
+    }
+
+    /// Takes one RTP packet of `track`.
+    pub(crate) fn take(&mut self, track: usize, rtp: &[u8]) -> Result<(), Stopped> {
+        let Some(depacketizer) = self.depacketizers.get_mut(track) else {
+            return Ok(());
+        };
+        for mut packet in depacketizer.push(rtp) {
+            packet.set_time_base(self.tracks[track].time_base());
+            if self.sinks.is_some() {
+                self.write(track, packet)?;
+                continue;
+            }
+            if !self.complete[track] && packet.is_key() {
+                self.complete[track] =
+                    complete(&self.tracks[track], &mut self.parameters[track], &packet);
+            }
+            self.held.push((track, packet));
+            let all = self.complete.iter().all(|complete| *complete);
+            if all || self.held.len() >= HOLD_AT_MOST || self.began.elapsed() >= HOLD_FOR {
+                self.publish()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self) -> Result<(), Stopped> {
+        let formats: Vec<TrackFormat> = self
+            .parameters
+            .iter()
+            .zip(&self.tracks)
+            .map(|(parameters, track)| TrackFormat::new(parameters.clone(), track.time_base()))
+            .collect();
+        let sinks = self
+            .broadcast
+            .publish(&formats)
+            .map_err(Stopped::Broadcast)?;
+        self.sinks = Some(sinks);
+        for (track, packet) in std::mem::take(&mut self.held) {
+            self.write(track, packet)?;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, track: usize, packet: ffmpeg::Packet) -> Result<(), Stopped> {
+        let Some(sink) = self.sinks.as_mut().and_then(|sinks| sinks.get_mut(track)) else {
+            return Ok(());
+        };
+        match sink.consume(MediaBuffer::packet(packet)) {
+            Ok(()) => Ok(()),
+            Err(Error::BroadcastError(error)) => Err(Stopped::Broadcast(error)),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// Whether the broadcast has been published to by this recording yet.
+    pub(crate) fn published(&self) -> bool {
+        self.sinks.is_some()
+    }
+}
+
+/// Completes a picture track's `parameters` from its first keyframe:
+/// its size, read by FFmpeg's parser, and its parameter sets where the
+/// description gave none. Whether the size was found.
+fn complete(
+    track: &Announced,
+    parameters: &mut ffmpeg::codec::Parameters,
+    key: &ffmpeg::Packet,
+) -> bool {
+    let Some(unit) = key.data() else {
+        return false;
+    };
+    let h265 = track.payload == Payload::H265;
+    if !matches!(track.payload, Payload::H264 | Payload::H265) || !key_unit(unit, h265) {
+        return false;
+    }
+    let mut extradata = track.extradata.clone();
+    if extradata.is_empty() {
+        // Parameter sets sent only in band: kept from the keyframe.
+        for nal in nal_units(unit) {
+            let kind = if h265 {
+                (nal[0] >> 1) & 0x3f
+            } else {
+                nal[0] & 0x1f
+            };
+            let parameter_set = if h265 {
+                (32..=34).contains(&kind)
+            } else {
+                kind == 7 || kind == 8
+            };
+            if parameter_set {
+                extradata.extend_from_slice(&[0, 0, 0, 1]);
+                extradata.extend_from_slice(nal);
+            }
+        }
+        if !extradata.is_empty() {
+            set_extradata(parameters, &extradata);
+        }
+    }
+    let mut stream = extradata;
+    stream.extend_from_slice(unit);
+    let Some((width, height)) = size(track.codec, &stream) else {
+        return false;
+    };
+    // SAFETY: parameters this recording owns alone; plain fields.
+    unsafe {
+        (*parameters.as_mut_ptr()).width = width;
+        (*parameters.as_mut_ptr()).height = height;
+    }
+    true
+}
+
+fn set_extradata(parameters: &mut ffmpeg::codec::Parameters, extradata: &[u8]) {
+    // SAFETY: the parameters' own extradata, replaced with a buffer from
+    // FFmpeg's allocator with its padding, as FFmpeg frees it.
+    unsafe {
+        let par = parameters.as_mut_ptr();
+        let data = ffi::av_mallocz(extradata.len() + ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize)
+            .cast::<u8>();
+        if data.is_null() {
+            return;
+        }
+        ptr::copy_nonoverlapping(extradata.as_ptr(), data, extradata.len());
+        ffi::av_freep(ptr::addr_of_mut!((*par).extradata).cast());
+        (*par).extradata = data;
+        (*par).extradata_size = extradata.len() as i32;
+    }
+}
+
+/// A picture's size, as FFmpeg's parser of `codec` reads it from `stream`
+/// — parameter sets and a keyframe, in Annex B.
+fn size(codec: ffmpeg::codec::Id, stream: &[u8]) -> Option<(i32, i32)> {
+    let mut padded = stream.to_vec();
+    padded.resize(stream.len() + ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize, 0);
+    // SAFETY: a parser and a codec context made, used and freed here; the
+    // input is padded as the parser reads past its end.
+    unsafe {
+        let parser = ffi::av_parser_init(ffi::AVCodecID::from(codec) as i32);
+        if parser.is_null() {
+            return None;
+        }
+        let mut context = ffi::avcodec_alloc_context3(ptr::null());
+        if context.is_null() {
+            ffi::av_parser_close(parser);
+            return None;
+        }
+        (*parser).flags |= ffi::PARSER_FLAG_COMPLETE_FRAMES;
+        let mut out = ptr::null_mut();
+        let mut out_size = 0;
+        ffi::av_parser_parse2(
+            parser,
+            context,
+            &mut out,
+            &mut out_size,
+            padded.as_ptr(),
+            stream.len() as i32,
+            ffi::AV_NOPTS_VALUE,
+            ffi::AV_NOPTS_VALUE,
+            0,
+        );
+        let size = ((*parser).width, (*parser).height);
+        ffi::av_parser_close(parser);
+        ffi::avcodec_free_context(&mut context);
+        (size.0 > 0 && size.1 > 0).then_some(size)
+    }
+}

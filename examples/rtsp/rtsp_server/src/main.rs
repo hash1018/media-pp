@@ -1,0 +1,175 @@
+//! An RTSP server: plays a file to any number of RTSP players as a camera
+//! would, and takes a publisher's push on a second path, which players play
+//! too.
+//!
+//! ```text
+//! FileDemuxer -> Pacer -> BroadcastSink    (the file, looped, at its own speed)
+//!                              |
+//!                      Broadcast "file" ----\
+//!                                            RtspServer -> players
+//! publisher -> RtspServer -> Broadcast "live" /
+//! ```
+//!
+//! Each player is sent the broadcast's packets as they are — nothing is
+//! decoded or encoded for it — from the newest keyframe on. `live` takes one
+//! publisher at a time; one that leaves ends its run, and the next one's
+//! players go on.
+//!
+//!     cargo run -p rtsp_server -- input.mp4 [address] [--seconds N]
+//!     ffplay rtsp://127.0.0.1:8554/file
+//!     ffmpeg -re -i video.mp4 -c copy -f rtsp rtsp://127.0.0.1:8554/live
+//!     ffplay rtsp://127.0.0.1:8554/live
+//!
+//! The address defaults to `127.0.0.1:8554`, this machine alone; give
+//! `0.0.0.0:8554` to serve the network. It runs until Enter is pressed, or
+//! for `--seconds`.
+
+fn main() -> Result<(), media_pp::Report> {
+    Ok(example::run()?)
+}
+
+mod example {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use media_pp::driver::DriverRunner;
+    use media_pp::elements::{
+        Broadcast, BroadcastOptions, FileDemuxer, Pacer, RtspPathMode, RtspServer,
+        RtspServerOptions, TrackFormat,
+    };
+    use media_pp::pipeline::Pipeline;
+
+    const USAGE: &str = "usage: rtsp_server <input> [address] [--seconds N]";
+
+    struct Args {
+        input: String,
+        address: String,
+        seconds: Option<u64>,
+    }
+
+    fn args() -> Option<Args> {
+        let mut input = None;
+        let mut address = None;
+        let mut seconds = None;
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            if arg == "--seconds" {
+                seconds = Some(args.next()?.parse().ok()?);
+            } else if input.is_none() {
+                input = Some(arg);
+            } else if address.is_none() {
+                address = Some(arg);
+            } else {
+                return None;
+            }
+        }
+        Some(Args {
+            input: input?,
+            address: address.unwrap_or_else(|| "127.0.0.1:8554".to_owned()),
+            seconds,
+        })
+    }
+
+    pub(super) fn run() -> media_pp::Result<()> {
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+        let Some(args) = args() else {
+            eprintln!("{USAGE}");
+            std::process::exit(1);
+        };
+
+        let (server, handle) =
+            RtspServer::bind("server", &args.address, RtspServerOptions::default())?;
+        let file = Broadcast::new("file", BroadcastOptions::default());
+        let live = Broadcast::new("live", BroadcastOptions::default());
+        handle.add_path("file", &file, RtspPathMode::Play)?;
+        handle.add_path("live", &live, RtspPathMode::Record)?;
+
+        // The file as a camera: looped, at its own speed, into its broadcast.
+        let (demuxer, streams) = FileDemuxer::open("file", &args.input)?;
+        demuxer.looping_handle().set_looping(true);
+        let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+        let sinks = file.publish(&tracks)?;
+        let (camera, ()) = Pipeline::new("file", demuxer, |source, ctx| {
+            for (stream, sink) in streams.iter().zip(sinks) {
+                let branch = ctx
+                    .branch()
+                    .queue(format!("packets-{}", stream.index), 64)
+                    .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                    .to(sink)?;
+                ctx.attach(source, stream.index, branch)?;
+            }
+            Ok(())
+        })?;
+        camera.run()?;
+
+        let server = DriverRunner::new(server);
+        server.run()?;
+        println!("playing {} at {}", args.input, handle.url("file"));
+        println!("a publisher may push to {}", handle.url("live"));
+        match args.seconds {
+            Some(seconds) => println!("serving for {seconds} s"),
+            None => println!("press Enter to stop"),
+        }
+
+        let stop = until_asked(args.seconds);
+        let mut next_report = Instant::now();
+        loop {
+            match stop.recv_timeout(Duration::from_millis(200)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if Instant::now() >= next_report {
+                next_report += Duration::from_secs(5);
+                println!(
+                    "players: {}, live published: {}",
+                    handle.players(),
+                    live.is_live()
+                );
+            }
+            if let Some(event) = camera.bus().try_recv() {
+                println!("{event}");
+            }
+        }
+
+        server.stop();
+        camera.stop();
+        wait_stopped(&server);
+        println!("stopped");
+        Ok(())
+    }
+
+    /// A channel that gets a message once Enter is pressed, or `seconds`
+    /// have gone by.
+    fn until_asked(seconds: Option<u64>) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        match seconds {
+            Some(seconds) => {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(seconds));
+                    let _ = tx.send(());
+                });
+            }
+            None => {
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let _ = std::io::stdin().read_line(&mut line);
+                    let _ = tx.send(());
+                });
+            }
+        }
+        rx
+    }
+
+    /// Waits for the server's thread to end: its bus closes then.
+    fn wait_stopped(server: &Arc<DriverRunner>) {
+        for event in server.bus().iter() {
+            println!("{event}");
+        }
+    }
+}

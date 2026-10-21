@@ -126,6 +126,8 @@ pub enum ElementType {
     D3d11VideoCompositor,
     /// WebRTC connection driver.
     WebRtcPeer,
+    /// RTSP server driver, serving broadcasts.
+    RtspServer,
     /// Filter dropping frames that come faster than a rate.
     FrameRateLimiter,
     /// Filter that stops a branch taking frames, and takes the paused span

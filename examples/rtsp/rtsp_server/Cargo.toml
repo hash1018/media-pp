@@ -1,0 +1,11 @@
+[package]
+name = "rtsp_server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["rtsp-server"] }
+
+[dev-dependencies]
+tempfile = "3.27"

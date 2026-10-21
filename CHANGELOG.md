@@ -51,6 +51,26 @@ compile error with no explanation.
 
 ### Added
 
+- **`RtspServer`, behind `rtsp-server`: an RTSP server serving
+  `Broadcast`s.** Each path is a broadcast, written by whatever pipeline
+  the application has; any number of players play it — FFmpeg, VLC, a
+  camera viewer — over TCP interleaved or UDP, each sent its own copy of
+  the RTP packets and nothing decoded, from the newest keyframe, a slow one
+  moved on to a newer keyframe rather than holding anyone back. A path in
+  `RtspPathMode::Record` also takes one publisher's push (`ANNOUNCE` and
+  `RECORD`, TCP or UDP; H.264, H.265, AAC, Opus, G.711) into its broadcast,
+  which its players play on; one that goes silent for
+  `RtspServerOptions::publisher_timeout` is let go of. It is a `Driver`, run
+  with a `DriverRunner`, on a tokio runtime of its own inside its thread.
+  The `rtsp_server` example serves a file as a camera and a publisher's
+  path.
+
+  ```rust
+  let (server, handle) = RtspServer::bind("server", "0.0.0.0:8554", RtspServerOptions::default())?;
+  handle.add_path("cam1", &camera, RtspPathMode::Play)?; // camera: a Broadcast
+  DriverRunner::new(server).run()?;
+  ```
+
 - **`Broadcast`: one stream of packets, written once and read by many.**
   `Broadcast::publish` takes an input's tracks and hands out a
   `BroadcastSink` for each, the end of the branch carrying it; what they

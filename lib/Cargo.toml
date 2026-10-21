@@ -31,7 +31,7 @@ categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 [package.metadata.docs.rs]
 default-target = "x86_64-unknown-linux-gnu"
 targets = []
-features = ["ort", "rnnoise", "webrtc", "whisper"]
+features = ["ort", "rnnoise", "rtsp-server", "webrtc", "whisper"]
 rustdoc-args = ["--cfg", "docsrs", "-D", "warnings"]
 
 [dependencies]
@@ -54,6 +54,17 @@ ndarray = { version = "0.17", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [
     "rust-crypto",
+] }
+# The RTSP server's sockets and connections, on a runtime it owns inside its
+# own thread; nothing else in the crate runs on tokio, nor needs a runtime of
+# the caller's.
+tokio = { version = "1", optional = true, default-features = false, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
 ] }
 # Glyph rasterization for compositor text layers — needed by every backend
 # that draws one, so not Windows-only.
@@ -611,6 +622,9 @@ whisper-cuda = ["whisper", "whisper-rs/cuda", "whisper-rs/raw-api"]
 # macOS, and needs nothing installed.
 whisper-metal = ["whisper", "whisper-rs/metal", "whisper-rs/raw-api"]
 webrtc = ["dep:str0m"]
+# `RtspServer`: serves `Broadcast`s to RTSP players and takes RTSP
+# publishers into them. Pure Rust beyond FFmpeg (tokio), on every platform.
+rtsp-server = ["dep:tokio"]
 
 [dev-dependencies]
 log = "0.4"

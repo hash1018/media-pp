@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::Receiver;
-use ffmpeg_next::{Rational, Rescale};
 
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 use crate::{
@@ -18,11 +17,8 @@ use crate::{
 };
 
 use super::state::time_base;
+use super::timeline::{Timeline, same_shape};
 use super::{Broadcast, BroadcastError, BroadcastItem, BroadcastReader};
-
-/// The unit the timeline a [`BroadcastSource`] makes is kept in, between
-/// tracks.
-const MICROSECONDS: Rational = Rational(1, 1_000_000);
 
 /// Starts a pipeline of its own from a [`Broadcast`]: a recording of a
 /// camera that viewers watch at the same time, say.
@@ -57,17 +53,7 @@ pub(crate) struct Relaying {
     bell: Receiver<()>,
     broadcast: Arc<str>,
     tracks: Vec<StreamInfo>,
-    /// Where the run being read began on the broadcast's timeline: the
-    /// first packet handed on of it, and that packet's unit.
-    origin: Option<(i64, Rational)>,
-    /// Where the run being read begins on this source's own timeline, in
-    /// [`MICROSECONDS`].
-    offset: i64,
-    /// Where what has been handed on so far ends, in [`MICROSECONDS`].
-    end: i64,
-    /// When the last packet handed on had arrived, for how far after it the
-    /// next run is put.
-    last_arrival: Option<Instant>,
+    timeline: Timeline,
     pp_log: PpLog,
 }
 
@@ -116,10 +102,7 @@ impl BroadcastSource {
                     bell,
                     broadcast: broadcast.name(),
                     tracks,
-                    origin: None,
-                    offset: 0,
-                    end: 0,
-                    last_arrival: None,
+                    timeline: Timeline::default(),
                     pp_log,
                 },
             )),
@@ -129,19 +112,10 @@ impl BroadcastSource {
 }
 
 impl Relaying {
-    /// Whether a run of `tracks` can go on through the outputs made for
-    /// this source's: as many, each of the same medium and codec.
-    fn fits(&self, tracks: &[StreamInfo]) -> bool {
-        tracks.len() == self.tracks.len()
-            && tracks.iter().zip(self.tracks.iter()).all(|(new, old)| {
-                new.kind == old.kind && new.parameters.id() == old.parameters.id()
-            })
-    }
-
     /// Another run begins, which what it hands on puts after what has
     /// been: whether it can go on with its tracks.
     fn begin_run(&mut self, tracks: &[StreamInfo]) -> bool {
-        if !self.fits(tracks) {
+        if !same_shape(&self.tracks, tracks) {
             pp_warn!(
                 pp_log: &self.pp_log,
                 "event=eos phase=source broadcast={} was published again with tracks [{}], which the outputs made for [{}] cannot carry; ending",
@@ -151,7 +125,7 @@ impl Relaying {
             );
             return false;
         }
-        self.origin = None;
+        self.timeline.next_run();
         pp_info!(pp_log: &self.pp_log, "broadcast={} began another run", self.broadcast);
         true
     }
@@ -165,46 +139,11 @@ impl Relaying {
         arrived: Instant,
     ) -> Option<MediaBuffer> {
         let unit = time_base(packet, Some(self.tracks[track].time_base));
-        if unit.numerator() <= 0 || unit.denominator() <= 0 {
-            return None;
+        let first = self.timeline.run_begins_at().is_none();
+        let stamped = self.timeline.restamp(packet, unit, arrived)?;
+        if first && let Some(at) = self.timeline.run_begins_at() {
+            pp_info!(pp_log: &self.pp_log, "broadcast={} goes on at {at:.3}s", self.broadcast);
         }
-        let at = packet.dts().or(packet.pts())?;
-        let (origin, origin_unit) = match self.origin {
-            Some(origin) => origin,
-            None => {
-                // The first packet of a run: it goes as far after the last
-                // run's last packet as it arrived after it.
-                if let Some(last) = self.last_arrival {
-                    let gap = arrived.saturating_duration_since(last).as_micros();
-                    self.offset = self
-                        .end
-                        .saturating_add(i64::try_from(gap).unwrap_or(i64::MAX));
-                    pp_info!(
-                        pp_log: &self.pp_log,
-                        "broadcast={} goes on at {:.3}s",
-                        self.broadcast,
-                        self.offset as f64 / 1e6
-                    );
-                }
-                *self.origin.insert((at, unit))
-            }
-        };
-        let shift = self.offset.rescale(MICROSECONDS, unit) - origin.rescale(origin_unit, unit);
-        let dts = packet.dts().map(|dts| dts + shift);
-        if dts
-            .or(packet.pts().map(|pts| pts + shift))
-            .is_some_and(|ts| ts < 0)
-        {
-            return None;
-        }
-        let mut stamped = packet.as_ref().clone();
-        stamped.set_pts(packet.pts().map(|pts| pts + shift));
-        stamped.set_dts(dts);
-        if let Some(last) = stamped.pts().or(dts) {
-            let ends = (last + stamped.duration().max(0)).rescale(unit, MICROSECONDS);
-            self.end = self.end.max(ends);
-        }
-        self.last_arrival = Some(arrived);
         let mut stamped: PacketBuffer = Arc::new(stamped).into();
         if let Some(metadata) = packet.metadata_arc() {
             stamped = stamped.with_metadata(Arc::clone(metadata));

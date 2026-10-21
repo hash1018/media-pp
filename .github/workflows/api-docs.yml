@@ -80,7 +80,7 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
-        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,mf-virtual-camera,wasapi-capture,wasapi-renderer,vulkan,cuda,cuda-visual-tracking,webrtc,ort,ort-cuda,ort-tensorrt,ort-directml,whisper,rnnoise
+        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,mf-virtual-camera,wasapi-capture,wasapi-renderer,vulkan,cuda,cuda-visual-tracking,webrtc,rtsp-server,ort,ort-cuda,ort-tensorrt,ort-directml,whisper,rnnoise
 
       # A feature dropped from the list above still documents cleanly — it
       # only takes its types with it — so what each GPU feature makes is
@@ -138,7 +138,7 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
-        run: cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,webrtc,ort,ort-coreml,whisper,rnnoise
+        run: cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer,webrtc,rtsp-server,ort,ort-coreml,whisper,rnnoise
 
       # As on Windows: a feature dropped from the list takes its types with it.
       - name: Check the GPU APIs are documented
@@ -187,7 +187,7 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
-        run: cargo doc -p media-pp --no-deps --features pipewire-screen-capture,pipewire-audio-capture,pipewire-audio-renderer,v4l2-capture,v4l2-virtual-camera,vulkan,cuda,cuda-visual-tracking,webrtc,ort,ort-cuda,ort-tensorrt,whisper,rnnoise
+        run: cargo doc -p media-pp --no-deps --features pipewire-screen-capture,pipewire-audio-capture,pipewire-audio-renderer,v4l2-capture,v4l2-virtual-camera,vulkan,cuda,cuda-visual-tracking,webrtc,rtsp-server,ort,ort-cuda,ort-tensorrt,whisper,rnnoise
 
       # As on Windows: a feature dropped from the list takes its types with it.
       - name: Check the Linux APIs are documented

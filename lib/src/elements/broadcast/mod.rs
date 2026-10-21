@@ -21,6 +21,7 @@ mod reader;
 mod sink;
 mod source;
 mod state;
+mod timeline;
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -34,6 +35,10 @@ use crate::pp_log::{PpLog, pp_info};
 pub use reader::{BroadcastItem, BroadcastReader};
 pub use sink::BroadcastSink;
 pub use source::BroadcastSource;
+#[cfg(feature = "rtsp-server")]
+pub(crate) use state::time_base;
+#[cfg(feature = "rtsp-server")]
+pub(crate) use timeline::{Timeline, same_shape};
 
 use state::State;
 

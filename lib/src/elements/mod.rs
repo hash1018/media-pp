@@ -118,6 +118,8 @@ pub use driver::{
     AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
     WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
 };
+#[cfg(feature = "rtsp-server")]
+pub use driver::{RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions};
 pub use filter::{
     AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,
     AudioCompressorOptions, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions,

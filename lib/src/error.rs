@@ -918,6 +918,11 @@ pub enum Error {
     #[error(transparent)]
     SubtitleEncoderError(#[from] crate::elements::SubtitleEncoderError),
 
+    /// See [`crate::elements::RtspServerError`].
+    #[cfg(feature = "rtsp-server")]
+    #[error(transparent)]
+    RtspServerError(#[from] crate::elements::RtspServerError),
+
     /// A WebRTC peer operation failed.
     #[cfg(feature = "webrtc")]
     #[error(transparent)]

@@ -1,0 +1,27 @@
+# rtsp_server
+
+An RTSP server: plays a file to any number of RTSP players as a camera would,
+and takes a publisher's push on a second path, which players play too.
+
+```text
+FileDemuxer -> Pacer -> BroadcastSink    (the file, looped, at its own speed)
+                             |
+                     Broadcast "file" ----\
+                                           RtspServer -> players
+publisher -> RtspServer -> Broadcast "live" /
+```
+
+Each player is sent the broadcast's packets as they are — nothing is decoded
+or encoded for it — from the newest keyframe on. `live` takes one publisher at
+a time; one that leaves ends its run, and the next one's players go on.
+
+```sh
+cargo run -p rtsp_server -- input.mp4 [address] [--seconds N]
+ffplay rtsp://127.0.0.1:8554/file
+ffmpeg -re -i video.mp4 -c copy -f rtsp rtsp://127.0.0.1:8554/live
+ffplay rtsp://127.0.0.1:8554/live
+```
+
+The address defaults to `127.0.0.1:8554`, this machine alone; give
+`0.0.0.0:8554` to serve the network. It runs until Enter is pressed, or for
+`--seconds`, printing how many players there are every five seconds.
