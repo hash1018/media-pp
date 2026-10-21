@@ -10,6 +10,10 @@
 //! runner, an executor that knows nothing of it, or its owner's own loop;
 //! and three of them run side by side in every sequence. The promises:
 //!
+//! A broadcast shape — three pipelines reading one broadcast a camera
+//! writes into, as a server's players do — may also end by the broadcast
+//! being closed.
+//!
 //! - every request is taken: a pause reaches every terminal, a resume
 //!   brings data again, a stop or a finish ends the pipeline — each within
 //!   [`TAKEN`] of the call, with nothing else to wake the poll;
@@ -44,7 +48,10 @@ use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
     element::{Element, ElementType, Filter, IntoSource, Output, RawSink, element_pp_log},
-    elements::{TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource},
+    elements::{
+        Broadcast, BroadcastOptions, BroadcastSource, TestAudioOptions, TestAudioSource,
+        TestVideoOptions, TestVideoSource, TrackFormat,
+    },
     pipeline::{Driven, DrivenPipeline, DrivenPipelineHandle, DrivenRunner},
     pp_log::PpLog,
     stream::StreamEvent,
@@ -67,6 +74,9 @@ const SIDE_BY_SIDE: usize = 3;
 enum Makes {
     Pictures,
     Sound,
+    /// A [`BroadcastSource`] of one broadcast the sequence's pipelines all
+    /// read, which a camera writes into as they run — a server's players.
+    Broadcast,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,6 +125,9 @@ enum Ending {
     Stop,
     Finish,
     Drop,
+    /// The broadcast they read is closed, which ends their streams — a
+    /// paused one's once it is resumed.
+    Close,
 }
 
 /// What a terminal was handed and told, and the harness's calls, in order.
@@ -251,7 +264,70 @@ impl Under {
     }
 }
 
-fn build(shape: DrivenShape, index: usize) -> (DrivenPipeline, Under) {
+/// A camera writing a picture every 40 ms into a broadcast of its own, a
+/// keyframe a second, until dropped.
+struct Camera {
+    broadcast: Broadcast,
+    stop: Arc<AtomicBool>,
+    writer: Option<thread::JoinHandle<()>>,
+}
+
+impl Camera {
+    fn start() -> Self {
+        const UNIT: ffmpeg::Rational = ffmpeg::Rational(1, 90_000);
+        let broadcast = Broadcast::new("camera", BroadcastOptions::default());
+        let mut parameters = ffmpeg::codec::Parameters::new();
+        // SAFETY: parameters made here and owned alone; both are plain
+        // fields of `AVCodecParameters`.
+        unsafe {
+            (*parameters.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
+            (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+        }
+        let mut sinks = broadcast
+            .publish(&[TrackFormat::new(parameters, UNIT)])
+            .expect("a picture track is published");
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = thread::spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                let began = Instant::now();
+                let mut n = 0i64;
+                while !stop.load(Ordering::Acquire) {
+                    let mut packet = ffmpeg::Packet::new(100);
+                    packet.set_pts(Some(n * 3_600));
+                    packet.set_dts(Some(n * 3_600));
+                    packet.set_duration(3_600);
+                    packet.set_time_base(UNIT);
+                    if n % 25 == 0 {
+                        packet.set_flags(ffmpeg::packet::Flags::KEY);
+                    }
+                    if sinks[0].consume(MediaBuffer::packet(packet)).is_err() {
+                        return;
+                    }
+                    n += 1;
+                    let due = began + Duration::from_millis(40) * n as u32;
+                    thread::sleep(due.saturating_duration_since(Instant::now()));
+                }
+            }
+        });
+        Self {
+            broadcast,
+            stop,
+            writer: Some(writer),
+        }
+    }
+}
+
+impl Drop for Camera {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+fn build(shape: DrivenShape, index: usize, camera: Option<&Camera>) -> (DrivenPipeline, Under) {
     let terminals = if matches!(shape.after, After::FanOut) {
         2
     } else {
@@ -291,6 +367,12 @@ fn build(shape: DrivenShape, index: usize) -> (DrivenPipeline, Under) {
             shape.after,
             sinks,
         ),
+        Makes::Broadcast => {
+            let broadcast = &camera.expect("a broadcast shape has a camera").broadcast;
+            let (source, _) =
+                BroadcastSource::new("relay", broadcast).expect("the camera has published");
+            wired(id, source, shape.after, sinks)
+        }
     };
     let handle = pipeline.handle();
     (
@@ -408,8 +490,10 @@ fn poll_on_this_thread(mut pipeline: DrivenPipeline, poller: Poller, dropped: &A
 
 fn run_sequence(shape: DrivenShape, seed: u64, steps: usize) -> Result<(), String> {
     let mut rng = Rng(seed.max(1));
-    let (pipelines, mut under): (Vec<_>, Vec<_>) =
-        (0..SIDE_BY_SIDE).map(|index| build(shape, index)).unzip();
+    let camera = matches!(shape.makes, Makes::Broadcast).then(Camera::start);
+    let (pipelines, mut under): (Vec<_>, Vec<_>) = (0..SIDE_BY_SIDE)
+        .map(|index| build(shape, index, camera.as_ref()))
+        .unzip();
     let mut polling = Polling::start(shape.poller, pipelines);
     let mut history = Vec::new();
     let outcome = (|| {
@@ -446,21 +530,38 @@ fn run_sequence(shape: DrivenShape, seed: u64, steps: usize) -> Result<(), Strin
                 Op::Wait(long) => thread::sleep(long),
             }
         }
-        let ending = match rng.below(3) {
-            0 => Ending::Stop,
-            1 => Ending::Finish,
+        let ending = match (rng.below(4), &camera) {
+            (0, _) => Ending::Stop,
+            (1, _) => Ending::Finish,
+            (2, Some(_)) => Ending::Close,
             _ => Ending::Drop,
         };
         history.push(format!("{ending:?}"));
         match ending {
-            Ending::Stop | Ending::Finish => {
+            Ending::Stop | Ending::Finish | Ending::Close => {
                 for under in &under {
-                    if matches!(ending, Ending::Stop) {
-                        under.call("stop");
-                        under.handle.stop();
-                    } else {
-                        under.call("finish");
-                        under.handle.finish();
+                    match ending {
+                        Ending::Stop => {
+                            under.call("stop");
+                            under.handle.stop();
+                        }
+                        Ending::Finish => {
+                            under.call("finish");
+                            under.handle.finish();
+                        }
+                        _ => under.call("close"),
+                    }
+                }
+                if let (Ending::Close, Some(camera)) = (ending, &camera) {
+                    camera.broadcast.close();
+                    // A paused pipeline asks its source nothing, so it
+                    // hears of the close once it plays on — as a running
+                    // pipeline's paused source does.
+                    for under in &under {
+                        if under.paused {
+                            under.call("resume");
+                            under.handle.resume();
+                        }
                     }
                 }
                 for under in &under {
@@ -539,7 +640,7 @@ fn judge(under: &Under, ending: Ending) -> Result<(), String> {
         }
         let wanted = match ending {
             Ending::Stop | Ending::Drop => Entry::Stopped,
-            Ending::Finish => Entry::Eos,
+            Ending::Finish | Ending::Close => Entry::Eos,
         };
         if heard.last() != Some(&&wanted) {
             return Err(format!(
@@ -575,7 +676,7 @@ fn judge(under: &Under, ending: Ending) -> Result<(), String> {
     {
         return Err(format!("an error: {error}"));
     }
-    if matches!(ending, Ending::Finish)
+    if matches!(ending, Ending::Finish | Ending::Close)
         && !events
             .iter()
             .any(|event| matches!(event, BusEvent::Finished))
@@ -592,7 +693,7 @@ fn conform(poller: Poller) {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(10);
-    let shapes: Vec<DrivenShape> = [Makes::Pictures, Makes::Sound]
+    let shapes: Vec<DrivenShape> = [Makes::Pictures, Makes::Sound, Makes::Broadcast]
         .into_iter()
         .flat_map(|makes| {
             [After::Nothing, After::Filter, After::FanOut]

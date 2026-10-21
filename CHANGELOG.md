@@ -61,8 +61,9 @@ compile error with no explanation.
   thread of its own — a queue, a `Pacer` or `VideoSynchronizer`, a source
   that is not `Source::drivable` — with the new
   `GraphError::ThreadInDrivenPipeline` and `GraphError::SourceNotDrivable`;
-  a `match` on `GraphError` needs an arm for each. `TestVideoSource` and
-  `TestAudioSource` are drivable. See `docs/driven-pipelines.md`.
+  a `match` on `GraphError` needs an arm for each. `TestVideoSource`,
+  `TestAudioSource` and `BroadcastSource` are drivable. See
+  `docs/driven-pipelines.md`.
 
 - **`WebRtcServer`: `Broadcast`s to WebRTC players, browsers among them.**
   One UDP socket serves every session, each a `str0m` connection run on the

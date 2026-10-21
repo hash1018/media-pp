@@ -91,6 +91,9 @@ pub(crate) struct State {
     pub(crate) closed: bool,
     pub(crate) subscribers: usize,
     wakers: Vec<Waker>,
+    /// How many times [`Self::wake`] has woken them: a reader whose waker
+    /// went in since the last time is still waiting in `wakers`.
+    pub(crate) wakes: u64,
     bells: Vec<Sender<()>>,
 }
 
@@ -302,10 +305,12 @@ impl State {
         }
     }
 
+    /// Wakes `waker` at the next write. Each reader asks once between
+    /// writes — see `BroadcastReader::poll_next` — so this looks through
+    /// nothing: with hundreds of readers waiting, a look through every
+    /// waker for each was a cost that grew as their square.
     pub(crate) fn add_waker(&mut self, waker: &Waker) {
-        if !self.wakers.iter().any(|known| known.will_wake(waker)) {
-            self.wakers.push(waker.clone());
-        }
+        self.wakers.push(waker.clone());
     }
 
     pub(crate) fn add_bell(&mut self, bell: Sender<()>) {
@@ -314,6 +319,7 @@ impl State {
 
     /// Wakes every reader waiting by a waker or a bell.
     pub(crate) fn wake(&mut self) {
+        self.wakes += 1;
         for waker in self.wakers.drain(..) {
             waker.wake();
         }

@@ -1,6 +1,7 @@
 //! Reading a broadcast into a pipeline of its own: [`BroadcastSource`].
 
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use crossbeam_channel::Receiver;
@@ -42,6 +43,11 @@ use super::{Broadcast, BroadcastError, BroadcastItem, BroadcastReader};
 /// [`BroadcastOptions::retain`](super::BroadcastOptions::retain) is moved on
 /// to the newest keyframe, and says so in the log; nothing in between is
 /// handed on.
+///
+/// It can be driven — run in a
+/// [`DrivenPipeline`](crate::pipeline::DrivenPipeline), a server's player
+/// each: it waits on its reader, which a write wakes, and asks for no time
+/// of its own.
 pub struct BroadcastSource(SourceStage<Relaying>);
 
 source_stage!(BroadcastSource);
@@ -173,10 +179,27 @@ impl Source for Relaying {
         )
     }
 
-    /// The next packet its reader reads, waiting for one to be written.
+    /// Driven, it waits on its reader, which wakes the poll it hands the
+    /// waker to.
+    fn drivable(&self) -> bool {
+        true
+    }
+
+    /// The next packet its reader reads, waiting for one to be written —
+    /// on its bell beside the pipeline on a thread of its own, and driven,
+    /// by handing the reader the poll's waker.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         loop {
-            let Some(item) = self.reader.try_next() else {
+            let item = if let Some(waker) = wait.waker() {
+                match self.reader.poll_next(&mut Context::from_waker(waker)) {
+                    Poll::Ready(Some(item)) => item,
+                    // Only after `Closed`, which has ended it already.
+                    Poll::Ready(None) => return Ok(Produced::End),
+                    Poll::Pending => return Ok(Produced::Nothing),
+                }
+            } else if let Some(item) = self.reader.try_next() {
+                item
+            } else {
                 match wait.recv(&self.bell) {
                     Received::Got(()) => continue,
                     Received::LetGo | Received::Gone => return Ok(Produced::Nothing),

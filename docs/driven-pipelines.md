@@ -1,8 +1,8 @@
 # Driven pipelines: many small pipelines on a few threads
 
-Status: **accepted**, 2026-10-22, with the decisions in §8. Stage 1 of §7
-is built — `DrivenPipeline`, its handle, `DrivenRunner`, and the test
-sources drivable; §7 says what is left, and §4.8 where what was built
+Status: **accepted**, 2026-10-22, with the decisions in §8. Stages 1 and 2
+of §7 are built — `DrivenPipeline`, its handle, `DrivenRunner`, and the test
+sources and `BroadcastSource` drivable; §7 says what is left, and §4.8 where what was built
 differs from what was first written here.
 
 File references are relative to `lib/src/`.
@@ -376,9 +376,14 @@ Each stage lands on its own, with its tests, as the streaming stages did.
    driven shapes — a live source, and the broadcast shape, with pause,
    resume, finish and stop in random order — run pinned to two cores, alone
    and loaded, a few hundred times (`CONTRIBUTING.md`).
-2. **Drivable sources.** `BroadcastSource` (the reader's waker).
-   `TestVideoSource` and `TestAudioSource` (the clock) were made drivable
-   in stage 1, which its tests needed.
+2. **Drivable sources** — done. `BroadcastSource` (the reader's waker),
+   and the broadcast shape in the driven conformance sequences: three
+   pipelines reading one broadcast a camera writes into, which may also end
+   by the broadcast closing. A reader now leaves its waker once between
+   writes, rather than looking through every waiting reader's for a copy —
+   a cost that grew as the square of the players. `TestVideoSource` and
+   `TestAudioSource` (the clock) were made drivable in stage 1, which its
+   tests needed.
 3. **WebRTC.** `WebRtcTrackSink`'s outbox target; `WebRtcServer`'s sessions
    on driven pipelines, polled by the thread that owns them; the server's
    own reader, timeline, pacing and Annex B conversion removed; paths as

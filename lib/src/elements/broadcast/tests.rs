@@ -799,3 +799,49 @@ fn a_broadcast_source_hands_on_what_is_written_while_it_runs() {
     assert_eq!(pictures_count.get(), 50);
     assert!(sounds_count.get() > 0);
 }
+
+/// Driven, a broadcast source waits on its reader alone: it asks for no
+/// time of its own, a write wakes the poll it handed the waker to, and
+/// closing the broadcast ends it.
+#[test]
+fn a_driven_broadcast_source_is_woken_by_writes_and_ends_with_the_broadcast() {
+    use crate::pipeline::{Driven, DrivenPipeline};
+
+    let broadcast = Broadcast::new("driven", BroadcastOptions::default());
+    let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
+    let (source, _) = BroadcastSource::new("relay", &broadcast).unwrap();
+    let (pictures, pictures_count) = PacketCounter::new("pictures");
+    let (sounds, sounds_count) = PacketCounter::new("sounds");
+    let (mut pipeline, ()) = DrivenPipeline::new("driven", source, |source, ctx| {
+        ctx.attach(source, 0, ctx.branch().to(pictures)?)?;
+        ctx.attach(source, 1, ctx.branch().to(sounds)?)?;
+        Ok(())
+    })
+    .unwrap();
+    let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+
+    assert_eq!(pipeline.poll(&mut cx), Driven::Pending { at: None });
+    write_seconds(&mut sinks, 0, 2);
+    assert!(wakes.0.load(Ordering::SeqCst) >= 1, "a write wakes it");
+    let mut polls = 0;
+    loop {
+        polls += 1;
+        assert!(polls < 100, "it kept asking for the thread");
+        match pipeline.poll(&mut cx) {
+            Driven::Pending { at: None } => break,
+            Driven::Pending { at: Some(at) } => assert!(at <= Instant::now()),
+            Driven::Finished => panic!("finished with the broadcast open"),
+        }
+    }
+    assert_eq!(pictures_count.get(), 50);
+    assert!(sounds_count.get() > 0);
+
+    let woken = wakes.0.load(Ordering::SeqCst);
+    broadcast.close();
+    assert!(wakes.0.load(Ordering::SeqCst) > woken, "closing wakes it");
+    assert_eq!(pipeline.poll(&mut cx), Driven::Finished);
+    drop(pipeline);
+    assert_eq!(broadcast.subscribers(), 0);
+}

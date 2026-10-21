@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, MutexGuard};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, bounded};
@@ -94,6 +94,10 @@ pub struct BroadcastReader {
     /// [`Back`].
     back_from: Option<u64>,
     back: Option<Back>,
+    /// The waker it left to be woken at the next write, and which of the
+    /// broadcast's wakes that next one is — so that it is left once, not
+    /// each time it is polled before then.
+    waiting: Option<(u64, Waker)>,
 }
 
 /// Other tracks' packets written before the keyframe a reader starts at
@@ -130,6 +134,7 @@ impl BroadcastReader {
             closed: false,
             back_from: None,
             back: None,
+            waiting: None,
         }
     }
 
@@ -183,7 +188,14 @@ impl BroadcastReader {
         if self.closed {
             return Poll::Ready(None);
         }
-        state.add_waker(cx.waker());
+        let left = self
+            .waiting
+            .as_ref()
+            .is_some_and(|(wake, waker)| *wake == state.wakes && waker.will_wake(cx.waker()));
+        if !left {
+            state.add_waker(cx.waker());
+            self.waiting = Some((state.wakes, cx.waker().clone()));
+        }
         Poll::Pending
     }
 
