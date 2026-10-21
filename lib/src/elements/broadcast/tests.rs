@@ -432,7 +432,7 @@ fn the_bound_lets_go_of_the_oldest_without_keyframes() {
     sinks[0]
         .consume(packet(0, PICTURE, VIDEO_UNIT, true, 64 * 1024))
         .unwrap();
-    for n in 1..64 {
+    for n in 1..160 {
         sinks[0]
             .consume(packet(n * PICTURE, PICTURE, VIDEO_UNIT, false, 64 * 1024))
             .unwrap();
@@ -451,11 +451,11 @@ fn the_bound_lets_go_of_the_oldest_without_keyframes() {
     assert!(matches!(reader.try_next(), Some(BroadcastItem::Started(_))));
     assert!(reader.try_next().is_none());
     sinks[0]
-        .consume(packet(64 * PICTURE, PICTURE, VIDEO_UNIT, false, 10))
+        .consume(packet(160 * PICTURE, PICTURE, VIDEO_UNIT, false, 10))
         .unwrap();
     assert!(reader.try_next().is_none());
     sinks[0]
-        .consume(packet(65 * PICTURE, PICTURE, VIDEO_UNIT, true, 10))
+        .consume(packet(161 * PICTURE, PICTURE, VIDEO_UNIT, true, 10))
         .unwrap();
     assert!(
         matches!(reader.try_next(), Some(BroadcastItem::Packet { track: 0, packet, .. }) if packet.is_key())

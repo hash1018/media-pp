@@ -15,6 +15,16 @@ Two programs of this repository, each a process of its own:
   RTP out of what it is sent and decodes nothing, so that the server is what
   is measured, not a decoder. Players start 5 ms apart.
 
+For WebRTC, [`webrtc_server`](../../../examples/webrtc/webrtc_server) and
+[`webrtc_load`](../../../examples/webrtc/webrtc_load) the same way: each
+player a thread with a `str0m` connection of its own, posting its offer for
+a picture and a sound to the server's WHEP URL as a browser's player does,
+and decoding nothing — it pays ICE, DTLS, SRTP and taking RTP apart, as a
+real player does. Its UDP socket asks for 8 MB, as a browser's does. Where a
+packet is lost, `str0m` waits up to thirty pictures for it to be sent again
+before it hands on the next whole one; such a picture counts as one after a
+gap.
+
 The players run on the same machine as the server, over the loopback: the
 numbers are the server's, with no network between, and the players' own
 processor time — given beside each run — is taken from the same cores.
@@ -32,11 +42,14 @@ ffmpeg -i sample.mp4 -f lavfi -i "sine=frequency=440:sample_rate=48000" \
 ```
 
 H.264 at 12.3 Mbit/s with two B-frames, AAC at 128 kbit/s; any encoder with
-those settings will do. The keyframe interval matters: a player starts at
-the newest keyframe the broadcast holds, and is sent what came after it at
-once over TCP — at twice its speed over UDP — so a stream with keyframes ten
-seconds apart has every player start with up to ten seconds to catch up,
-which is the stream's, not the server's.
+those settings will do. For WebRTC, the same without B-frames and with Opus
+sound, which is what a browser takes: `-bf 0 -c:a libopus -b:a 96k`.
+
+The keyframe interval matters: a player starts at the newest keyframe the
+broadcast holds, and is sent what came after it at once over TCP — at twice
+its speed over UDP and WebRTC — so a stream with keyframes ten seconds apart
+has every player start with up to ten seconds to catch up, which is the
+stream's, not the server's.
 
 ## What is measured
 
@@ -76,6 +89,13 @@ server's processor time and memory as they play:
 ```powershell
 examples\rtsp\rtsp_load\bench.ps1 -Video stream.mp4 -Players 1,50,100,200,400 -Seconds 30 -Threads 2
 examples\rtsp\rtsp_load\bench.ps1 -Video stream.mp4 -Players 100,200 -Seconds 30 -Threads 2 -Udp
+```
+
+and [`examples/webrtc/webrtc_load/bench.ps1`](../../../examples/webrtc/webrtc_load/bench.ps1)
+the same for `webrtc_server`:
+
+```powershell
+examples\webrtc\webrtc_load\bench.ps1 -Video webrtc.mp4 -Players 50,100,200 -Seconds 30 -Threads 4
 ```
 
 Elsewhere, run the two by hand, and read the server's processor time

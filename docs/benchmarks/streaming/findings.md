@@ -1,4 +1,43 @@
-# What measuring the server changed
+# What measuring the servers changed
+
+## A WebRTC server sent a packet a turn of its loop
+
+The first WebRTC run kept up with fifty players on one thread, but its
+memory grew without bound past that — 3 GB at a hundred — and a picture
+larger than a few dozen packets could arrive whole seconds late. Three things
+in how the server drove `str0m`:
+
+- **What was written waited for the next turn.** `str0m` sends what is
+  written only once it has been told the time has moved on; the server told
+  it at the start of each turn, before writing, so everything written waited
+  a turn — and, with the thread busy, piled up in `str0m`'s queue, which has
+  no bound. The server now tells it after writing.
+- **One packet a turn.** `str0m`'s pacer lets one packet out and then asks
+  for the time again, with a deadline already past. The server took any
+  deadline as the end of the turn, so a turn sent one packet. It now answers
+  a deadline that has come and goes on sending. `WebRtcPeer` had the same
+  loop, which held a peer to about a thousand packets a second, and is fixed
+  the same way.
+- **Pictures written over.** `str0m` keeps what it is to send in a ring of a
+  thousand packets a video track, and the server wrote sixteen pictures
+  before sending any: a few large ones together were written over before
+  they left. It now sends each picture before writing the next.
+
+With the three, memory stays at some 2.4 MB a player, and a test pins the
+throughput: without the second, two seconds of 100 kB pictures take ten
+seconds to catch up on. The server's threads were added then
+(`WebRtcServerOptions::threads`), each a socket and a loop of its own, since
+one thread is one core.
+
+## Players arriving at once were refused
+
+At three hundred players arriving five milliseconds apart, some were
+refused a connection: the WHEP endpoint answered a request at a time,
+waiting for a server thread's answer to each, and the rest overflowed the
+listener's backlog. It now answers each on a thread of its own, up to 512 at
+once.
+
+
 
 ## UDP players lost half of what they were sent
 

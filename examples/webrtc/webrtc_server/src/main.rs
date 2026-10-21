@@ -17,13 +17,14 @@
 //! is left out. Plays of the file without B-frames, as a browser takes
 //! H.264.
 //!
-//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--seconds N]
+//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N]
 //!
 //! Both addresses default to this machine alone. To serve the network,
 //! give the address the network reaches this machine at to `--udp` — a
 //! browser is told to send there — and `0.0.0.0:8080` to `--http`. It runs
 //! until Enter is pressed, or for `--seconds`, printing what each session
-//! does.
+//! does. `--threads` is how many threads — each with a UDP port of its own,
+//! from the one `--udp` names on — it runs its sessions on, two by default.
 
 fn main() -> Result<(), media_pp::Report> {
     Ok(example::run()?)
@@ -41,13 +42,14 @@ mod example {
     use media_pp::pipeline::Pipeline;
 
     const USAGE: &str =
-        "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--seconds N]";
+        "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--threads N] [--seconds N]";
 
     struct Args {
         input: String,
         udp: String,
         http: String,
         seconds: Option<u64>,
+        threads: Option<usize>,
     }
 
     fn args() -> Option<Args> {
@@ -55,12 +57,14 @@ mod example {
         let mut udp = "127.0.0.1:8189".to_owned();
         let mut http = "127.0.0.1:8080".to_owned();
         let mut seconds = None;
+        let mut threads = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--udp" => udp = args.next()?,
                 "--http" => http = args.next()?,
                 "--seconds" => seconds = Some(args.next()?.parse().ok()?),
+                "--threads" => threads = Some(args.next()?.parse().ok().filter(|&n| n > 0)?),
                 _ if input.is_none() => input = Some(arg),
                 _ => return None,
             }
@@ -70,6 +74,7 @@ mod example {
             udp,
             http,
             seconds,
+            threads,
         })
     }
 
@@ -85,8 +90,11 @@ mod example {
             std::process::exit(1);
         };
 
-        let (server, handle) =
-            WebRtcServer::bind("server", &args.udp, WebRtcServerOptions::default())?;
+        let mut options = WebRtcServerOptions::default();
+        if let Some(threads) = args.threads {
+            options.threads = threads;
+        }
+        let (server, handle) = WebRtcServer::bind("server", &args.udp, options)?;
         let file = Broadcast::new("file", BroadcastOptions::default());
         let live = Broadcast::new("live", BroadcastOptions::default());
         handle.add_path("file", &file, WebRtcPathMode::Play)?;

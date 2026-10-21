@@ -23,7 +23,7 @@ use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
 use crate::elements::Broadcast;
 use crate::error::Result;
-use crate::pp_log::{PpLog, pp_info};
+use crate::pp_log::{PpLog, pp_info, pp_warn};
 
 pub use http::WebRtcHttpEndpoint;
 use session::Session;
@@ -187,19 +187,38 @@ pub enum WebRtcServerEvent {
 }
 
 /// How a [`WebRtcServer`] runs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WebRtcServerOptions {
-    /// The addresses players and publishers reach the server's socket at —
-    /// its ICE candidates. Empty, the default, is the address it is bound
-    /// to, which must then be one a client can reach: not `0.0.0.0`.
+    /// The addresses players and publishers reach the server's sockets at
+    /// — its ICE candidates. Empty, the default, is the address it is
+    /// bound to, which must then be one a client can reach: not `0.0.0.0`.
+    /// A candidate without a port — port 0 — is at the socket's.
     pub candidates: Vec<SocketAddr>,
+    /// How many threads it runs its sessions on, each with a UDP socket of
+    /// its own: a new session goes to the thread with the fewest. Two by
+    /// default. Bound to port 0, each thread's socket is at a port the
+    /// system chooses; bound to a port, the threads' sockets are at that
+    /// port and the ones after it — as many as there are threads, each
+    /// candidate's port counting up with them — so a firewall or a router
+    /// forwards that range.
+    pub threads: usize,
+}
+
+impl Default for WebRtcServerOptions {
+    fn default() -> Self {
+        Self {
+            candidates: Vec::new(),
+            threads: 2,
+        }
+    }
 }
 
 /// A WebRTC server: plays [`Broadcast`]s to WebRTC players — browsers among
 /// them — each under a path of its own, and takes a WebRTC publisher's
 /// stream into one on a path that allows it. Needs the `webrtc` feature.
 ///
-/// One UDP socket serves every session. A player is sent its path's
+/// A few UDP sockets serve every session — one for each of its threads (see
+/// [`WebRtcServerOptions::threads`]). A player is sent its path's
 /// broadcast as it is — nothing decoded or encoded — from the newest
 /// keyframe on, in the codecs WebRTC carries: H.264, H.265, VP8, VP9 and AV1
 /// pictures, Opus and G.711 sound. A track in any other codec — AAC, say,
@@ -241,8 +260,10 @@ pub struct WebRtcServerOptions {
 ///
 /// # How it works
 ///
-/// One thread — its driver's — runs every session: a `str0m` connection
-/// each, fed what the socket receives, polled for what it sends. A player is
+/// Each of its threads runs the sessions given it, each a `str0m`
+/// connection, fed what the thread's socket receives and polled for what it
+/// sends; a thread keeps one core busy at most (`docs/benchmarks/streaming`
+/// has what a player costs it). A player is
 /// a reader of its path's broadcast from the moment it connects, so it
 /// starts at a keyframe; what the broadcast held then is sent at twice the
 /// stream's speed, so it catches up without a burst its socket cannot hold,
@@ -253,10 +274,18 @@ pub struct WebRtcServerOptions {
 pub struct WebRtcServer {
     name: Arc<str>,
     pp_log: PpLog,
+    shards: Vec<Shard>,
+    shared: Arc<Shared>,
+}
+
+/// One of a server's threads: its socket, and the sessions it is given.
+struct Shard {
+    index: usize,
     socket: Option<UdpSocket>,
+    local: SocketAddr,
     candidates: Vec<Candidate>,
     commands: Receiver<Command>,
-    shared: Arc<Shared>,
+    pp_log: PpLog,
 }
 
 /// A handle to a [`WebRtcServer`], to say what it serves and to answer
@@ -270,7 +299,8 @@ pub struct WebRtcServer {
 #[derive(Clone)]
 pub struct WebRtcServerHandle {
     shared: Arc<Shared>,
-    commands: Sender<Command>,
+    /// Each thread's.
+    commands: Vec<Sender<Command>>,
 }
 
 /// What a server and its handles share.
@@ -280,6 +310,10 @@ pub(crate) struct Shared {
     local_addr: SocketAddr,
     next_session: AtomicU64,
     sessions: AtomicUsize,
+    /// How many sessions each thread has.
+    per_thread: Vec<AtomicUsize>,
+    /// Which session publishes into each path that has a publisher.
+    publishing: Mutex<HashMap<String, SessionId>>,
     events: (Sender<WebRtcServerEvent>, Receiver<WebRtcServerEvent>),
 }
 
@@ -289,7 +323,7 @@ pub(crate) struct Path {
     pub(crate) mode: WebRtcPathMode,
 }
 
-/// What a handle asks of the server's loop.
+/// What a handle asks of a thread.
 pub(crate) enum Command {
     Open {
         path: String,
@@ -310,16 +344,27 @@ pub(crate) enum Command {
     },
 }
 
+/// How many of a session number's low bits say which thread it is on.
+const THREAD_BITS: u32 = 8;
+
+impl SessionId {
+    /// The thread it is on, of `threads`.
+    fn thread(self, threads: usize) -> usize {
+        (self.0 & ((1 << THREAD_BITS) - 1)) as usize % threads.max(1)
+    }
+}
+
 impl WebRtcServer {
-    /// A server on a UDP socket bound to `addr` — `"192.168.0.5:8189"`, or
-    /// `"127.0.0.1:0"` for a port of the system's choice on this machine
+    /// A server on UDP sockets bound to `addr` — `"192.168.0.5:8189"`, or
+    /// `"127.0.0.1:0"` for ports of the system's choice on this machine
     /// alone — and the handle that says what it serves.
     ///
     /// # Errors
     ///
-    /// [`WebRtcServerError::Bind`] where `addr` cannot be bound, and
-    /// [`WebRtcServerError::NoCandidate`] where it is bound to every
-    /// interface and no [`WebRtcServerOptions::candidates`] are given.
+    /// [`WebRtcServerError::Bind`] where `addr`, or a port after it that a
+    /// thread needs, cannot be bound, and [`WebRtcServerError::NoCandidate`]
+    /// where it is bound to every interface and no
+    /// [`WebRtcServerOptions::candidates`] are given.
     pub fn bind(
         name: impl Into<String>,
         addr: impl ToSocketAddrs,
@@ -345,54 +390,72 @@ impl WebRtcServer {
         let first = *addrs
             .first()
             .ok_or_else(|| bind_error(io::Error::new(io::ErrorKind::InvalidInput, "no address")))?;
-        let socket = udp_socket(first).map_err(bind_error)?;
-        let local_addr = socket.local_addr().map_err(bind_error)?;
-        let advertised = if options.candidates.is_empty() {
-            if local_addr.ip().is_unspecified() {
-                return Err(WebRtcServerError::NoCandidate(local_addr));
-            }
-            vec![local_addr]
-        } else {
-            options
-                .candidates
-                .iter()
-                .map(|candidate| {
-                    // A candidate's port is the socket's where it says none.
-                    if candidate.port() == 0 {
-                        SocketAddr::new(candidate.ip(), local_addr.port())
-                    } else {
-                        *candidate
-                    }
-                })
-                .collect()
-        };
-        let candidates = advertised
-            .iter()
-            .filter_map(|addr| Candidate::host(*addr, "udp").ok())
-            .collect();
+        let threads = options.threads.clamp(1, 1 << THREAD_BITS);
         let pp_log = element_pp_log(ElementType::WebRtcServer, &name, None);
-        pp_info!(pp_log: &pp_log, "bound to {local_addr}, candidates {advertised:?}");
-        let (commands_tx, commands) = bounded(256);
+        let mut shards = Vec::with_capacity(threads);
+        let mut senders = Vec::with_capacity(threads);
+        for index in 0..threads {
+            let port = match first.port() {
+                0 => 0,
+                port => port.checked_add(index as u16).ok_or_else(|| {
+                    bind_error(io::Error::new(io::ErrorKind::InvalidInput, "ports run out"))
+                })?,
+            };
+            let socket = udp_socket(SocketAddr::new(first.ip(), port)).map_err(bind_error)?;
+            let local = socket.local_addr().map_err(bind_error)?;
+            let advertised: Vec<SocketAddr> = if options.candidates.is_empty() {
+                if local.ip().is_unspecified() {
+                    return Err(WebRtcServerError::NoCandidate(local));
+                }
+                vec![local]
+            } else {
+                options
+                    .candidates
+                    .iter()
+                    .map(|candidate| match candidate.port() {
+                        0 => SocketAddr::new(candidate.ip(), local.port()),
+                        port => SocketAddr::new(candidate.ip(), port.saturating_add(index as u16)),
+                    })
+                    .collect()
+            };
+            pp_info!(
+                pp_log: &pp_log,
+                "thread {index} bound to {local}, candidates {advertised:?}"
+            );
+            let (sender, commands) = bounded(256);
+            senders.push(sender);
+            shards.push(Shard {
+                index,
+                socket: Some(socket),
+                local,
+                candidates: advertised
+                    .iter()
+                    .filter_map(|addr| Candidate::host(*addr, "udp").ok())
+                    .collect(),
+                commands,
+                pp_log: pp_log.clone(),
+            });
+        }
         let shared = Arc::new(Shared {
             pp_log: pp_log.clone(),
             paths: Mutex::new(HashMap::new()),
-            local_addr,
+            local_addr: shards[0].local,
             next_session: AtomicU64::new(seed()),
             sessions: AtomicUsize::new(0),
+            per_thread: (0..threads).map(|_| AtomicUsize::new(0)).collect(),
+            publishing: Mutex::new(HashMap::new()),
             events: unbounded(),
         });
         Ok((
             Self {
                 name,
                 pp_log,
-                socket: Some(socket),
-                candidates,
-                commands,
+                shards,
                 shared: Arc::clone(&shared),
             },
             WebRtcServerHandle {
                 shared,
-                commands: commands_tx,
+                commands: senders,
             },
         ))
     }
@@ -402,7 +465,7 @@ impl WebRtcServer {
 /// URL from one is not another's in the next.
 fn seed() -> u64 {
     use std::hash::BuildHasher;
-    std::collections::hash_map::RandomState::new().hash_one(Instant::now()) >> 16
+    std::collections::hash_map::RandomState::new().hash_one(Instant::now()) >> 24
 }
 
 fn udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
@@ -513,12 +576,19 @@ impl WebRtcServerHandle {
         offer: &str,
     ) -> std::result::Result<(SessionId, String), WebRtcServerError> {
         let (answer, answered) = bounded(1);
-        self.ask(Command::Open {
-            path: path.to_owned(),
-            role,
-            offer: offer.to_owned(),
-            answer,
-        })?;
+        // The thread with the fewest sessions.
+        let thread = (0..self.commands.len())
+            .min_by_key(|&thread| self.shared.per_thread[thread].load(Ordering::Acquire))
+            .unwrap_or(0);
+        self.ask(
+            thread,
+            Command::Open {
+                path: path.to_owned(),
+                role,
+                offer: offer.to_owned(),
+                answer,
+            },
+        )?;
         answered
             .recv_timeout(ANSWER_WITHIN)
             .map_err(|_| WebRtcServerError::NotRunning)?
@@ -527,7 +597,13 @@ impl WebRtcServerHandle {
     /// Ends `session`. Whether there was one.
     pub fn close(&self, session: SessionId) -> bool {
         let (done, closed) = bounded(1);
-        if self.ask(Command::Close { session, done }).is_err() {
+        if self
+            .ask(
+                session.thread(self.commands.len()),
+                Command::Close { session, done },
+            )
+            .is_err()
+        {
             return false;
         }
         closed.recv_timeout(ANSWER_WITHIN).unwrap_or(false)
@@ -549,19 +625,22 @@ impl WebRtcServerHandle {
         data: &[u8],
     ) -> std::result::Result<(), WebRtcServerError> {
         let (done, sent) = bounded(1);
-        self.ask(Command::Send {
-            session,
-            channel: channel.to_owned(),
-            binary,
-            data: data.to_vec(),
-            done,
-        })?;
+        self.ask(
+            session.thread(self.commands.len()),
+            Command::Send {
+                session,
+                channel: channel.to_owned(),
+                binary,
+                data: data.to_vec(),
+                done,
+            },
+        )?;
         sent.recv_timeout(ANSWER_WITHIN)
             .map_err(|_| WebRtcServerError::NotRunning)?
     }
 
-    fn ask(&self, command: Command) -> std::result::Result<(), WebRtcServerError> {
-        self.commands
+    fn ask(&self, thread: usize, command: Command) -> std::result::Result<(), WebRtcServerError> {
+        self.commands[thread]
             .send_timeout(command, ANSWER_WITHIN)
             .map_err(|_| WebRtcServerError::NotRunning)
     }
@@ -573,7 +652,7 @@ impl WebRtcServerHandle {
         self.shared.events.1.recv_timeout(timeout).ok()
     }
 
-    /// The address its socket is bound to.
+    /// The address its first thread's socket is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.shared.local_addr
     }
@@ -643,31 +722,60 @@ impl Element for WebRtcServer {
 }
 
 impl Driver for WebRtcServer {
-    /// Runs every session until asked to stop; each is closed then.
+    /// Runs every thread's sessions until asked to stop; each is closed
+    /// then. The first thread is the driver's own.
     fn run(&mut self, stop: &StopReceiver, _bus: &Bus) -> Result<()> {
-        let Some(socket) = self.socket.take() else {
+        if self.shards.iter().any(|shard| shard.socket.is_none()) {
             return Ok(());
+        }
+        pp_info!(self, "started: {} threads", self.shards.len());
+        let shared = &*self.shared;
+        let name = &self.name;
+        std::thread::scope(|scope| {
+            let (first, rest) = self.shards.split_at_mut(1);
+            for shard in rest {
+                let index = shard.index;
+                let spawned = std::thread::Builder::new()
+                    .name(format!("{name}-webrtc-{index}"))
+                    .spawn_scoped(scope, move || shard.run(stop, shared));
+                if let Err(error) = spawned {
+                    pp_warn!(
+                        pp_log: &shared.pp_log,
+                        "thread {index} could not start: {error}"
+                    );
+                }
+            }
+            first[0].run(stop, shared);
+        });
+        pp_info!(self, "stopped");
+        Ok(())
+    }
+}
+
+impl Shard {
+    /// Runs this thread's sessions until asked to stop.
+    fn run(&mut self, stop: &StopReceiver, shared: &Shared) {
+        let Some(socket) = self.socket.take() else {
+            return;
         };
-        pp_info!(self, "started");
         let mut sessions: HashMap<SessionId, Session> = HashMap::new();
         let mut buffer = vec![0u8; 65_536];
-        let local = self.shared.local_addr;
-        let mut publishing: HashMap<String, SessionId> = HashMap::new();
+        let local = self.local;
         while !stop.is_stopped() {
             while let Ok(command) = self.commands.try_recv() {
-                self.command(command, &socket, &mut sessions, &mut publishing);
+                self.command(command, &socket, &mut sessions, shared);
             }
             let now = Instant::now();
             let mut next = now + POLL;
             let mut ended = Vec::new();
             for (id, session) in &mut sessions {
-                match session.drive(now, &socket, &self.shared) {
+                match session.drive(now, &socket, shared) {
                     Ok(deadline) => next = next.min(deadline),
                     Err(why) => ended.push((*id, why)),
                 }
             }
             for (id, why) in ended {
-                self.end(id, why, &mut sessions, &mut publishing);
+                self.end(id, why, &mut sessions, shared);
             }
             let wait = next
                 .saturating_duration_since(Instant::now())
@@ -713,25 +821,16 @@ impl Driver for WebRtcServer {
             if let Some(session) = sessions.get_mut(&id) {
                 session.close(&socket);
             }
-            self.end(
-                id,
-                "the server stopped".into(),
-                &mut sessions,
-                &mut publishing,
-            );
+            self.end(id, "the server stopped".into(), &mut sessions, shared);
         }
-        pp_info!(self, "stopped");
-        Ok(())
     }
-}
 
-impl WebRtcServer {
     fn command(
         &mut self,
         command: Command,
         socket: &UdpSocket,
         sessions: &mut HashMap<SessionId, Session>,
-        publishing: &mut HashMap<String, SessionId>,
+        shared: &Shared,
     ) {
         match command {
             Command::Open {
@@ -740,18 +839,24 @@ impl WebRtcServer {
                 offer,
                 answer,
             } => {
-                let opened = self.open(&path, role, &offer, publishing);
-                let reply = opened.map(|(id, session, sdp)| {
-                    sessions.insert(id, session);
-                    self.shared.sessions.fetch_add(1, Ordering::AcqRel);
-                    if role == SessionRole::Publish {
-                        publishing.insert(path.clone(), id);
-                    }
-                    pp_info!(self, "session {id}: {role:?} {path}");
-                    (id, sdp)
-                });
+                let reply = self
+                    .open(&path, role, &offer, shared)
+                    .map(|(id, session, sdp)| {
+                        sessions.insert(id, session);
+                        shared.sessions.fetch_add(1, Ordering::AcqRel);
+                        shared.per_thread[self.index].fetch_add(1, Ordering::AcqRel);
+                        pp_info!(
+                            pp_log: &self.pp_log,
+                            "session {id}: {role:?} {path} on thread {}",
+                            self.index
+                        );
+                        (id, sdp)
+                    });
                 if let Err(error) = &reply {
-                    pp_info!(self, "an offer for {path} ({role:?}) was refused: {error}");
+                    pp_info!(
+                        pp_log: &self.pp_log,
+                        "an offer for {path} ({role:?}) was refused: {error}"
+                    );
                 }
                 let _ = answer.send(reply);
             }
@@ -761,7 +866,7 @@ impl WebRtcServer {
                     if let Some(open) = sessions.get_mut(&session) {
                         open.close(socket);
                     }
-                    self.end(session, "closed".into(), sessions, publishing);
+                    self.end(session, "closed".into(), sessions, shared);
                 }
                 let _ = done.send(found);
             }
@@ -788,21 +893,24 @@ impl WebRtcServer {
         path: &str,
         role: SessionRole,
         offer: &str,
-        publishing: &HashMap<String, SessionId>,
+        shared: &Shared,
     ) -> std::result::Result<(SessionId, Session, String), WebRtcServerError> {
-        let entry = self
-            .shared
+        let entry = shared
             .path(path)
             .ok_or_else(|| WebRtcServerError::NoSuchPath(path.to_owned()))?;
+        if role == SessionRole::Play && !session::playable(&entry.broadcast) {
+            return Err(WebRtcServerError::NothingToPlay(path.to_owned()));
+        }
+        let number = shared.next_session.fetch_add(1, Ordering::Relaxed);
+        let id = SessionId((number << THREAD_BITS) | self.index as u64);
+        // A publisher holds its path from here: looked at and taken under
+        // one lock, so that two threads cannot each give it one.
+        let mut publishing = shared.publishing.lock().unwrap_or_else(|p| p.into_inner());
         if role == SessionRole::Publish
             && (entry.mode != WebRtcPathMode::Publish || publishing.contains_key(path))
         {
             return Err(WebRtcServerError::NotPublishable(path.to_owned()));
         }
-        if role == SessionRole::Play && !session::playable(&entry.broadcast) {
-            return Err(WebRtcServerError::NothingToPlay(path.to_owned()));
-        }
-        let id = SessionId(self.shared.next_session.fetch_add(1, Ordering::Relaxed));
         let (session, answer) = Session::open(
             id,
             path,
@@ -812,6 +920,9 @@ impl WebRtcServer {
             &self.candidates,
             self.pp_log.clone(),
         )?;
+        if role == SessionRole::Publish {
+            publishing.insert(path.to_owned(), id);
+        }
         Ok((id, session, answer))
     }
 
@@ -820,16 +931,24 @@ impl WebRtcServer {
         id: SessionId,
         why: String,
         sessions: &mut HashMap<SessionId, Session>,
-        publishing: &mut HashMap<String, SessionId>,
+        shared: &Shared,
     ) {
         let Some(session) = sessions.remove(&id) else {
             return;
         };
-        self.shared.sessions.fetch_sub(1, Ordering::AcqRel);
-        publishing.retain(|_, publisher| *publisher != id);
-        pp_info!(self, "session {id} ({}) ended: {why}", session.path());
-        let _ = self
-            .shared
+        shared.sessions.fetch_sub(1, Ordering::AcqRel);
+        shared.per_thread[self.index].fetch_sub(1, Ordering::AcqRel);
+        shared
+            .publishing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, publisher| *publisher != id);
+        pp_info!(
+            pp_log: &self.pp_log,
+            "session {id} ({}) ended: {why}",
+            session.path()
+        );
+        let _ = shared
             .events
             .0
             .send(WebRtcServerEvent::Ended { session: id, why });

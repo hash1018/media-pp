@@ -19,7 +19,7 @@ and AV1 pictures and Opus sound, so a file's AAC is left out; a browser takes
 H.264 without B-frames.
 
 ```sh
-cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--seconds N]
+cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N]
 ```
 
 Both addresses default to this machine alone. To serve the network, give the
@@ -27,4 +27,6 @@ address the network reaches this machine at to `--udp` — a browser is told to
 send there — and `0.0.0.0:8080` to `--http`. A WHIP publisher — OBS, or a
 page of your own — posts to `http://127.0.0.1:8080/live/whip`, and
 `http://127.0.0.1:8080/live` plays what it sends. It runs until Enter is
-pressed, or for `--seconds`, printing what each session does.
+pressed, or for `--seconds`, printing what each session does. `--threads` is
+how many threads — each with a UDP port of its own, from the one `--udp` names
+on — it runs its sessions on, two by default.

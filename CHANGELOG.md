@@ -59,6 +59,10 @@ compile error with no explanation.
   H.264 from an MP4 turned into Annex B with its parameter sets ahead of each
   keyframe. A path in `WebRtcPathMode::Publish` takes one publisher, whose
   tracks are published into the broadcast once they have said what they are.
+  Its sessions are spread over `WebRtcServerOptions::threads` threads, two by
+  default, each with a UDP socket of its own; a thread carries some 70
+  players of a 12 Mbit/s 1080p stream, and `webrtc_load` measures more — see
+  [the streaming benchmarks](docs/benchmarks/streaming/).
   The server answers offers and leaves how they come to the application —
   `WebRtcServerHandle::play` and `publish` — and `serve_http` speaks WHEP and
   WHIP over HTTP, with a page at `/<path>` that plays the path in a browser.
@@ -148,6 +152,11 @@ compile error with no explanation.
   aspect ratio and copying its best audio stream without resetting time.
 
 ### Fixed
+
+- **A `WebRtcPeer` sends faster than a thousand packets a second.** Its loop
+  took the deadline `str0m`'s pacer gives after every packet — one already
+  past — as the end of its turn, and so sent one packet a turn; it now
+  answers such a deadline and goes on sending.
 
 - **A transcriber no longer loses words and repeats them where its rounds
   meet.** Each round heard the one before it again and kept the words the

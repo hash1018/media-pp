@@ -67,6 +67,36 @@ keyframe only once it is further behind than the broadcast keeps — five
 seconds by default — and none got that far. [findings.md](findings.md)
 says why UDP players lost half of what they were sent before.
 
+## WebRTC
+
+WHEP players of the same stream without B-frames and with Opus sound
+(`webrtc-1080p`, 12.2 Mbit/s), on as many server threads as given:
+
+| Players | Server threads | Delivered | Server processor | Server memory | Pictures after a gap | Lag spread, median / p99 / max | Players' processor |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50 | 1 | 601 Mbit/s | 0.76 cores | 143 MB | 9, 9 players | 329 / 1331 / 1331 ms | 0.55 cores |
+| 100 | 1 | 829 Mbit/s | 0.98 cores | 262 MB | 3 | 5904 / 6818 / 6849 ms | 0.53 cores |
+| 100 | 4 | 1.19 Gbit/s | 2.58 cores | 251 MB | 21, 18 players | 228 / 1266 / 1267 ms | 1.70 cores |
+| 200 | 4 | 2.23 Gbit/s | 3.64 cores | 481 MB | 23 | 2123 / 2241 / 2256 ms | 2.02 cores |
+| 200 | 6 | 2.38 Gbit/s | 4.23 cores | 477 MB | 30, 28 players | 406 / 2271 / 2496 ms | 2.75 cores |
+| 300 | 6 | 2.80 Gbit/s | 5.22 cores | 702 MB | 11 | 5323 / 6928 / 7052 ms | 3.25 cores |
+
+A WebRTC player costs the server 0.015 to 0.02 of a core — six to eight
+times an RTSP player over TCP: every packet is encrypted for that player
+alone, and `str0m`, which sends it, takes a packet at a time. One thread
+keeps up with some 70 players of this stream and then falls behind — a
+hundred are all sent everything, five seconds late. Threads scale it: four
+carry a hundred as one carries fifty, and six two hundred; at three hundred
+the server's five cores and the players' three had the machine's six
+physical cores and more, so where a dedicated machine's limit lies was not
+measured. Each player takes some 2.4 MB of the server's memory, most of it
+`str0m`'s buffers of what it has sent, kept for resending.
+
+Pictures after a gap are packets lost on the loopback, nearly all by
+players at the start of a run; `str0m` waits up to thirty pictures — about
+1.3 s — for a lost packet before it goes on, which is the p99 lag spread of
+the runs that kept up.
+
 ## Read together
 
 - For many players, TCP: it costs a quarter of what UDP does, and every
@@ -76,3 +106,6 @@ says why UDP players lost half of what they were sent before.
 - Memory is not what runs out: 71 MB served eight hundred players.
 - What runs out first is the network: a gigabit link carries some 75 of
   these players, at well under a tenth of a core.
+- A WebRTC player costs most: give `WebRtcServerOptions::threads` one
+  thread for every 70 players of a stream like this one, up to the cores
+  the machine has to spare.

@@ -511,7 +511,15 @@ impl WebRtcPeer {
     /// Drains every immediately-available str0m output (retransmits and
     /// events), returning once str0m itself has nothing left to do until
     /// the returned deadline.
+    ///
+    /// str0m's pacer lets one packet out at a time and then asks for the
+    /// time again with a deadline already past; such a deadline is answered
+    /// here and the sending goes on, rather than one packet leaving per turn
+    /// of the loop — which held a peer to a thousand packets a second.
     fn drive_until_timeout(&mut self, bus: &Bus) -> Result<Instant> {
+        // Deadlines answered in a row with nothing sent between: a guard
+        // against a connection that keeps asking without moving on.
+        let mut asked = 0;
         loop {
             let output = self
                 .rtc
@@ -519,14 +527,30 @@ impl WebRtcPeer {
                 .inspect_err(|error| pp_error!(self, "poll_output failed: {error}"))
                 .map_err(WebRtcError::from)?;
             match output {
-                Output::Timeout(deadline) => return Ok(deadline),
+                Output::Timeout(deadline) => {
+                    let now = Instant::now();
+                    asked += 1;
+                    if deadline > now || asked > 8 {
+                        return Ok(deadline);
+                    }
+                    self.rtc
+                        .handle_input(Input::Timeout(now))
+                        .inspect_err(|error| {
+                            pp_error!(self, "handle_input(Timeout) failed: {error}")
+                        })
+                        .map_err(WebRtcError::from)?;
+                }
                 Output::Transmit(t) => {
+                    asked = 0;
                     // A single failed send (e.g. transient ICMP unreachable)
                     // isn't fatal to the whole connection — str0m's own
                     // retransmit/timeout logic handles loss.
                     let _ = self.socket.send_to(&t.contents, t.destination);
                 }
-                Output::Event(event) => self.handle_event(event, bus),
+                Output::Event(event) => {
+                    asked = 0;
+                    self.handle_event(event, bus);
+                }
             }
         }
     }

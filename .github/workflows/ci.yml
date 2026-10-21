@@ -104,7 +104,7 @@ jobs:
 
       - name: Lint (WebRTC)
         shell: pwsh
-        run: cargo clippy -p media-pp -p webrtc_server --all-targets --features webrtc -- -D warnings
+        run: cargo clippy -p media-pp -p webrtc_server -p webrtc_load --all-targets --features webrtc -- -D warnings
 
       # `DOCS_RS` keeps `ort-sys` from downloading ONNX Runtime and linking its
       # dylibs into the target directory, which needs Developer Mode on a
@@ -245,7 +245,7 @@ jobs:
         shell: pwsh
         run: |
           cargo test -p media-pp --features webrtc --lib -- webrtc::server
-          cargo test -p webrtc_server
+          cargo test -p webrtc_server -p webrtc_load
 
   linux:
     runs-on: ubuntu-26.04
@@ -324,7 +324,7 @@ jobs:
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
       - name: Lint (WebRTC)
-        run: cargo clippy -p media-pp -p webrtc_server --all-targets --features webrtc -- -D warnings
+        run: cargo clippy -p media-pp -p webrtc_server -p webrtc_load --all-targets --features webrtc -- -D warnings
 
       - name: Check (ONNX Runtime and WebRTC)
         env:
@@ -424,7 +424,7 @@ jobs:
       - name: Test (WebRTC server)
         run: |
           cargo test -p media-pp --features webrtc --lib -- webrtc::server
-          cargo test -p webrtc_server
+          cargo test -p webrtc_server -p webrtc_load
 
       # PipeWire-session-dependent tests skip themselves with a reason
       # (`try_capture_source()`-style helper) when this headless runner has
@@ -473,7 +473,7 @@ jobs:
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
       - name: Lint (WebRTC)
-        run: cargo clippy -p media-pp -p webrtc_server --all-targets --features webrtc -- -D warnings
+        run: cargo clippy -p media-pp -p webrtc_server -p webrtc_load --all-targets --features webrtc -- -D warnings
 
       # Together, and each alone: the pixel-buffer and Metal code the
       # captures, VideoToolbox and Metal share is gated on whichever of them

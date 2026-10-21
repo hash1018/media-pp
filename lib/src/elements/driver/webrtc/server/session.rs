@@ -30,6 +30,16 @@ use super::{SessionId, SessionRole, Shared, WebRtcServerError, WebRtcServerEvent
 /// without a burst its socket cannot hold.
 const CATCH_UP: f64 = 2.0;
 
+/// How many packets a player is written before what they make is sent, and
+/// how many times that is done in one turn of the server's loop — so that one
+/// player catching up cannot keep the others waiting.
+///
+/// One: str0m keeps what it is to send in a ring of a thousand RTP packets
+/// a video track, and what is written past that before it is sent is
+/// written over — a few large pictures written together were lost whole.
+const WRITES_PER_POLL: usize = 1;
+const ROUNDS: usize = 256;
+
 /// How long a session may take to connect after its offer is answered.
 const CONNECT_WITHIN: Duration = Duration::from_secs(30);
 
@@ -189,21 +199,30 @@ impl Session {
                 .map_err(|error| error.to_string())?;
         }
         let mut next = now + Duration::from_secs(1);
-        if let Some(due) = self.pump(now)? {
-            next = next.min(due);
-        }
-        loop {
-            match self.rtc.poll_output().map_err(|error| error.to_string())? {
-                Output::Timeout(deadline) => {
-                    self.deadline = deadline;
-                    next = next.min(deadline);
-                    break;
-                }
-                Output::Transmit(transmit) => {
-                    let _ = socket.send_to(&transmit.contents, transmit.destination);
-                }
-                Output::Event(event) => self.event(event, shared)?,
+        // What is due is written a packet at a time, and what it makes sent
+        // before the next: see `WRITES_PER_POLL`.
+        let mut more = true;
+        for _ in 0..ROUNDS {
+            let due = self.pump(now)?;
+            more = due == Some(now);
+            if let Some(due) = due
+                && !more
+            {
+                next = next.min(due);
             }
+            // str0m sends what was written only once time has moved on
+            // past it; without this it waits for the next turn of the loop,
+            // and under load piles up there without bound.
+            self.rtc
+                .handle_input(Input::Timeout(now))
+                .map_err(|error| error.to_string())?;
+            self.flush(socket, shared, &mut next)?;
+            if !more {
+                break;
+            }
+        }
+        if more {
+            next = now;
         }
         if !self.rtc.is_alive() {
             return Err("the connection closed".into());
@@ -212,6 +231,48 @@ impl Session {
             return Err("it never connected".into());
         }
         Ok(next)
+    }
+
+    /// Sends what the connection has to send, and tells what happened.
+    ///
+    /// str0m's pacer lets one packet out at a time and then asks for the
+    /// time again — a deadline already past — so a deadline that has come is
+    /// answered here and the sending goes on, rather than one packet going
+    /// out a turn of the loop and the rest piling up.
+    fn flush(
+        &mut self,
+        socket: &UdpSocket,
+        shared: &Shared,
+        next: &mut Instant,
+    ) -> Result<(), String> {
+        // Deadlines answered in a row with nothing sent between: a guard
+        // against a connection that keeps asking without moving on.
+        let mut asked = 0;
+        loop {
+            match self.rtc.poll_output().map_err(|error| error.to_string())? {
+                Output::Timeout(deadline) => {
+                    let now = Instant::now();
+                    asked += 1;
+                    if deadline <= now && asked <= 8 {
+                        self.rtc
+                            .handle_input(Input::Timeout(now))
+                            .map_err(|error| error.to_string())?;
+                        continue;
+                    }
+                    self.deadline = deadline;
+                    *next = (*next).min(deadline);
+                    return Ok(());
+                }
+                Output::Transmit(transmit) => {
+                    asked = 0;
+                    let _ = socket.send_to(&transmit.contents, transmit.destination);
+                }
+                Output::Event(event) => {
+                    asked = 0;
+                    self.event(event, shared)?;
+                }
+            }
+        }
     }
 
     /// Closes the connection, telling the client.
@@ -312,8 +373,7 @@ impl Session {
         if playing.reader.is_none() {
             return Ok(None);
         }
-        // Bounded, so that one player cannot keep the others waiting.
-        for _ in 0..512 {
+        for _ in 0..WRITES_PER_POLL {
             if let Some(pending) = playing.pending.take() {
                 if pending.due > now {
                     let due = pending.due;

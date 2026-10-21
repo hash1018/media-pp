@@ -1,0 +1,13 @@
+[package]
+name = "webrtc_load"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib" }
+str0m = { version = "0.21", default-features = false, features = ["rust-crypto"] }
+
+[dev-dependencies]
+media-pp = { path = "../../../lib", features = ["webrtc"] }
+tempfile = "3.27"

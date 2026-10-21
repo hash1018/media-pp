@@ -15,9 +15,10 @@ use crate::elements::StreamInfo;
 /// The most a broadcast holds, keyframe or not — see [`super::Broadcast`].
 #[cfg(not(test))]
 pub(crate) const MAX_BYTES: usize = 256 * 1024 * 1024;
-/// Small enough for a test to go over.
+/// Small enough for a test to go over, large enough for a few seconds of
+/// 1080p.
 #[cfg(test)]
-pub(crate) const MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// One packet as the broadcast keeps it.
 pub(crate) struct Entry {

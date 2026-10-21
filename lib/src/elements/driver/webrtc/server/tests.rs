@@ -70,7 +70,20 @@ struct Client {
 
 impl Client {
     fn new() -> Self {
-        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        // A receive buffer as large as a browser's: a picture larger than
+        // the system's default arrives at once.
+        let socket = {
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )
+            .unwrap();
+            let _ = socket.set_recv_buffer_size(8 * 1024 * 1024);
+            socket.bind(&addr.into()).unwrap();
+            UdpSocket::from(socket)
+        };
         let local = socket.local_addr().unwrap();
         let mut rtc = Rtc::builder().build(Instant::now());
         rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
@@ -574,5 +587,111 @@ fn whep_over_http_answers_offers_and_ends_sessions() {
     assert!(again.starts_with("HTTP/1.1 404"), "{again}");
     drop(endpoint);
     camera.stop();
+    runner.stop();
+}
+
+/// The candidate port an answer gives.
+fn answered_port(answer: &str) -> u16 {
+    answer
+        .lines()
+        .find_map(|line| line.strip_prefix("a=candidate:"))
+        .and_then(|candidate| candidate.split_whitespace().nth(5))
+        .and_then(|port| port.parse().ok())
+        .expect("the answer gives a candidate")
+}
+
+/// A new session goes to the thread with the fewest, each thread on a
+/// socket of its own; both play.
+#[test]
+fn sessions_are_spread_over_the_threads() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, cam, _live) = server();
+    let camera = feed(&cam, &path);
+    let mut players: Vec<(Client, Mid, u16)> = (0..2)
+        .map(|_| {
+            let mut client = Client::new();
+            let (offer, pending, mids, _) =
+                client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+            let (_, answer) = handle.play("cam", &offer).unwrap();
+            let port = answered_port(&answer);
+            client.accept(pending, &answer);
+            (client, mids[0], port)
+        })
+        .collect();
+    assert_ne!(players[0].2, players[1].2, "two threads, two sockets");
+    for (client, mid, _) in &mut players {
+        let mid = *mid;
+        assert!(
+            client.run_until(Duration::from_secs(20), |client| client.received(mid).len()
+                >= 10)
+        );
+    }
+    camera.stop();
+    runner.stop();
+}
+
+/// A player catching up is sent its backlog at twice the stream's speed,
+/// every packet of it: str0m lets one packet out and asks for the time
+/// again, and the server once sent a packet a turn of its loop, falling
+/// further behind the larger the pictures.
+#[test]
+fn a_player_catches_up_on_large_pictures_in_time() {
+    let (runner, handle, cam, _live) = server();
+    let video = TrackFormat::new(
+        {
+            let mut parameters = ffmpeg::codec::Parameters::new();
+            // SAFETY: parameters this test owns alone; plain fields.
+            unsafe {
+                (*parameters.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
+                (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+                (*parameters.as_mut_ptr()).width = 1920;
+                (*parameters.as_mut_ptr()).height = 1080;
+            }
+            parameters
+        },
+        ffmpeg::Rational(1, 90_000),
+    );
+    let mut sinks = cam.publish(&[video]).unwrap();
+    // Two seconds of 100 kB pictures from one keyframe, in Annex B, written
+    // at once: some four thousand RTP packets for the player to catch up on
+    // in one. Nothing decodes them; the player only puts them back together.
+    let pictures = 50usize;
+    for n in 0..pictures as i64 {
+        let mut data = vec![0, 0, 0, 1, if n == 0 { 0x65 } else { 0x41 }];
+        data.resize(100_000, 0xAB);
+        let mut packet = ffmpeg::Packet::copy(&data);
+        packet.set_pts(Some(n * 3_600));
+        packet.set_dts(Some(n * 3_600));
+        packet.set_time_base(ffmpeg::Rational(1, 90_000));
+        if n == 0 {
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+        }
+        crate::element::RawSink::consume(&mut sinks[0], crate::buffer::MediaBuffer::packet(packet))
+            .unwrap();
+    }
+
+    let mut client = Client::new();
+    let (offer, pending, mids, _) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+    let (_, answer) = handle.play("cam", &offer).unwrap();
+    client.accept(pending, &answer);
+    assert!(client.run_until(Duration::from_secs(10), |client| client.connected()));
+    let connected = Instant::now();
+    let all = client.run_until(Duration::from_secs(10), |client| {
+        client.received(mids[0]).len() >= pictures
+    });
+    let took = connected.elapsed();
+    assert!(
+        all,
+        "only {} of {pictures} pictures arrived",
+        client.received(mids[0]).len()
+    );
+    // At most two seconds of pictures at twice their speed: one second at
+    // most, with room.
+    assert!(
+        took < Duration::from_millis(1_800),
+        "{pictures} pictures took {took:?} to catch up on"
+    );
     runner.stop();
 }

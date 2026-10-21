@@ -3,7 +3,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -16,6 +16,9 @@ const MAX_BODY: usize = 256 * 1024;
 
 /// How long a client may take to send its request.
 const READ_WITHIN: Duration = Duration::from_secs(10);
+
+/// How many requests are answered at once; one more is answered `503`.
+const MAX_IN_FLIGHT: usize = 512;
 
 /// A [`WebRtcServer`](super::WebRtcServer)'s offers and answers over HTTP:
 /// WHEP for players, WHIP for publishers — what a browser, OBS or
@@ -30,10 +33,13 @@ const READ_WITHIN: Duration = Duration::from_secs(10);
 /// - `OPTIONS` answers what a browser asks before it posts from another
 ///   origin, and every answer allows any origin.
 ///
-/// Made with [`WebRtcServerHandle::serve_http`]; it serves on a thread of
-/// its own until dropped, a request at a time — offers are few and quick to
-/// answer. Plain HTTP: put it behind a proxy that terminates TLS for a page
-/// served over HTTPS.
+/// Made with [`WebRtcServerHandle::serve_http`]; it listens on a thread of
+/// its own until dropped, and answers each request on a thread of its own —
+/// one waits for a server thread to answer its offer, and players arriving
+/// together do not wait on one another. A request still being answered as it
+/// is dropped is answered first, within the few seconds a request is given.
+/// Plain HTTP: put it behind a proxy that terminates TLS for a page served
+/// over HTTPS.
 pub struct WebRtcHttpEndpoint {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -99,15 +105,39 @@ impl std::fmt::Debug for WebRtcHttpEndpoint {
 }
 
 fn serve(listener: &TcpListener, server: &WebRtcServerHandle, stop: &AtomicBool) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, peer)) => {
-                if let Err(error) = answer(stream, server) {
-                    pp_debug!(pp_log: &server.shared.pp_log, "an HTTP request from {peer} failed: {error}");
+                // Each request on a thread of its own: an offer waits for a
+                // server thread to answer it, and a crowd of players arriving
+                // at once must not wait in the listener's backlog behind one
+                // another — past its length, they are refused.
+                if in_flight.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT {
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                    let _ = stream.set_nonblocking(false);
+                    let _ = respond(stream, 503, &[("Retry-After", "1".into())], "");
+                    continue;
+                }
+                let server = server.clone();
+                let counted = Arc::clone(&in_flight);
+                let spawned = thread::Builder::new()
+                    .name("webrtc-http-request".into())
+                    .spawn(move || {
+                        if let Err(error) = answer(stream, &server) {
+                            pp_debug!(
+                                pp_log: &server.shared.pp_log,
+                                "an HTTP request from {peer} failed: {error}"
+                            );
+                        }
+                        counted.fetch_sub(1, Ordering::AcqRel);
+                    });
+                if spawned.is_err() {
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(20));
+                thread::sleep(Duration::from_millis(5));
             }
             Err(error) => {
                 pp_warn!(pp_log: &server.shared.pp_log, "accepting an HTTP connection failed: {error}");

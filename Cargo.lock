@@ -4839,6 +4839,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "webrtc_load"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+ "str0m",
+ "tempfile",
+]
+
+[[package]]
 name = "webrtc_loopback"
 version = "0.1.0"
 dependencies = [
