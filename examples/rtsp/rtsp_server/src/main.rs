@@ -15,14 +15,15 @@
 //! publisher at a time; one that leaves ends its run, and the next one's
 //! players go on.
 //!
-//!     cargo run -p rtsp_server -- input.mp4 [address] [--seconds N]
+//!     cargo run -p rtsp_server -- input.mp4 [address] [--seconds N] [--threads N]
 //!     ffplay rtsp://127.0.0.1:8554/file
 //!     ffmpeg -re -i video.mp4 -c copy -f rtsp rtsp://127.0.0.1:8554/live
 //!     ffplay rtsp://127.0.0.1:8554/live
 //!
 //! The address defaults to `127.0.0.1:8554`, this machine alone; give
 //! `0.0.0.0:8554` to serve the network. It runs until Enter is pressed, or
-//! for `--seconds`.
+//! for `--seconds`; `--threads` is how many threads the server runs its
+//! connections on, two by default.
 
 fn main() -> Result<(), media_pp::Report> {
     Ok(example::run()?)
@@ -40,22 +41,26 @@ mod example {
     };
     use media_pp::pipeline::Pipeline;
 
-    const USAGE: &str = "usage: rtsp_server <input> [address] [--seconds N]";
+    const USAGE: &str = "usage: rtsp_server <input> [address] [--seconds N] [--threads N]";
 
     struct Args {
         input: String,
         address: String,
         seconds: Option<u64>,
+        threads: Option<usize>,
     }
 
     fn args() -> Option<Args> {
         let mut input = None;
         let mut address = None;
         let mut seconds = None;
+        let mut threads = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--seconds" {
                 seconds = Some(args.next()?.parse().ok()?);
+            } else if arg == "--threads" {
+                threads = Some(args.next()?.parse().ok().filter(|&n| n > 0)?);
             } else if input.is_none() {
                 input = Some(arg);
             } else if address.is_none() {
@@ -68,6 +73,7 @@ mod example {
             input: input?,
             address: address.unwrap_or_else(|| "127.0.0.1:8554".to_owned()),
             seconds,
+            threads,
         })
     }
 
@@ -83,8 +89,11 @@ mod example {
             std::process::exit(1);
         };
 
-        let (server, handle) =
-            RtspServer::bind("server", &args.address, RtspServerOptions::default())?;
+        let mut options = RtspServerOptions::default();
+        if let Some(threads) = args.threads {
+            options.threads = threads;
+        }
+        let (server, handle) = RtspServer::bind("server", &args.address, options)?;
         let file = Broadcast::new("file", BroadcastOptions::default());
         let live = Broadcast::new("live", BroadcastOptions::default());
         handle.add_path("file", &file, RtspPathMode::Play)?;

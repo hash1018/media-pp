@@ -63,7 +63,11 @@ compile error with no explanation.
   `RtspServerOptions::publisher_timeout` is let go of. It is a `Driver`, run
   with a `DriverRunner`, on a tokio runtime of its own inside its thread.
   The `rtsp_server` example serves a file as a camera and a publisher's
-  path.
+  path, and `rtsp_load` plays hundreds of players against it: on a Core
+  i5-12400F it served 800 players of a 12 Mbit/s 1080p stream over TCP on
+  1.75 cores and 71 MB, losing nothing, and UDP players at four to five
+  times the processor each — see
+  [the streaming benchmarks](docs/benchmarks/streaming/).
 
   ```rust
   let (server, handle) = RtspServer::bind("server", "0.0.0.0:8554", RtspServerOptions::default())?;

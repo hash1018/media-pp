@@ -118,6 +118,7 @@ use `resize` to save a video.
 | [`rtsp_source`](../examples/rtsp/rtsp_source) | Receiving from an RTSP camera or server | All |
 | [`rtsp_listen`](../examples/rtsp/rtsp_listen) | Receiving an RTSP push — from an encoder, `ffmpeg -f rtsp` or `rtsp_serve` | All |
 | [`rtsp_server`](../examples/rtsp/rtsp_server) | An RTSP server: a file played to players as a camera, and a publisher's push played on | All |
+| [`rtsp_load`](../examples/rtsp/rtsp_load) | Hundreds of RTSP players against a server, each counting what it is sent; [the streaming benchmarks](benchmarks/streaming/) | All |
 | [`broadcast`](../examples/core/broadcast) | One input written once into a `Broadcast`, recorded and read by your code at once, across the input dropping and coming back | All |
 
 ## Compositing and overlays

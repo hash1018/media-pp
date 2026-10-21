@@ -34,6 +34,12 @@ const PUBLIC: &str = "OPTIONS, DESCRIBE, ANNOUNCE, SETUP, PLAY, RECORD, PAUSE, T
 /// How many of a publisher's UDP packets wait for its connection's task.
 const UDP_BACKLOG: usize = 1024;
 
+/// How much faster than it plays a UDP player is sent what the broadcast
+/// held when it joined: twice, so it catches up in as long as that was.
+/// Sent at once, the group of pictures it joins with overflows the
+/// player's socket, and UDP has no way to say slow down.
+const UDP_CATCH_UP: f64 = 2.0;
+
 /// One of a publisher's RTP packets that came over UDP: its track, and the
 /// packet.
 pub(super) type Datagram = (usize, Vec<u8>);
@@ -128,6 +134,9 @@ struct Playing {
     start_us: i64,
     /// Whether the reader has been handed the run it started in.
     started: bool,
+    /// Where a UDP player's sending is paced from: when the first packet
+    /// was sent, and where it is on the session's timeline.
+    paced_from: Option<(Instant, f64)>,
     _count: Count,
 }
 
@@ -647,6 +656,7 @@ impl Connection {
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |since| i64::try_from(since.as_micros()).unwrap_or(0)),
                 started: false,
+                paced_from: None,
                 _count: Count::new(&self.shared),
             });
             pp_info!(
@@ -768,6 +778,8 @@ fn described(shared: &Shared, path: &str) -> Option<(Broadcast, Vec<StreamInfo>,
 struct Outgoing {
     delivery: Delivery,
     packets: Vec<Vec<u8>>,
+    /// Not before when, for a UDP player catching up.
+    due: Option<Instant>,
 }
 
 /// What `item` has a playing session send its player, if anything: an
@@ -849,8 +861,20 @@ fn prepare(
             }
         },
     };
+    let due = match delivery {
+        Delivery::Udp { .. } => stamped.dts().or(stamped.pts()).map(|ts| {
+            let at = ts as f64 * f64::from(time_base(&stamped, Some(info.time_base)));
+            let (began, from) = *playing.paced_from.get_or_insert((Instant::now(), at));
+            began + Duration::from_secs_f64(((at - from) / UDP_CATCH_UP).max(0.0))
+        }),
+        Delivery::Tcp { .. } => None,
+    };
     match packetizer.packetize(&stamped) {
-        Ok(packets) => Ok(Some(Outgoing { delivery, packets })),
+        Ok(packets) => Ok(Some(Outgoing {
+            delivery,
+            packets,
+            due,
+        })),
         Err(error) => {
             pp_debug!(
                 pp_log: pp_log,
@@ -865,7 +889,11 @@ fn prepare(
 /// Sends what a player is to be sent: what fails to send over TCP ends the
 /// connection, with why.
 async fn deliver(
-    Outgoing { delivery, packets }: Outgoing,
+    Outgoing {
+        delivery,
+        packets,
+        due,
+    }: Outgoing,
     write: &mut OwnedWriteHalf,
     udp: Option<&Udp>,
     shared: &Shared,
@@ -893,14 +921,25 @@ async fn deliver(
             let Some(udp) = udp else {
                 return Err("no UDP sockets");
             };
+            if let Some(due) = due {
+                tokio::time::sleep_until(due.into()).await;
+            }
             for packet in &packets {
-                let sent = if rtp::is_rtcp(packet) {
-                    udp.rtcp.send_to(packet, rtcp).await
+                let (socket, to) = if rtp::is_rtcp(packet) {
+                    (&udp.rtcp, rtcp)
                 } else {
-                    udp.rtp.send_to(packet, rtp).await
+                    (&udp.rtp, rtp)
+                };
+                // Straight to the socket while it takes it; waited on only
+                // when its buffer is full.
+                let sent = match socket.try_send_to(packet, to) {
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        socket.send_to(packet, to).await
+                    }
+                    sent => sent,
                 };
                 if let Err(error) = sent {
-                    pp_debug!(pp_log: pp_log, "a datagram to {rtp} was not sent: {error}");
+                    pp_debug!(pp_log: pp_log, "a datagram to {to} was not sent: {error}");
                 }
             }
             Ok(())

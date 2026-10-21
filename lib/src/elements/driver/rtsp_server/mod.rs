@@ -154,6 +154,16 @@ impl Default for RtspServerOptions {
 /// thread, and stops — every connection closed — when its runner is stopped
 /// or dropped.
 ///
+/// A player starts at the newest keyframe, so it is up to a group of
+/// pictures behind the input — as far as the input's keyframes are apart —
+/// and stays so. What came after that keyframe is sent at once to a player
+/// over TCP, whose connection paces it, and at twice the stream's speed to
+/// one over UDP, which nothing paces: sent at once, it overflows the
+/// player's socket. A UDP player costs the server several times what a TCP
+/// one does — a system call for every RTP packet — so many of them want
+/// more [`RtspServerOptions::threads`]; `docs/benchmarks/streaming` has the
+/// figures.
+///
 /// Each player is a reader of its path's broadcast, and is sent RTP as FFmpeg's
 /// `rtp` muxer cuts it — any codec that muxer carries, described by the SDP
 /// it writes. A player's tracks share one timeline, so they stay together,
@@ -250,7 +260,7 @@ impl RtspServer {
         let listener = TcpListener::bind(&addrs[..]).map_err(bind_error)?;
         let local_addr = listener.local_addr().map_err(bind_error)?;
         let udp = if options.udp {
-            let open = || UdpSocket::bind(SocketAddr::new(local_addr.ip(), 0)).map_err(bind_error);
+            let open = || udp_socket(SocketAddr::new(local_addr.ip(), 0)).map_err(bind_error);
             Some((open()?, open()?))
         } else {
             None
@@ -372,6 +382,23 @@ impl std::fmt::Debug for RtspServerHandle {
             .finish()
     }
 }
+
+/// A UDP socket bound to `addr`, its buffers as large as the system lets
+/// them be up to [`UDP_BUFFER`]: every UDP player's packets leave through
+/// the one socket, and a keyframe for each arrives at once — a buffer of the
+/// system's default size (64 KiB on Windows) holds a fraction of one.
+fn udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    // Not fatal: a smaller buffer only loses more under load.
+    let _ = socket.set_send_buffer_size(UDP_BUFFER);
+    let _ = socket.set_recv_buffer_size(UDP_BUFFER);
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
+/// How large the server's UDP sockets' buffers are asked to be.
+const UDP_BUFFER: usize = 8 * 1024 * 1024;
 
 /// Whether `path` is one a URL names as it is.
 fn valid_path(path: &str) -> bool {

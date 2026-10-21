@@ -663,3 +663,101 @@ fn a_path_holds_one_publisher_and_a_path_for_players_none() {
     first.stop();
     runner.stop();
 }
+
+/// What a UDP player joins with — everything since the newest keyframe — is
+/// sent at twice the stream's speed, not at once: UDP has no way to say slow
+/// down, and the burst overflowed players' sockets, losing half of what they
+/// were sent (docs/benchmarks/streaming/findings.md).
+#[test]
+fn a_udp_player_catches_up_at_twice_the_streams_speed() {
+    use std::net::UdpSocket;
+
+    let (_runner, handle, broadcast) = server(true);
+    let video = TrackFormat::new(
+        {
+            let mut parameters = ffmpeg::codec::Parameters::new();
+            // SAFETY: parameters this test owns alone; plain fields.
+            unsafe {
+                (*parameters.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
+                (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+                (*parameters.as_mut_ptr()).width = 320;
+                (*parameters.as_mut_ptr()).height = 240;
+            }
+            parameters
+        },
+        ffmpeg::Rational(1, 90_000),
+    );
+    let mut sinks = broadcast.publish(&[video]).unwrap();
+    // Four seconds of pictures from one keyframe, written at once: all of it
+    // is what a player joining now catches up on.
+    let pictures = 100;
+    for n in 0..pictures {
+        let mut data = vec![0, 0, 0, 1, if n == 0 { 0x65 } else { 0x41 }];
+        data.resize(2_000, 0xAB);
+        let mut packet = ffmpeg::Packet::copy(&data);
+        packet.set_pts(Some(n * 3_600));
+        packet.set_dts(Some(n * 3_600));
+        packet.set_time_base(ffmpeg::Rational(1, 90_000));
+        if n == 0 {
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+        }
+        crate::element::RawSink::consume(&mut sinks[0], MediaBuffer::packet(packet)).unwrap();
+    }
+
+    let rtp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    rtp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let port = rtp.local_addr().unwrap().port();
+    let mut stream = TcpStream::connect(handle.local_addr()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let url = handle.url("cam");
+    let setup = exchange(
+        &mut stream,
+        &format!(
+            "SETUP {url}/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP;unicast;client_port={port}-{}\r\n\r\n",
+            port + 1
+        ),
+    );
+    assert!(setup.starts_with("RTSP/1.0 200"), "{setup}");
+    let session = setup
+        .lines()
+        .find_map(|line| line.strip_prefix("Session: "))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let play = exchange(
+        &mut stream,
+        &format!("PLAY {url} RTSP/1.0\r\nCSeq: 2\r\nSession: {session}\r\n\r\n"),
+    );
+    assert!(play.starts_with("RTSP/1.0 200"), "{play}");
+
+    let mut buffer = [0u8; 2048];
+    let mut arrivals = Vec::new();
+    let mut last_picture = None;
+    while arrivals.len() < pictures as usize {
+        let length = rtp.recv(&mut buffer).expect("every picture arrives");
+        // The last packet of each picture carries the marker.
+        if buffer[1] & 0x80 != 0 {
+            arrivals.push(Instant::now());
+            last_picture = Some(u32::from_be_bytes([
+                buffer[4], buffer[5], buffer[6], buffer[7],
+            ]));
+        }
+        assert!(length > 12);
+    }
+    assert!(last_picture.is_some());
+    let took = arrivals[arrivals.len() - 1] - arrivals[0];
+    // Four seconds of pictures at twice their speed: two seconds, less the
+    // last picture's own 40 ms.
+    assert!(
+        took >= Duration::from_millis(1_700),
+        "four seconds of pictures arrived in {took:?}, at once rather than paced"
+    );
+    assert!(
+        took < Duration::from_millis(3_000),
+        "paced slower than twice: {took:?}"
+    );
+}

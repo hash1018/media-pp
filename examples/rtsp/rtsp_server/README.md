@@ -16,7 +16,7 @@ or encoded for it — from the newest keyframe on. `live` takes one publisher at
 a time; one that leaves ends its run, and the next one's players go on.
 
 ```sh
-cargo run -p rtsp_server -- input.mp4 [address] [--seconds N]
+cargo run -p rtsp_server -- input.mp4 [address] [--seconds N] [--threads N]
 ffplay rtsp://127.0.0.1:8554/file
 ffmpeg -re -i video.mp4 -c copy -f rtsp rtsp://127.0.0.1:8554/live
 ffplay rtsp://127.0.0.1:8554/live
@@ -24,4 +24,6 @@ ffplay rtsp://127.0.0.1:8554/live
 
 The address defaults to `127.0.0.1:8554`, this machine alone; give
 `0.0.0.0:8554` to serve the network. It runs until Enter is pressed, or for
-`--seconds`, printing how many players there are every five seconds.
+`--seconds`, printing how many players there are every five seconds;
+`--threads` is how many threads the server runs its connections on, two by
+default.

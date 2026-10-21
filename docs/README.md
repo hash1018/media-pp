@@ -46,6 +46,7 @@ under *Unreleased* in [`CHANGELOG.md`](../CHANGELOG.md). The API pages and
 | [Stream events](stream-events.md) | How segments, flushes and the end of a stream travel through a pipeline |
 | [D3D12 inference](d3d12-inference.md) | Detection on any GPU through DirectML: what was measured and why it is built so |
 | [Vision benchmarks](benchmarks/vision/) | How fast detection, tracking and classification run, on Linux, Windows and macOS |
+| [Streaming benchmarks](benchmarks/streaming/) | How many RTSP players one server serves, over TCP and UDP, and what each costs |
 | [Speech benchmarks](benchmarks/speech/) | How fast and how well the whisper transcribers hear, per model and backend, and how late live captions run |
 
 [docs.rs]: https://docs.rs/media-pp

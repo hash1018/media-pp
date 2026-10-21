@@ -2123,6 +2123,7 @@ dependencies = [
  "pkg-config",
  "pollster",
  "raw-window-handle",
+ "socket2",
  "str0m",
  "thiserror 2.0.19",
  "time",
@@ -3461,6 +3462,14 @@ dependencies = [
 
 [[package]]
 name = "rtsp_listen"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+ "tempfile",
+]
+
+[[package]]
+name = "rtsp_load"
 version = "0.1.0"
 dependencies = [
  "media-pp",

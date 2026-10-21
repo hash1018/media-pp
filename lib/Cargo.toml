@@ -58,6 +58,9 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 # The RTSP server's sockets and connections, on a runtime it owns inside its
 # own thread; nothing else in the crate runs on tokio, nor needs a runtime of
 # the caller's.
+# The RTSP server's UDP sockets, opened with buffers large enough for every
+# player's packets at once — already in the tree through tokio.
+socket2 = { version = "0.6", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = [
     "io-util",
     "macros",
@@ -624,7 +627,7 @@ whisper-metal = ["whisper", "whisper-rs/metal", "whisper-rs/raw-api"]
 webrtc = ["dep:str0m"]
 # `RtspServer`: serves `Broadcast`s to RTSP players and takes RTSP
 # publishers into them. Pure Rust beyond FFmpeg (tokio), on every platform.
-rtsp-server = ["dep:tokio"]
+rtsp-server = ["dep:socket2", "dep:tokio"]
 
 [dev-dependencies]
 log = "0.4"

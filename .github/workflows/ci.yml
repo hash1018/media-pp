@@ -100,7 +100,7 @@ jobs:
 
       - name: Lint (RTSP server)
         shell: pwsh
-        run: cargo clippy -p media-pp -p rtsp_server --all-targets --features rtsp-server -- -D warnings
+        run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
       # `DOCS_RS` keeps `ort-sys` from downloading ONNX Runtime and linking its
       # dylibs into the target directory, which needs Developer Mode on a
@@ -234,7 +234,7 @@ jobs:
         shell: pwsh
         run: |
           cargo test -p media-pp --features rtsp-server --lib -- rtsp_server
-          cargo test -p rtsp_server
+          cargo test -p rtsp_server -p rtsp_load
 
   linux:
     runs-on: ubuntu-26.04
@@ -310,7 +310,7 @@ jobs:
         run: cargo clippy -p media-pp --all-targets --features rnnoise -- -D warnings
 
       - name: Lint (RTSP server)
-        run: cargo clippy -p media-pp -p rtsp_server --all-targets --features rtsp-server -- -D warnings
+        run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
       - name: Check (ONNX Runtime and WebRTC)
         env:
@@ -405,7 +405,7 @@ jobs:
       - name: Test (RTSP server)
         run: |
           cargo test -p media-pp --features rtsp-server --lib -- rtsp_server
-          cargo test -p rtsp_server
+          cargo test -p rtsp_server -p rtsp_load
 
       # PipeWire-session-dependent tests skip themselves with a reason
       # (`try_capture_source()`-style helper) when this headless runner has
@@ -451,7 +451,7 @@ jobs:
 
       # Run on the other two jobs; compiled here.
       - name: Lint (RTSP server)
-        run: cargo clippy -p media-pp -p rtsp_server --all-targets --features rtsp-server -- -D warnings
+        run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
       # Together, and each alone: the pixel-buffer and Metal code the
       # captures, VideoToolbox and Metal share is gated on whichever of them
