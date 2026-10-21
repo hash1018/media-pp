@@ -44,6 +44,7 @@ under *Unreleased* in [`CHANGELOG.md`](../CHANGELOG.md). The API pages and
 | | |
 |---|---|
 | [Stream events](stream-events.md) | How segments, flushes and the end of a stream travel through a pipeline |
+| [Driven pipelines](driven-pipelines.md) | Pipelines with no thread of their own, polled by a few threads — what the servers' players are to run on |
 | [D3D12 inference](d3d12-inference.md) | Detection on any GPU through DirectML: what was measured and why it is built so |
 | [Vision benchmarks](benchmarks/vision/) | How fast detection, tracking and classification run, on Linux, Windows and macOS |
 | [Streaming benchmarks](benchmarks/streaming/) | How many RTSP players one server serves, over TCP and UDP, and what each costs |
