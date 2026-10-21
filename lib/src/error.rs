@@ -617,6 +617,10 @@ pub enum Error {
     #[error(transparent)]
     ProduceError(#[from] ProduceError),
 
+    /// See [`crate::elements::BroadcastError`].
+    #[error(transparent)]
+    BroadcastError(#[from] crate::elements::BroadcastError),
+
     /// See [`crate::elements::PipelineBridgeError`].
     #[error(transparent)]
     PipelineBridgeError(#[from] crate::elements::PipelineBridgeError),

@@ -1,0 +1,9 @@
+[package]
+name = "broadcast"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib" }
+file_common = { path = "../file_common" }

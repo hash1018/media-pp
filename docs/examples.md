@@ -117,6 +117,7 @@ use `resize` to save a video.
 | [`rtsp_serve_seek`](../examples/rtsp/rtsp_serve_seek) | The same, sought and paused while viewers watch | All |
 | [`rtsp_source`](../examples/rtsp/rtsp_source) | Receiving from an RTSP camera or server | All |
 | [`rtsp_listen`](../examples/rtsp/rtsp_listen) | Receiving an RTSP push — from an encoder, `ffmpeg -f rtsp` or `rtsp_serve` | All |
+| [`broadcast`](../examples/core/broadcast) | One input written once into a `Broadcast`, recorded and read by your code at once, across the input dropping and coming back | All |
 
 ## Compositing and overlays
 

@@ -81,6 +81,7 @@ fails.
 | Files | `FileMuxer` — MP4, MOV, Matroska and more by the extension; an MP4 or MOV laid out fast-start, for playing as it downloads, or in fragments, which a recording cut off still opens from (`Mp4Layout`) |
 | Files cut by time or size | `SegmentedFileMuxer`, each cut on a keyframe |
 | The last stretch, saved on demand | `ReplayBuffer` |
+| One stream written once, read by many | `Broadcast`: its `BroadcastSink`s take an input's packets, and any number of `BroadcastSource`s (a pipeline each) and `BroadcastReader`s (your code, blocking or as a future) read them — never waiting on one another, each starting at a keyframe — while the input drops and comes back |
 | Streaming | `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink` with `WebRtcPeer` |
 | A camera other applications open | `MfVirtualCamera` (Windows 11), `V4l2VirtualCamera` (Linux) |
 | Your code | `AppSink` |

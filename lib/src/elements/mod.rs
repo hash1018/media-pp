@@ -2,6 +2,8 @@
 //!
 //! [`source`] produces buffers, [`filter`] transforms them, [`sink`] consumes
 //! them, and [`driver`] holds the background tasks that have no pads at all.
+//! [`broadcast`] is one stream written once by a pipeline and read by many —
+//! other pipelines, and code of one's own.
 //! [`vision`] and [`speech`] are grouped by what they are for rather than by
 //! role: finding objects in pictures, following them, counting them and
 //! drawing them; hearing what is said, and writing it down.
@@ -19,6 +21,7 @@
 //! and runtime control is documented on the element itself rather than here.
 
 mod audio_format;
+pub mod broadcast;
 pub mod driver;
 pub mod filter;
 pub(crate) mod rtsp;
@@ -29,6 +32,10 @@ mod video_format;
 pub mod vision;
 
 pub use audio_format::AudioFormat;
+pub use broadcast::{
+    Broadcast, BroadcastError, BroadcastItem, BroadcastOptions, BroadcastReader, BroadcastSink,
+    BroadcastSource,
+};
 pub use rtsp::{RtspOptions, RtspTransport};
 pub use video_format::VideoFormat;
 

@@ -366,6 +366,13 @@ pub enum ElementType {
     SegmentedFileMuxer,
     /// Rolling window of encoded packets, written to a file on request.
     ReplayBuffer,
+    /// One stream of encoded packets written once and read by many — not
+    /// an element itself, but what its log records go under.
+    Broadcast,
+    /// Writes one track of a branch into a broadcast.
+    BroadcastSink,
+    /// Reads a broadcast into a pipeline of its own.
+    BroadcastSource,
     /// RTMP publishing muxer sink, one FLV stream to an external server.
     RtmpMuxer,
     /// Anything outside this crate's own elements — a test double, a

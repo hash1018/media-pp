@@ -51,6 +51,31 @@ compile error with no explanation.
 
 ### Added
 
+- **`Broadcast`: one stream of packets, written once and read by many.**
+  `Broadcast::publish` takes an input's tracks and hands out a
+  `BroadcastSink` for each, the end of the branch carrying it; what they
+  are handed is kept, nothing decoded or copied, and read by any number of
+  `BroadcastSource`s — one at the start of a pipeline of its own, a
+  recording, say — and `BroadcastReader`s, for code of your own, which wait
+  on a thread or as a future. The writer never waits: a reader that falls
+  behind further than `BroadcastOptions::retain` is moved on to the newest
+  keyframe and told, and loses nothing else. A reader starts at the newest
+  keyframe held, so it can show a picture at once; whole groups of
+  pictures spanning at least `retain` are kept. A broadcast outlives its
+  input: published again, after the input dropped, its readers are told one
+  run ended and another began, and a `BroadcastSource` puts the next run
+  after the last on one timeline. `Error::BroadcastError` and the
+  `ElementType`s `Broadcast`, `BroadcastSink` and `BroadcastSource` come
+  with it, and the `broadcast` example records and counts a file played
+  twice into one.
+
+  ```rust
+  let camera = Broadcast::new("camera", BroadcastOptions::default());
+  let sinks = camera.publish(&tracks)?; // one per track, for the input's pipeline
+  let (recorder, tracks) = BroadcastSource::new("recorder", &camera)?;
+  let mut viewer = camera.subscribe();
+  ```
+
 - **`RtspSource::listen`, receiving an RTSP push.** Rather than asking a
   server for a stream, the source takes the port in its URL and waits for
   one publisher — an encoder, `ffmpeg -f rtsp`, an `RtspMuxer` — to

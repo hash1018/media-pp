@@ -575,6 +575,10 @@ enum Shape {
     File(FileShape),
     /// A live source, which cannot be sought and never ends.
     Live,
+    /// A live camera's packets written into a broadcast by a pipeline of
+    /// their own, and read back by a `BroadcastSource` — a source that
+    /// waits on what another pipeline writes, with an output per track.
+    Broadcast,
     /// An offline compositor fed by a live source through a pipeline of its
     /// own — a render waiting on its input, holding that pipeline back a
     /// frame ahead of what it has drawn, while its own is paused, resumed
@@ -592,7 +596,7 @@ impl Shape {
     fn lossless(self) -> bool {
         match self {
             Shape::File(shape) => shape.pacing != Pacing::Synchronizer,
-            Shape::Live => false,
+            Shape::Live | Shape::Broadcast => false,
             Shape::Offline | Shape::OfflineMix => true,
         }
     }
@@ -621,6 +625,9 @@ struct Rig {
     looping: Option<FileDemuxerHandle>,
     /// Pipelines feeding the one under test, kept running as long as it is.
     _feeds: Vec<Arc<Pipeline>>,
+    /// The broadcast between a feed and the pipeline under test, kept open
+    /// as long as it is.
+    _broadcast: Option<crate::elements::Broadcast>,
 }
 
 /// The picture decoded, and queued for what follows.
@@ -699,6 +706,7 @@ impl Rig {
         match shape {
             Shape::File(shape) => Self::build_file(shape),
             Shape::Live => Some(Self::build_live()),
+            Shape::Broadcast => Some(Self::build_broadcast()),
             Shape::Offline => Some(Self::build_offline()),
             Shape::OfflineMix => Some(Self::build_offline_mix()),
         }
@@ -726,6 +734,62 @@ impl Rig {
             terminals: vec![("screen", log)],
             looping: None,
             _feeds: Vec::new(),
+            _broadcast: None,
+        }
+    }
+
+    fn build_broadcast() -> Self {
+        use crate::elements::{
+            Broadcast, BroadcastOptions, BroadcastSource, SwEncoder, SwEncoderOptions, TrackFormat,
+            VideoCodec,
+        };
+        let options = TestVideoOptions {
+            width: 64,
+            height: 48,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+        };
+        let encoder = SwEncoder::new(
+            "camera-h264",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: options.width,
+                height: options.height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
+                frame_rate: options.frame_rate,
+                bit_rate: 100_000,
+                gop_size: 15,
+                max_b_frames: None,
+            },
+        )
+        .expect("open the encoder");
+        let broadcast = Broadcast::new("camera", BroadcastOptions::default());
+        let mut sinks = broadcast
+            .publish(&[TrackFormat::from(&encoder)])
+            .expect("publish the camera");
+        let sink = sinks.remove(0);
+        let camera = TestVideoSource::new("camera", options);
+        let (feed, ()) = Pipeline::new("conformance-broadcast-feed", camera, |source, ctx| {
+            let branch = ctx.branch().pipe(encoder).queue("packets", 4).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire the feed");
+        feed.run().expect("run the feed");
+        let (recorder, log) = Recorder::new("recorded", ffmpeg::Rational::new(1, 90_000));
+        let (source, _) = BroadcastSource::new("relay", &broadcast).expect("read the broadcast");
+        let (pipeline, ()) = Pipeline::new("conformance-broadcast", source, |source, ctx| {
+            let branch = ctx.branch().queue("relayed", 4).to(recorder)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire the relay");
+        Self {
+            pipeline,
+            duration: None,
+            terminals: vec![("recorded", log)],
+            looping: None,
+            _feeds: vec![feed],
+            _broadcast: Some(broadcast),
         }
     }
 
@@ -763,6 +827,7 @@ impl Rig {
             terminals: vec![("speakers", log)],
             looping: None,
             _feeds: vec![feed],
+            _broadcast: None,
         }
     }
 
@@ -812,6 +877,7 @@ impl Rig {
             terminals: vec![("screen", log)],
             looping: None,
             _feeds: vec![feed],
+            _broadcast: None,
         }
     }
 
@@ -915,6 +981,7 @@ impl Rig {
             terminals,
             looping: Some(looping),
             _feeds: Vec::new(),
+            _broadcast: None,
         })
     }
 
@@ -1302,7 +1369,7 @@ impl Calls<'_> {
 fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<(), String> {
     let turns = match shape {
         Shape::File(shape) => turns_round(shape),
-        Shape::Live | Shape::Offline | Shape::OfflineMix => true,
+        Shape::Live | Shape::Broadcast | Shape::Offline | Shape::OfflineMix => true,
     };
     run_sequence_turning(shape, seed, steps, turns)
 }
@@ -2572,6 +2639,11 @@ fn the_matrix_keeps_its_control_promises_5() {
 #[test]
 fn a_live_source_keeps_its_control_promises() {
     conform(Shape::Live, 100);
+}
+
+#[test]
+fn a_broadcast_source_keeps_its_control_promises() {
+    conform(Shape::Broadcast, 103);
 }
 
 #[test]

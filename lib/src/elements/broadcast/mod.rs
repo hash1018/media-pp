@@ -1,0 +1,363 @@
+//! One stream of encoded packets, written once and read by many: a
+//! [`Broadcast`].
+//!
+//! A live input — a camera pulled with [`RtspSource`](crate::elements::RtspSource),
+//! a publisher received with `RtspSource::listen` — is written into a
+//! broadcast once, through the [`BroadcastSink`]s its
+//! [`Broadcast::publish`] hands out, and read by as many as want it: a
+//! server's viewers through a [`BroadcastReader`] each, a recording through
+//! a [`BroadcastSource`] at the start of a pipeline of its own. Nothing is
+//! decoded or encoded again for any of them.
+//!
+//! - The writer never waits. A reader that cannot keep up is the only one
+//!   that loses anything: it is moved on to the newest keyframe, and told.
+//! - A reader starts at a keyframe: the newest one the broadcast holds,
+//!   which it keeps whole groups of pictures of for [`BroadcastOptions::retain`].
+//! - A broadcast outlives what writes into it. An input that drops and is
+//!   opened again publishes again into the same broadcast, and its readers
+//!   go on: they are told that one run ended and another began.
+
+mod reader;
+mod sink;
+mod source;
+mod state;
+
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+use thiserror::Error as ThisError;
+
+use crate::element::{ElementType, element_pp_log};
+use crate::elements::{StreamInfo, TrackFormat};
+use crate::pp_log::{PpLog, pp_info};
+
+pub use reader::{BroadcastItem, BroadcastReader};
+pub use sink::BroadcastSink;
+pub use source::BroadcastSource;
+
+use state::State;
+
+/// Why a [`Broadcast`] or what it hands out refused something.
+///
+/// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
+#[derive(Debug, ThisError)]
+pub enum BroadcastError {
+    /// [`Broadcast::publish`] was given no tracks.
+    #[error("a broadcast is published with at least one track")]
+    NoTracks,
+    /// A track's codec parameters say neither video, sound nor text.
+    #[error("track {index} is neither video, audio nor subtitles")]
+    UnsupportedTrack {
+        /// Where the track was in the list published.
+        index: usize,
+    },
+    /// The broadcast has been closed: nothing is written to it or read from
+    /// it any more.
+    #[error("broadcast {0} is closed")]
+    Closed(Arc<str>),
+    /// The sink belongs to a publication that a later one replaced: what it
+    /// is handed goes nowhere.
+    #[error("broadcast {0} has been published again; this sink's input is no longer its")]
+    Superseded(Arc<str>),
+    /// A [`BroadcastSink`] was handed something other than a packet.
+    #[error("a BroadcastSink takes encoded packets, got {0}")]
+    UnsupportedBuffer(&'static str),
+    /// A [`BroadcastSource`] was made for a broadcast nothing has been
+    /// published to: there are no tracks yet to make outputs of.
+    #[error("broadcast {0} has not been published to yet")]
+    NotPublished(Arc<str>),
+}
+
+/// How a [`Broadcast`] keeps what it is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BroadcastOptions {
+    /// At least how much of the newest stretch to keep, in whole groups of
+    /// pictures: how far a reader may fall behind before it is moved on to
+    /// the newest keyframe. A reader that joins starts at the newest
+    /// keyframe kept, so it shows a picture at once and is as close to live
+    /// as the stream allows.
+    ///
+    /// A group of pictures is let go of only when what is left after it
+    /// still spans this long, so what is kept always begins at a keyframe
+    /// and never spans less — a stream whose keyframes are further apart
+    /// than this keeps two groups, up to twice its keyframe interval. Five
+    /// seconds by default.
+    pub retain: Duration,
+}
+
+impl Default for BroadcastOptions {
+    fn default() -> Self {
+        Self {
+            retain: Duration::from_secs(5),
+        }
+    }
+}
+
+/// One stream of encoded packets, written once and read by many.
+///
+/// See the [module](self) for what it is for. A cheap handle: clones share
+/// the one broadcast. The broadcast is closed — its readers told so, its
+/// sinks refused — once [`Self::close`] is called or the last clone is
+/// dropped; readers and sinks alone do not keep it open.
+///
+/// # Example
+///
+/// A camera's stream written once and recorded, while a reader of its own
+/// counts what it is handed:
+///
+/// ```no_run
+/// # fn main() -> media_pp::Result<()> {
+/// use media_pp::elements::{
+///     Broadcast, BroadcastItem, BroadcastOptions, BroadcastSource, FileMuxer, Mp4Layout,
+///     RtspOptions, RtspSource, TrackFormat,
+/// };
+/// use media_pp::pipeline::Pipeline;
+///
+/// let camera = Broadcast::new("camera", BroadcastOptions::default());
+///
+/// // The input: every stream of the camera into the broadcast.
+/// let (source, streams) = RtspSource::open("rtsp", "rtsp://192.168.0.10/stream", RtspOptions::default())?;
+/// let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+/// let sinks = camera.publish(&tracks)?;
+/// let (input, ()) = Pipeline::new("input", source, |source, ctx| {
+///     for (stream, sink) in streams.iter().zip(sinks) {
+///         let branch = ctx.branch().queue("packets", 64).to(sink)?;
+///         ctx.attach(source, stream.index, branch)?;
+///     }
+///     Ok(())
+/// })?;
+/// input.run()?;
+///
+/// // A recording, from the broadcast's newest keyframe on.
+/// let (recorded, streams) = BroadcastSource::new("recorder", &camera)?;
+/// let mut muxer = FileMuxer::create("camera.mp4", Mp4Layout::Standard)?;
+/// let tracks: Vec<_> = streams.iter().map(|stream| muxer.add_stream("track", stream)).collect::<Result<_, _>>()?;
+/// let mut files = muxer.open()?;
+/// let mut ends = Vec::new();
+/// for track in tracks {
+///     ends.push(files.take(track)?);
+/// }
+/// let (recording, ()) = Pipeline::new("recording", recorded, |source, ctx| {
+///     for (index, end) in ends.into_iter().enumerate() {
+///         let branch = ctx.branch().to(end)?;
+///         ctx.attach(source, index, branch)?;
+///     }
+///     Ok(())
+/// })?;
+/// recording.run()?;
+///
+/// // A reader of one's own.
+/// let mut reader = camera.subscribe();
+/// while let Some(item) = reader.next_timeout(std::time::Duration::from_secs(1)) {
+///     if let BroadcastItem::Packet { track, .. } = item {
+///         println!("a packet of track {track}");
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # How it works
+///
+/// What is written is kept in order in one buffer, every track together,
+/// with where each group of pictures begins: the keyframes of its first
+/// video track, or every packet where it has none. A reader is only a
+/// position in that buffer, so a thousand of them cost a thousand
+/// positions, and the packets they are handed are the ones written, shared
+/// and never copied.
+///
+/// Each [`Self::publish`] begins a run: the tracks it is given, and what
+/// its sinks are handed after. A run ends when every one of its sinks has
+/// been handed the end of its stream, or stopped, or dropped, or when the
+/// broadcast is published again; what a run kept is let go of when the next
+/// one begins, since a new input's timestamps have nothing to do with the
+/// last one's. A seek in the pipeline writing — a file played into a
+/// broadcast — begins a run of the same tracks.
+///
+/// Above [`BroadcastOptions::retain`] there is one more bound: a broadcast
+/// never holds more than 256 MiB, keyframe or not, so a stream that never
+/// sends one cannot fill the memory. Readers then start at the next
+/// keyframe that arrives.
+#[derive(Clone)]
+pub struct Broadcast {
+    shared: Arc<Shared>,
+    /// Closes the broadcast as the last clone of this handle goes.
+    _owner: Arc<Owner>,
+}
+
+/// What every handle, sink and reader of one broadcast share.
+pub(crate) struct Shared {
+    pub(crate) name: Arc<str>,
+    pub(crate) options: BroadcastOptions,
+    pub(crate) pp_log: PpLog,
+    pub(crate) state: Mutex<State>,
+    /// Rung whenever something is written or the broadcast changes, for a
+    /// reader that waits on a thread of its own.
+    pub(crate) changed: Condvar,
+}
+
+impl Shared {
+    /// Wakes every reader waiting on this broadcast, however it waits.
+    pub(crate) fn wake(&self, state: &mut State) {
+        state.wake();
+        self.changed.notify_all();
+    }
+}
+
+/// Closes its broadcast when the last [`Broadcast`] handle goes.
+struct Owner(Arc<Shared>);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        close(&self.0);
+    }
+}
+
+fn close(shared: &Shared) {
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !state.closed {
+        state.closed = true;
+        pp_info!(pp_log: &shared.pp_log, "closed");
+        shared.wake(&mut state);
+    }
+}
+
+impl Broadcast {
+    /// A broadcast with nothing published to it yet.
+    pub fn new(name: impl Into<String>, options: BroadcastOptions) -> Self {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::Broadcast, &name, None);
+        pp_info!(pp_log: &pp_log, "created: retain={:?}", options.retain);
+        let shared = Arc::new(Shared {
+            name,
+            options,
+            pp_log,
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+        });
+        Self {
+            _owner: Arc::new(Owner(Arc::clone(&shared))),
+            shared,
+        }
+    }
+
+    /// Its name, as its log records and its sinks' errors give it.
+    pub fn name(&self) -> Arc<str> {
+        Arc::clone(&self.shared.name)
+    }
+
+    /// Begins a run of `tracks`, and answers a sink for each, in the same
+    /// order: the end of the branch carrying that track's packets.
+    ///
+    /// A run already going ends here — its readers are told — and its
+    /// sinks are refused from now on with [`BroadcastError::Superseded`].
+    /// This is what an input opened again after it dropped does.
+    ///
+    /// # Errors
+    ///
+    /// [`BroadcastError::NoTracks`] for an empty list,
+    /// [`BroadcastError::UnsupportedTrack`] for a track that is neither
+    /// video, audio nor subtitles, and [`BroadcastError::Closed`] once the
+    /// broadcast is closed. Nothing changes on an error.
+    pub fn publish(&self, tracks: &[TrackFormat]) -> Result<Vec<BroadcastSink>, BroadcastError> {
+        if tracks.is_empty() {
+            return Err(BroadcastError::NoTracks);
+        }
+        let mut infos = Vec::with_capacity(tracks.len());
+        for (index, track) in tracks.iter().enumerate() {
+            let kind = track.parameters.medium();
+            if crate::contract::MediaKind::packet_for(kind).is_none() {
+                return Err(BroadcastError::UnsupportedTrack { index });
+            }
+            infos.push(StreamInfo {
+                index,
+                kind,
+                parameters: track.parameters.clone(),
+                time_base: track.time_base,
+                frame_rate: None,
+            });
+        }
+        let publication = {
+            let mut state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.closed {
+                return Err(BroadcastError::Closed(self.name()));
+            }
+            let publication = state.publish(infos.clone());
+            pp_info!(
+                pp_log: &self.shared.pp_log,
+                "published: run={} tracks=[{}]",
+                state.run,
+                describe(&infos)
+            );
+            self.shared.wake(&mut state);
+            publication
+        };
+        Ok(infos
+            .iter()
+            .map(|info| BroadcastSink::new(Arc::clone(&self.shared), publication, info))
+            .collect())
+    }
+
+    /// A reader of everything written from now on, starting at the newest
+    /// keyframe the broadcast holds. See [`BroadcastReader`].
+    pub fn subscribe(&self) -> BroadcastReader {
+        BroadcastReader::new(Arc::clone(&self.shared))
+    }
+
+    /// The tracks of the run going now, or of the last one where none is —
+    /// `None` before anything has been published.
+    pub fn tracks(&self) -> Option<Vec<StreamInfo>> {
+        let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.tracks.as_ref().map(|tracks| tracks.to_vec())
+    }
+
+    /// Whether a run is going: something has been published and its sinks
+    /// have not all ended.
+    pub fn is_live(&self) -> bool {
+        let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.live
+    }
+
+    /// Whether it has been closed.
+    pub fn is_closed(&self) -> bool {
+        let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.closed
+    }
+
+    /// How many readers it has — [`BroadcastReader`]s and
+    /// [`BroadcastSource`]s alike.
+    pub fn subscribers(&self) -> usize {
+        let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.subscribers
+    }
+
+    /// Closes it now rather than when the last handle goes: readers are told
+    /// it is closed once they have read what it holds, and sinks are refused
+    /// with [`BroadcastError::Closed`].
+    pub fn close(&self) {
+        close(&self.shared);
+    }
+}
+
+impl std::fmt::Debug for Broadcast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Broadcast")
+            .field("name", &self.shared.name)
+            .finish()
+    }
+}
+
+/// The tracks, for a log record.
+fn describe(tracks: &[StreamInfo]) -> String {
+    tracks
+        .iter()
+        .map(|track| format!("{:?}/{:?}", track.kind, track.parameters.id()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(test)]
+mod tests;
