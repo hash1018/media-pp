@@ -1,4 +1,7 @@
 mod command;
+mod connection;
+mod inbox;
+mod outbox;
 mod peer;
 mod server;
 mod stream_info;

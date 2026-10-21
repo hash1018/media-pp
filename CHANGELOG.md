@@ -12,6 +12,12 @@ compile error with no explanation.
 
 ### Changed
 
+- **A `WebRtcPeer` that falls behind goes on from a keyframe.** Its track
+  sinks share one outbox; a peer backed up as far as it keeps lets go of
+  what it holds and sends each track from its next keyframe, where it used
+  to drop the newest packet each time — leaving a picture broken until the
+  next keyframe anyway, and the peer still behind.
+
 - **Speech is a family of elements, as vision is: `elements::speech`.**
   `WhisperTranscriber`, a terminal sink handing each line to a callback, is
   gone; a transcriber is now a filter per backend — `SwWhisperTranscriber`,
@@ -50,6 +56,13 @@ compile error with no explanation.
   `match` on `RtspSourceError` needs an arm for each.
 
 ### Added
+
+- **`WebRtcTrackSink` converts HEVC's `hvcC` as it does H.264's `avcC`.**
+  `set_source_parameters` with an MP4 demuxer's HEVC parameters puts the
+  record's parameter sets in front of each keyframe and rewrites every
+  length-prefixed packet as Annex-B; it used to refuse them with
+  `ParameterSetsNotSupported`, which VVC's `vvcC` still is.
+  `WebRtcTrackSource` can be driven.
 
 - **`DrivenPipeline`: a pipeline with no thread of its own.** Wired as a
   `Pipeline` is, then polled by whoever owns it — many of them on a few

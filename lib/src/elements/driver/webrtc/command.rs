@@ -10,8 +10,6 @@ use str0m::{
 };
 use thiserror::Error as ThisError;
 
-use crate::buffer::MediaBuffer;
-
 /// Names one track of a [`WebRtcPeer`](crate::elements::WebRtcPeer), from
 /// the moment it is requested.
 ///
@@ -94,8 +92,8 @@ pub enum WebRtcError {
     #[error("codec parameters describe {0:?}, which WebRTC does not carry")]
     SourceCodecUnsupported(ffmpeg::codec::Id),
     /// Codec parameters carry configuration this sink cannot put in front of
-    /// a keyframe. H.264's `avcC` is converted; HEVC's `hvcC` and VVC's
-    /// `vvcC` are not, so those need an encoder writing Annex-B headers.
+    /// a keyframe. H.264's `avcC` and HEVC's `hvcC` are converted; VVC's
+    /// `vvcC` is not, so it needs an encoder writing Annex-B headers.
     #[error(
         "track {track_id:?} was given {codec:?} configuration that is not Annex-B parameter sets"
     )]
@@ -216,12 +214,11 @@ pub enum WebRtcError {
     Closed,
 }
 
-/// One command sent from a [`super::track::WebRtcHandle`] or a
-/// [`super::track::WebRtcTrackSink`] (any thread) into the thread
-/// [`super::peer::WebRtcPeer`] runs on as a driver.
+/// One command sent from a [`super::track::WebRtcHandle`] (any thread) into
+/// the thread [`super::peer::WebRtcPeer`] runs on as a driver. What its
+/// track sinks send goes through its outbox instead.
 pub(super) enum Command {
     AddTrack(TrackId, MediaKind, Direction, Codec),
-    Push(TrackId, Option<Codec>, MediaBuffer),
     SetAnswer(SdpAnswer),
     /// A fresh offer from the *remote* peer (their own renegotiation, e.g.
     /// them adding a track) — out of scope to originate ourselves in v1

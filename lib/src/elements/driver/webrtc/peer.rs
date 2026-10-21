@@ -9,10 +9,10 @@ use std::{
 };
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use ffmpeg_next as ffmpeg;
 use str0m::{
-    Event, Input, Output, Rtc,
+    Event, Input, Rtc,
     change::{SdpOffer, SdpPendingOffer},
     format::Codec,
     media::{Direction, MediaKind, MediaTime, Mid},
@@ -30,6 +30,9 @@ use crate::{
 
 use super::{
     command::{Command, TrackId, TrackOutState, WebRtcError},
+    connection::{self, Next, Outputs},
+    inbox::{Delivered, Inbox},
+    outbox::{Outbox, Outgoing},
     stream_info::{StreamInfoProbe, WebRtcStreamInfo},
     track::{AttachedTrack, TrackEndpoints, WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource},
 };
@@ -39,17 +42,17 @@ use super::{
 /// polling rather than a true multi-way wait.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// Bound on the command channel (see [`Command`]) and on each attached
-/// track's inbound buffer (`WebRtcPeer` -> its `WebRtcTrackSource`). Once
-/// this many media buffers are backed up, the newest one is dropped
-/// instead of piling up in memory forever — the right call for live media,
-/// where a backed-up peer means falling behind, not something worth
-/// buffering indefinitely for (same reasoning as
-/// [`crate::queue::OverflowPolicy::DropNewest`]). Control traffic on the
-/// same channel (`AddTrack`/`SetAnswer`/`AcceptOffer`) is never dropped for
-/// capacity pressure — those call sites block on plain `send` instead of
-/// `try_send`. A disconnected peer still rejects the command; `set_answer`
-/// intentionally treats that case as a no-op.
+/// Bound on the command channel (see [`Command`]), on the outbox its track
+/// sinks share, and on each attached track's inbound buffer (`WebRtcPeer`
+/// -> its `WebRtcTrackSource`). Live media that backs up this far means
+/// falling behind, not something worth buffering indefinitely for: an
+/// inbound track drops its newest buffer (same reasoning as
+/// [`crate::queue::OverflowPolicy::DropNewest`]), and the outbox lets go of
+/// what it holds and goes on from each track's next keyframe. Commands
+/// (`AddTrack`/`SetAnswer`/`AcceptOffer`) are never dropped for capacity
+/// pressure — those call sites block on plain `send`. A disconnected peer
+/// still rejects the command; `set_answer` intentionally treats that case
+/// as a no-op.
 const CHANNEL_CAPACITY: usize = 128;
 /// A WebRTC connection to one remote peer, carrying its tracks in and out
 /// of pipelines.
@@ -189,12 +192,11 @@ pub struct WebRtcPeer {
     /// (for tracks the *remote* peer added — see the type docs) never
     /// collide with ones `WebRtcHandle::add_track` mints.
     next_id: Arc<AtomicU64>,
-    /// Cloned into every [`WebRtcTrackSink`] this element hands out via
-    /// [`WebRtcPeer::attach_track`] — including for tracks *this* side
-    /// requested, since `WebRtcTrackSink` is otherwise only ever
-    /// constructed from inside `run`.
-    command_tx: Sender<Command>,
     command_rx: Receiver<Command>,
+    /// What every [`WebRtcTrackSink`] this element hands out puts its
+    /// packets in, for `run` to write — closed as the peer goes, so a sink
+    /// kept past it says so.
+    outbox: Outbox,
     /// The other half of [`WebRtcHandle::next_track`] — one entry per
     /// newly-attached track, in attachment order (see [`TrackId`]'s own
     /// docs for why the caller has to match on it, not just take these in
@@ -205,11 +207,19 @@ pub struct WebRtcPeer {
 }
 
 struct TrackInState {
-    data_tx: Sender<MediaBuffer>,
+    inbox: Inbox,
     codec: Arc<Mutex<Option<Codec>>>,
     stream_info_tx: Sender<WebRtcStreamInfo>,
     stream_info_probe: StreamInfoProbe,
     stream_info_sent: bool,
+}
+
+impl Drop for TrackInState {
+    /// The peer has let go of the track, stopping or for good: its source
+    /// ends once it has handed on what it holds.
+    fn drop(&mut self) {
+        self.inbox.close();
+    }
 }
 
 impl WebRtcPeer {
@@ -251,8 +261,8 @@ impl WebRtcPeer {
                 remote_closed: false,
                 pending: None,
                 next_id: next_id.clone(),
-                command_tx: command_tx.clone(),
                 command_rx,
+                outbox: Outbox::new(CHANNEL_CAPACITY),
                 new_track_tx,
                 on_offer: Box::new(on_offer),
                 on_keyframe_request: Box::new(on_keyframe_request),
@@ -297,17 +307,17 @@ impl WebRtcPeer {
                 kind,
                 outbound_codec,
                 negotiated_codecs.clone(),
-                self.command_tx.clone(),
+                self.outbox.clone(),
             )
         });
         let source = direction.is_receiving().then(|| {
-            let (tx, rx) = bounded(CHANNEL_CAPACITY);
+            let inbox = Inbox::new(CHANNEL_CAPACITY);
             let (stream_info_tx, stream_info_rx) = bounded(1);
             let codec = Arc::new(Mutex::new(None));
             self.tracks_in.insert(
                 mid,
                 TrackInState {
-                    data_tx: tx,
+                    inbox: inbox.clone(),
                     codec: codec.clone(),
                     stream_info_tx,
                     stream_info_probe: StreamInfoProbe::new(),
@@ -318,7 +328,7 @@ impl WebRtcPeer {
                 id,
                 kind,
                 format!("webrtc-track-{}-in", id.0),
-                rx,
+                inbox,
                 codec,
                 negotiated_codecs.clone(),
                 stream_info_rx,
@@ -359,7 +369,7 @@ impl WebRtcPeer {
         }
     }
 
-    fn apply_command(&mut self, cmd: Command, bus: &Bus) -> Result<()> {
+    fn apply_command(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::AddTrack(id, kind, direction, codec) => {
                 pp_info!(
@@ -369,22 +379,6 @@ impl WebRtcPeer {
                 self.tracks_out
                     .insert(id, TrackOutState::ToOpen(kind, direction));
                 self.track_codec.insert(id, codec);
-            }
-            Command::Push(id, codec, buf) => {
-                // A malformed media packet is local to this one track and
-                // buffer. Report and drop it without tearing down the
-                // entire live WebRTC connection, matching Queue's
-                // consume-error contract.
-                if let Err(error) = self.write_track(id, codec, buf) {
-                    bus.post(
-                        &self.pp_log,
-                        BusEvent::Error {
-                            element_type: ElementType::WebRtcPeer,
-                            name: self.name.clone(),
-                            error,
-                        },
-                    );
-                }
             }
             Command::SetAnswer(answer) => {
                 let Some((pending, ids)) = self.pending.take() else {
@@ -464,93 +458,61 @@ impl WebRtcPeer {
         }
     }
 
-    fn write_track(&mut self, id: TrackId, codec: Option<Codec>, buf: MediaBuffer) -> Result<()> {
+    /// Writes everything its track sinks have put in the outbox. A
+    /// malformed packet is local to its one track and buffer: reported and
+    /// dropped without tearing down the connection, matching `Queue`'s
+    /// consume-error contract.
+    fn write_outbox(&mut self, bus: &Bus) {
+        for outgoing in self.outbox.take_all() {
+            if let Err(error) = self.write_track(outgoing) {
+                bus.post(
+                    &self.pp_log,
+                    BusEvent::Error {
+                        element_type: ElementType::WebRtcPeer,
+                        name: self.name.clone(),
+                        error,
+                    },
+                );
+            }
+        }
+    }
+
+    fn write_track(&mut self, outgoing: Outgoing) -> Result<()> {
+        let Outgoing {
+            track: id,
+            codec,
+            packet,
+        } = outgoing;
         let Some(TrackOutState::Open(mid)) = self.tracks_out.get(&id) else {
             // Not open yet (or unknown/never added) — dropped, see
             // `WebRtcHandle::add_track`'s docs.
             return Ok(());
         };
-        let MediaBuffer::Packet(packet) = buf else {
-            return Ok(()); // a frame: refused by the track, never reaches here
-        };
-        let Some(writer) = self.rtc.writer(*mid) else {
-            return Ok(());
-        };
-        let codec = codec.ok_or(WebRtcError::OutboundCodecNotDeclared(id))?;
-        // Never guess the first negotiated codec: str0m packetizes whatever
-        // bytes it receives under the selected payload type, so guessing VP8
-        // for an H.264 packet creates a valid-looking but mislabeled stream.
-        let mut negotiated = Vec::new();
-        let mut pt = None;
-        for params in writer.payload_params() {
-            let candidate = params.spec().codec;
-            if !negotiated.contains(&candidate) {
-                negotiated.push(candidate);
-            }
-            if candidate == codec && pt.is_none() {
-                pt = Some(params.pt());
-            }
-        }
-        let Some(pt) = pt else {
-            return Err(WebRtcError::OutboundCodecNotNegotiated {
-                track_id: id,
-                codec,
-                negotiated,
-            }
-            .into());
-        };
-        let data = packet.data().unwrap_or(&[]).to_vec();
-        let rtp_time = packet_rtp_time(&packet)?;
-        writer
-            .write(pt, Instant::now(), rtp_time, data)
-            .inspect_err(|error| pp_error!(self, "writer.write failed: {error}"))
-            .map_err(WebRtcError::from)?;
+        let mid = *mid;
+        connection::write(&mut self.rtc, mid, id, codec, &packet)
+            .inspect_err(|error| pp_error!(self, "writing track {id:?} failed: {error}"))?;
         Ok(())
     }
 
     /// Drains every immediately-available str0m output (retransmits and
     /// events), returning once str0m itself has nothing left to do until
-    /// the returned deadline.
-    ///
-    /// str0m's pacer lets one packet out at a time and then asks for the
-    /// time again with a deadline already past; such a deadline is answered
-    /// here and the sending goes on, rather than one packet leaving per turn
-    /// of the loop — which held a peer to a thousand packets a second.
+    /// the returned deadline — see [`Outputs`].
     fn drive_until_timeout(&mut self, bus: &Bus) -> Result<Instant> {
-        // Deadlines answered in a row with nothing sent between: a guard
-        // against a connection that keeps asking without moving on.
-        let mut asked = 0;
+        let mut outputs = Outputs::new();
         loop {
-            let output = self
-                .rtc
-                .poll_output()
+            let next = outputs
+                .next(&mut self.rtc)
                 .inspect_err(|error| pp_error!(self, "poll_output failed: {error}"))
                 .map_err(WebRtcError::from)?;
-            match output {
-                Output::Timeout(deadline) => {
-                    let now = Instant::now();
-                    asked += 1;
-                    if deadline > now || asked > 8 {
-                        return Ok(deadline);
-                    }
-                    self.rtc
-                        .handle_input(Input::Timeout(now))
-                        .inspect_err(|error| {
-                            pp_error!(self, "handle_input(Timeout) failed: {error}")
-                        })
-                        .map_err(WebRtcError::from)?;
-                }
-                Output::Transmit(t) => {
-                    asked = 0;
+            match next {
+                Next::Wait(deadline) => return Ok(deadline),
+                Next::Transmit(t) => {
                     // A single failed send (e.g. transient ICMP unreachable)
                     // isn't fatal to the whole connection — str0m's own
                     // retransmit/timeout logic handles loss.
                     let _ = self.socket.send_to(&t.contents, t.destination);
                 }
-                Output::Event(event) => {
-                    asked = 0;
-                    self.handle_event(event, bus);
-                }
+                Next::Event(event) => self.handle_event(event, bus),
             }
         }
     }
@@ -618,26 +580,13 @@ impl WebRtcPeer {
                         track.stream_info_sent = track.stream_info_tx.try_send(info).is_ok();
                     }
 
-                    let mut packet = ffmpeg::Packet::copy(&data.data);
-                    // `data.time` is str0m's own RTP timestamp (numerator)
-                    // over the codec's clock rate (denominator) — reused
-                    // as-is for pts/dts. No B-frame reordering happens over
-                    // RTP (decode order == transmit order), so pts and dts
-                    // are always the same value here.
-                    packet.set_time_base(ffmpeg::Rational::new(1, data.time.denom() as i32));
-                    let pts = data.time.numer() as i64;
-                    packet.set_pts(Some(pts));
-                    packet.set_dts(Some(pts));
-                    if data.is_keyframe() {
-                        let flags = packet.flags() | ffmpeg::codec::packet::Flags::KEY;
-                        packet.set_flags(flags);
-                    }
+                    let packet = connection::received(&data);
                     match track
-                        .data_tx
-                        .try_send(MediaBuffer::Packet(Arc::new(packet).into()))
+                        .inbox
+                        .push(MediaBuffer::Packet(Arc::new(packet).into()))
                     {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
+                        Delivered::Taken => {}
+                        Delivered::Full => {
                             // This track's `WebRtcTrackSource` (or whatever
                             // it feeds) isn't keeping up — drop the newest
                             // buffer rather than let this grow unbounded
@@ -650,7 +599,7 @@ impl WebRtcPeer {
                                 },
                             );
                         }
-                        Err(TrySendError::Disconnected(_)) => {
+                        Delivered::Gone => {
                             // This track's `WebRtcTrackSource` is gone (its
                             // own `Pipeline` finished) — stop trying to feed
                             // it.
@@ -781,6 +730,12 @@ fn to_str0m_media_time(timestamp: MediaTimestamp) -> std::result::Result<MediaTi
     Ok(MediaTime::new(numer, frequency))
 }
 
+impl Drop for WebRtcPeer {
+    fn drop(&mut self) {
+        self.outbox.close();
+    }
+}
+
 impl Element for WebRtcPeer {
     fn name(&self) -> Arc<str> {
         self.name.clone()
@@ -827,9 +782,10 @@ impl Driver for WebRtcPeer {
         let mut buf = vec![0u8; 2000];
         loop {
             while let Ok(cmd) = self.command_rx.try_recv() {
-                self.apply_command(cmd, bus)?;
+                self.apply_command(cmd)?;
             }
             self.negotiate_if_needed();
+            self.write_outbox(bus);
 
             let deadline = self.drive_until_timeout(bus)?;
             if self.remote_closed || !self.rtc.is_alive() || stop.is_stopped() {

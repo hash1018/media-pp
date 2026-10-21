@@ -8,8 +8,10 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+
+use super::inbox::{Inbox, Taken};
 use str0m::{
     change::{SdpAnswer, SdpOffer},
     format::Codec,
@@ -29,6 +31,7 @@ use crate::{
 
 use super::{
     command::{Command, TrackId, WebRtcError},
+    outbox::{Outbox, Outgoing, Pushed},
     stream_info::{WebRtcStreamInfo, annex_b_nalus, str0m_codec},
 };
 
@@ -113,6 +116,43 @@ fn avcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
     for count_mask in [0x1f_u8, 0xff] {
         let count = config.get(offset)? & count_mask;
         offset += 1;
+        for _ in 0..count {
+            let length =
+                u16::from_be_bytes([*config.get(offset)?, *config.get(offset + 1)?]) as usize;
+            offset += 2;
+            let end = offset.checked_add(length)?;
+            if end > config.len() || length == 0 {
+                return None;
+            }
+            parameter_sets.extend_from_slice(&START_CODE);
+            parameter_sets.extend_from_slice(&config[offset..end]);
+            offset = end;
+        }
+    }
+    Some((
+        (!parameter_sets.is_empty()).then_some(parameter_sets),
+        nal_length_size,
+    ))
+}
+
+/// Reads an `HEVCDecoderConfigurationRecord` — HEVC's `avcC`, what an MP4
+/// demuxer puts in `extradata` — as Annex-B parameter sets plus the NAL
+/// length prefix size its packets use; `None` for anything else.
+fn hvcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+    // 22 bytes of profile and format, lengthSizeMinusOne in the low bits of
+    // the last; then a count of arrays, each a type byte, a 16-bit count,
+    // and that many 16-bit-length parameter sets.
+    const HEADER: usize = 23;
+    if config.len() < HEADER || config[0] != 1 || starts_with_start_code(config) {
+        return None;
+    }
+    let nal_length_size = (config[21] & 0x03) as usize + 1;
+    let mut parameter_sets = Vec::new();
+    let mut offset = HEADER;
+    for _ in 0..config[22] {
+        offset += 1;
+        let count = u16::from_be_bytes([*config.get(offset)?, *config.get(offset + 1)?]);
+        offset += 2;
         for _ in 0..count {
             let length =
                 u16::from_be_bytes([*config.get(offset)?, *config.get(offset + 1)?]) as usize;
@@ -344,8 +384,11 @@ impl WebRtcHandle {
 /// One outbound track. A plain [`RawSink`] — no bespoke push API, it links
 /// into a [`crate::pipeline::ChainBuilder`] exactly like
 /// [`crate::elements::RtspMuxer`] or any other terminal sink.
-/// `consume()` only ever hands off to `WebRtcPeer::run`'s own thread via a
-/// channel send; the actual str0m write happens over there.
+/// `consume()` makes the packet ready for RTP and puts it in its
+/// connection's outbox, shared by all the connection's tracks; the str0m
+/// write happens where the connection is driven — the peer's thread. A
+/// connection that falls behind as far as its outbox keeps lets go of what
+/// it holds, and each track goes on from its next keyframe.
 ///
 /// Its negotiated codec capabilities are available immediately through
 /// [`WebRtcTrackSink::negotiated_codecs`]. The outbound selection is initialized
@@ -360,7 +403,7 @@ pub struct WebRtcTrackSink {
     kind: MediaKind,
     codec: Option<Codec>,
     negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
-    command_tx: Sender<Command>,
+    outbox: Outbox,
     /// libavcodec may express encoder delay as a negative first PTS (Opus is
     /// a common example), while RTP media time is unsigned. The first packet
     /// establishes one track-wide shift so relative timing is preserved.
@@ -388,14 +431,14 @@ impl WebRtcTrackSink {
         kind: MediaKind,
         codec: Option<Codec>,
         negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
-        command_tx: Sender<Command>,
+        outbox: Outbox,
     ) -> Self {
         Self {
             id,
             kind,
             codec,
             negotiated_codecs,
-            command_tx,
+            outbox,
             timestamp_offset: None,
             parameter_sets: None,
             nal_length_size: None,
@@ -447,20 +490,21 @@ impl WebRtcTrackSink {
     ///
     /// # A demuxer's parameters
     ///
-    /// A container demuxer describes H.264 with an `avcC` record, and its
-    /// packets are length-prefixed to match rather than Annex-B. Passing
-    /// those parameters is therefore two statements at once: the parameter
-    /// sets are these, and the payloads to come are length-prefixed. Both are
-    /// read out of the one record, and every payload is rewritten as Annex-B
-    /// on its way to RTP.
+    /// A container demuxer describes H.264 with an `avcC` record and HEVC
+    /// with an `hvcC`, and its packets are length-prefixed to match rather
+    /// than Annex-B. Passing those parameters is therefore two statements at
+    /// once: the parameter sets are these, and the payloads to come are
+    /// length-prefixed. Both are read out of the one record, and every
+    /// payload is rewritten as Annex-B on its way to RTP.
     ///
     /// # Errors
     ///
     /// [`WebRtcError::OutboundCodecNotNegotiated`] when this connection did
     /// not retain the codec the parameters name,
     /// [`WebRtcError::SourceCodecUnsupported`] when WebRTC does not carry it
-    /// at all, and [`WebRtcError::ParameterSetsNotSupported`] for HEVC or VVC
-    /// configuration in `hvcC`/`vvcC` form, which this sink cannot convert.
+    /// at all, and [`WebRtcError::ParameterSetsNotSupported`] for
+    /// configuration it cannot read — VVC's `vvcC`, or a record that is not
+    /// what its codec's should be.
     /// A failed call changes nothing, so the previous declaration stays
     /// usable and already-enqueued packets keep the one they were sent with.
     ///
@@ -500,7 +544,10 @@ impl WebRtcTrackSink {
             _ if !annex_b_codec(codec) => (None, None),
             _ if bytes.is_empty() => (None, None),
             _ if starts_with_start_code(&bytes) => (Some(bytes), None),
-            _ if codec == Codec::H264 => match avcc_parameter_sets(&bytes) {
+            _ if matches!(codec, Codec::H264 | Codec::H265) => match match codec {
+                Codec::H264 => avcc_parameter_sets(&bytes),
+                _ => hvcc_parameter_sets(&bytes),
+            } {
                 // A record with no parameter sets still says the packets are
                 // length-prefixed. Nothing is left to prepend, so a keyframe
                 // that turns out not to carry them in-band either is caught
@@ -514,7 +561,7 @@ impl WebRtcTrackSink {
                     .into());
                 }
             },
-            // `hvcC`/`vvcC`: a real configuration record this sink has no
+            // `vvcC`: a real configuration record this sink has no
             // conversion for. Refused rather than prepended verbatim, which
             // would put a decoder configuration into the bitstream.
             _ => {
@@ -636,29 +683,33 @@ impl RawSink for WebRtcTrackSink {
         let buf = self.prepare_bitstream(buf)?;
         let buf = self.prepend_parameter_sets(buf);
         let buf = self.normalize_packet_timestamp(buf)?;
-        // `WebRtcPeer::run` gone (channel disconnected) means this track is
-        // dead — surface it as `Err` rather than swallowing it, so whatever
-        // pipeline this `RawSink` is plugged into (its own `Queue`, its own
-        // `Bus`) actually learns about it instead of silently sending into
-        // a void forever. Non-fatal by the same convention as any other
-        // `RawSink::consume` failure (see `Queue`'s own docs) — just no longer
-        // an invisible one.
+        let (MediaBuffer::Packet(packet), Some(codec)) = (buf, self.codec) else {
+            return Ok(()); // refused above
+        };
+        // The connection gone means this track is dead — surfaced as `Err`
+        // rather than swallowed, so whatever pipeline this sink is in learns
+        // of it instead of sending into a void forever. Non-fatal by the
+        // same convention as any other `RawSink::consume` failure.
         //
-        // A full channel (`WebRtcPeer::run` backed up) drops the newest
-        // buffer instead — same as an unopened track (see `add_track`'s
-        // docs) — but isn't reported on a `Bus`: unlike `WebRtcPeer::run`,
-        // which only ever borrows a `Bus` for the duration of one `run()`
-        // call, `WebRtcTrackSink` is a handle the caller can keep past
-        // `Driver::stop()`, so storing one here would keep that `Bus`'s
-        // channel open indefinitely — including past whatever's waiting on
-        // `BusReceiver::iter()` to finish once every sender is gone.
-        match self
-            .command_tx
-            .try_send(Command::Push(self.id, self.codec, buf))
-        {
-            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => {
-                pp_error!(self, "WebRtcPeer::run gone — track is dead");
+        // A connection fallen behind lets go and goes on from a keyframe —
+        // logged, not reported on a `Bus`: this sink is a handle the caller
+        // can keep past the connection, and a `Bus` kept here would stay
+        // open past whatever waits for every sender to go.
+        match self.outbox.push(Outgoing {
+            track: self.id,
+            codec,
+            packet,
+        }) {
+            Pushed::Taken | Pushed::Skipped => Ok(()),
+            Pushed::FellBehind => {
+                pp_warn!(
+                    self,
+                    "the connection fell behind; going on from the next keyframe"
+                );
+                Ok(())
+            }
+            Pushed::Closed => {
+                pp_error!(self, "the connection is gone — track is dead");
                 Err(WebRtcError::Closed.into())
             }
         }
@@ -842,10 +893,11 @@ impl WebRtcTrackSink {
 /// the same shape as [`crate::elements::AppSource`]: it links into its own
 /// [`crate::pipeline::Pipeline`] via `src_pads()` like any other source.
 /// The difference from `AppSource` is only *who* feeds it — instead of an
-/// [`crate::elements::AppSourceHandle`] the app calls itself,
-/// [`crate::driver::Driver::run`] pushes into the sending half of this same
-/// channel internally, from its own thread, for every `Event::MediaData`
-/// on this track's `Mid`. Nothing here ever calls back into caller-supplied
+/// [`crate::elements::AppSourceHandle`] the app calls itself, whatever
+/// drives the connection puts each packet received on this track's `Mid`
+/// into the track's inbox, from its own thread. It can be driven — run in
+/// a [`DrivenPipeline`](crate::pipeline::DrivenPipeline): a packet wakes
+/// the poll that found none. Nothing here ever calls back into caller-supplied
 /// code from `WebRtcPeer::run`'s own thread — that thread only ever touches
 /// this crate's own types (see the module docs for why `WebRtcPeer` hands
 /// tracks out through [`WebRtcHandle::next_track`] instead of a callback).
@@ -865,7 +917,7 @@ struct Receiving {
     /// Its one output's: encoded media of the track's kind, whichever
     /// codec is negotiated with the peer at runtime.
     contract: OutputContract,
-    data_rx: Receiver<MediaBuffer>,
+    inbox: Inbox,
     codec: Arc<Mutex<Option<Codec>>>,
     negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
     stream_info: Mutex<StreamInfoState>,
@@ -881,7 +933,7 @@ impl WebRtcTrackSource {
         id: TrackId,
         kind: MediaKind,
         name: impl Into<String>,
-        data_rx: Receiver<MediaBuffer>,
+        inbox: Inbox,
         codec: Arc<Mutex<Option<Codec>>>,
         negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
         stream_info_rx: Receiver<WebRtcStreamInfo>,
@@ -894,7 +946,7 @@ impl WebRtcTrackSource {
                 id,
                 pp_log,
                 contract: OutputContract::Fixed(PortContract::packet(packet_kind(kind))),
-                data_rx,
+                inbox,
                 codec,
                 negotiated_codecs,
                 stream_info: Mutex::new(StreamInfoState {
@@ -976,20 +1028,38 @@ impl Source for Receiving {
         self.contract
     }
 
-    /// The next packet the peer received — or, once the peer is gone, the
-    /// end of the stream.
+    /// It waits on its inbox, which a packet wakes.
+    fn drivable(&self) -> bool {
+        true
+    }
+
+    /// The next packet the connection received — or, once it has let go of
+    /// the track, the end of the stream.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        Ok(match wait.recv(&self.data_rx) {
-            Received::Got(buf) => Produced::Buffer(buf),
-            Received::LetGo => Produced::Nothing,
-            Received::Gone => {
-                pp_info!(self, "WebRtcPeer gone, ending");
-                Produced::End
+        loop {
+            let waker = wait.waker().cloned();
+            match self.inbox.take(waker.as_ref()) {
+                Taken::Packet(buf) => return Ok(Produced::Buffer(buf)),
+                Taken::Ended => {
+                    pp_info!(self, "the connection let go of the track, ending");
+                    return Ok(Produced::End);
+                }
+                Taken::Empty if waker.is_some() => return Ok(Produced::Nothing),
+                Taken::Empty => match wait.recv(self.inbox.bell()) {
+                    Received::Got(()) => {}
+                    Received::LetGo | Received::Gone => return Ok(Produced::Nothing),
+                },
             }
-        })
+        }
     }
 
     fn attached(&mut self, cx: &Attached<'_>) {
         self.pp_log = cx.pp_log().clone();
+    }
+}
+
+impl Drop for Receiving {
+    fn drop(&mut self) {
+        self.inbox.reader_gone();
     }
 }

@@ -20,6 +20,7 @@ use str0m::{
 };
 
 use super::command::Command;
+use super::outbox::{Outbox, Outgoing};
 use super::peer::packet_rtp_time;
 use super::{
     AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
@@ -49,6 +50,36 @@ fn command_only_handle(capacity: usize) -> (WebRtcHandle, Receiver<Command>) {
         },
         command_rx,
     )
+}
+
+/// What a sink put in its outbox, one at a time, as the peer takes it.
+struct Pushes(
+    Outbox,
+    std::cell::RefCell<std::collections::VecDeque<Outgoing>>,
+);
+
+/// One packet a sink pushed: its track, its codec, the packet.
+struct Push(TrackId, Option<Codec>, MediaBuffer);
+
+impl Pushes {
+    fn recv(&self) -> std::result::Result<Push, &'static str> {
+        let mut taken = self.1.borrow_mut();
+        if taken.is_empty() {
+            taken.extend(self.0.take_all());
+        }
+        let outgoing = taken.pop_front().ok_or("nothing was pushed")?;
+        Ok(Push(
+            outgoing.track,
+            Some(outgoing.codec),
+            MediaBuffer::Packet(outgoing.packet),
+        ))
+    }
+}
+
+/// An outbox for a sink, and how a test reads what it pushes.
+fn outbox_of(capacity: usize) -> (Outbox, Pushes) {
+    let outbox = Outbox::new(capacity);
+    (outbox.clone(), Pushes(outbox, Default::default()))
 }
 
 #[test]
@@ -122,14 +153,14 @@ fn add_track_returns_closed_instead_of_a_phantom_id() {
 
 #[test]
 fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
-    let (handle, _command_rx) = command_only_handle(1);
+    let (outbox, _command_rx) = outbox_of(1);
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Vp8]));
     let mut sink = WebRtcTrackSink::new(
         TrackId(7),
         MediaKind::Video,
         None,
         negotiated,
-        handle.command_tx.clone(),
+        outbox.clone(),
     );
     let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
     packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
@@ -167,18 +198,18 @@ fn parameters_for(id: ffmpeg::codec::Id, extradata: &[u8]) -> ffmpeg::codec::Par
 
 /// An H.264 video sink for a track whose negotiation retained H.264, with
 /// the receiver its pushes land in.
-fn h264_sink(id: u64, capacity: usize) -> (WebRtcTrackSink, Receiver<Command>) {
+fn h264_sink(id: u64, capacity: usize) -> (WebRtcTrackSink, Pushes) {
     video_sink(id, capacity, Codec::H264)
 }
 
-fn video_sink(id: u64, capacity: usize, codec: Codec) -> (WebRtcTrackSink, Receiver<Command>) {
-    let (handle, command_rx) = command_only_handle(capacity);
+fn video_sink(id: u64, capacity: usize, codec: Codec) -> (WebRtcTrackSink, Pushes) {
+    let (outbox, command_rx) = outbox_of(capacity);
     let sink = WebRtcTrackSink::new(
         TrackId(id),
         MediaKind::Video,
         Some(codec),
         Arc::new(std::sync::Mutex::new(vec![codec])),
-        handle.command_tx.clone(),
+        outbox,
     );
     (sink, command_rx)
 }
@@ -227,7 +258,7 @@ fn parameter_sets_go_in_front_of_every_keyframe_and_nothing_else() {
 
     let sent: Vec<Vec<u8>> = (0..3)
         .map(|_| {
-            let Command::Push(TrackId(9), _, MediaBuffer::Packet(packet)) =
+            let Push(TrackId(9), _, MediaBuffer::Packet(packet)) =
                 command_rx.recv().expect("packet was queued")
             else {
                 panic!("expected a packet command");
@@ -290,7 +321,7 @@ fn a_demuxers_avcc_configuration_rewrites_its_packets_as_annex_b() {
 
     let sent: Vec<Vec<u8>> = (0..2)
         .map(|_| {
-            let Command::Push(TrackId(11), _, MediaBuffer::Packet(packet)) =
+            let Push(TrackId(11), _, MediaBuffer::Packet(packet)) =
                 command_rx.recv().expect("packet was queued")
             else {
                 panic!("expected a packet command");
@@ -316,6 +347,49 @@ fn a_demuxers_avcc_configuration_rewrites_its_packets_as_annex_b() {
     );
 }
 
+/// An MP4's HEVC comes the same way, its configuration in `hvcC`: the
+/// record's parameter sets go in front of a keyframe, and every packet is
+/// rewritten as Annex-B — what the WebRTC server did for itself before it
+/// sent through this sink.
+#[test]
+fn a_demuxers_hvcc_configuration_rewrites_its_packets_as_annex_b() {
+    let (mut sink, command_rx) = video_sink(21, 2, Codec::H265);
+    // An hvcC with four-byte lengths and one array: a VPS of two bytes.
+    let mut record = vec![1u8; 22];
+    record[21] = 0x03;
+    record.push(1);
+    record.extend_from_slice(&[0x20, 0, 1, 0, 2, 0x40, 1]);
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::HEVC, &record))
+        .expect("H.265 is negotiated for this track");
+
+    // A keyframe that carries its SPS and PPS, as a demuxer's first one does.
+    let keyframe: &[u8] = &[
+        0, 0, 0, 2, 0x42, 1, 0, 0, 0, 2, 0x44, 1, 0, 0, 0, 2, 0x26, 1,
+    ];
+    sink.consume(video_packet(keyframe, true))
+        .expect("an hvcC-configured sink accepts the packets that record describes");
+    sink.consume(video_packet(&[0, 0, 0, 2, 0x02, 1], false))
+        .expect("and the ones between keyframes");
+
+    let sent: Vec<Vec<u8>> = (0..2)
+        .map(|_| {
+            let Push(TrackId(21), _, MediaBuffer::Packet(packet)) =
+                command_rx.recv().expect("packet was queued")
+            else {
+                panic!("expected a packet");
+            };
+            packet.data().expect("packet has a payload").to_vec()
+        })
+        .collect();
+    assert_eq!(
+        sent[0],
+        [
+            0, 0, 0, 1, 0x40, 1, 0, 0, 0, 1, 0x42, 1, 0, 0, 0, 1, 0x44, 1, 0, 0, 0, 1, 0x26, 1
+        ]
+    );
+    assert_eq!(sent[1], [0, 0, 0, 1, 0x02, 1]);
+}
+
 /// The record says the payloads are length-prefixed, and this one is not.
 ///
 /// A caller can have reason to pass a demuxer's parameters — the parameter
@@ -333,7 +407,7 @@ fn a_sink_declared_from_an_avcc_record_still_takes_annex_b_packets() {
     sink.consume(video_packet(payload, true))
         .expect("a payload already in the form RTP carries is not a malformed one");
 
-    let Command::Push(TrackId(15), _, MediaBuffer::Packet(packet)) =
+    let Push(TrackId(15), _, MediaBuffer::Packet(packet)) =
         command_rx.recv().expect("packet was queued")
     else {
         panic!("expected a packet command");
@@ -369,7 +443,7 @@ fn set_codec_forgets_what_a_previous_declaration_said() {
     sink.consume(video_packet(payload, true))
         .expect("a self-assembled Annex-B keyframe carrying its own parameter sets is accepted");
 
-    let Command::Push(TrackId(16), _, MediaBuffer::Packet(packet)) =
+    let Push(TrackId(16), _, MediaBuffer::Packet(packet)) =
         command_rx.recv().expect("packet was queued")
     else {
         panic!("expected a packet command");
@@ -404,7 +478,7 @@ fn an_avcc_with_no_parameter_sets_still_rewrites_its_packets() {
     sink.consume(video_packet(payload, true))
         .expect("a keyframe carrying its own parameter sets is accepted");
 
-    let Command::Push(TrackId(17), _, MediaBuffer::Packet(packet)) =
+    let Push(TrackId(17), _, MediaBuffer::Packet(packet)) =
         command_rx.recv().expect("packet was queued")
     else {
         panic!("expected a packet command");
@@ -551,18 +625,18 @@ fn a_keyframe_with_no_parameter_sets_and_none_declared_is_refused() {
     .expect("a keyframe carrying its own SPS/PPS needs nothing prepended");
 }
 
-/// HEVC keeps its configuration in `hvcC`, which is neither Annex-B nor the
-/// `avcC` this sink converts. Storing it would put a decoder configuration
-/// record into the bitstream in front of every keyframe.
+/// HEVC configuration that is neither Annex-B nor an `hvcC` record this
+/// sink can read is refused: storing it would put a decoder configuration
+/// into the bitstream in front of every keyframe.
 #[test]
 fn hevc_configuration_that_is_not_annex_b_is_refused() {
-    let (handle, _command_rx) = command_only_handle(1);
+    let (outbox, _command_rx) = outbox_of(1);
     let mut sink = WebRtcTrackSink::new(
         TrackId(15),
         MediaKind::Video,
         Some(Codec::H265),
         Arc::new(std::sync::Mutex::new(vec![Codec::H265])),
-        handle.command_tx.clone(),
+        outbox.clone(),
     );
 
     let error = sink
@@ -570,7 +644,7 @@ fn hevc_configuration_that_is_not_annex_b_is_refused() {
             ffmpeg::codec::Id::HEVC,
             &[0x01, 0x01, 0x60],
         ))
-        .expect_err("hvcC cannot be prepended and cannot be converted");
+        .expect_err("a record too short to be an hvcC is neither prepended nor converted");
     assert!(matches!(
         error,
         crate::Error::WebRtcError(WebRtcError::ParameterSetsNotSupported {
@@ -586,13 +660,13 @@ fn hevc_configuration_that_is_not_annex_b_is_refused() {
 /// else.
 #[test]
 fn audio_parameters_declare_the_codec_without_leaving_headers_to_prepend() {
-    let (handle, command_rx) = command_only_handle(1);
+    let (outbox, command_rx) = outbox_of(1);
     let mut sink = WebRtcTrackSink::new(
         TrackId(16),
         MediaKind::Audio,
         None,
         Arc::new(std::sync::Mutex::new(vec![Codec::Opus])),
-        handle.command_tx.clone(),
+        outbox.clone(),
     );
     let opus_head = [b'O', b'p', b'u', b's', b'H', b'e', b'a', b'd', 1, 2];
 
@@ -602,7 +676,7 @@ fn audio_parameters_declare_the_codec_without_leaving_headers_to_prepend() {
     let payload: &[u8] = &[0xfc, 0xff, 0xfe];
     sink.consume(video_packet(payload, true))
         .expect("an Opus packet needs no bitstream handling");
-    let Command::Push(TrackId(16), Some(Codec::Opus), MediaBuffer::Packet(packet)) =
+    let Push(TrackId(16), Some(Codec::Opus), MediaBuffer::Packet(packet)) =
         command_rx.recv().expect("packet was queued")
     else {
         panic!("expected an Opus packet command");
@@ -631,14 +705,14 @@ fn parameters_naming_a_codec_webrtc_does_not_carry_are_refused() {
 
 #[test]
 fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() {
-    let (handle, command_rx) = command_only_handle(2);
+    let (outbox, command_rx) = outbox_of(2);
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Opus]));
     let mut sink = WebRtcTrackSink::new(
         TrackId(8),
         MediaKind::Audio,
         Some(Codec::Opus),
         negotiated,
-        handle.command_tx.clone(),
+        outbox.clone(),
     );
 
     for pts in [-312, 648] {
@@ -651,7 +725,7 @@ fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() 
     }
 
     for expected in [0, 960] {
-        let Command::Push(TrackId(8), Some(Codec::Opus), MediaBuffer::Packet(packet)) =
+        let Push(TrackId(8), Some(Codec::Opus), MediaBuffer::Packet(packet)) =
             command_rx.recv().expect("normalized packet was queued")
         else {
             panic!("expected an Opus packet command");
@@ -663,14 +737,14 @@ fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() 
 
 #[test]
 fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
-    let (handle, command_rx) = command_only_handle(1);
+    let (outbox, command_rx) = outbox_of(1);
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Vp8]));
     let mut sink = WebRtcTrackSink::new(
         TrackId(7),
         MediaKind::Video,
         None,
         negotiated,
-        handle.command_tx.clone(),
+        outbox.clone(),
     );
 
     sink.set_codec(Codec::Vp8)
@@ -692,8 +766,7 @@ fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
     packet.set_pts(Some(0));
     sink.consume(MediaBuffer::Packet(Arc::new(packet).into()))
         .expect("the previous VP8 selection should still be usable");
-    let Command::Push(TrackId(7), codec, _) = command_rx.recv().expect("packet should be queued")
-    else {
+    let Push(TrackId(7), codec, _) = command_rx.recv().expect("packet should be queued") else {
         panic!("expected Push command");
     };
     assert_eq!(codec, Some(Codec::Vp8));
@@ -701,13 +774,13 @@ fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
 
 #[test]
 fn wait_stream_info_can_retry_after_timeout_and_caches_the_result() {
-    let (_data_tx, data_rx) = bounded(1);
+    let inbox = super::inbox::Inbox::new(1);
     let (info_tx, info_rx) = bounded(1);
     let source = WebRtcTrackSource::new(
         TrackId(9),
         MediaKind::Video,
         "track-in",
-        data_rx,
+        inbox,
         Arc::new(std::sync::Mutex::new(None)),
         Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
         info_rx,
@@ -751,13 +824,13 @@ fn wait_stream_info_can_retry_after_timeout_and_caches_the_result() {
 
 #[test]
 fn wait_stream_info_returns_closed_if_the_peer_ends_before_media() {
-    let (_data_tx, data_rx) = bounded(1);
+    let inbox = super::inbox::Inbox::new(1);
     let (info_tx, info_rx) = bounded(1);
     let source = WebRtcTrackSource::new(
         TrackId(10),
         MediaKind::Video,
         "track-in",
-        data_rx,
+        inbox,
         Arc::new(std::sync::Mutex::new(None)),
         Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
         info_rx,
@@ -1813,4 +1886,52 @@ fn a_peer_that_dies_notifies_the_surviving_peer_on_both_endpoints() {
 
     track_pipeline_a.stop();
     driver_a.stop();
+}
+
+/// Driven, a track source waits on its inbox: what the connection puts in
+/// wakes the poll that found nothing, and the connection letting go of the
+/// track ends the pipeline — what a server's publisher sessions run on.
+#[test]
+fn a_track_source_driven_is_woken_by_what_the_connection_receives() {
+    use std::task::{Context, Wake, Waker};
+
+    use crate::elements::PacketCounter;
+    use crate::pipeline::{Driven, DrivenPipeline};
+
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let inbox = super::inbox::Inbox::new(8);
+    let (_info_tx, info_rx) = bounded(1);
+    let source = WebRtcTrackSource::new(
+        TrackId(30),
+        MediaKind::Video,
+        "track-in",
+        inbox.clone(),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
+        info_rx,
+    );
+    let (counter, count) = PacketCounter::new("counter");
+    let (mut pipeline, ()) = DrivenPipeline::new("publisher", source, |source, ctx| {
+        ctx.attach(source, 0, ctx.branch().to(counter)?)?;
+        Ok(())
+    })
+    .unwrap();
+    let wakes = Arc::new(Count(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+
+    assert_eq!(pipeline.poll(&mut cx), Driven::Pending { at: None });
+    inbox.push(video_packet(&[0, 0, 0, 1, 0x65], true));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "a packet wakes it");
+    assert_eq!(pipeline.poll(&mut cx), Driven::Pending { at: None });
+    assert_eq!(count.get(), 1);
+    inbox.close();
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 2, "the end wakes it");
+    assert_eq!(pipeline.poll(&mut cx), Driven::Finished);
 }

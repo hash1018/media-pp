@@ -384,10 +384,22 @@ Each stage lands on its own, with its tests, as the streaming stages did.
    a cost that grew as the square of the players. `TestVideoSource` and
    `TestAudioSource` (the clock) were made drivable in stage 1, which its
    tests needed.
-3. **WebRTC.** `WebRtcTrackSink`'s outbox target; `WebRtcServer`'s sessions
-   on driven pipelines, polled by the thread that owns them; the server's
-   own reader, timeline, pacing and Annex B conversion removed; paths as
-   §5.4. The server's tests, unchanged in what they assert, pass.
+3. **WebRTC**, in two parts, after the user asked (2026-10-22) for the
+   peer and the server to be one implementation rather than two:
+   - **3a** — done. What `WebRtcPeer` and the server did each their own way
+     is shared: the outbox a connection's `WebRtcTrackSink`s put their
+     packets in (the peer drains it whole; a server session as each packet
+     is due), the inbox a `WebRtcTrackSource` reads — drivable now, woken
+     by what the connection puts in — and the loop that takes str0m's
+     output and writes a packet (`connection.rs`). The sink converts
+     `hvcC` as the server did. The peer is on them, its tests passing.
+   - **3b** — `WebRtcServer`'s sessions on driven pipelines and the same
+     pieces: a player `BroadcastSource → WebRtcTrackSink` per track it
+     takes, a publisher `WebRtcTrackSource → BroadcastSink` per track,
+     polled by the thread that owns the session; the server's own reader,
+     timeline, Annex B conversion and str0m loop removed, its catch-up
+     pacing kept on the outbox; paths as §5.4. The server's tests,
+     unchanged in what they assert, pass.
 4. **RTSP.** `RtspTrackSink`; `RtspServer`'s sessions likewise, polled from
    their tasks.
 5. **Measured.** `rtsp_load` and `webrtc_load` against the same figures as
