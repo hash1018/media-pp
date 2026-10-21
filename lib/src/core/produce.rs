@@ -9,6 +9,7 @@
 
 use std::{
     sync::Arc,
+    task::Waker,
     time::{Duration, Instant},
 };
 
@@ -16,7 +17,10 @@ use crate::{
     buffer::MediaBuffer,
     bus::Bus,
     contract::OutputContract,
-    control::{ChannelGone, ControlMsg, ControlReceiver, RequestKind, handle_request},
+    control::{
+        ChannelGone, ControlMsg, ControlReceiver, RequestKind, apply_finish, apply_one,
+        apply_one_unacked, handle_request,
+    },
     element::{
         Attached, Context, Element, ElementType, Identity, Named, RawSource, ReversibleSource,
         SeekableSource, SrcPads,
@@ -175,6 +179,24 @@ pub trait Source: Send {
     /// default.
     fn stopping(&mut self) {}
 
+    /// Whether it can be driven — run by a
+    /// [`DrivenPipeline`](crate::pipeline::DrivenPipeline) on whatever
+    /// thread polls it rather than on one of its own. It can where it waits
+    /// only through [`Wait::until`], or on something it hands
+    /// [`Wait::waker`] to, and where [`Self::starting`] sets up nothing
+    /// that has to stay on one thread: a driven pipeline may be polled on
+    /// another thread each time. `false` by default, and a driven pipeline
+    /// refuses a source that says so.
+    ///
+    /// Driven, a wait never blocks: [`Wait::until`] answers `false` before
+    /// its time, and the source is asked again once it has come. So the
+    /// time a drivable source waits for is one it keeps until it is there
+    /// — `wait.until(wait.now() + tick)`, worked out anew each time it is
+    /// asked, is never reached.
+    fn drivable(&self) -> bool {
+        false
+    }
+
     /// Called as it is added to a pipeline, before it is asked for anything.
     ///
     /// It is told who it is in the pipeline it is being added to, and that
@@ -243,6 +265,35 @@ pub struct Wait<'a> {
     paused: Duration,
     /// Which of the source's outputs something is wired to.
     linked: &'a [bool],
+    /// Driven, what the poll it runs in has to know of its waits — and
+    /// then a wait never blocks.
+    driving: Option<&'a mut Driving>,
+}
+
+/// What a wait in a driven poll leaves for the poll: when the source wants
+/// to be asked again, and whether it took the poll's waker to be woken by
+/// something else.
+pub(crate) struct Driving {
+    waker: Waker,
+    /// The earliest time a wait was let go before, on the real clock.
+    deadline: Option<Instant>,
+    /// Whether the source took [`Self::waker`].
+    took_waker: bool,
+}
+
+impl Driving {
+    fn new(waker: Waker) -> Self {
+        Self {
+            waker,
+            deadline: None,
+            took_waker: false,
+        }
+    }
+
+    /// Asks again by `at`, on the real clock.
+    fn by(&mut self, at: Instant) {
+        self.deadline = Some(self.deadline.map_or(at, |deadline| deadline.min(at)));
+    }
 }
 
 impl Wait<'_> {
@@ -271,7 +322,21 @@ impl Wait<'_> {
     /// [`AppSource`](crate::elements::AppSource)'s job; one that must look
     /// at something of its own waits a few milliseconds at a time here and
     /// looks again.
+    ///
+    /// In a [`DrivenPipeline`](crate::pipeline::DrivenPipeline) this never
+    /// blocks: before `at`, it answers `false` at once, and the source is
+    /// asked again once `at` has come.
     pub fn until(&mut self, at: Instant) -> bool {
+        let now = self.now();
+        if let Some(driving) = self.driving.as_deref_mut() {
+            if now >= at {
+                return true;
+            }
+            // `at` is on the clock a pause stands still on; the poll's
+            // owner keeps the real one.
+            driving.by(at + self.paused);
+            return false;
+        }
         let Some(control) = self.control else {
             std::thread::sleep(at.saturating_duration_since(self.now()));
             return true;
@@ -287,6 +352,20 @@ impl Wait<'_> {
                 return false;
             }
         }
+    }
+
+    /// The waker of the poll this runs in, in a
+    /// [`DrivenPipeline`](crate::pipeline::DrivenPipeline) — `None` on a
+    /// thread of the source's own.
+    ///
+    /// For a source that waits on something that can wake it: hand the
+    /// waker to it, answer [`Produced::Nothing`], and the pipeline is polled
+    /// again once it is woken. A source that waits on anything else is not
+    /// [`Source::drivable`].
+    pub fn waker(&mut self) -> Option<&Waker> {
+        let driving = self.driving.as_deref_mut()?;
+        driving.took_waker = true;
+        Some(&driving.waker)
     }
 
     /// Waits for `rx`'s next message the same way: [`Received::Got`] it,
@@ -320,6 +399,25 @@ impl Wait<'_> {
     ) -> Option<Received<T>> {
         use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 
+        // Driven, what is there now, or let go: a channel cannot wake the
+        // poll, so a source waiting on one is not drivable — see
+        // `Source::drivable` — and this only keeps it from blocking.
+        let now = self.now();
+        let paused = self.paused;
+        if let Some(driving) = self.driving.as_deref_mut() {
+            return match rx.try_recv() {
+                Ok(got) => Some(Received::Got(got)),
+                Err(TryRecvError::Disconnected) => Some(Received::Gone),
+                Err(TryRecvError::Empty) => match at {
+                    Some(at) if now >= at => None,
+                    Some(at) => {
+                        driving.by(at + paused);
+                        Some(Received::LetGo)
+                    }
+                    None => Some(Received::LetGo),
+                },
+            };
+        }
         let Some(requests) = self.control else {
             let got = match at {
                 None => rx.recv().ok(),
@@ -405,7 +503,48 @@ pub struct SourceStage<P> {
     /// Whether a `Seek` has repositioned the source since it last ended its
     /// outputs — which sends it back to making things.
     sought: bool,
+    /// Where the last poll left it, driven — see [`RawSource::drive`].
+    driven: DriveState,
 }
+
+/// Where a driven source stands between one poll and the next: what its
+/// thread's loop keeps in where it is, driven, it keeps here.
+#[derive(Default)]
+struct DriveState {
+    /// Whether [`Source::starting`] has been called.
+    started: bool,
+    /// Since when it has been paused: a pause is a state, driven, rather
+    /// than a wait.
+    paused_since: Option<Instant>,
+    /// At its end, the outputs still owed theirs.
+    ending: Option<Vec<bool>>,
+    /// Whether it has ended, and [`Source::stopping`] been called.
+    ended: bool,
+}
+
+/// What one poll of a driven source hands it — see
+/// [`DrivenPipeline`](crate::pipeline::DrivenPipeline). Only this crate
+/// makes one.
+#[doc(hidden)]
+pub struct Drive<'a> {
+    pub(crate) control: &'a ControlReceiver,
+    pub(crate) bus: &'a Bus,
+    pub(crate) waker: &'a Waker,
+}
+
+/// Where a poll left a driven source.
+#[doc(hidden)]
+pub enum Stepped {
+    /// To be polled again when woken, or by the time given where there is
+    /// one.
+    Pending(Option<Instant>),
+    /// Stopped, finished or at its end, and let go of.
+    Ended,
+}
+
+/// How many things a driven source is asked for in one poll at most, so
+/// that one pipeline does not keep the others on its thread waiting.
+const DRIVEN_BUDGET: usize = 32;
 
 /// How handing every output its end went.
 enum Ending {
@@ -440,6 +579,7 @@ impl<P: Source> SourceStage<P> {
             linked: Vec::new(),
             owed_segment: None,
             sought: false,
+            driven: DriveState::default(),
         }
     }
 
@@ -577,6 +717,7 @@ impl<P: Source> RawSource for SourceStage<P> {
             control: None,
             paused: self.paused,
             linked: &self.linked,
+            driving: None,
         };
         while self
             .inner
@@ -600,9 +741,200 @@ impl<P: Source> RawSource for SourceStage<P> {
         }
         Ok(())
     }
+
+    fn drivable(&self) -> bool {
+        self.inner.drivable()
+    }
+
+    /// One poll of the source in a driven pipeline: what the thread's loop
+    /// does in [`Self::run`], as far as it gets without waiting — the
+    /// requests taken, the source asked until it has nothing now — and
+    /// where it got to, for the next poll. [`Source::starting`] on the
+    /// first, and [`Source::stopping`] once it has ended, however.
+    fn drive(&mut self, drive: &mut Drive<'_>) -> Result<Stepped> {
+        if self.driven.ended {
+            return Ok(Stepped::Ended);
+        }
+        if !self.driven.started {
+            pp_info!(pp_log: self.identity.pp_log(), "started");
+            self.linked = self.pads.iter().map(SrcPad::is_linked).collect();
+            self.driven.started = true;
+            if let Err(error) = self.inner.starting() {
+                self.driven.ended = true;
+                return Err(error);
+            }
+        }
+        let stepped = self.step(drive);
+        if !matches!(stepped, Ok(Stepped::Pending(_))) {
+            self.driven.ended = true;
+            self.inner.stopping();
+        }
+        stepped
+    }
 }
 
 impl<P: Source> SourceStage<P> {
+    /// [`RawSource::drive`] between the source's own setting up and
+    /// letting go.
+    fn step(&mut self, drive: &mut Drive<'_>) -> Result<Stepped> {
+        let (control, bus) = (drive.control, drive.bus);
+        let state = Arc::clone(control.state());
+        // What the pipeline asks first, as `handle_request` takes it — but
+        // a pause, rather than waited out here, is where the next poll
+        // finds the source.
+        while let Ok(Some((request, ack))) = control.try_take() {
+            let RequestKind::Control(msg) = request else {
+                self.finish_driven(bus, &ack, state.backwards());
+                pp_info!(pp_log: self.identity.pp_log(), "stopped");
+                return Ok(Stepped::Ended);
+            };
+            if let Some(since) = self.driven.paused_since {
+                if !state.holds() {
+                    // Downstream goes on first, then the source itself, and
+                    // only then is the request done — see `wait_out_pause`.
+                    apply_one_unacked(self, bus, &msg, &state)?;
+                    self.paused += since.elapsed();
+                    self.driven.paused_since = None;
+                    self.inner.resuming()?;
+                    let _ = ack.send(());
+                    continue;
+                }
+            } else if msg == ControlMsg::Pause {
+                self.driven.paused_since = Some(Instant::now());
+                self.inner.pausing()?;
+            }
+            if apply_one(self, bus, &msg, &ack, &state)? {
+                if let Some(since) = self.driven.paused_since.take() {
+                    self.paused += since.elapsed();
+                }
+                pp_info!(pp_log: self.identity.pp_log(), "stopped");
+                return Ok(Stepped::Ended);
+            }
+        }
+        if self.driven.paused_since.is_some() {
+            return Ok(Stepped::Pending(None));
+        }
+        if self.driven.ending.is_some() {
+            return Ok(self.end_driven(bus));
+        }
+        let mut driving = Driving::new(drive.waker.clone());
+        for _ in 0..DRIVEN_BUDGET {
+            let prerolling = self.prerolling();
+            self.parking
+                .drain(&mut self.pads, &mut reporter(&self.identity, bus));
+            if let Some((position, start)) = self.owed_segment {
+                if !self.parking.is_empty() {
+                    return Ok(Stepped::Pending(Some(Instant::now() + HELD_POLL)));
+                }
+                self.owed_segment = None;
+                self.begin_segment(false, position, start, bus);
+            }
+            if self.parking.blocked(&mut self.pads, prerolling) {
+                return Ok(Stepped::Pending(Some(Instant::now() + HELD_POLL)));
+            }
+            driving.deadline = None;
+            driving.took_waker = false;
+            let mut wait = Wait {
+                control: None,
+                paused: self.paused,
+                linked: &self.linked,
+                driving: Some(&mut driving),
+            };
+            match self.inner.produce(&mut wait)? {
+                Produced::Buffer(buf) => self.hand_on(0, buf, prerolling, bus)?,
+                Produced::On(index, buf) => self.hand_on(index, buf, prerolling, bus)?,
+                Produced::Segment {
+                    flushed: true,
+                    position,
+                    start,
+                } => {
+                    self.parking.forget();
+                    self.begin_segment(true, position, start, bus);
+                }
+                Produced::Segment {
+                    flushed: false,
+                    position,
+                    start,
+                } => {
+                    if self.parking.is_empty() {
+                        self.begin_segment(false, position, start, bus);
+                    } else {
+                        self.owed_segment = Some((position, start));
+                    }
+                }
+                // Let go of a wait: asked again by when it said, or once
+                // what it handed the waker to wakes the poll. Neither, it
+                // had nothing this time and is asked again at once, as its
+                // thread's loop would.
+                Produced::Nothing => {
+                    if let Some(at) = driving.deadline {
+                        return Ok(Stepped::Pending(Some(at)));
+                    }
+                    if driving.took_waker {
+                        return Ok(Stepped::Pending(None));
+                    }
+                }
+                // Nothing seeks a driven pipeline, so nothing brings the
+                // source back from its end: it ends there.
+                Produced::End => {
+                    self.driven.ending = Some(vec![true; self.pads.len()]);
+                    return Ok(self.end_driven(bus));
+                }
+            }
+        }
+        // More to do, and the rest of the thread's pipelines are owed a turn.
+        Ok(Stepped::Pending(Some(Instant::now())))
+    }
+
+    /// Hands each output owed its end that end, as [`Self::end_every_output`]
+    /// does, as far as it can without waiting.
+    fn end_driven(&mut self, bus: &Bus) -> Stepped {
+        let pp_log = self.identity.pp_log().clone();
+        let Some(owed) = self.driven.ending.as_mut() else {
+            return Stepped::Ended;
+        };
+        let mut report = reporter(&self.identity, bus);
+        self.parking.drain(&mut self.pads, &mut report);
+        for (index, pad) in self.pads.iter_mut().enumerate() {
+            if owed[index] && !self.parking.owes(index) && (!pad.is_linked() || pad.ready_consume())
+            {
+                if let Err(error) = pad.push_eos(&pp_log) {
+                    report(error);
+                }
+                owed[index] = false;
+            }
+        }
+        if owed.contains(&true) {
+            return Stepped::Pending(Some(Instant::now() + HELD_POLL));
+        }
+        pp_info!(
+            pp_log: &pp_log,
+            "event=eos phase=source_completed outcome=ok"
+        );
+        Stepped::Ended
+    }
+
+    /// A finish, driven: as [`apply_finish`] — or, at the end of its
+    /// stream already, what is held back and the ends still owed, and no
+    /// output a second end.
+    fn finish_driven(&mut self, bus: &Bus, ack: &crossbeam_channel::Sender<()>, backwards: bool) {
+        let Some(owed) = self.driven.ending.take() else {
+            apply_finish(self, bus, ack, backwards);
+            return;
+        };
+        let pp_log = self.identity.pp_log().clone();
+        let mut report = reporter(&self.identity, bus);
+        self.parking.deliver_all(&mut self.pads, &mut report);
+        for (index, pad) in self.pads.iter_mut().enumerate() {
+            if owed[index]
+                && let Err(error) = pad.push_eos(&pp_log)
+            {
+                report(error);
+            }
+        }
+        let _ = ack.send(());
+    }
+
     /// The loop itself: [`RawSource::run`] between the source's own
     /// setting up and letting go.
     fn ask(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
@@ -652,6 +984,7 @@ impl<P: Source> SourceStage<P> {
                 control,
                 paused: self.paused,
                 linked: &self.linked,
+                driving: None,
             };
             match self.inner.produce(&mut wait)? {
                 Produced::Buffer(buf) => self.hand_on(0, buf, prerolling, bus)?,
@@ -713,6 +1046,7 @@ impl<P: Source> SourceStage<P> {
             control,
             paused: self.paused,
             linked: &[],
+            driving: None,
         };
         let at = wait.now() + HELD_POLL;
         wait.until(at);
@@ -1011,6 +1345,15 @@ macro_rules! source_stage {
                 bus: &$crate::bus::Bus,
             ) -> $crate::error::Result<()> {
                 self.0.finishing(backwards, bus)
+            }
+            fn drivable(&self) -> bool {
+                self.0.drivable()
+            }
+            fn drive(
+                &mut self,
+                drive: &mut $crate::element::Drive<'_>,
+            ) -> $crate::error::Result<$crate::element::Stepped> {
+                self.0.drive(drive)
             }
         }
     };

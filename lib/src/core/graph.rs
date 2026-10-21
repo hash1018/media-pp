@@ -388,6 +388,25 @@ pub enum GraphError {
         /// Number of source pads exposed by the rejected filter.
         count: usize,
     },
+
+    /// A [`DrivenPipeline`](crate::pipeline::DrivenPipeline) was wired with
+    /// something that runs on a thread of its own: a queue, or an element
+    /// that waits on the clock behind a queue of its own, as a `Pacer` does.
+    /// A driven pipeline has no thread but the one that polls it.
+    #[error("{name} runs on a thread of its own, which a driven pipeline has none of")]
+    ThreadInDrivenPipeline {
+        /// Caller-selected name of the queue or element.
+        name: Arc<str>,
+    },
+
+    /// A [`DrivenPipeline`](crate::pipeline::DrivenPipeline) was given a
+    /// source that cannot be driven — see
+    /// [`Source::drivable`](crate::element::Source::drivable).
+    #[error("{name} cannot be driven: it waits on something that cannot wake the poll")]
+    SourceNotDrivable {
+        /// Caller-selected name of the source.
+        name: Arc<str>,
+    },
 }
 
 #[derive(Debug, Clone)]

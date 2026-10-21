@@ -29,6 +29,11 @@
 //! What waits on the clock — a [`Pacer`](elements::Pacer) — always runs
 //! behind one: the queue in front of it, or else one the chain adds.
 //!
+//! A [`DrivenPipeline`](pipeline::DrivenPipeline) is the same graph with
+//! no thread at all: whoever owns it polls it, so many share a few threads
+//! — a server's players, each a pipeline of its own. Its wiring refuses a
+//! queue and what waits behind one, since there is no thread to hand on to.
+//!
 //! ```no_run
 //! use std::time::Duration;
 //!

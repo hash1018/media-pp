@@ -1,7 +1,9 @@
 # Driven pipelines: many small pipelines on a few threads
 
-Status: **accepted**, 2026-10-22, with the decisions in §8. Nothing is built
-yet; §7 is the order it is built in.
+Status: **accepted**, 2026-10-22, with the decisions in §8. Stage 1 of §7
+is built — `DrivenPipeline`, its handle, `DrivenRunner`, and the test
+sources drivable; §7 says what is left, and §4.8 where what was built
+differs from what was first written here.
 
 File references are relative to `lib/src/`.
 
@@ -116,7 +118,7 @@ let (mut session, ()) = DrivenPipeline::new("player-17", source, |source, ctx| {
 // The owner's loop, on whatever thread it has:
 match session.poll(&mut cx) {               // a std::task::Context
     Driven::Pending { at } => { /* call again when woken, or at `at` */ }
-    Driven::Finished(result) => { /* done; drop it */ }
+    Driven::Finished => { /* done — what ended it is on the bus; drop it */ }
 }
 ```
 
@@ -235,6 +237,33 @@ polled, elements' records under their identities, `Pipeline::stats`'s
 counterpart. The thread an element's record names is the owner's thread,
 which is the truth.
 
+### 4.8 As built
+
+Stage 1 settled four things this design left open or had otherwise:
+
+- **Control is through a handle.** `DrivenPipeline::handle()` gives a
+  `DrivenPipelineHandle` — cheap to clone, `Send + Sync`, with `pause`,
+  `resume`, `stop`, `finish`, the bus, `stats` and `topology` — because the
+  owner hands the pipeline itself to whatever polls it (`DrivenRunner`, an
+  executor) and keeps only the handle. The handle keeps the bus and the
+  control channel, never an element.
+- **`Driven::Finished` carries nothing.** What ended a pipeline — its
+  stream, a stop, a finish, a failure — is on its bus, as for a running
+  pipeline; the error itself cannot be both posted and returned.
+- **A drivable source keeps the time it waits for.** Driven, `Wait::until`
+  answers `false` before its time and the source is asked again later, so
+  `wait.until(wait.now() + tick)`, worked out anew at each ask, is never
+  reached. `TestAudioSource` did that and made no sound driven; it keeps
+  its next tick now, and `Source::drivable` says so. The driven conformance
+  sequences found it.
+- **The conformance sequences are a set of their own**
+  (`core::pipeline::tests::conformance::driven`): a picture or a sound
+  source, alone, behind a filter, or fanned out; three side by side,
+  polled by a `DrivenRunner`, as a `Future` on an executor of their own, or
+  by their owner's loop; pause, resume and waits in random order, ended by
+  a stop, a finish or a drop. They run under the same variables as the
+  threaded ones, and CI's `-- conformance` runs them.
+
 ## 5. The servers on driven pipelines
 
 ### 5.1 A sink for a session
@@ -340,16 +369,16 @@ thought over again before any stage takes them up:
 
 Each stage lands on its own, with its tests, as the streaming stages did.
 
-1. **Core.** `DrivenPipeline`: wiring and its checks (§4.5), `poll` (§4.2),
+1. **Core** — done. `DrivenPipeline`: wiring and its checks (§4.5), `poll` (§4.2),
    `Wait` driven (§4.3), control by poll (§4.4), failure and teardown
    (§4.6). `Source::drivable`. The `Future`, the timer and `DrivenRunner`
    (§8, 6). The control conformance sequences gain
    driven shapes — a live source, and the broadcast shape, with pause,
    resume, finish and stop in random order — run pinned to two cores, alone
    and loaded, a few hundred times (`CONTRIBUTING.md`).
-2. **Drivable sources.** `BroadcastSource` (the reader's waker),
-   `TestVideoSource` and `TestAudioSource` (the clock), each tested driven
-   and threaded.
+2. **Drivable sources.** `BroadcastSource` (the reader's waker).
+   `TestVideoSource` and `TestAudioSource` (the clock) were made drivable
+   in stage 1, which its tests needed.
 3. **WebRTC.** `WebRtcTrackSink`'s outbox target; `WebRtcServer`'s sessions
    on driven pipelines, polled by the thread that owns them; the server's
    own reader, timeline, pacing and Annex B conversion removed; paths as

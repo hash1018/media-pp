@@ -206,6 +206,11 @@ impl Source for Generating {
         true
     }
 
+    /// It waits only on the clock.
+    fn drivable(&self) -> bool {
+        true
+    }
+
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)

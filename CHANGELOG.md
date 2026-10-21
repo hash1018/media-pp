@@ -51,6 +51,19 @@ compile error with no explanation.
 
 ### Added
 
+- **`DrivenPipeline`: a pipeline with no thread of its own.** Wired as a
+  `Pipeline` is, then polled by whoever owns it — many of them on a few
+  threads, as a server's players will be. `DrivenRunner` polls them for an
+  application with no executor; as a `Future`, one goes to any executor,
+  its deadlines kept by one timer thread for the process. Control is
+  through `DrivenPipelineHandle` (pause, resume, stop, finish — none of
+  them waits), and dropping one stops it. Its wiring refuses what has a
+  thread of its own — a queue, a `Pacer` or `VideoSynchronizer`, a source
+  that is not `Source::drivable` — with the new
+  `GraphError::ThreadInDrivenPipeline` and `GraphError::SourceNotDrivable`;
+  a `match` on `GraphError` needs an arm for each. `TestVideoSource` and
+  `TestAudioSource` are drivable. See `docs/driven-pipelines.md`.
+
 - **`WebRtcServer`: `Broadcast`s to WebRTC players, browsers among them.**
   One UDP socket serves every session, each a `str0m` connection run on the
   server's thread. A player is sent its path's broadcast as it is, from the

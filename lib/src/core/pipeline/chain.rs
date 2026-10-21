@@ -686,7 +686,9 @@ impl ChainBuilder {
     /// [`VideoSynchronizer`] do. Those run behind a queue of their own, so the
     /// wait holds up nothing upstream: a [`Self::queue`] added straight before
     /// them is that queue, and where there is none this puts one of eight
-    /// there, named `<name>-queue`.
+    /// there, named `<name>-queue` — except in a
+    /// [`DrivenPipeline`](super::DrivenPipeline), which has no thread for
+    /// one and refuses such an element.
     ///
     /// [`Filter`]: crate::element::Filter
     /// [`Pacer`]: crate::elements::Pacer
@@ -699,7 +701,11 @@ impl ChainBuilder {
             .last()
             .is_some_and(|node| node.info.element_type == ElementType::Queue);
         if element.own_queue().is_some() && !behind_a_queue {
-            self = self.queue(format!("{name}-queue"), OWN_QUEUE_CAPACITY);
+            if !self.context.driven {
+                self = self.queue(format!("{name}-queue"), OWN_QUEUE_CAPACITY);
+            } else if self.error.is_none() {
+                self.error = Some(GraphError::ThreadInDrivenPipeline { name: name.clone() });
+            }
         }
         let pad_count = element.src_pads().len();
         if pad_count != 1 && self.error.is_none() {
@@ -741,7 +747,9 @@ impl ChainBuilder {
     ///
     /// The queue is a thread boundary (blocking when full — see
     /// [`OverflowPolicy::Block`]): everything added after this runs on its
-    /// own worker thread instead of the thread that feeds this queue.
+    /// own worker thread instead of the thread that feeds this queue. A
+    /// [`DrivenPipeline`](super::DrivenPipeline) has no thread for one, and
+    /// its wiring refuses it.
     pub fn queue(self, name: impl Into<String>, capacity: usize) -> Self {
         self.queue_with_policy(name, capacity, OverflowPolicy::default())
     }
@@ -756,6 +764,11 @@ impl ChainBuilder {
         policy: OverflowPolicy,
     ) -> Self {
         let name: Arc<str> = name.into().into();
+        if self.context.driven {
+            self.error
+                .get_or_insert(GraphError::ThreadInDrivenPipeline { name });
+            return self;
+        }
         let id = self.context.graph.reserve_element_id();
         let counters = ElementCounters::for_queue(capacity);
         self.planned.push(PlannedNode {

@@ -114,6 +114,10 @@ struct Generating {
     /// When the first samples were made, on the clock a pause does not move
     /// — what every later tick counts the samples it owes from.
     started: Option<Instant>,
+    /// When the next tick is due, on the same clock — kept, rather than
+    /// worked out from now each time it is asked, so that a wait let go
+    /// and asked again waits for the same tick.
+    next_tick: Option<Instant>,
 }
 
 // SAFETY: see `AudioMixer`'s own `unsafe impl Send` docs — same
@@ -144,6 +148,7 @@ impl TestAudioSource {
                 frequency: options.frequency,
                 samples_emitted: 0,
                 started: None,
+                next_tick: None,
             },
         ))
     }
@@ -207,6 +212,11 @@ impl Source for Generating {
         true
     }
 
+    /// It waits only on the clock.
+    fn drivable(&self) -> bool {
+        true
+    }
+
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(PortContract::frame(
             MediaKind::AudioFrame,
@@ -219,9 +229,13 @@ impl Source for Generating {
     /// burst of what it would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         let started = *self.started.get_or_insert_with(|| wait.now());
-        if !wait.until(wait.now() + TICK_INTERVAL) {
+        let tick = *self
+            .next_tick
+            .get_or_insert_with(|| wait.now() + TICK_INTERVAL);
+        if !wait.until(tick) {
             return Ok(Produced::Nothing);
         }
+        self.next_tick = None;
         let elapsed = wait.now().saturating_duration_since(started);
         let expected = (elapsed.as_secs_f64() * self.sample_rate as f64) as i64;
         let needed = (expected - self.samples_emitted).max(0) as usize;

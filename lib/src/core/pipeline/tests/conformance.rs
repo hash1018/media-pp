@@ -91,6 +91,8 @@ use crate::elements::{
 };
 use crate::playback_clock::PlaybackClock;
 
+mod driven;
+
 /// How long any one control call may take before the sequence is failed as
 /// hung. Generous, so a loaded two-core runner is never mistaken for a
 /// deadlock: a real one does not return at all.

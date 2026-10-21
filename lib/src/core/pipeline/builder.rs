@@ -93,6 +93,22 @@ pub struct PipelineBuilder {
     /// The queue workers every request reaches directly — see
     /// [`crate::control::Direct`].
     queue_workers: Arc<crate::control::Workers>,
+    /// Whether this builds a [`DrivenPipeline`](super::DrivenPipeline).
+    driven: bool,
+}
+
+/// What a [`DrivenPipeline`](super::DrivenPipeline) is made of: one
+/// source's pipeline, built as any other is, and not run.
+pub(super) struct DrivenParts {
+    pub(super) id: Arc<str>,
+    pub(super) bus: Bus,
+    pub(super) bus_rx: BusReceiver,
+    pub(super) clock: Arc<Clock>,
+    pub(super) state: Arc<crate::playback_state::PlaybackState>,
+    pub(super) graph: PipelineGraph,
+    pub(super) source: SourceEntry,
+    pub(super) control: (ControlSender, ControlReceiver),
+    pub(super) source_counters: Arc<ElementCounters>,
 }
 
 impl PipelineBuilder {
@@ -121,6 +137,17 @@ impl PipelineBuilder {
             operation: Arc::new(Mutex::new(())),
             source_counters: Vec::new(),
             queue_workers: Arc::default(),
+            driven: false,
+        }
+    }
+
+    /// A builder for the one source of a
+    /// [`DrivenPipeline`](super::DrivenPipeline), whose wiring refuses what
+    /// needs a thread of its own.
+    pub(super) fn driven(id: impl Into<String>) -> Self {
+        Self {
+            driven: true,
+            ..Self::new(id)
         }
     }
 
@@ -154,6 +181,12 @@ impl PipelineBuilder {
         let mut source = source.into_source();
         *source.pp_log_mut() =
             element_pp_log(source.element_type(), &source.name(), Some(&self.id));
+        if self.driven && !source.drivable() {
+            return Err(crate::graph::GraphError::SourceNotDrivable {
+                name: source.name(),
+            }
+            .into());
+        }
         let source_id = self.graph.add_source(source.element_type(), source.name());
         // A source follows a seek by repositioning itself; whether it can is
         // settled now, and a seek it cannot follow is refused before
@@ -188,6 +221,7 @@ impl PipelineBuilder {
             source_counters: Arc::clone(&counters),
             completion: Arc::clone(&self.completion),
             queue_workers: Arc::clone(&self.queue_workers),
+            driven: self.driven,
         });
         source.attach_context(&context);
         let wired = wire(&mut source, &context)?;
@@ -198,6 +232,22 @@ impl PipelineBuilder {
         self.sources.push((source_id, Box::new(source)));
         self.control_pairs.push(control::channel_in(&self.state));
         Ok((self, wired))
+    }
+
+    /// What [`Self::driven`]'s one source made, for its driven pipeline.
+    pub(super) fn into_driven(mut self) -> DrivenParts {
+        debug_assert!(self.driven && self.sources.len() == 1);
+        DrivenParts {
+            id: self.id,
+            bus: self.bus,
+            bus_rx: self.bus_rx,
+            clock: self.clock,
+            state: self.state,
+            graph: self.graph,
+            source: self.sources.remove(0),
+            control: self.control_pairs.remove(0),
+            source_counters: self.source_counters.remove(0),
+        }
     }
 
     /// Finishes construction. At least one [`PipelineBuilder::add_source`]

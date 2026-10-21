@@ -39,8 +39,8 @@ use crate::{
 };
 
 pub use crate::produce::{
-    AsNamedSource, AsRawSource, AsSource, IntoSource, ProduceError, Produced, Source, SourceStage,
-    Wait,
+    AsNamedSource, AsRawSource, AsSource, Drive, IntoSource, ProduceError, Produced, Source,
+    SourceStage, Stepped, Wait,
 };
 pub use crate::render::{AsBoxSink, AsNamedSink, AsRawSink, AsSink, BoxSink, IntoTerminal, Sink};
 pub use crate::transform::{
@@ -752,6 +752,10 @@ pub struct Context {
     /// the pipeline's requests reach directly — see
     /// [`crate::control::Direct`].
     pub(crate) queue_workers: Arc<crate::control::Workers>,
+    /// Whether the pipeline is a
+    /// [`DrivenPipeline`](crate::pipeline::DrivenPipeline), which has no
+    /// thread for a queue to hand on to — so its wiring refuses one.
+    pub(crate) driven: bool,
 }
 
 impl Context {
@@ -808,6 +812,7 @@ impl Context {
             source_id,
             source_counters: ElementCounters::new(),
             queue_workers: Arc::default(),
+            driven: false,
         }
     }
 }
@@ -1139,6 +1144,22 @@ pub trait RawSource: SrcPads {
     /// The default does nothing.
     fn resuming(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether it can run in a
+    /// [`DrivenPipeline`](crate::pipeline::DrivenPipeline) — see
+    /// [`Source::drivable`]. Never, for a source with a loop of its own.
+    #[doc(hidden)]
+    fn drivable(&self) -> bool {
+        false
+    }
+
+    /// One poll of it in a driven pipeline — only ever called where
+    /// [`Self::drivable`] says it can be. A source with a loop of its own
+    /// has nothing to do in one but end.
+    #[doc(hidden)]
+    fn drive(&mut self, _drive: &mut Drive<'_>) -> Result<Stepped> {
+        Ok(Stepped::Ended)
     }
 }
 
