@@ -45,7 +45,26 @@ compile error with no explanation.
   was how a round decided what to trust; two rounds agreeing does that now
   (below). Leave the field out: `ChunkPolicy { chunk_ms, token_timing }`.
 
+- **`RtspSourceError` has `InvalidListenUrl`, `NoPublisher` and
+  `PublisherSilent` variants**, for `RtspSource::listen` — see Added. A
+  `match` on `RtspSourceError` needs an arm for each.
+
 ### Added
+
+- **`RtspSource::listen`, receiving an RTSP push.** Rather than asking a
+  server for a stream, the source takes the port in its URL and waits for
+  one publisher — an encoder, `ffmpeg -f rtsp`, an `RtspMuxer` — to
+  announce its streams and record into it, then hands on their packets as
+  `RtspSource::open` does. The publisher picks TCP or UDP.
+  `RtspListenOptions` bounds the wait for a publisher (`NoPublisher`) and
+  how long one may go silent (`PublisherSilent`); its closing the
+  connection ends the stream. It is FFmpeg's listener: one publisher per
+  call, no authentication, no viewers. The `rtsp_listen` example counts
+  what a publisher sends.
+
+  ```rust
+  let (source, streams) = RtspSource::listen("ingest", "rtsp://0.0.0.0:8554/live", RtspListenOptions::default())?;
+  ```
 
 - **`whisper-cuda` and `whisper-metal`.** whisper.cpp on an NVIDIA GPU
   with CUDA, and on a Mac's GPU, beside `whisper-vulkan`; see

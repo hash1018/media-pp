@@ -116,6 +116,7 @@ use `resize` to save a video.
 | [`rtsp_serve`](../examples/rtsp/rtsp_serve) | A file published to an RTSP server such as MediaMTX | All |
 | [`rtsp_serve_seek`](../examples/rtsp/rtsp_serve_seek) | The same, sought and paused while viewers watch | All |
 | [`rtsp_source`](../examples/rtsp/rtsp_source) | Receiving from an RTSP camera or server | All |
+| [`rtsp_listen`](../examples/rtsp/rtsp_listen) | Receiving an RTSP push — from an encoder, `ffmpeg -f rtsp` or `rtsp_serve` | All |
 
 ## Compositing and overlays
 

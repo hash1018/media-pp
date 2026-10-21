@@ -122,7 +122,7 @@ pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };
 pub use render_mode::RenderMode;
-pub use rtsp_source::{RtspSource, RtspSourceError};
+pub use rtsp_source::{RtspListenOptions, RtspSource, RtspSourceError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use shared_texture::{
     D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,

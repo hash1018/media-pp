@@ -51,7 +51,7 @@ fails.
 
 | | |
 |---|---|
-| Files and the network | `FileDemuxer`, `RtspSource`, `WebRtcTrackSource` |
+| Files and the network | `FileDemuxer`; `RtspSource`, from a camera or a server, or with a publisher pushing into it (`RtspSource::listen`); `WebRtcTrackSource` |
 | From your code | `AppSource`; `PipelineBridge`, from another pipeline |
 | Synthetic | `TestVideoSource`, `TestAudioSource` |
 

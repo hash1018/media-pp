@@ -229,12 +229,12 @@ pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     CompositorInput, FileDemuxer, FileDemuxerError, FileDemuxerHandle, LayerFrame, MixFormat,
     MixerHandle, MixerInputSink, PipelineBridge, PipelineBridgeError, PipelineBridgeHandle,
-    PipelineBridgeOptions, RenderMode, RtspSource, RtspSourceError, StreamInfo, SwTextLayerError,
-    SwTextLayerHandle, SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle,
-    SwVideoCompositorInput, SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions,
-    TestAudioSource, TestVideoOptions, TestVideoSource, TextLayer, TextLayerControl,
-    VideoCompositorControl, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
-    VideoLayerControl, VideoRect, VideoSourceRect,
+    PipelineBridgeOptions, RenderMode, RtspListenOptions, RtspSource, RtspSourceError, StreamInfo,
+    SwTextLayerError, SwTextLayerHandle, SwVideoCompositor, SwVideoCompositorError,
+    SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,
+    SwVideoLayerHandle, TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
+    TextLayer, TextLayerControl, VideoCompositorControl, VideoCompositorOptions, VideoFit,
+    VideoInputId, VideoLayer, VideoLayerControl, VideoRect, VideoSourceRect,
 };
 #[cfg(all(target_os = "macos", feature = "avfoundation-capture"))]
 pub use source::{

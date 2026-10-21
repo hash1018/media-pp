@@ -24,7 +24,9 @@ impl RtspTransport {
 /// How to reach an RTSP server — for
 /// [`RtspSource::open`](crate::elements::RtspSource::open), which receives
 /// from one, and [`RtspMuxer::create`](crate::elements::RtspMuxer::create),
-/// which publishes to one.
+/// which publishes to one. [`RtspSource::listen`](crate::elements::RtspSource::listen),
+/// which a publisher reaches instead, takes
+/// [`RtspListenOptions`](crate::elements::RtspListenOptions).
 #[derive(Debug, Clone, Copy)]
 pub struct RtspOptions {
     /// Transport used for RTSP media delivery.
