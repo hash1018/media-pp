@@ -115,8 +115,10 @@ pub use crate::platform::macos::videotoolbox::{
 };
 #[cfg(feature = "webrtc")]
 pub use driver::{
-    AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
-    WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
+    AttachedTrack, SessionId, SessionRole, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle,
+    WebRtcHttpEndpoint, WebRtcPathMode, WebRtcPeer, WebRtcServer, WebRtcServerError,
+    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcStreamInfo, WebRtcTrackSink,
+    WebRtcTrackSource,
 };
 #[cfg(feature = "rtsp-server")]
 pub use driver::{RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions};

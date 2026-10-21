@@ -51,6 +51,29 @@ compile error with no explanation.
 
 ### Added
 
+- **`WebRtcServer`: `Broadcast`s to WebRTC players, browsers among them.**
+  One UDP socket serves every session, each a `str0m` connection run on the
+  server's thread. A player is sent its path's broadcast as it is, from the
+  newest keyframe, what it catches up on at twice the stream's speed — in
+  the codecs WebRTC carries (H.264, H.265, VP8, VP9, AV1, Opus, G.711),
+  H.264 from an MP4 turned into Annex B with its parameter sets ahead of each
+  keyframe. A path in `WebRtcPathMode::Publish` takes one publisher, whose
+  tracks are published into the broadcast once they have said what they are.
+  The server answers offers and leaves how they come to the application —
+  `WebRtcServerHandle::play` and `publish` — and `serve_http` speaks WHEP and
+  WHIP over HTTP, with a page at `/<path>` that plays the path in a browser.
+  Data channels a client opens come out of `next_event`, and `send` answers
+  on them. It runs under the `webrtc` feature, which now brings `socket2`
+  for the socket's buffers. The `webrtc_server` example serves a file and a
+  publisher's path; Chrome played it, and published to it from a canvas.
+
+  ```rust
+  let (server, handle) = WebRtcServer::bind("server", "192.168.0.5:8189", WebRtcServerOptions::default())?;
+  handle.add_path("cam1", &camera, WebRtcPathMode::Play)?; // camera: a Broadcast
+  DriverRunner::new(server).run()?;
+  let _http = handle.serve_http("0.0.0.0:8080")?; // http://192.168.0.5:8080/cam1
+  ```
+
 - **`RtspServer`, behind `rtsp-server`: an RTSP server serving
   `Broadcast`s.** Each path is a broadcast, written by whatever pipeline
   the application has; any number of players play it — FFmpeg, VLC, a

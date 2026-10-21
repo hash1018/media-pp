@@ -162,3 +162,4 @@ The models are not included; each README says which to download.
 | [`webrtc_av_loopback`](../examples/webrtc/webrtc_av_loopback) | Video and sound on one connection | All |
 | [`webrtc_record`](../examples/webrtc/webrtc_record) | A file sent over WebRTC and the received tracks recorded | All |
 | [`webrtc_video_call`](../examples/webrtc/webrtc_video_call) | A two-way video call, each side in a window | All |
+| [`webrtc_server`](../examples/webrtc/webrtc_server) | A WebRTC server a browser plays through WHEP, and a WHIP publisher's path | All |

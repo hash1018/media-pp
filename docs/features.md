@@ -56,7 +56,7 @@ choice.
 | `whisper-vulkan` | `VulkanWhisperTranscriber`, on any GPU through Vulkan; enables `whisper` | Linux, Windows |
 | `whisper-cuda` | `CudaWhisperTranscriber`, on an NVIDIA GPU with CUDA; enables `whisper` | Linux, Windows |
 | `whisper-metal` | `MetalWhisperTranscriber`, on a Mac's GPU; enables `whisper` | macOS |
-| `webrtc` | `str0m`-based WebRTC peer and track elements | All |
+| `webrtc` | `str0m`-based WebRTC peer and track elements, and `WebRtcServer`: `Broadcast`s to WebRTC players and from WHIP publishers, WHEP and WHIP over HTTP | All |
 | `rtsp-server` | `RtspServer`: `Broadcast`s played to RTSP players, and RTSP publishers taken into them; tokio, inside the server | All |
 
 ## What a feature needs

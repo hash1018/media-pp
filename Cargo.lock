@@ -4855,6 +4855,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "webrtc_server"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+ "str0m",
+ "tempfile",
+]
+
+[[package]]
 name = "webrtc_video_call"
 version = "0.1.0"
 dependencies = [

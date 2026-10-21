@@ -20,6 +20,8 @@ pub use rtsp_server::{
 };
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
-    AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
-    WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
+    AttachedTrack, SessionId, SessionRole, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle,
+    WebRtcHttpEndpoint, WebRtcPathMode, WebRtcPeer, WebRtcServer, WebRtcServerError,
+    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcStreamInfo, WebRtcTrackSink,
+    WebRtcTrackSource,
 };

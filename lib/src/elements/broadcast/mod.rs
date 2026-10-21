@@ -35,9 +35,9 @@ use crate::pp_log::{PpLog, pp_info};
 pub use reader::{BroadcastItem, BroadcastReader};
 pub use sink::BroadcastSink;
 pub use source::BroadcastSource;
-#[cfg(feature = "rtsp-server")]
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
 pub(crate) use state::time_base;
-#[cfg(feature = "rtsp-server")]
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
 pub(crate) use timeline::{Timeline, same_shape};
 
 use state::State;

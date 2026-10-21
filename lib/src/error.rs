@@ -923,6 +923,11 @@ pub enum Error {
     #[error(transparent)]
     RtspServerError(#[from] crate::elements::RtspServerError),
 
+    /// See [`crate::elements::WebRtcServerError`].
+    #[cfg(feature = "webrtc")]
+    #[error(transparent)]
+    WebRtcServerError(#[from] crate::elements::WebRtcServerError),
+
     /// A WebRTC peer operation failed.
     #[cfg(feature = "webrtc")]
     #[error(transparent)]

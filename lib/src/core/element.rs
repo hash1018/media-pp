@@ -128,6 +128,8 @@ pub enum ElementType {
     WebRtcPeer,
     /// RTSP server driver, serving broadcasts.
     RtspServer,
+    /// WebRTC server driver, serving broadcasts.
+    WebRtcServer,
     /// Filter dropping frames that come faster than a rate.
     FrameRateLimiter,
     /// Filter that stops a branch taking frames, and takes the paused span

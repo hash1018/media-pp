@@ -102,6 +102,10 @@ jobs:
         shell: pwsh
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
+      - name: Lint (WebRTC)
+        shell: pwsh
+        run: cargo clippy -p media-pp -p webrtc_server --all-targets --features webrtc -- -D warnings
+
       # `DOCS_RS` keeps `ort-sys` from downloading ONNX Runtime and linking its
       # dylibs into the target directory, which needs Developer Mode on a
       # runner to create symlinks. Checking never links, so the download buys
@@ -236,6 +240,13 @@ jobs:
           cargo test -p media-pp --features rtsp-server --lib -- rtsp_server
           cargo test -p rtsp_server -p rtsp_load
 
+      # str0m clients of the tests' own against the server, on the loopback.
+      - name: Test (WebRTC server)
+        shell: pwsh
+        run: |
+          cargo test -p media-pp --features webrtc --lib -- webrtc::server
+          cargo test -p webrtc_server
+
   linux:
     runs-on: ubuntu-26.04
     env:
@@ -311,6 +322,9 @@ jobs:
 
       - name: Lint (RTSP server)
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
+
+      - name: Lint (WebRTC)
+        run: cargo clippy -p media-pp -p webrtc_server --all-targets --features webrtc -- -D warnings
 
       - name: Check (ONNX Runtime and WebRTC)
         env:
@@ -407,6 +421,11 @@ jobs:
           cargo test -p media-pp --features rtsp-server --lib -- rtsp_server
           cargo test -p rtsp_server -p rtsp_load
 
+      - name: Test (WebRTC server)
+        run: |
+          cargo test -p media-pp --features webrtc --lib -- webrtc::server
+          cargo test -p webrtc_server
+
       # PipeWire-session-dependent tests skip themselves with a reason
       # (`try_capture_source()`-style helper) when this headless runner has
       # no session to open; the screen-capture portal handshake itself is
@@ -452,6 +471,9 @@ jobs:
       # Run on the other two jobs; compiled here.
       - name: Lint (RTSP server)
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
+
+      - name: Lint (WebRTC)
+        run: cargo clippy -p media-pp -p webrtc_server --all-targets --features webrtc -- -D warnings
 
       # Together, and each alone: the pixel-buffer and Metal code the
       # captures, VideoToolbox and Metal share is gated on whichever of them
