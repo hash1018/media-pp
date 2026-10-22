@@ -181,16 +181,18 @@ or a WebRTC sender that lowers its picture size for its connection, goes on
 with new H.264 or H.265 parameter sets in band — another size, profile,
 chroma format or bit depth:
 
-- `RtspServer` and `WebRtcServer` carry it on as it comes, and `SwDecoder`
-  follows it.
-- `RtspSource`, `WhepSource` and `WebRtcTrackSource` say so on the bus,
-  once for each output (`BusEvent::FormatChanged`). What was built from the
-  old description is built anew by opening the source again.
+- `RtspServer` and `WebRtcServer` carry it on as it comes, in the same
+  track, and `SwDecoder` follows it.
 - A muxer whose header keeps the first parameter sets for the whole output
   — `FileMuxer` to an MP4 or MOV, `HlsMuxer` of fMP4, `DashMuxer` — refuses
   the track from there (`MuxerTrackError::FormatChanged`), and the output
   is finished with what came before. Matroska and MPEG-TS take the new sets
   as they come.
+- A source's `StreamInfo` stays what the stream began as, and so does a
+  `Broadcast`'s: an MP4 opened anew from it refuses the same keyframe. A
+  server that records what it receives, where senders may change their
+  pictures, records to MPEG-TS HLS (`HlsSegmentFormat::MpegTs`) or
+  Matroska.
 
 ## Elements of your own
 

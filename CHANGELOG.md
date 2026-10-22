@@ -98,15 +98,6 @@ compile error with no explanation.
 
 ### Added
 
-- **`BusEvent::FormatChanged`: a source's stream changed its pictures
-  partway.** A camera reconfigured, or a WebRTC sender lowering its
-  picture size, goes on with new H.264 or H.265 parameter sets, and the
-  `StreamInfo` the source described it with no longer says what it
-  carries. `RtspSource`, `WhepSource` and `WebRtcTrackSource` now say so,
-  once for each output, at the first keyframe of the new pictures, and go
-  on handing the stream out; a software decoder follows it. Open the
-  source again to build what follows it for the stream as it is now.
-
 - **`WebRtcServerOptions::ice_servers`: STUN and TURN servers told to
   WHIP and WHEP clients.** As RFC 9725 tells them — a `Link` header each,
   with a TURN server's credentials — on the answer to an offer, and on the

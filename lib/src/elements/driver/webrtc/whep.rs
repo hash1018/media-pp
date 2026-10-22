@@ -7,13 +7,11 @@ use str0m::Rtc;
 use str0m::change::SdpAnswer;
 use str0m::media::{Direction, MediaKind};
 
-use crate::bus::Bus;
 use crate::contract::{OutputContract, PortContract};
 use crate::element::{
     Attached, ElementType, Identity, Produced, Source, SourceStage, Wait, element_pp_log,
 };
 use crate::elements::StreamInfo;
-use crate::elements::parameter_sets::{OutputWatches, report_change};
 use crate::error::Result;
 use crate::pad::SrcPad;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
@@ -109,10 +107,6 @@ struct Watching {
     /// The connection, which this keeps alive.
     _client: Arc<Client>,
     pp_log: PpLog,
-    /// Whether each track still carries the pictures it was described
-    /// with — see [`crate::bus::BusEvent::FormatChanged`].
-    watches: OutputWatches,
-    bus: Option<Bus>,
 }
 
 impl WhepSource {
@@ -242,8 +236,6 @@ impl WhepSource {
                 next: 0,
                 _client: client,
                 pp_log,
-                watches: OutputWatches::new(&streams),
-                bus: None,
             },
         ));
         Ok((source, streams))
@@ -282,16 +274,6 @@ impl Source for Watching {
                 match self.inboxes[index].take(waker.as_ref()) {
                     Taken::Packet(buf) => {
                         self.next = (index + 1) % tracks;
-                        if let Some(change) = self.watches.changed(index, &buf) {
-                            report_change(
-                                self.bus.as_ref(),
-                                &self.pp_log,
-                                ElementType::WhepSource,
-                                self.pp_log.name(),
-                                index,
-                                change,
-                            );
-                        }
                         return Ok(Produced::On(index, buf));
                     }
                     Taken::Ended => ended += 1,
@@ -314,7 +296,6 @@ impl Source for Watching {
 
     fn attached(&mut self, cx: &Attached<'_>) {
         self.pp_log = cx.pp_log().clone();
-        self.bus = Some(cx.context().bus.clone());
     }
 }
 

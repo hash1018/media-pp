@@ -5,15 +5,12 @@
 //! A [`StreamInfo`](crate::elements::StreamInfo) is the stream as it
 //! began. A camera reconfigured, or a WebRTC sender that lowers its picture
 //! size for its connection, goes on with new parameter sets in band: a
-//! decoder reading them follows, but a source has described the stream as
-//! it was, and an MP4 keeps the first sets in its header for the whole
-//! file. Only what the picture is counts as a change here: a sender that
+//! decoder reading them follows, but an MP4 keeps the first sets in its
+//! header for the whole file. Only what the picture is counts as a change here: a sender that
 //! writes its sets again with another level or other timing information has
 //! not changed what it sends.
 
 use ffmpeg_next as ffmpeg;
-
-use crate::{buffer::MediaBuffer, elements::StreamInfo};
 
 /// What a sequence parameter set says the pictures are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,34 +103,10 @@ impl ShapeWatch {
         })
     }
 
-    /// A watch over a stream of codec `id` with no configuration to read:
-    /// what it began as is the first set it carries.
-    #[cfg(any(feature = "webrtc", test))]
-    pub(crate) fn learning(id: ffmpeg::codec::Id) -> Option<Self> {
-        Some(Self {
-            codec: Codec::of(id)?,
-            length_size: 4,
-            began: None,
-        })
-    }
-
     /// What the stream began as, where that is known yet.
     #[cfg(test)]
     pub(crate) fn began(&self) -> Option<Shape> {
         self.began
-    }
-
-    /// [`Self::changed`] for a buffer as a source hands it out: only a
-    /// keyframe's packet is read, since that is where a sender's new sets
-    /// go.
-    pub(crate) fn changed_in(&mut self, buf: &MediaBuffer) -> Option<(Shape, Shape)> {
-        let MediaBuffer::Packet(packet) = buf else {
-            return None;
-        };
-        if !packet.is_key() {
-            return None;
-        }
-        self.changed(packet.data()?)
     }
 
     /// The shape a keyframe's packet says its pictures now are, where its
@@ -152,58 +125,6 @@ impl ShapeWatch {
             }
             Some(began) => (began != now).then_some((began, now)),
         }
-    }
-}
-
-/// A source's watch over each of its outputs, saying of each once: a
-/// source's own part of [`crate::bus::BusEvent::FormatChanged`].
-pub(crate) struct OutputWatches(Vec<Option<ShapeWatch>>);
-
-impl OutputWatches {
-    /// One watch for each of `streams`, in their order — each its output's.
-    pub(crate) fn new<'a>(streams: impl IntoIterator<Item = &'a StreamInfo>) -> Self {
-        Self(
-            streams
-                .into_iter()
-                .map(|stream| ShapeWatch::new(stream.parameters()))
-                .collect(),
-        )
-    }
-
-    /// What output `output` changed from and to, the first time a keyframe
-    /// of it says so; never again for that output after.
-    pub(crate) fn changed(&mut self, output: usize, buf: &MediaBuffer) -> Option<(Shape, Shape)> {
-        let watch = self.0.get_mut(output)?;
-        let change = watch.as_mut()?.changed_in(buf)?;
-        *watch = None;
-        Some(change)
-    }
-}
-
-/// Says on `bus` that output `output` of the source `name` changed from
-/// `was` to `now` — logged with what changed, where the event says only
-/// which output.
-pub(crate) fn report_change(
-    bus: Option<&crate::bus::Bus>,
-    pp_log: &crate::pp_log::PpLog,
-    element_type: crate::element::ElementType,
-    name: &str,
-    output: usize,
-    (was, now): (Shape, Shape),
-) {
-    crate::pp_log::pp_info!(
-        pp_log: pp_log,
-        "output {output} changed its pictures from {was} to {now}"
-    );
-    if let Some(bus) = bus {
-        bus.post(
-            pp_log,
-            crate::bus::BusEvent::FormatChanged {
-                element_type,
-                name: name.into(),
-                output,
-            },
-        );
     }
 }
 
@@ -666,12 +587,20 @@ mod tests {
         assert_eq!((shape.chroma_format, shape.bit_depth), (1, 8));
     }
 
-    /// The first set a stream carries is what it began as, the same set
-    /// again changes nothing, and another size is said.
+    /// With no configuration to read, the first set a stream carries is what
+    /// it began as; the same set again changes nothing, and another size is
+    /// said.
     #[test]
     fn a_watch_says_when_the_pictures_are_no_longer_what_they_began_as() {
         let (small, large) = (h264((320, 240)), h264((640, 360)));
-        let mut watch = ShapeWatch::learning(ffmpeg::codec::Id::H264).unwrap();
+        let mut parameters = ffmpeg::codec::Parameters::new();
+        // SAFETY: parameters this test owns alone; plain fields.
+        unsafe {
+            (*parameters.as_mut_ptr()).codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+        }
+        let mut watch = ShapeWatch::new(&parameters).unwrap();
+        assert_eq!(watch.began(), None, "nothing to read before a packet");
         for packet in &small {
             assert_eq!(watch.changed(packet.data().unwrap()), None);
         }
@@ -682,11 +611,6 @@ mod tests {
         assert_eq!(
             sizes(watch.changed(large[0].data().unwrap())),
             Some(((320, 240), (640, 360)))
-        );
-        assert_eq!(
-            ShapeWatch::learning(ffmpeg::codec::Id::VP8).map(|_| ()),
-            None,
-            "a codec whose sets are not read is not watched"
         );
     }
 

@@ -18,10 +18,8 @@ use str0m::{
     media::{Direction, MediaKind, Mid},
 };
 
-use crate::elements::parameter_sets::{ShapeWatch, report_change};
 use crate::{
     buffer::{MediaBuffer, PacketBuffer},
-    bus::Bus,
     contract::{InputContract, OutputContract, PortContract},
     element::{
         Attached, Element, ElementType, Identity, Produced, RawSink, Source, SourceStage, Wait,
@@ -936,12 +934,6 @@ struct Receiving {
     codec: Arc<Mutex<Option<Codec>>>,
     negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
     stream_info: Mutex<StreamInfoState>,
-    /// Whether the track still carries the pictures it began with — see
-    /// [`crate::bus::BusEvent::FormatChanged`]. Made at its first
-    /// keyframe, once its codec is known; `Some(None)` once it has said so,
-    /// or for a codec whose parameter sets are not read.
-    watch: Option<Option<ShapeWatch>>,
-    bus: Option<Bus>,
 }
 
 struct StreamInfoState {
@@ -974,8 +966,6 @@ impl WebRtcTrackSource {
                     rx: stream_info_rx,
                     cached: None,
                 }),
-                watch: None,
-                bus: None,
             },
         ))
     }
@@ -1042,33 +1032,6 @@ impl WebRtcTrackSource {
     }
 }
 
-impl Receiving {
-    /// Says on the bus, once, that the track's pictures are no longer
-    /// what they began as.
-    fn watch_format(&mut self, buf: &MediaBuffer) {
-        let watch = self.watch.get_or_insert_with(|| {
-            let id = match *self.codec.lock().unwrap() {
-                Some(Codec::H264) => ffmpeg::codec::Id::H264,
-                Some(Codec::H265) => ffmpeg::codec::Id::HEVC,
-                _ => return None,
-            };
-            ShapeWatch::learning(id)
-        });
-        let Some(change) = watch.as_mut().and_then(|watch| watch.changed_in(buf)) else {
-            return;
-        };
-        *watch = None;
-        report_change(
-            self.bus.as_ref(),
-            &self.pp_log,
-            ElementType::WebRtcPeer,
-            self.pp_log.name(),
-            0,
-            change,
-        );
-    }
-}
-
 impl Source for Receiving {
     fn is_live(&self) -> bool {
         true
@@ -1089,10 +1052,7 @@ impl Source for Receiving {
         loop {
             let waker = wait.waker().cloned();
             match self.inbox.take(waker.as_ref()) {
-                Taken::Packet(buf) => {
-                    self.watch_format(&buf);
-                    return Ok(Produced::Buffer(buf));
-                }
+                Taken::Packet(buf) => return Ok(Produced::Buffer(buf)),
                 Taken::Ended => {
                     pp_info!(self, "the connection let go of the track, ending");
                     return Ok(Produced::End);
@@ -1108,7 +1068,6 @@ impl Source for Receiving {
 
     fn attached(&mut self, cx: &Attached<'_>) {
         self.pp_log = cx.pp_log().clone();
-        self.bus = Some(cx.context().bus.clone());
     }
 }
 

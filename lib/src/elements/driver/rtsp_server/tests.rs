@@ -1057,14 +1057,13 @@ fn a_udp_player_far_behind_the_newest_keyframe_starts_at_the_next() {
     );
 }
 
-/// A camera that changes its picture size partway: the player's
-/// `RtspSource` says so on its bus, once, and a software decoder after it
-/// goes on with the new size.
+/// A camera that changes its picture size partway: the server carries it on
+/// as it comes, and a software decoder after the player's `RtspSource` goes
+/// on with the new size.
 #[test]
-fn a_camera_that_changes_its_picture_size_is_said_to_and_decodes_on() {
+fn a_camera_that_changes_its_picture_size_decodes_on_through_the_server() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::bus::BusEvent;
     use crate::elements::{AppSink, SwDecoder};
 
     let (parameters, small) = crate::test_support::h264_configured((320, 240));
@@ -1130,15 +1129,6 @@ fn a_camera_that_changes_its_picture_size_is_said_to_and_decodes_on() {
     camera.join().unwrap();
     runner.stop();
 
-    let changed: Vec<_> = pipeline
-        .bus()
-        .iter()
-        .filter(|event| matches!(event, BusEvent::FormatChanged { .. }))
-        .collect();
-    assert!(
-        matches!(&changed[..], [BusEvent::FormatChanged { output: 0, .. }]),
-        "said once, of the picture's output: {changed:?}"
-    );
     let sizes = sizes.lock().unwrap();
     let first_large = sizes.iter().position(|&size| size == (640, 360)).unwrap();
     assert!(

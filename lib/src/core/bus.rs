@@ -114,29 +114,6 @@ pub enum BusEvent {
         landed: Duration,
     },
 
-    /// A source's stream changed its pictures partway — a camera
-    /// reconfigured, a WebRTC sender that lowered its picture size — so
-    /// the [`StreamInfo`](crate::elements::StreamInfo) it described output
-    /// `output` with no longer says what that output carries. Posted once
-    /// for each output, at the first keyframe whose H.264 or H.265
-    /// sequence parameter set says other pictures: another size, profile,
-    /// chroma format or bit depth.
-    ///
-    /// The source goes on handing the stream out as it comes. A software
-    /// decoder reads the new parameter sets and follows; what was built
-    /// from the old description may not — a muxer of MP4 refuses the track
-    /// from there ([`MuxerTrackError::FormatChanged`](crate::elements::MuxerTrackError::FormatChanged)).
-    /// To have everything after it built for the stream as it now is, open
-    /// the source again.
-    FormatChanged {
-        /// Built-in kind of the source whose stream changed.
-        element_type: ElementType,
-        /// Caller-selected instance name of the source.
-        name: Arc<str>,
-        /// The output whose stream changed, as its `StreamInfo::index` says.
-        output: usize,
-    },
-
     /// Every terminal sink in the pipeline has accepted end-of-stream: the
     /// muxers have written their trailers, the renderers have taken their
     /// last frame. Posted once per stream, after the last terminal's own
@@ -181,12 +158,6 @@ impl fmt::Display for BusEvent {
                 f,
                 "[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"
             ),
-            BusEvent::FormatChanged { name, output, .. } => {
-                write!(
-                    f,
-                    "[{name}] the stream on output {output} changed its format"
-                )
-            }
             BusEvent::Finished => write!(f, "finished"),
         }
     }
@@ -355,10 +326,6 @@ impl Bus {
             BusEvent::Seeked {
                 requested, landed, ..
             } => pp_info!(pp_log: pp_log, "seeked: requested {requested:.2?}, landed {landed:.2?}"),
-            BusEvent::FormatChanged { output, .. } => pp_warn!(
-                pp_log: pp_log,
-                "event=format_changed output={output}: the stream no longer matches what it was opened as"
-            ),
             BusEvent::Finished => pp_info!(pp_log: pp_log, "event=finished"),
         }
         // Nothing to do if the receiving end is gone (pipeline dropped).
@@ -480,9 +447,7 @@ impl BusReceiver {
     pub fn log_events(&self) {
         for event in self.iter() {
             match event {
-                BusEvent::Error { .. }
-                | BusEvent::Dropped { .. }
-                | BusEvent::FormatChanged { .. } => eprintln!("{event}"),
+                BusEvent::Error { .. } | BusEvent::Dropped { .. } => eprintln!("{event}"),
                 BusEvent::Eos { .. } | BusEvent::Seeked { .. } | BusEvent::Finished => {
                     println!("{event}")
                 }
@@ -532,14 +497,6 @@ mod tests {
                     landed: Duration::from_millis(1000),
                 },
                 "[muxer] seeked: requested 1.50s, landed 1.00s",
-            ),
-            (
-                BusEvent::FormatChanged {
-                    element_type: ElementType::RtspSource,
-                    name: "camera".into(),
-                    output: 0,
-                },
-                "[camera] the stream on output 0 changed its format",
             ),
             (BusEvent::Finished, "finished"),
         ];
