@@ -1,11 +1,20 @@
 //! One RTSP connection: its requests, what it is sent while it plays, and
 //! what it sends while it publishes.
+//!
+//! What a player is sent is a driven pipeline of its own,
+//! `BroadcastSource → RtspTrackSink` for each track it set up, which the
+//! connection's task polls whenever it has sent all the pipeline gave it:
+//! a player that takes its packets slowly leaves its reader behind in the
+//! broadcast, never a queue of them here.
 
 use std::collections::hash_map::RandomState;
+use std::future::Future;
 use std::hash::BuildHasher;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,14 +22,16 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::mpsc;
 
-use crate::elements::broadcast::{Timeline, same_shape, time_base};
-use crate::elements::{Broadcast, BroadcastItem, BroadcastReader, StreamInfo};
+use crate::elements::broadcast::same_shape;
+use crate::elements::{Broadcast, BroadcastSource, StreamInfo};
+use crate::pipeline::{DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
 use super::announce::{self, Announced};
 use super::message::{self, Incoming, Request, Response, Transport};
 use super::record::{Recording, Stopped};
 use super::rtp::{self, Packetizer};
+use super::track::{Delivery, Outbox, Outgoing, RtspTrackSink};
 use super::{RtspPathMode, Shared};
 
 /// How long a session lasts without a request, as the server tells its
@@ -33,12 +44,6 @@ const PUBLIC: &str = "OPTIONS, DESCRIBE, ANNOUNCE, SETUP, PLAY, RECORD, PAUSE, T
 
 /// How many of a publisher's UDP packets wait for its connection's task.
 const UDP_BACKLOG: usize = 1024;
-
-/// How much faster than it plays a UDP player is sent what the broadcast
-/// held when it joined: twice, so it catches up in as long as that was.
-/// Sent at once, the group of pictures it joins with overflows the
-/// player's socket, and UDP has no way to say slow down.
-const UDP_CATCH_UP: f64 = 2.0;
 
 /// One of a publisher's RTP packets that came over UDP: its track, and the
 /// packet.
@@ -87,15 +92,6 @@ impl Udp {
     }
 }
 
-/// Where one track of a playing session is sent.
-#[derive(Debug, Clone, Copy)]
-enum Delivery {
-    /// Interleaved on the connection: RTP on `channel`, RTCP on the next.
-    Tcp { channel: u8 },
-    /// To the player's ports.
-    Udp { rtp: SocketAddr, rtcp: SocketAddr },
-}
-
 /// What a connection has set up.
 struct Session {
     id: String,
@@ -123,21 +119,20 @@ enum Role {
     },
 }
 
-/// A playing session's reading of its broadcast.
+/// A playing session's pipeline, and what it has cut into RTP to be sent.
 struct Playing {
-    reader: BroadcastReader,
-    timeline: Timeline,
-    /// Each described track's packetizer, made with its first packet.
-    packetizers: Vec<Option<Packetizer>>,
-    /// Where timestamp zero is in the sender reports, the same for every
-    /// track so the player lines them up.
-    start_us: i64,
-    /// Whether the reader has been handed the run it started in.
-    started: bool,
-    /// Where a UDP player's sending is paced from: when the first packet
-    /// was sent, and where it is on the session's timeline.
-    paced_from: Option<(Instant, f64)>,
+    pipeline: DrivenPipeline,
+    handle: DrivenPipelineHandle,
+    outbox: Outbox,
     _count: Count,
+}
+
+/// What a playing session's pipeline has for its connection next.
+enum Played {
+    Send(Outgoing),
+    /// Its stream has ended: the broadcast closed, or was published again
+    /// with tracks its description does not hold.
+    Ended,
 }
 
 /// Counts a player for as long as it plays.
@@ -315,17 +310,19 @@ pub(super) async fn serve(
             {
                 break 'connection "the publisher went silent";
             }
-            item = next_item(&mut playing), if playing.is_some() => {
-                // Its own scope: what the session holds is not `Sync`, and
-                // must not be borrowed across the send below.
-                let outgoing = {
-                    let (Some(session), Some(play)) = (&connection.session, &mut playing) else {
-                        continue;
-                    };
-                    match prepare(item, session, play, &pp_log) {
-                        Ok(Some(outgoing)) => outgoing,
-                        Ok(None) => continue,
-                        Err(why) => break 'connection why,
+            played = next_played(&mut playing), if playing.is_some() => {
+                let outgoing = match played {
+                    Played::Send(outgoing) => outgoing,
+                    Played::Ended => {
+                        let closed = connection
+                            .session
+                            .as_ref()
+                            .is_none_or(|session| session.broadcast.is_closed());
+                        break 'connection if closed {
+                            "the broadcast closed"
+                        } else {
+                            "the broadcast's tracks changed"
+                        };
                     }
                 };
                 if let Err(why) = deliver(outgoing, &mut write, udp.as_deref(), &shared, &pp_log).await {
@@ -345,11 +342,28 @@ pub(super) async fn serve(
     }
 }
 
-/// The next item a playing session's reader reads.
-async fn next_item(playing: &mut Option<Playing>) -> Option<BroadcastItem> {
-    std::future::poll_fn(|cx| match playing.as_mut() {
-        Some(playing) => playing.reader.poll_next(cx),
-        None => std::task::Poll::Pending,
+/// What a playing session's pipeline has for its connection next: what it
+/// already gave, or else what a poll of it gives — polled only once all it
+/// gave has been sent.
+async fn next_played(playing: &mut Option<Playing>) -> Played {
+    std::future::poll_fn(|cx| {
+        let Some(playing) = playing.as_mut() else {
+            return Poll::Pending;
+        };
+        loop {
+            if let Some(outgoing) = playing.outbox.take() {
+                return Poll::Ready(Played::Send(outgoing));
+            }
+            let polled = Pin::new(&mut playing.pipeline).poll(cx);
+            // What it reports is in the log already; read here so that it
+            // does not pile up on a bus nobody else reads.
+            while playing.handle.bus().try_recv().is_some() {}
+            match polled {
+                Poll::Ready(()) => return Poll::Ready(Played::Ended),
+                Poll::Pending if playing.outbox.is_empty() => return Poll::Pending,
+                Poll::Pending => {}
+            }
+        }
     })
     .await
 }
@@ -633,9 +647,9 @@ impl Connection {
             broadcast,
             role:
                 Role::Play {
+                    tracks,
                     described,
                     delivery,
-                    ..
                 },
         }) = self.session.as_ref()
         else {
@@ -648,17 +662,10 @@ impl Connection {
             .header("Session", session_header(id))
             .header("Range", "npt=0.000-");
         if playing.is_none() {
-            *playing = Some(Playing {
-                reader: broadcast.subscribe(),
-                timeline: Timeline::default(),
-                packetizers: described.iter().map(|_| None).collect(),
-                start_us: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |since| i64::try_from(since.as_micros()).unwrap_or(0)),
-                started: false,
-                paced_from: None,
-                _count: Count::new(&self.shared),
-            });
+            match self.begin_playing(id, broadcast, tracks, described, delivery) {
+                Ok(begun) => *playing = Some(begun),
+                Err(status) => return Response::new(status),
+            }
             pp_info!(
                 pp_log: &self.shared.pp_log,
                 "{} plays {path} (session {id}, {} of {} tracks)",
@@ -668,6 +675,78 @@ impl Connection {
             );
         }
         response
+    }
+
+    /// A player's pipeline: a reader of the broadcast from its newest
+    /// keyframe, and a sink for each track it set up. Refused with the
+    /// status to answer where the broadcast's tracks are no longer the ones
+    /// described, or a track cannot be packetized.
+    fn begin_playing(
+        &self,
+        id: &str,
+        broadcast: &Broadcast,
+        tracks: &[StreamInfo],
+        described: &[usize],
+        delivery: &[Option<Delivery>],
+    ) -> Result<Playing, u16> {
+        let (source, now) =
+            BroadcastSource::new(format!("rtsp-{id}-reader"), broadcast).map_err(|_| 404_u16)?;
+        if !same_shape(tracks, &now) {
+            pp_info!(
+                pp_log: &self.shared.pp_log,
+                "{} was published again with tracks session {id}'s description does not hold",
+                broadcast.name()
+            );
+            return Err(410);
+        }
+        // Where timestamp zero is in the sender reports, the same for every
+        // track so the player lines them up.
+        let start_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| i64::try_from(since.as_micros()).unwrap_or(0));
+        let outbox = Outbox::default();
+        let mut sinks = Vec::new();
+        for (stream, &track) in described.iter().enumerate() {
+            let Some(delivery) = delivery[stream] else {
+                continue;
+            };
+            let info = &tracks[track];
+            let packetizer =
+                Packetizer::new(info, rtp::payload_type(stream), start_us).map_err(|error| {
+                    pp_warn!(
+                        pp_log: &self.shared.pp_log,
+                        "session {id}: could not packetize track {track} of {}: {error}",
+                        broadcast.name()
+                    );
+                    500_u16
+                })?;
+            sinks.push((
+                track,
+                RtspTrackSink::new(
+                    format!("rtsp-{id}-track-{track}"),
+                    delivery,
+                    packetizer,
+                    info.time_base,
+                    outbox.clone(),
+                ),
+            ));
+        }
+        let (pipeline, ()) = DrivenPipeline::new(format!("rtsp-{id}"), source, |source, ctx| {
+            for (track, sink) in sinks {
+                ctx.attach(source, track, ctx.branch().to(sink)?)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| {
+            pp_warn!(pp_log: &self.shared.pp_log, "session {id} could not begin: {error}");
+            500_u16
+        })?;
+        Ok(Playing {
+            handle: pipeline.handle(),
+            pipeline,
+            outbox,
+            _count: Count::new(&self.shared),
+        })
     }
 
     fn record(&mut self) -> Response {
@@ -772,118 +851,6 @@ fn described(shared: &Shared, path: &str) -> Option<(Broadcast, Vec<StreamInfo>,
         return None;
     }
     Some((entry.broadcast, tracks, described))
-}
-
-/// What is to be sent to a player, and where.
-struct Outgoing {
-    delivery: Delivery,
-    packets: Vec<Vec<u8>>,
-    /// Not before when, for a UDP player catching up.
-    due: Option<Instant>,
-}
-
-/// What `item` has a playing session send its player, if anything: an
-/// error, with why, ends the connection.
-fn prepare(
-    item: Option<BroadcastItem>,
-    session: &Session,
-    playing: &mut Playing,
-    pp_log: &PpLog,
-) -> Result<Option<Outgoing>, &'static str> {
-    let Role::Play {
-        tracks,
-        described,
-        delivery,
-    } = &session.role
-    else {
-        return Ok(None);
-    };
-    let (track, packet, arrived) = match item {
-        Some(BroadcastItem::Closed) | None => return Err("the broadcast closed"),
-        Some(BroadcastItem::Started(started)) => {
-            if !same_shape(tracks, &started) {
-                pp_info!(
-                    pp_log: pp_log,
-                    "{} was published again with tracks the session's description does not hold; ending session {}",
-                    session.path,
-                    session.id
-                );
-                return Err("the broadcast's tracks changed");
-            }
-            if playing.started {
-                playing.timeline.next_run();
-            }
-            playing.started = true;
-            return Ok(None);
-        }
-        Some(BroadcastItem::Skipped) => {
-            pp_debug!(
-                pp_log: pp_log,
-                "session {} fell behind {} and goes on from its newest keyframe",
-                session.id,
-                session.path
-            );
-            return Ok(None);
-        }
-        Some(BroadcastItem::Ended) => return Ok(None),
-        Some(BroadcastItem::Packet {
-            track,
-            packet,
-            arrived,
-        }) => (track, packet, arrived),
-    };
-    let Some(stream) = described.iter().position(|&index| index == track) else {
-        return Ok(None);
-    };
-    let Some(delivery) = delivery[stream] else {
-        return Ok(None);
-    };
-    let info = &tracks[track];
-    let Some(stamped) =
-        playing
-            .timeline
-            .restamp(&packet, time_base(&packet, Some(info.time_base)), arrived)
-    else {
-        return Ok(None);
-    };
-    let packetizer = match &mut playing.packetizers[stream] {
-        Some(packetizer) => packetizer,
-        slot => match Packetizer::new(info, rtp::payload_type(stream), playing.start_us) {
-            Ok(packetizer) => slot.insert(packetizer),
-            Err(error) => {
-                pp_warn!(
-                    pp_log: pp_log,
-                    "session {}: could not packetize track {track} of {}: {error}",
-                    session.id,
-                    session.path
-                );
-                return Err("a track could not be packetized");
-            }
-        },
-    };
-    let due = match delivery {
-        Delivery::Udp { .. } => stamped.dts().or(stamped.pts()).map(|ts| {
-            let at = ts as f64 * f64::from(time_base(&stamped, Some(info.time_base)));
-            let (began, from) = *playing.paced_from.get_or_insert((Instant::now(), at));
-            began + Duration::from_secs_f64(((at - from) / UDP_CATCH_UP).max(0.0))
-        }),
-        Delivery::Tcp { .. } => None,
-    };
-    match packetizer.packetize(&stamped) {
-        Ok(packets) => Ok(Some(Outgoing {
-            delivery,
-            packets,
-            due,
-        })),
-        Err(error) => {
-            pp_debug!(
-                pp_log: pp_log,
-                "session {}: a packet of track {track} was not sent: {error}",
-                session.id
-            );
-            Ok(None)
-        }
-    }
 }
 
 /// Sends what a player is to be sent: what fails to send over TCP ends the

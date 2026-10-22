@@ -8,6 +8,7 @@ pub(crate) mod rtp;
 mod session;
 #[cfg(test)]
 mod tests;
+mod track;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -164,12 +165,18 @@ impl Default for RtspServerOptions {
 /// more [`RtspServerOptions::threads`]; `docs/benchmarks/streaming` has the
 /// figures.
 ///
-/// Each player is a reader of its path's broadcast, and is sent RTP as FFmpeg's
-/// `rtp` muxer cuts it — any codec that muxer carries, described by the SDP
-/// it writes. A player's tracks share one timeline, so they stay together,
-/// and that timeline goes on across the broadcast's runs: one that begins
-/// with tracks of a different shape ends the player's session, since its
-/// description no longer holds. A session lasts as long as its connection.
+/// Each player is a pipeline of its own with no thread of its own — a
+/// [`DrivenPipeline`](crate::pipeline::DrivenPipeline) of a
+/// [`BroadcastSource`](crate::elements::BroadcastSource) of its path's
+/// broadcast, and a sink for each track it set up — which its connection
+/// polls once it has sent all the pipeline gave it, so a player that takes
+/// its packets slowly is left behind in the broadcast rather than queued
+/// for here. It is sent RTP as FFmpeg's `rtp` muxer cuts it — any codec
+/// that muxer carries, described by the SDP it writes. A player's tracks
+/// share one timeline, so they stay together, and that timeline goes on
+/// across the broadcast's runs: one that begins with tracks of a different
+/// shape ends the player's session, since its description no longer holds.
+/// A session lasts as long as its connection.
 pub struct RtspServer {
     name: Arc<str>,
     pp_log: PpLog,

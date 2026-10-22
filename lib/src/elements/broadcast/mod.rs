@@ -38,7 +38,7 @@ pub use source::BroadcastSource;
 #[cfg(feature = "rtsp-server")]
 pub(crate) use state::time_base;
 #[cfg(feature = "rtsp-server")]
-pub(crate) use timeline::{Timeline, same_shape};
+pub(crate) use timeline::same_shape;
 
 use state::State;
 

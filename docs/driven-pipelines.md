@@ -409,8 +409,18 @@ Each stage lands on its own, with its tests, as the streaming stages did.
      method of `docs/benchmarks/streaming`), at 0.4 MB more a player. Paths
      as §5.4 are left for when an application needs a pipeline of its own
      for a path.
-4. **RTSP.** `RtspTrackSink`; `RtspServer`'s sessions likewise, polled from
-   their tasks.
+4. **RTSP** — done. A playing session is a driven pipeline
+   `BroadcastSource → RtspTrackSink` per track it set up; the sink cuts RTP
+   and puts it, with when a UDP player is due it, in the session's outbox.
+   The connection's task sends what the outbox holds and polls the pipeline
+   only once it is empty, so TCP's backpressure is as it was: a slow player
+   is left behind in the broadcast, not queued for. The server's own
+   reader and restamping are gone. `RtspTrackSink` stays crate-private —
+   nothing outside a session hands one out. Publishing (ANNOUNCE/RECORD)
+   is as it was: it writes into a broadcast and reads none. Against the
+   streaming benchmark's figures, two threads: TCP 100 players 0.32 → 0.26
+   cores, 400 players 0.99 → 0.89; UDP 100 players 0.88 → 0.97 cores and
+   47 → 79 MB, its lag spread 243 → 146 ms; nothing lost.
 5. **Measured.** `rtsp_load` and `webrtc_load` against the same figures as
    `docs/benchmarks/streaming`. A stage-3 or stage-4 change that costs a
    player more than a quarter again of the processor it costs now is
