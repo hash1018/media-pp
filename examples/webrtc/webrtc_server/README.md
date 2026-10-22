@@ -19,7 +19,7 @@ and AV1 pictures and Opus sound, so a file's AAC is left out; a browser takes
 H.264 without B-frames.
 
 ```sh
-cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS]
+cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS] [--candidate ADDRESS]...
 ```
 
 Both addresses default to this machine alone. To serve the network, give the
@@ -30,6 +30,20 @@ page of your own — posts to `http://127.0.0.1:8080/live/whip`, and
 pressed, or for `--seconds`, printing what each session does. `--threads` is
 how many threads — each with a UDP port of its own, from the one `--udp` names
 on — it runs its sessions on, two by default.
+
+Behind a router, give the router's public address with `--candidate`: it is
+what browsers are told to send to, in place of the address the server is
+bound to, and the router forwards those UDP ports — the `--udp` port and one
+more for each further thread — to this machine. A bare IP keeps the bound
+port. Give it once for each address a browser may reach the server at, the
+local one too where browsers on the same network play:
+
+```sh
+cargo run -p webrtc_server -- input.mp4 --udp 192.168.0.10:8189 --http 0.0.0.0:8080 --candidate 203.0.113.7 --candidate 192.168.0.10
+```
+
+The server finds no public address of its own: on a closed network there is
+none, and asking a STUN server would be a request out of it.
 
 With `--rtmp ADDRESS` it also takes an RTMP publisher into `live` — OBS with
 the "Custom" service, its server `rtmp://127.0.0.1:1935/live` and its stream

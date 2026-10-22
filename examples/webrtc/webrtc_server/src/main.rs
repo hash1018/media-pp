@@ -21,7 +21,7 @@
 //! is left out. Plays of the file without B-frames, as a browser takes
 //! H.264.
 //!
-//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS]
+//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS] [--candidate ADDRESS]...
 //!
 //! Both addresses default to this machine alone. To serve the network,
 //! give the address the network reaches this machine at to `--udp` — a
@@ -29,6 +29,10 @@
 //! until Enter is pressed, or for `--seconds`, printing what each session
 //! does. `--threads` is how many threads — each with a UDP port of its own,
 //! from the one `--udp` names on — it runs its sessions on, two by default.
+//! `--candidate` is an address the server tells browsers to send to in place
+//! of the one it is bound to — the public address of a router that forwards
+//! the UDP ports to this machine; a bare IP keeps the bound port; give it
+//! once for each address a browser may reach it at.
 //! `--record` also records what `file` plays, as it plays it, into an HLS
 //! event playlist under `DIR` — `index.m3u8` and its fMP4 segments, playable
 //! while it grows and finished as the server stops. `--rtmp` also takes an
@@ -42,6 +46,7 @@ fn main() -> Result<(), media_pp::Report> {
 }
 
 mod example {
+    use std::net::{IpAddr, SocketAddr};
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
@@ -53,7 +58,7 @@ mod example {
     };
     use media_pp::pipeline::Pipeline;
 
-    const USAGE: &str = "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS]";
+    const USAGE: &str = "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS] [--candidate ADDRESS]...";
 
     struct Args {
         input: String,
@@ -63,6 +68,15 @@ mod example {
         threads: Option<usize>,
         record: Option<String>,
         rtmp: Option<String>,
+        candidates: Vec<SocketAddr>,
+    }
+
+    /// `ADDRESS`, or an IP alone, which then keeps the port the server is
+    /// bound to.
+    fn candidate(text: &str) -> Option<SocketAddr> {
+        text.parse()
+            .ok()
+            .or_else(|| text.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 0)))
     }
 
     fn args() -> Option<Args> {
@@ -73,6 +87,7 @@ mod example {
         let mut threads = None;
         let mut record = None;
         let mut rtmp = None;
+        let mut candidates = Vec::new();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -82,6 +97,7 @@ mod example {
                 "--threads" => threads = Some(args.next()?.parse().ok().filter(|&n| n > 0)?),
                 "--record" => record = Some(args.next()?),
                 "--rtmp" => rtmp = Some(args.next()?),
+                "--candidate" => candidates.push(candidate(&args.next()?)?),
                 _ if input.is_none() => input = Some(arg),
                 _ => return None,
             }
@@ -94,6 +110,7 @@ mod example {
             threads,
             record,
             rtmp,
+            candidates,
         })
     }
 
@@ -113,6 +130,7 @@ mod example {
         if let Some(threads) = args.threads {
             options.threads = threads;
         }
+        options.candidates = args.candidates;
         let (server, handle) = WebRtcServer::bind("server", &args.udp, options)?;
         let file = Broadcast::new("file", BroadcastOptions::default());
         let live = Broadcast::new("live", BroadcastOptions::default());

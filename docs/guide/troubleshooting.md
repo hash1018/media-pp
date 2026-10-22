@@ -100,6 +100,16 @@ A pipeline writing a file refuses to seek — a recording is a record of what
 happened — and so does one reading a live source. `check_seek()` asks
 before trying.
 
+**A browser on another network gets an answer from `WebRtcServer` but never
+plays.**
+The answer tells the browser where to send its media: the address the
+server is bound to, which behind a router is not one the browser can reach.
+Put the router's public address in `WebRtcServerOptions::candidates` — a
+port of 0 keeps the bound one — and forward the server's UDP ports to the
+machine: the bound port and one more for each further thread. The server
+does not look its public address up itself, which a closed network could
+not answer.
+
 **Hardware encoding is not used.**
 Run the doctor. An FFmpeg built without NVIDIA's `nvcodec` has no NVENC;
 the setup script includes it. `VideoEncodeBin::path()` says which
