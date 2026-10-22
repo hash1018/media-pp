@@ -114,6 +114,11 @@ fn assert_scaled(what: &str, (sizes, errors): (Vec<(u32, u32)>, Vec<String>)) {
 /// why where it does not: a CI runner's device opens, or even decodes,
 /// no video. One that decodes the first size and then fails is a failure,
 /// not this.
+#[cfg(any(
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    feature = "cuda",
+    feature = "vulkan"
+))]
 fn decodes_here<M>(
     what: &str,
     decoder: Option<impl IntoFilter<M> + Send + 'static>,
