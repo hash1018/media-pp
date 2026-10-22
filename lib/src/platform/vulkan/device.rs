@@ -76,13 +76,13 @@ pub enum VulkanDeviceError {
 /// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
 /// let video = source.best(media::Type::Video)?;
 /// // Both elements are made from the same `device`.
-/// let decoder = VulkanDecoder::new("decoder", video.parameters.clone(), &device, 8)?;
+/// let decoder = VulkanDecoder::new("decoder", video.parameters().clone(), &device, 8)?;
 /// let download = VulkanDownload::new("download", &device);
 /// let (counter, _frames) = FrameCounter::new("counter");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).pipe(download).to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

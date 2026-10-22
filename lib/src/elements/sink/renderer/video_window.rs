@@ -65,13 +65,13 @@ pub enum VideoWindowError {
 ///
 /// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
-/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// let (window, events) = VideoWindow::open("window", WindowOptions::default())?;
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 8);
 ///     let branch = branch.pipe(Pacer::new("pacer")).to(window)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

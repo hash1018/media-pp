@@ -47,7 +47,7 @@ mod example {
     use media_pp::elements::{
         Broadcast, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode, HlsMuxer, HlsOptions,
         Pacer, RtmpServer, RtmpServerOptions, RtspPathMode, RtspServer, RtspServerOptions,
-        TrackFormat,
+        StreamInfo,
     };
     use media_pp::pipeline::Pipeline;
 
@@ -140,16 +140,16 @@ mod example {
         // The file as a camera: looped, at its own speed, into its broadcast.
         let (demuxer, streams) = FileDemuxer::open("file", &args.input)?;
         demuxer.looping_handle().set_looping(true);
-        let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+        let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
         let sinks = file.publish(&tracks)?;
         let (camera, ()) = Pipeline::new("file", demuxer, |source, ctx| {
             for (stream, sink) in streams.iter().zip(sinks) {
                 let branch = ctx
                     .branch()
-                    .queue(format!("packets-{}", stream.index), 64)
-                    .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                    .queue(format!("packets-{}", stream.index()), 64)
+                    .pipe(Pacer::new(format!("pacer-{}", stream.index())))
                     .to(sink)?;
-                ctx.attach(source, stream.index, branch)?;
+                ctx.attach(source, stream.index(), branch)?;
             }
             Ok(())
         })?;
@@ -220,9 +220,11 @@ mod example {
         let mut muxer = HlsMuxer::create(options)?;
         let mut tracks = Vec::new();
         for stream in &streams {
-            let track =
-                muxer.add_stream(format!("track-{}", stream.index), TrackFormat::from(stream))?;
-            tracks.push((stream.index, track));
+            let track = muxer.add_stream(
+                format!("track-{}", stream.index()),
+                StreamInfo::from(stream),
+            )?;
+            tracks.push((stream.index(), track));
         }
         let mut sinks = muxer.open()?;
         let (recorder, ()) = Pipeline::new("recorder", source, |source, ctx| {

@@ -38,11 +38,11 @@ mod example {
 
         println!("stream count: {}", streams.len());
         for s in &streams {
-            println!("  [{}] {:?}", s.index, s.kind);
+            println!("  [{}] {:?}", s.index(), s.kind());
         }
 
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let (frame_counter, frame_count) = FrameCounter::new("frame-counter");
         let (packet_counter, packet_count) = PacketCounter::new("packet-counter");
@@ -57,7 +57,7 @@ mod example {
                 .branch(decode_branch)
                 .branch(packet_branch)
                 .build()?;
-            ctx.attach(source, video.index, tee_branch)?;
+            ctx.attach(source, video.index(), tee_branch)?;
             Ok(())
         })?;
 

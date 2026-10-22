@@ -52,23 +52,23 @@ impl BroadcastSink {
     pub(super) fn new(shared: Arc<Shared>, publication: u64, track: &StreamInfo) -> Self {
         let identity = Identity::new(
             ElementType::BroadcastSink,
-            format!("{}-{}", shared.name, track.index),
+            format!("{}-{}", shared.name, track.index()),
         );
         let pp_log = identity.pp_log().clone();
         pp_info!(
             pp_log: &pp_log,
             "created: track={} kind={:?} codec={:?}",
-            track.index,
-            track.kind,
-            track.parameters.id()
+            track.index(),
+            track.kind(),
+            track.parameters().id()
         );
-        let kind = MediaKind::packet_for(track.kind).unwrap_or(MediaKind::VideoPacket);
+        let kind = MediaKind::packet_for(track.kind()).unwrap_or(MediaKind::VideoPacket);
         Self(SinkStage::new(
             identity,
             Writing {
                 shared,
                 publication,
-                track: track.index,
+                track: track.index(),
                 kind,
                 ended: false,
                 over_said: false,

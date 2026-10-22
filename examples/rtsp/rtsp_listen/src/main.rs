@@ -59,19 +59,19 @@ mod example {
         for stream in &streams {
             println!(
                 "  [{}] {:?} {:?}, time base {}",
-                stream.index,
-                stream.kind,
-                stream.parameters.id(),
-                stream.time_base
+                stream.index(),
+                stream.kind(),
+                stream.parameters().id(),
+                stream.time_base()
             );
         }
 
         let (pipeline, counts) = Pipeline::new("rtsp-listen", source, |source, ctx| {
             let mut counts = Vec::new();
             for stream in &streams {
-                let (counter, count) = PacketCounter::new(format!("count-{}", stream.index));
+                let (counter, count) = PacketCounter::new(format!("count-{}", stream.index()));
                 let branch = ctx.branch().to(counter)?;
-                ctx.attach(source, stream.index, branch)?;
+                ctx.attach(source, stream.index(), branch)?;
                 counts.push(count);
             }
             Ok(counts)

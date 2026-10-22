@@ -34,9 +34,7 @@ use crate::{
         PortContract,
     },
     element::{Context, Element, ElementType, Flow, RawFilter, RawSink, SrcPads, element_pp_log},
-    elements::{
-        SwEncoder, SwEncoderOptions, SwScaler, TrackFormat, VideoCodec, filter::line::Line,
-    },
+    elements::{StreamInfo, SwEncoder, SwEncoderOptions, SwScaler, VideoCodec, filter::line::Line},
     error::Result,
     pad::SrcPad,
     pp_log::{PpLog, pp_info},
@@ -273,13 +271,13 @@ impl EncodePath {
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(Error::Other("no size".into()))?;
 /// let target = DecodeTarget::System; // or a GPU: `DecodeTarget::D3d11 { .. }`, ...
-/// let decoder = VideoDecodeBin::open("decode", video.parameters.clone(), target.clone(), None)?;
+/// let decoder = VideoDecodeBin::open("decode", video.parameters().clone(), target.clone(), None)?;
 /// let input = EncodeInput::for_decoded(&target, decoder.output_format())
 ///     .ok_or(Error::Other("no encoder takes these pictures".into()))?;
 /// let encoder = VideoEncodeBin::open("encode", input, VideoEncodeOptions {
 ///     width,
 ///     height,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 4_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -292,7 +290,7 @@ impl EncodePath {
 /// let sink = muxer.open()?.take(track)?;
 /// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -331,7 +329,7 @@ impl EncodePath {
 /// pipeline runs.
 ///
 /// Never again after that: a muxer takes its stream's headers from the
-/// encoder it was opened with ([`TrackFormat::from`] this), so one
+/// encoder it was opened with ([`StreamInfo::from`] this), so one
 /// encoder's packets could not follow another's in the same file.
 ///
 /// # What it holds
@@ -400,13 +398,11 @@ impl Chosen {
     fn of<E>(path: EncodePath, mut before: Vec<Box<dyn RawFilter>>, encoder: E) -> Self
     where
         E: RawFilter + 'static,
-        for<'a> TrackFormat: From<&'a E>,
+        for<'a> StreamInfo: From<&'a E>,
     {
-        let TrackFormat {
-            parameters,
-            time_base,
-            ..
-        } = TrackFormat::from(&encoder);
+        let format = StreamInfo::from(&encoder);
+        let time_base = format.time_base();
+        let parameters = format.into_parameters();
         before.push(Box::new(encoder));
         Self {
             path,
@@ -518,7 +514,7 @@ impl VideoEncodeBin {
     }
 
     /// The stream the chosen encoder writes, as a muxer's `add_stream` takes
-    /// it — through [`TrackFormat::from`] this.
+    /// it — through [`StreamInfo::from`] this.
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         self.parameters.clone()
     }
@@ -562,7 +558,7 @@ impl Tried<'_> {
     }
 }
 
-impl From<&VideoEncodeBin> for TrackFormat {
+impl From<&VideoEncodeBin> for StreamInfo {
     fn from(bin: &VideoEncodeBin) -> Self {
         Self::new(bin.parameters(), bin.time_base())
     }
@@ -1243,10 +1239,10 @@ mod tests {
         let (demuxer, streams) = FileDemuxer::open("check", &file).expect("the file opens again");
         let length = demuxer.duration();
         let video = &streams[0];
-        let codec = video.parameters.id();
+        let codec = video.parameters().id();
         // SAFETY: plain fields of parameters this test owns.
         let size = unsafe {
-            let raw = video.parameters.as_ptr();
+            let raw = video.parameters().as_ptr();
             ((*raw).width as u32, (*raw).height as u32)
         };
         let color = video.color();

@@ -35,7 +35,7 @@ mod example {
 
         println!("stream count: {}", streams.len());
         for s in &streams {
-            println!("  [{}] {:?}", s.index, s.kind);
+            println!("  [{}] {:?}", s.index(), s.kind());
         }
 
         let video = source.best(media::Type::Video).ok();
@@ -50,11 +50,11 @@ mod example {
                     .branch()
                     .queue("video-q", 32) // its own thread, separate from audio
                     .to(video_counter)?;
-                ctx.attach(source, v.index, branch)?;
+                ctx.attach(source, v.index(), branch)?;
             }
             if let Some(a) = audio {
                 let branch = ctx.branch().queue("audio-q", 32).to(audio_counter)?;
-                ctx.attach(source, a.index, branch)?;
+                ctx.attach(source, a.index(), branch)?;
             }
             // Any other stream's pad is simply left unlinked.
             Ok(())

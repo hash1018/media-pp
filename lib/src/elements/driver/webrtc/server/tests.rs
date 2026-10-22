@@ -17,7 +17,7 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use super::*;
 use crate::driver::DriverRunner;
-use crate::elements::{BroadcastOptions, FileDemuxer, Pacer, TrackFormat};
+use crate::elements::{BroadcastOptions, FileDemuxer, Pacer, StreamInfo};
 use crate::pipeline::Pipeline;
 
 /// A server on the loopback serving `cam` for players and `live` for a
@@ -41,16 +41,16 @@ fn server() -> (Arc<DriverRunner>, WebRtcServerHandle, Broadcast, Broadcast) {
 fn feed(broadcast: &Broadcast, path: &str) -> Arc<Pipeline> {
     let (demuxer, streams) = FileDemuxer::open("camera", path).unwrap();
     demuxer.looping_handle().set_looping(true);
-    let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+    let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
     let sinks = broadcast.publish(&tracks).unwrap();
     let (pipeline, ()) = Pipeline::new("camera", demuxer, |source, ctx| {
         for (stream, sink) in streams.iter().zip(sinks) {
             let branch = ctx
                 .branch()
-                .queue(format!("packets-{}", stream.index), 64)
-                .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                .queue(format!("packets-{}", stream.index()), 64)
+                .pipe(Pacer::new(format!("pacer-{}", stream.index())))
                 .to(sink)?;
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
         }
         Ok(())
     })
@@ -318,7 +318,7 @@ fn a_publisher_is_played_back() {
     let (_, streams) = FileDemuxer::open("probe", &path).unwrap();
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg::media::Type::Video)
         .unwrap();
     // Made Annex B, with the parameter sets ahead of each keyframe, as a
     // track sink makes what it sends.
@@ -330,17 +330,17 @@ fn a_publisher_is_played_back() {
         Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
         outbox.clone(),
     );
-    sink.set_source_parameters(&video.parameters).unwrap();
+    sink.set_source_parameters(video.parameters()).unwrap();
     let mut input = ffmpeg::format::input(&path).unwrap();
     let pictures: Vec<(Vec<u8>, i64)> = input
         .packets()
-        .filter(|(stream, _)| stream.index() == video.index)
+        .filter(|(stream, _)| stream.index() == video.index())
         .map(|(_, mut packet)| {
             let ts = packet
                 .pts()
                 .unwrap()
-                .rescale(video.time_base, ffmpeg::Rational(1, 90_000));
-            packet.set_time_base(video.time_base);
+                .rescale(video.time_base(), ffmpeg::Rational(1, 90_000));
+            packet.set_time_base(video.time_base());
             crate::element::RawSink::consume(&mut sink, crate::buffer::MediaBuffer::packet(packet))
                 .unwrap();
             let sent = outbox.take_all().pop_front().unwrap();
@@ -392,12 +392,12 @@ fn a_publisher_is_played_back() {
     assert!(done, "the publisher's stream never reached its broadcast");
     let tracks = live.tracks().unwrap();
     assert_eq!(tracks.len(), 1);
-    assert_eq!(tracks[0].parameters.id(), ffmpeg::codec::Id::H264);
+    assert_eq!(tracks[0].parameters().id(), ffmpeg::codec::Id::H264);
     // SAFETY: plain fields of parameters held here.
     let (width, height) = unsafe {
         (
-            (*tracks[0].parameters.as_ptr()).width,
-            (*tracks[0].parameters.as_ptr()).height,
+            (*tracks[0].parameters().as_ptr()).width,
+            (*tracks[0].parameters().as_ptr()).height,
         )
     };
     assert!(
@@ -659,7 +659,7 @@ fn a_player_catches_up_on_large_pictures_in_time() {
         return;
     }
     let (runner, handle, cam, _live) = server();
-    let video = TrackFormat::new(
+    let video = StreamInfo::new(
         {
             let mut parameters = ffmpeg::codec::Parameters::new();
             // SAFETY: parameters this test owns alone; plain fields.
@@ -1025,7 +1025,7 @@ fn ice_servers_are_told_to_clients_let_in_and_no_one_else() {
 #[test]
 fn a_player_far_behind_the_newest_keyframe_starts_at_the_next() {
     let (runner, handle, cam, _live) = server();
-    let video = TrackFormat::new(
+    let video = StreamInfo::new(
         {
             let mut parameters = ffmpeg::codec::Parameters::new();
             // SAFETY: parameters this test owns alone; plain fields.

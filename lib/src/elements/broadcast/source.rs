@@ -166,7 +166,7 @@ impl Relaying {
         packet: &PacketBuffer,
         arrived: Instant,
     ) -> Option<MediaBuffer> {
-        let unit = time_base(packet, Some(self.tracks[track].time_base));
+        let unit = time_base(packet, Some(self.tracks[track].time_base()));
         let first = self.timeline.run_begins_at().is_none();
         let stamped = self.timeline.restamp(packet, unit, arrived)?;
         if first && let Some(at) = self.timeline.run_begins_at() {
@@ -191,7 +191,7 @@ impl Source for Relaying {
                 .iter()
                 .enumerate()
                 .map(|(index, track)| {
-                    let contract = MediaKind::packet_for(track.kind)
+                    let contract = MediaKind::packet_for(track.kind())
                         .map_or(OutputContract::Unknown, |kind| {
                             OutputContract::Fixed(PortContract::packet(kind))
                         });

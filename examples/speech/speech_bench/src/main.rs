@@ -126,7 +126,7 @@ mod bench {
 
         let (source, _) = FileDemuxer::open("demux", &clip)?;
         let audio = source.best(media::Type::Audio)?;
-        let decoder = SwDecoder::new("decode", audio.parameters.clone())?;
+        let decoder = SwDecoder::new("decode", audio.parameters().clone())?;
         let resampler = AudioResampler::new(
             "to-whisper",
             AudioFormat::new(
@@ -175,7 +175,7 @@ mod bench {
                 .queue("speech", QUEUE_DEPTH)
                 .pipe(transcriber)
                 .to(sink)?;
-            ctx.attach(source, audio.index, branch)?;
+            ctx.attach(source, audio.index(), branch)?;
             Ok(())
         })?;
 

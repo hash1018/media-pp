@@ -9,7 +9,8 @@ use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 
 use super::file_muxer::{FileMuxer, FileMuxerError, Mp4Layout};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use crate::elements::StreamInfo;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -52,7 +53,7 @@ pub enum SegmentPolicy {
 /// own copy); the original stays here as the template.
 struct StreamDef {
     name: Arc<str>,
-    format: TrackFormat,
+    format: StreamInfo,
     /// Whether this is the track [`SegmentGroup::consume_packet`] waits for
     /// a keyframe on before actually cutting — see
     /// [`SegmentedFileMuxer::open`]'s own docs.
@@ -166,10 +167,10 @@ impl SegmentedFileMuxer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        format: impl Into<TrackFormat>,
+        format: impl Into<StreamInfo>,
     ) -> MuxerTrack {
-        let format: TrackFormat = format.into();
-        let is_video = format.parameters.medium() == ffmpeg::media::Type::Video;
+        let format: StreamInfo = format.into();
+        let is_video = format.parameters().medium() == ffmpeg::media::Type::Video;
         let track = self.id.track(self.streams.len());
         self.streams.push(StreamDef {
             name: name.into().into(),
@@ -224,7 +225,7 @@ impl SegmentedFileMuxer {
             .map(|s| {
                 (
                     s.name.clone(),
-                    MediaKind::packet_for(s.format.parameters.medium()),
+                    MediaKind::packet_for(s.format.parameters().medium()),
                 )
             })
             .collect();
@@ -342,9 +343,9 @@ impl GroupState {
         unsafe {
             ffmpeg::ffi::av_compare_ts(
                 at,
-                self.streams[track].format.time_base.into(),
+                self.streams[track].format.time_base().into(),
                 reached,
-                self.streams[video].format.time_base.into(),
+                self.streams[video].format.time_base().into(),
             ) < 0
         }
     }
@@ -570,8 +571,8 @@ impl SegmentGroup {
             unsafe {
                 ffmpeg::ffi::av_rescale_q(
                     origin,
-                    state.streams[origin_track].format.time_base.into(),
-                    state.streams[track_index].format.time_base.into(),
+                    state.streams[origin_track].format.time_base().into(),
+                    state.streams[track_index].format.time_base().into(),
                 )
             }
         };
@@ -1047,7 +1048,7 @@ mod tests {
             .map(|(index, (parameters, time_base))| {
                 muxer.add_stream(
                     format!("track-{index}"),
-                    TrackFormat::new(parameters.clone(), *time_base),
+                    StreamInfo::new(parameters.clone(), *time_base),
                 )
             })
             .collect();

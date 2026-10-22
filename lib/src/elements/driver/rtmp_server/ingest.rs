@@ -8,7 +8,7 @@ use ffmpeg_next::{self as ffmpeg, codec::Id, ffi};
 use crate::buffer::MediaBuffer;
 use crate::element::RawSink;
 use crate::elements::driver::parameters::{picture_size, set_extradata};
-use crate::elements::{Broadcast, BroadcastError, BroadcastSink, TrackFormat};
+use crate::elements::{Broadcast, BroadcastError, BroadcastSink, StreamInfo};
 use crate::error::Error;
 
 use super::amf::Amf;
@@ -241,7 +241,7 @@ impl Ingest {
         for (medium, track) in [(Medium::Video, &self.video), (Medium::Audio, &self.audio)] {
             if let Some(track) = track {
                 media.push(medium);
-                formats.push(TrackFormat::new(parameters(medium, track), TIME_BASE));
+                formats.push(StreamInfo::new(parameters(medium, track), TIME_BASE));
             }
         }
         let sinks = self

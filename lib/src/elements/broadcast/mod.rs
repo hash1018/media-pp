@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error as ThisError;
 
 use crate::element::{ElementType, element_pp_log};
-use crate::elements::{StreamInfo, TrackFormat};
+use crate::elements::StreamInfo;
 use crate::pp_log::{PpLog, pp_info};
 
 pub use reader::{BroadcastItem, BroadcastReader};
@@ -124,7 +124,7 @@ impl Default for BroadcastOptions {
 /// # fn main() -> media_pp::Result<()> {
 /// use media_pp::elements::{
 ///     Broadcast, BroadcastItem, BroadcastOptions, BroadcastSource, FileMuxer, Mp4Layout,
-///     RtspOptions, RtspSource, TrackFormat,
+///     RtspOptions, RtspSource, StreamInfo,
 /// };
 /// use media_pp::pipeline::Pipeline;
 ///
@@ -132,12 +132,12 @@ impl Default for BroadcastOptions {
 ///
 /// // The input: every stream of the camera into the broadcast.
 /// let (source, streams) = RtspSource::open("rtsp", "rtsp://192.168.0.10/stream", RtspOptions::default())?;
-/// let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+/// let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
 /// let sinks = camera.publish(&tracks)?;
 /// let (input, ()) = Pipeline::new("input", source, |source, ctx| {
 ///     for (stream, sink) in streams.iter().zip(sinks) {
 ///         let branch = ctx.branch().queue("packets", 64).to(sink)?;
-///         ctx.attach(source, stream.index, branch)?;
+///         ctx.attach(source, stream.index(), branch)?;
 ///     }
 ///     Ok(())
 /// })?;
@@ -280,23 +280,16 @@ impl Broadcast {
     /// [`BroadcastError::UnsupportedTrack`] for a track that is neither
     /// video, audio nor subtitles, and [`BroadcastError::Closed`] once the
     /// broadcast is closed. Nothing changes on an error.
-    pub fn publish(&self, tracks: &[TrackFormat]) -> Result<Vec<BroadcastSink>, BroadcastError> {
+    pub fn publish(&self, tracks: &[StreamInfo]) -> Result<Vec<BroadcastSink>, BroadcastError> {
         if tracks.is_empty() {
             return Err(BroadcastError::NoTracks);
         }
         let mut infos = Vec::with_capacity(tracks.len());
         for (index, track) in tracks.iter().enumerate() {
-            let kind = track.parameters.medium();
-            if crate::contract::MediaKind::packet_for(kind).is_none() {
+            if crate::contract::MediaKind::packet_for(track.kind()).is_none() {
                 return Err(BroadcastError::UnsupportedTrack { index });
             }
-            infos.push(StreamInfo {
-                index,
-                kind,
-                parameters: track.parameters.clone(),
-                time_base: track.time_base,
-                frame_rate: None,
-            });
+            infos.push(track.clone().with_index(index));
         }
         let publication = {
             let mut state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -431,7 +424,7 @@ pub struct BroadcastStats {
 fn describe(tracks: &[StreamInfo]) -> String {
     tracks
         .iter()
-        .map(|track| format!("{:?}/{:?}", track.kind, track.parameters.id()))
+        .map(|track| format!("{:?}/{:?}", track.kind(), track.parameters().id()))
         .collect::<Vec<_>>()
         .join(", ")
 }

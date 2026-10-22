@@ -370,9 +370,9 @@ fn seek_repositions_and_playback_continues() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let count = Arc::new(AtomicUsize::new(0));
     let sink = CountingSink {
@@ -439,9 +439,9 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     // Paced for the same reason as `seek_repositions_and_playback_continues`
     // — otherwise the file finishes before `seek()` is even called.
@@ -546,19 +546,19 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
     let Some(audio) = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
     else {
         eprintln!("skipping: fixture has no audio stream");
         return;
     };
-    let video_params = video.parameters.clone();
-    let audio_params = audio.parameters.clone();
-    let video_tb = video.time_base;
-    let audio_tb = audio.time_base;
+    let video_params = video.parameters().clone();
+    let audio_params = audio.parameters().clone();
+    let video_tb = video.time_base();
+    let audio_tb = audio.time_base();
 
     let target = Duration::from_secs(3);
     let video_samples = Arc::new(Mutex::new(Vec::new()));
@@ -578,7 +578,7 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
                 samples: Arc::clone(&video_samples),
                 pp_log: element_pp_log(ElementType::Other, "video", None),
             })?;
-        ctx.attach(source, video.index, video_branch)?;
+        ctx.attach(source, video.index(), video_branch)?;
         let audio_branch = ctx
             .branch()
             .queue("audio-packets", 8)
@@ -589,7 +589,7 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
                 samples: Arc::clone(&audio_samples),
                 pp_log: element_pp_log(ElementType::Other, "audio", None),
             })?;
-        ctx.attach(source, audio.index, audio_branch)?;
+        ctx.attach(source, audio.index(), audio_branch)?;
         Ok(())
     })
     .expect("test pipeline wiring must succeed");
@@ -632,10 +632,10 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = video.parameters.clone();
-    let time_base = video.time_base;
+    let params = video.parameters().clone();
+    let time_base = video.time_base();
     let packets = Arc::new(AtomicUsize::new(0));
     let frames = Arc::new(Mutex::new(Vec::new()));
 
@@ -659,7 +659,7 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
             .branch(packet_branch)
             .branch(decoded_branch)
             .build()?;
-        ctx.attach(source, video.index, tee)?;
+        ctx.attach(source, video.index(), tee)?;
         Ok(())
     })
     .expect("pipeline wiring");
@@ -706,10 +706,10 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = video.parameters.clone();
-    let time_base = video.time_base;
+    let params = video.parameters().clone();
+    let time_base = video.time_base();
     let samples = Arc::new(Mutex::new(Vec::new()));
 
     let (pipeline, ()) = Pipeline::new("eof-preview", source, |source, ctx| {
@@ -723,7 +723,7 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
                 samples: Arc::clone(&samples),
                 pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
             })?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .expect("pipeline wiring");
@@ -1147,10 +1147,10 @@ fn a_seek_from_a_paused_start_delivers_just_the_frame_asked_for() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = video.parameters.clone();
-    let time_base = video.time_base;
+    let params = video.parameters().clone();
+    let time_base = video.time_base();
     let samples = Arc::new(Mutex::new(Vec::new()));
 
     let (pipeline, ()) = Pipeline::new("paused-seek", source, |source, ctx| {
@@ -1163,7 +1163,7 @@ fn a_seek_from_a_paused_start_delivers_just_the_frame_asked_for() {
                 samples: Arc::clone(&samples),
                 pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
             })?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .expect("pipeline wiring");
@@ -1217,10 +1217,10 @@ fn a_seek_while_video_waits_on_a_stalled_audio_clock_returns() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = video.parameters.clone();
-    let time_base = video.time_base;
+    let params = video.parameters().clone();
+    let time_base = video.time_base();
     let samples = Arc::new(Mutex::new(Vec::new()));
 
     let (pipeline, ()) = Pipeline::new("stalled-audio-seek", source, |source, ctx| {
@@ -1235,7 +1235,7 @@ fn a_seek_while_video_waits_on_a_stalled_audio_clock_returns() {
                 samples: Arc::clone(&samples),
                 pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
             })?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .expect("pipeline wiring");
@@ -1283,13 +1283,13 @@ fn two_paced_sources_on_one_file_survive_consecutive_seeks() {
     let (video_source, streams) = FileDemuxer::open("video-demux", &path).expect("open");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("a video stream")
         .clone();
     let (audio_source, streams) = FileDemuxer::open("audio-demux", &path).expect("open");
     let audio = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
         .expect("an audio stream")
         .clone();
     let video_samples = Arc::new(Mutex::new(Vec::new()));
@@ -1299,15 +1299,15 @@ fn two_paced_sources_on_one_file_survive_consecutive_seeks() {
         .add_source(video_source, |source, ctx| {
             let branch = ctx
                 .branch()
-                .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+                .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
                 .pipe(Pacer::new("video-pacer"))
                 .to(PrerollProbe {
                     label: "video",
-                    time_base: video.time_base,
+                    time_base: video.time_base(),
                     samples: Arc::clone(&video_samples),
                     pp_log: element_pp_log(ElementType::Other, "video", None),
                 })?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })
         .expect("wire the picture");
@@ -1315,15 +1315,15 @@ fn two_paced_sources_on_one_file_survive_consecutive_seeks() {
         .add_source(audio_source, |source, ctx| {
             let branch = ctx
                 .branch()
-                .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+                .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
                 .pipe(Pacer::new("audio-pacer"))
                 .to(PrerollProbe {
                     label: "audio",
-                    time_base: audio.time_base,
+                    time_base: audio.time_base(),
                     samples: Arc::clone(&audio_samples),
                     pp_log: element_pp_log(ElementType::Other, "audio", None),
                 })?;
-            ctx.attach(source, audio.index, branch)?;
+            ctx.attach(source, audio.index(), branch)?;
             Ok(())
         })
         .expect("wire the sound");
@@ -1366,21 +1366,21 @@ fn position_follows_playback_through_pause_and_seek() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("a video stream")
         .clone();
     let count = Arc::new(AtomicUsize::new(0));
     let (pipeline, ()) = Pipeline::new("position", source, |source, ctx| {
         let branch = ctx
             .branch()
-            .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("decoder", video.parameters().clone())?)
             .pipe(Pacer::new("pacer"))
             .to(CountingSink {
                 pp_log: element_pp_log(ElementType::Other, "screen", None),
                 name: "screen".into(),
                 count: Arc::clone(&count),
             })?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .expect("pipeline wiring");
@@ -1439,10 +1439,10 @@ fn a_paused_seek_that_runs_into_the_end_still_finishes_once_resumed() {
     let duration = source.duration().expect("the fixture says how long it is");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = video.parameters.clone();
-    let index = video.index;
+    let params = video.parameters().clone();
+    let index = video.index();
     let decoder = crate::elements::SwDecoder::with_threading(
         "video-decoder",
         params,
@@ -1514,10 +1514,10 @@ fn paced_file(name: &str) -> Option<(Arc<Pipeline>, Duration, Arc<AtomicUsize>)>
     let duration = source.duration().expect("the fixture says how long it is");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = video.parameters.clone();
-    let index = video.index;
+    let params = video.parameters().clone();
+    let index = video.index();
     let shown = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&shown);
     let (pipeline, ()) = Pipeline::new(name, source, |source, ctx| {
@@ -1730,7 +1730,7 @@ fn a_seek_keeps_the_sound_that_prerolled_before_the_picture() {
     let find = |kind| {
         streams
             .iter()
-            .find(|stream| stream.kind == kind)
+            .find(|stream| stream.kind() == kind)
             .expect("the fixture has picture and sound")
             .clone()
     };
@@ -1758,17 +1758,17 @@ fn a_seek_keeps_the_sound_that_prerolled_before_the_picture() {
         let picture = ctx
             .branch()
             .queue("video-packets", 8)
-            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
             .queue("video-frames", 2)
             .to(screen)?;
-        ctx.attach(source, video.index, picture)?;
+        ctx.attach(source, video.index(), picture)?;
         let sound = ctx
             .branch()
             .queue("audio-packets", 8)
-            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
             .queue("audio-frames", 4)
             .to(speakers)?;
-        ctx.attach(source, audio.index, sound)?;
+        ctx.attach(source, audio.index(), sound)?;
         Ok(())
     })
     .expect("wire the pipeline");
@@ -1791,7 +1791,7 @@ fn a_seek_keeps_the_sound_that_prerolled_before_the_picture() {
     pipeline.stop();
 
     let heard = heard.lock().unwrap();
-    let base = audio.time_base;
+    let base = audio.time_base();
     let at = |pts: Option<i64>| {
         pts.map(|pts| pts as f64 * f64::from(base.numerator()) / f64::from(base.denominator()))
     };
@@ -1815,7 +1815,7 @@ fn a_tee_branch_that_prerolls_first_misses_nothing() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("the fixture has a picture")
         .clone();
     let shown: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1842,10 +1842,10 @@ fn a_tee_branch_that_prerolls_first_misses_nothing() {
         let tee = ctx.tee("tee").branch(fast).branch(slow).build()?;
         let picture = ctx
             .branch()
-            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
             .queue("video-frames", 4)
             .to_branch(tee)?;
-        ctx.attach(source, video.index, picture)?;
+        ctx.attach(source, video.index(), picture)?;
         Ok(())
     })
     .expect("wire the pipeline");
@@ -1891,7 +1891,7 @@ fn a_tee_of_packets_whose_branch_prerolls_first_misses_nothing() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("the fixture has a picture")
         .clone();
     let shown: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1914,17 +1914,17 @@ fn a_tee_of_packets_whose_branch_prerolls_first_misses_nothing() {
         let fast = ctx
             .branch()
             .queue("fast-packets", 8)
-            .pipe(SwDecoder::new("fast-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("fast-decoder", video.parameters().clone())?)
             .queue("fast", 2)
             .to(screen)?;
         let slow = ctx
             .branch()
             .queue("slow-packets", 8)
-            .pipe(SwDecoder::new("slow-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("slow-decoder", video.parameters().clone())?)
             .queue("slow", 2)
             .to(slow)?;
         let tee = ctx.tee("tee").branch(fast).branch(slow).build()?;
-        ctx.attach(source, video.index, tee)?;
+        ctx.attach(source, video.index(), tee)?;
         Ok(())
     })
     .expect("wire the pipeline");

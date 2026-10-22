@@ -128,10 +128,10 @@ pub enum CudaRendererError {
 /// let renderer = CudaRenderer::new("screen", &device, presenter(&device));
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
-///     let decoder = CudaDecoder::new("decoder", video.parameters.clone(), &device, 20)?;
+///     let decoder = CudaDecoder::new("decoder", video.parameters().clone(), &device, 20)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
 ///     let branch = branch.pipe(Pacer::new("pacer")).to(renderer)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// # Ok(())

@@ -51,7 +51,7 @@ pub enum SwCutDetectorError {
 /// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let params = video.parameters.clone();
+/// # let params = video.parameters().clone();
 ///
 /// let (pipeline, ()) = Pipeline::new("cuts", source, |source, ctx| {
 ///     let decoder = SwDecoder::new("decoder", params)?;
@@ -63,7 +63,7 @@ pub enum SwCutDetectorError {
 ///         Ok(())
 ///     });
 ///     let branch = ctx.branch().pipe(decoder).pipe(cuts).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

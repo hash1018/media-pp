@@ -184,13 +184,13 @@ pub enum VideoToolboxEncoderError {
 /// let (source, _) = FileDemuxer::open("file", "input.mov")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
-/// let decoder = VideoToolboxDecoder::new("decode", video.parameters.clone(), &device)?;
+/// let decoder = VideoToolboxDecoder::new("decode", video.parameters().clone(), &device)?;
 /// let options = VideoToolboxEncoderOptions {
 ///     codec: VideoToolboxCodec::H265,
 ///     format: VideoToolboxFrameFormat::Nv12, // P010 for a 10-bit stream
 ///     width,
 ///     height,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 8_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -202,7 +202,7 @@ pub enum VideoToolboxEncoderError {
 /// let sink = muxer.open()?.take(track)?;
 /// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -376,7 +376,7 @@ impl VideoToolboxEncoder {
         stream: &crate::elements::StreamInfo,
     ) -> std::result::Result<Self, VideoToolboxEncoderError> {
         crate::ensure_ffmpeg();
-        let hdr = HdrMetadata::of(&stream.parameters);
+        let hdr = HdrMetadata::of(stream.parameters());
         Self::open(name, device, options, stream.color(), &hdr)
     }
 
@@ -587,7 +587,7 @@ impl Encoding {
 /// The track this encoder's packets make: its
 /// [`VideoToolboxEncoder::parameters`], timed in its
 /// [`VideoToolboxEncoder::time_base`].
-impl From<&VideoToolboxEncoder> for crate::elements::TrackFormat {
+impl From<&VideoToolboxEncoder> for crate::elements::StreamInfo {
     fn from(encoder: &VideoToolboxEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base())
     }

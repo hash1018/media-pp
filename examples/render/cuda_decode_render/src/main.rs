@@ -57,7 +57,7 @@ mod linux_example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         // The CUDA device first, and the Vulkan device on the same GPU: made
         // once, before anything decodes.
@@ -87,7 +87,7 @@ mod linux_example {
                 .queue("frames", FRAMES)
                 .pipe(Pacer::new("pacer"))
                 .to(screen)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

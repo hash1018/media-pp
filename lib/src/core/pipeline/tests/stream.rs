@@ -284,9 +284,9 @@ fn each_lap_of_a_looping_file_begins_a_segment() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
-        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream")
-        .index;
+        .index();
     source.looping_handle().set_looping(true);
     let (terminal, seen) = Watcher::new("terminal");
     let (pipeline, ()) = Pipeline::new("laps", source, |source, ctx| {

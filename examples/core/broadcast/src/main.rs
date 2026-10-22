@@ -35,7 +35,7 @@ mod example {
     use media_pp::contract::MediaKind;
     use media_pp::elements::{
         Broadcast, BroadcastItem, BroadcastOptions, BroadcastSource, FileDemuxer, FileMuxer,
-        Mp4Layout, Pacer, TrackFormat,
+        Mp4Layout, Pacer, StreamInfo,
     };
     use media_pp::pipeline::Pipeline;
 
@@ -70,7 +70,7 @@ mod example {
         let mut muxer = FileMuxer::create(output.path(), Mp4Layout::Standard)?;
         let ids = tracks
             .iter()
-            .map(|track| muxer.add_stream(format!("{:?}", track.kind), track))
+            .map(|track| muxer.add_stream(format!("{:?}", track.kind()), track))
             .collect::<media_pp::Result<Vec<_>>>()?;
         let mut files = muxer.open()?;
         let ends = ids
@@ -149,21 +149,21 @@ mod example {
             let (demuxer, streams) = FileDemuxer::open("demux", path)?;
             let kept: Vec<_> = streams
                 .iter()
-                .filter(|stream| MediaKind::packet_for(stream.kind).is_some())
+                .filter(|stream| MediaKind::packet_for(stream.kind()).is_some())
                 .collect();
-            let formats: Vec<TrackFormat> = kept
+            let formats: Vec<StreamInfo> = kept
                 .iter()
-                .map(|stream| TrackFormat::from(*stream))
+                .map(|stream| StreamInfo::from(*stream))
                 .collect();
             let sinks = camera.publish(&formats)?;
             let (pipeline, ()) = Pipeline::new(format!("camera-{run}"), demuxer, |source, ctx| {
                 for (stream, sink) in kept.iter().zip(sinks) {
                     let branch = ctx
                         .branch()
-                        .queue(format!("packets-{}", stream.index), 64)
-                        .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                        .queue(format!("packets-{}", stream.index()), 64)
+                        .pipe(Pacer::new(format!("pacer-{}", stream.index())))
                         .to(sink)?;
-                    ctx.attach(source, stream.index, branch)?;
+                    ctx.attach(source, stream.index(), branch)?;
                 }
                 Ok(())
             })?;

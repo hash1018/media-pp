@@ -74,12 +74,12 @@ pub enum CudaDecoderError {
 /// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// // Room for the 4 pictures the queue after it may hold.
-/// let decoder = CudaDecoder::new("decode", video.parameters.clone(), &device, 4)?;
+/// let decoder = CudaDecoder::new("decode", video.parameters().clone(), &device, 4)?;
 /// let (counter, frames) = FrameCounter::new("count");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

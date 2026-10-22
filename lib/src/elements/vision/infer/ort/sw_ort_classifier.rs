@@ -49,7 +49,7 @@ const MAX_BATCH: usize = 32;
 /// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// # let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// # let sink = AppSink::new("found", |_buf| Ok(()));
 ///
 /// let detector = SwOrtDetector::new("detector", "yolov10n.onnx", OrtDetectorOptions::default())?;
@@ -64,7 +64,7 @@ const MAX_BATCH: usize = 32;
 /// # let (pipeline, ()) = Pipeline::new("classify", source, |source, ctx| {
 /// let branch = ctx.branch().pipe(decoder).queue("frames", 8)
 ///     .pipe(detector).pipe(tracker).pipe(classifier).to(sink)?;
-/// # ctx.attach(source, video.index, branch)?;
+/// # ctx.attach(source, video.index(), branch)?;
 /// # Ok(())
 /// # })?;
 /// # Ok(())

@@ -220,7 +220,7 @@ mod linux_example {
                 Some(path) => {
                     let (source, _) = FileDemuxer::open("demux", path)?;
                     let video = source.best(media::Type::Video)?;
-                    let params = video.parameters.clone();
+                    let params = video.parameters().clone();
                     // SAFETY: `params` is the stream's own codec parameters,
                     // live for as long as `params` is.
                     let (width, height) = unsafe {
@@ -238,7 +238,7 @@ mod linux_example {
                             Some(upload) => branch.pipe(upload),
                             None => branch,
                         };
-                        ctx.attach(source, video.index, branch.to(renderer)?)?;
+                        ctx.attach(source, video.index(), branch.to(renderer)?)?;
                         Ok(())
                     })?
                     .0

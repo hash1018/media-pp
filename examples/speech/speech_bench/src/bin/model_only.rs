@@ -126,7 +126,7 @@ fn decode(clip: &str) -> media_pp::Result<Vec<f32>> {
     let _log_guard = media_pp::log::init("model_only", "logs", media_pp::log::Level::Trace, 7)?;
     let (source, _) = FileDemuxer::open("demux", clip)?;
     let audio = source.best(media::Type::Audio)?;
-    let decoder = SwDecoder::new("decode", audio.parameters.clone())?;
+    let decoder = SwDecoder::new("decode", audio.parameters().clone())?;
     let resampler = AudioResampler::new(
         "to-whisper",
         AudioFormat::new(
@@ -150,7 +150,7 @@ fn decode(clip: &str) -> media_pp::Result<Vec<f32>> {
     };
     let (pipeline, ()) = Pipeline::new("decode", source, move |source, ctx| {
         let branch = ctx.branch().pipe(decoder).pipe(resampler).to(sink)?;
-        ctx.attach(source, audio.index, branch)?;
+        ctx.attach(source, audio.index(), branch)?;
         Ok(())
     })?;
     pipeline.run()?;

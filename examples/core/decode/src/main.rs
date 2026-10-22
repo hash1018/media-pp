@@ -34,11 +34,11 @@ mod example {
 
         println!("stream count: {}", streams.len());
         for s in &streams {
-            println!("  [{}] {:?}", s.index, s.kind);
+            println!("  [{}] {:?}", s.index(), s.kind());
         }
 
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let (counter, frame_count) = FrameCounter::new("counter");
 
@@ -48,7 +48,7 @@ mod example {
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
                 .to(counter)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

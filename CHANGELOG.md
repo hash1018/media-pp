@@ -10,6 +10,23 @@ compile error with no explanation.
 
 ## Unreleased
 
+### Breaking
+
+- **`TrackFormat` is gone; muxers and `Broadcast::publish` take a
+  `StreamInfo`.** The two said the same thing — a stream's codec
+  parameters and time base — and a demuxed stream had to be turned from
+  one into the other. Write `StreamInfo` where you wrote `TrackFormat`:
+  `StreamInfo::new(parameters, time_base)` for a stream described by hand,
+  `&encoder` and `&stream` as before, `.with_orientation(..)` as before.
+  `WebRtcStreamInfo::track_format` is `stream_info`.
+
+- **`StreamInfo`'s fields are read through methods.** Write
+  `stream.index()`, `stream.kind()`, `stream.parameters()`,
+  `stream.time_base()` and `stream.frame_rate()` for the fields of the same
+  names; `stream.parameters().clone()` where the parameters were moved out.
+  `StreamInfo::new` and `with_frame_rate` make one. A field can now be added
+  without breaking anything that reads it.
+
 ### Changed
 
 - **A WebRTC player, or an RTSP one over UDP, starts at most a second
@@ -253,6 +270,12 @@ compile error with no explanation.
   aspect ratio and copying its best audio stream without resetting time.
 
 ### Fixed
+
+- **A `Broadcast` keeps its tracks' frame rate.** `Broadcast::tracks`, and
+  every `BroadcastSource` and `BroadcastReader` of it, said `None` even
+  for a track published from a stream that says its rate — a demuxed
+  file's — so an encoder re-encoding what a broadcast carries had none to
+  open at.
 
 - **A live `DashMuxer` lets its old segments go on every FFmpeg.** FFmpeg's
   DASH muxer deletes through its file protocol, which an FFmpeg built with

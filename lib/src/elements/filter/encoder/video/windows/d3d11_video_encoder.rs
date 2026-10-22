@@ -349,13 +349,13 @@ pub struct D3d11VideoEncoderOptions {
 /// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
-/// let decoder = D3d11Decoder::new("decode", video.parameters.clone(), &gpu, 4)?;
+/// let decoder = D3d11Decoder::new("decode", video.parameters().clone(), &gpu, 4)?;
 /// let encoder = D3d11VideoEncoder::new("encode", &gpu, D3d11VideoEncoderOptions {
 ///     codec: D3d11VideoCodec::H264MediaFoundation, // any vendor's GPU
 ///     input_format: D3d11VideoInputFormat::Nv12, // what an 8-bit stream decodes to
 ///     width,
 ///     height,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 6_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -366,7 +366,7 @@ pub struct D3d11VideoEncoderOptions {
 /// let sink = muxer.open()?.take(track)?;
 /// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -902,7 +902,7 @@ impl Encoding {
 
 /// The track this encoder's packets make: its [`D3d11VideoEncoder::parameters`], timed
 /// in its [`D3d11VideoEncoder::time_base`].
-impl From<&D3d11VideoEncoder> for crate::elements::TrackFormat {
+impl From<&D3d11VideoEncoder> for crate::elements::StreamInfo {
     fn from(encoder: &D3d11VideoEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base())
     }

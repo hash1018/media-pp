@@ -10,7 +10,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -41,106 +40,6 @@ pub enum MuxerTrackError {
 pub struct MuxerTrack {
     muxer: MuxerId,
     index: usize,
-}
-
-/// What one track holds, as a muxer's `add_stream` takes it: the codec
-/// parameters its packets were encoded with and the unit their timestamps
-/// are in.
-///
-/// The two describe one stream and have to come from the same place, so
-/// the usual way to get one is from what produces that stream — an
-/// encoder, such as `&encoder` for a [`crate::elements::SwEncoder`] or
-/// [`crate::elements::SwAudioEncoder`], or a demuxed
-/// [`&StreamInfo`](crate::elements::StreamInfo) for packets copied through
-/// unchanged. [`TrackFormat::new`] is for a stream described by hand.
-#[derive(Clone)]
-pub struct TrackFormat {
-    pub(crate) parameters: ffmpeg::codec::Parameters,
-    pub(crate) time_base: ffmpeg::Rational,
-    /// Whether the stream's parameter sets are the same from its first
-    /// packet to its last, so an MP4 may keep them in the sample entry
-    /// alone even where `parameters` carries none: what an encoder of this
-    /// crate knows of its own output, and nothing can know of a stream
-    /// copied from elsewhere, whose sets may change partway.
-    pub(crate) fixed_parameter_sets: bool,
-}
-
-impl TrackFormat {
-    /// A track whose packets carry `parameters` and are timed in
-    /// `time_base`.
-    pub fn new(parameters: ffmpeg::codec::Parameters, time_base: ffmpeg::Rational) -> Self {
-        Self {
-            parameters,
-            time_base,
-            fixed_parameter_sets: false,
-        }
-    }
-
-    /// The same track, said to keep one set of parameter sets throughout —
-    /// for an encoder of this crate whose FFmpeg encoder hands its sets only
-    /// in band (`hevc_d3d12va`), so that a muxer of MP4 still writes its
-    /// HEVC as `hvc1`.
-    #[cfg(all(target_os = "windows", feature = "d3d12"))]
-    pub(crate) fn with_fixed_parameter_sets(mut self) -> Self {
-        self.fixed_parameter_sets = true;
-        self
-    }
-
-    /// The same track, its pictures shown turned as `orientation` says:
-    /// the display matrix a container keeps beside a video track — what a
-    /// re-encoded phone recording has to carry on, given
-    /// [`StreamInfo::orientation`](crate::elements::StreamInfo::orientation)
-    /// of the stream it came from. An upright one takes away any matrix
-    /// the track carried. Only a container that keeps one writes it — MP4
-    /// and MOV do.
-    #[must_use]
-    pub fn with_orientation(mut self, orientation: crate::orientation::Orientation) -> Self {
-        let kind = ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX;
-        // SAFETY: the parameters are this value's own; FFmpeg's side-data
-        // functions keep its list and count in step, and a new entry's
-        // `data` is the `size` bytes asked for, which the matrix fills.
-        unsafe {
-            let raw = self.parameters.as_mut_ptr();
-            ffmpeg::ffi::av_packet_side_data_remove(
-                (*raw).coded_side_data,
-                &mut (*raw).nb_coded_side_data,
-                kind,
-            );
-            if !orientation.is_upright() {
-                let matrix = orientation.matrix();
-                let size = size_of_val(&matrix);
-                let entry = ffmpeg::ffi::av_packet_side_data_new(
-                    &mut (*raw).coded_side_data,
-                    &mut (*raw).nb_coded_side_data,
-                    kind,
-                    size,
-                    0,
-                );
-                if entry.is_null() {
-                    std::alloc::handle_alloc_error(
-                        std::alloc::Layout::array::<i32>(matrix.len()).expect("nine i32s"),
-                    );
-                }
-                std::ptr::copy_nonoverlapping(matrix.as_ptr().cast::<u8>(), (*entry).data, size);
-            }
-        }
-        self
-    }
-}
-
-impl std::fmt::Debug for TrackFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TrackFormat")
-            .field("codec", &self.parameters.id())
-            .field("time_base", &self.time_base)
-            .finish()
-    }
-}
-
-impl From<&crate::elements::StreamInfo> for TrackFormat {
-    fn from(stream: &crate::elements::StreamInfo) -> Self {
-        Self::new(stream.parameters.clone(), stream.time_base)
-    }
 }
 
 /// What a muxer's `open` returns: one sink per track, each taken out by the
@@ -255,18 +154,18 @@ mod tests {
             },
         )
         .expect("AAC is built into FFmpeg");
-        let format = TrackFormat::from(&encoder);
-        assert_eq!(format.time_base, encoder.time_base());
-        assert_eq!(format.parameters.id(), encoder.parameters().id());
+        let format = crate::elements::StreamInfo::from(&encoder);
+        assert_eq!(format.time_base(), encoder.time_base());
+        assert_eq!(format.parameters().id(), encoder.parameters().id());
 
         let Some(path) = crate::test_support::try_test_video() else {
             return;
         };
         let (_source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
         for stream in &streams {
-            let format = TrackFormat::from(stream);
-            assert_eq!(format.time_base, stream.time_base);
-            assert_eq!(format.parameters.id(), stream.parameters.id());
+            let format = crate::elements::StreamInfo::from(stream);
+            assert_eq!(format.time_base(), stream.time_base());
+            assert_eq!(format.parameters().id(), stream.parameters().id());
         }
     }
 }

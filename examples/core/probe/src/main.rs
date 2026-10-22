@@ -35,7 +35,7 @@ mod example {
 
         println!("stream count: {}", streams.len());
         for s in &streams {
-            println!("  [{}] {:?}", s.index, s.kind);
+            println!("  [{}] {:?}", s.index(), s.kind());
         }
 
         // Now that we know what's in the file, decide what to demux by
@@ -50,7 +50,7 @@ mod example {
                 .branch()
                 .queue("q1", 32) // thread boundary: demux thread -> counter thread
                 .to(counter)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

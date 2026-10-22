@@ -49,7 +49,7 @@ const OWN_QUEUE_CAPACITY: usize = 8;
 ///
 /// let (source, _streams) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(media::Type::Video)?;
-/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// let (counter, _frames) = FrameCounter::new("counter");
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
@@ -59,7 +59,7 @@ const OWN_QUEUE_CAPACITY: usize = 8;
 ///         .queue("frames", 8) // what follows runs on the queue's thread
 ///         .pipe(Pacer::new("pacer"))
 ///         .to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// # Ok(())

@@ -192,7 +192,7 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", video_path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
@@ -255,7 +255,7 @@ mod example {
                 .pipe(scaler)
                 .pipe(overlay)
                 .to(sink)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

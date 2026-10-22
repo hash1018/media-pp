@@ -46,7 +46,7 @@ mod example {
             D3d12DetectionOverlay, D3d12Gpu, D3d12OrtDetector, D3d12OrtDetectorOptions,
             D3d12VideoCodec, D3d12VideoEncoder, D3d12VideoEncoderOptions, DetectionOverlayOptions,
             Detections, FileDemuxer, FileMuxer, HideShape, Hiding, LabelStyle, Mp4Layout,
-            ObjectTracker, OrtDetectorOptions, RedactStyle, TrackFormat, TrackerOptions, Treatment,
+            ObjectTracker, OrtDetectorOptions, RedactStyle, StreamInfo, TrackerOptions, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -189,7 +189,7 @@ mod example {
         let followed: Arc<Mutex<HashSet<u64>>> = Arc::default();
         let pictures = Arc::new(Mutex::new(0usize));
         let (kept_ids, kept_count) = (Arc::clone(&followed), Arc::clone(&pictures));
-        let frame_rate = stream.frame_rate.unwrap_or(Rational::new(30, 1));
+        let frame_rate = stream.frame_rate().unwrap_or(Rational::new(30, 1));
         let per_second = (f64::from(frame_rate.numerator()) / f64::from(frame_rate.denominator()))
             .round()
             .max(1.0) as usize;
@@ -259,14 +259,14 @@ mod example {
                 let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
                 let track = muxer.add_stream(
                     "video",
-                    TrackFormat::from(&encoder).with_orientation(orientation),
+                    StreamInfo::from(&encoder).with_orientation(orientation),
                 )?;
                 Some((overlay, encoder, muxer.open()?.take(track)?))
             }
             None => None,
         };
 
-        let params = stream.parameters.clone();
+        let params = stream.parameters().clone();
         let started = Instant::now();
         let (pipeline, ()) = Pipeline::new("d3d12-detect", source, |source, ctx| {
             let decoder = D3d12Decoder::new("decoder", params, &gpu)?;
@@ -290,7 +290,7 @@ mod example {
                     branch.to_branch(tee)?
                 }
             };
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
             Ok(())
         })?;
         pipeline.run()?;

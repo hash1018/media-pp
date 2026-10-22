@@ -6,7 +6,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::buffer::MediaBuffer;
 use crate::element::RawSink;
-use crate::elements::{Broadcast, BroadcastError, BroadcastSink, TrackFormat};
+use crate::elements::{Broadcast, BroadcastError, BroadcastSink, StreamInfo};
 use crate::error::Error;
 
 use super::announce::{Announced, Payload};
@@ -93,11 +93,11 @@ impl Recording {
     }
 
     fn publish(&mut self) -> Result<(), Stopped> {
-        let formats: Vec<TrackFormat> = self
+        let formats: Vec<StreamInfo> = self
             .parameters
             .iter()
             .zip(&self.tracks)
-            .map(|(parameters, track)| TrackFormat::new(parameters.clone(), track.time_base()))
+            .map(|(parameters, track)| StreamInfo::new(parameters.clone(), track.time_base()))
             .collect();
         let sinks = self
             .broadcast

@@ -57,7 +57,7 @@ mod example {
             CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, Detection,
             DetectionOverlayOptions, Detections, FileDemuxer, FileMuxer, HideShape, Hiding,
             InputScale, LabelStyle, Mp4Layout, ObjectTracker, OrtClassifierOptions,
-            OrtDetectorOptions, RedactStyle, TrackFormat, TrackerOptions, Treatment,
+            OrtDetectorOptions, RedactStyle, StreamInfo, TrackerOptions, Treatment,
         },
         ffmpeg::{Rational, media},
         pipeline::Pipeline,
@@ -319,7 +319,7 @@ mod example {
                         input_format: CudaFrameFormat::Nv12,
                         width,
                         height,
-                        frame_rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
+                        frame_rate: stream.frame_rate().unwrap_or(Rational::new(30, 1)),
                         bit_rate: 8_000_000,
                         gop_size: 60,
                         max_b_frames: None,
@@ -328,7 +328,7 @@ mod example {
                 let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
                 let track = muxer.add_stream(
                     "video",
-                    TrackFormat::from(&encoder).with_orientation(orientation),
+                    StreamInfo::from(&encoder).with_orientation(orientation),
                 )?;
                 Some((overlay, encoder, muxer.open()?.take(track)?))
             }
@@ -357,7 +357,7 @@ mod example {
             _ => None,
         };
 
-        let params = stream.parameters.clone();
+        let params = stream.parameters().clone();
         let (pipeline, ()) = Pipeline::new("cuda-track", source, |source, ctx| {
             let decoder = CudaDecoder::new("decoder", params, device, 16)?;
             let mut branch = ctx
@@ -392,7 +392,7 @@ mod example {
                     branch.to_branch(tee)?
                 }
             };
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
             Ok(())
         })?;
         pipeline.run()?;

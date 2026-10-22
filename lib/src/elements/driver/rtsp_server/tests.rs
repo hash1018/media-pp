@@ -14,7 +14,7 @@ use crate::buffer::MediaBuffer;
 use crate::driver::DriverRunner;
 use crate::elements::{
     AccessRequest, Authorize, BroadcastOptions, FileDemuxer, Pacer, RtspOptions, RtspSource,
-    RtspTransport, StreamInfo, TrackFormat,
+    RtspTransport, StreamInfo,
 };
 use crate::pipeline::Pipeline;
 use crate::test_support::CapturingSink;
@@ -46,16 +46,16 @@ fn server(udp: bool) -> (Arc<DriverRunner>, RtspServerHandle, Broadcast) {
 fn feed(broadcast: &Broadcast, path: &str) -> Arc<Pipeline> {
     let (demuxer, streams) = FileDemuxer::open("camera", path).unwrap();
     demuxer.looping_handle().set_looping(true);
-    let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+    let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
     let sinks = broadcast.publish(&tracks).unwrap();
     let (pipeline, ()) = Pipeline::new("camera", demuxer, |source, ctx| {
         for (stream, sink) in streams.iter().zip(sinks) {
             let branch = ctx
                 .branch()
-                .queue(format!("packets-{}", stream.index), 64)
-                .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                .queue(format!("packets-{}", stream.index()), 64)
+                .pipe(Pacer::new(format!("pacer-{}", stream.index())))
                 .to(sink)?;
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
         }
         Ok(())
     })
@@ -100,9 +100,9 @@ fn play(url: &str, transport: RtspTransport) -> Player {
         for (stream, sink) in streams.iter().zip(sinks) {
             let branch = ctx
                 .branch()
-                .queue(format!("received-{}", stream.index), 256)
+                .queue(format!("received-{}", stream.index()), 256)
                 .to(sink)?;
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
         }
         Ok(())
     })
@@ -137,7 +137,10 @@ impl Player {
     }
 
     fn index_of(&self, medium: ffmpeg::media::Type) -> usize {
-        self.streams.iter().position(|s| s.kind == medium).unwrap()
+        self.streams
+            .iter()
+            .position(|s| s.kind() == medium)
+            .unwrap()
     }
 
     fn packets(&self, stream: usize) -> Vec<(Option<i64>, bool)> {
@@ -164,11 +167,11 @@ fn check_played(player: &Player) {
     let video = player.index_of(ffmpeg::media::Type::Video);
     let audio = player.index_of(ffmpeg::media::Type::Audio);
     assert_eq!(
-        player.streams[video].parameters.id(),
+        player.streams[video].parameters().id(),
         ffmpeg::codec::Id::H264
     );
     assert_eq!(
-        player.streams[audio].parameters.id(),
+        player.streams[audio].parameters().id(),
         ffmpeg::codec::Id::AAC
     );
     player.wait_for(30);
@@ -180,7 +183,7 @@ fn check_played(player: &Player) {
         "pictures in order: {pts:?}"
     );
     let seconds =
-        |stream: usize, pts: i64| pts as f64 * f64::from(player.streams[stream].time_base);
+        |stream: usize, pts: i64| pts as f64 * f64::from(player.streams[stream].time_base());
     let first_picture = seconds(video, pts[0]);
     let first_sound = seconds(audio, player.packets(audio)[0].0.unwrap());
     assert!(
@@ -291,7 +294,7 @@ fn players_go_on_when_the_input_is_published_again() {
         "one timeline across the drop"
     );
     // Where the input was gone: a gap of about the 300 ms it was.
-    let unit = f64::from(player.streams[video].time_base);
+    let unit = f64::from(player.streams[video].time_base());
     let gap = packets
         .windows(2)
         .position(|w| (w[1].0 - w[0].0) as f64 * unit > 0.2)
@@ -430,7 +433,7 @@ fn requests_are_answered_as_rtsp_says() {
         "nothing published yet: {unpublished}"
     );
 
-    let video = TrackFormat::new(
+    let video = StreamInfo::new(
         {
             let mut parameters = ffmpeg::codec::Parameters::new();
             // SAFETY: parameters this test owns alone; plain fields.
@@ -546,7 +549,7 @@ fn publish(url: &str, path: &str, transport: RtspTransport) -> crate::Result<Arc
     )?;
     let tracks = streams
         .iter()
-        .map(|stream| muxer.add_stream(format!("track-{}", stream.index), stream))
+        .map(|stream| muxer.add_stream(format!("track-{}", stream.index()), stream))
         .collect::<crate::Result<Vec<_>>>()?;
     let mut sinks = muxer.open()?;
     let sinks = tracks
@@ -557,10 +560,10 @@ fn publish(url: &str, path: &str, transport: RtspTransport) -> crate::Result<Arc
         for (stream, sink) in streams.iter().zip(sinks) {
             let branch = ctx
                 .branch()
-                .queue(format!("published-{}", stream.index), 64)
-                .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                .queue(format!("published-{}", stream.index()), 64)
+                .pipe(Pacer::new(format!("pacer-{}", stream.index())))
                 .to(sink)?;
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
         }
         Ok(())
     })?;
@@ -594,17 +597,17 @@ fn a_publisher_is_played_back(transport: RtspTransport) {
     let (_, fixture) = FileDemuxer::open("probe", &path).unwrap();
     let fixture_video = fixture
         .iter()
-        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg::media::Type::Video)
         .unwrap();
     let tracks = live.tracks().unwrap();
     let video = tracks
         .iter()
-        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg::media::Type::Video)
         .unwrap();
     // SAFETY: reading plain fields of parameters held here.
     let (width, height, want) = unsafe {
-        let got = &*video.parameters.as_ptr();
-        let want = &*fixture_video.parameters.as_ptr();
+        let got = &*video.parameters().as_ptr();
+        let want = &*fixture_video.parameters().as_ptr();
         (got.width, got.height, (want.width, want.height))
     };
     assert_eq!((width, height), want);
@@ -724,7 +727,7 @@ fn play_over_udp(
 #[test]
 fn a_udp_player_catches_up_at_twice_the_streams_speed() {
     let (_runner, handle, broadcast) = server(true);
-    let video = TrackFormat::new(
+    let video = StreamInfo::new(
         {
             let mut parameters = ffmpeg::codec::Parameters::new();
             // SAFETY: parameters this test owns alone; plain fields.
@@ -994,7 +997,7 @@ fn a_digest_response_answers_this_connections_challenge_alone() {
 #[test]
 fn a_udp_player_far_behind_the_newest_keyframe_starts_at_the_next() {
     let (_runner, handle, broadcast) = server(true);
-    let video = TrackFormat::new(
+    let video = StreamInfo::new(
         {
             let mut parameters = ffmpeg::codec::Parameters::new();
             // SAFETY: parameters this test owns alone; plain fields.

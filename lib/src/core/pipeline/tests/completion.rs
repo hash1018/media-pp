@@ -375,14 +375,14 @@ fn finishing_while_playing_delivers_eos_through_a_timed_branch() {
         let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
         let video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
             .expect("the fixture has a picture")
             .clone();
         let (screen, pictures, ended) = Screen::new("screen");
         let (pipeline, ()) = Pipeline::new("finish-while-timed", source, |source, ctx| {
             let decoded = ctx
                 .branch()
-                .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+                .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
                 .queue("video-frames", 4);
             let branch = if synchronized {
                 decoded
@@ -391,7 +391,7 @@ fn finishing_while_playing_delivers_eos_through_a_timed_branch() {
             } else {
                 decoded.pipe(Pacer::new("video-pacer")).to(screen)?
             };
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })
         .expect("wire the pipeline");
@@ -430,7 +430,7 @@ fn a_seek_past_the_end_through_a_tee_ends_every_branch() {
     let duration = source.duration().expect("the fixture says how long it is");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("the fixture has a picture")
         .clone();
     let (sinks, ended): (Vec<_>, Vec<_>) = (0..2)
@@ -446,10 +446,10 @@ fn a_seek_past_the_end_through_a_tee_ends_every_branch() {
         }
         let branch = ctx
             .branch()
-            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
             .queue("video-frames", 4)
             .to_branch(tee.build()?)?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .expect("wire the pipeline");

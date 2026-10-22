@@ -99,7 +99,7 @@ mod example {
             HideShape, Hiding, InputScale, LabelStyle, Line, LineCount, MetalDetectionOverlay,
             MetalOrtClassifier, MetalOrtDetector, MetalOrtDetectorOptions, Mp4Layout,
             ObjectAnalytics, ObjectTracker, OrtClassifierOptions, OrtDetectorOptions, OverlayParts,
-            RedactStyle, Tiles, TrackFormat, TrackerOptions, Treatment, VideoToolboxCodec,
+            RedactStyle, StreamInfo, Tiles, TrackerOptions, Treatment, VideoToolboxCodec,
             VideoToolboxDecoder, VideoToolboxDevice, VideoToolboxEncoder,
             VideoToolboxEncoderOptions, VideoToolboxFrameFormat,
         },
@@ -517,7 +517,7 @@ mod example {
                     },
                     width,
                     height,
-                    frame_rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
+                    frame_rate: stream.frame_rate().unwrap_or(Rational::new(30, 1)),
                     bit_rate: 8_000_000,
                     gop_size: 60,
                     max_b_frames: None,
@@ -533,7 +533,7 @@ mod example {
                 let mut muxer = FileMuxer::create(path, Mp4Layout::Standard)?;
                 let track = muxer.add_stream(
                     "video",
-                    TrackFormat::from(&encoder).with_orientation(orientation),
+                    StreamInfo::from(&encoder).with_orientation(orientation),
                 )?;
                 let muxer_sink = muxer.open()?.take(track)?;
                 Some((overlay, encoder, muxer_sink))
@@ -541,7 +541,7 @@ mod example {
             None => None,
         };
 
-        let params = stream.parameters.clone();
+        let params = stream.parameters().clone();
         let (pipeline, ()) = Pipeline::new("metal-detect", source, |source, ctx| {
             let decoder = VideoToolboxDecoder::new("decoder", params, &device)?;
             let mut detecting = ctx
@@ -579,7 +579,7 @@ mod example {
                     detecting.to_branch(tee)?
                 }
             };
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
             Ok(())
         })?;
 

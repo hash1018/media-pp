@@ -10,7 +10,8 @@ use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use crate::elements::StreamInfo;
 
 use crate::{
     element::ElementType,
@@ -382,7 +383,7 @@ impl HlsMuxer {
     }
 
     /// Registers one encoded packet stream, described by `format` (see
-    /// [`TrackFormat`]). Its time base must match the timestamps carried by
+    /// [`StreamInfo`]). Its time base must match the timestamps carried by
     /// packets arriving at the returned track sink.
     ///
     /// The returned [`MuxerTrack`] is how this track's sink is taken out of
@@ -390,13 +391,11 @@ impl HlsMuxer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        format: impl Into<TrackFormat>,
+        format: impl Into<StreamInfo>,
     ) -> Result<MuxerTrack> {
-        let TrackFormat {
-            parameters,
-            time_base,
-            ..
-        } = format.into();
+        let format = format.into();
+        let time_base = format.time_base();
+        let parameters = format.into_parameters();
         let mut stream = self
             .output
             .add_stream(parameters.id())
@@ -506,7 +505,7 @@ mod tests {
         let audio = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(encoder.parameters(), ffmpeg::Rational::new(1, 48_000)),
+                StreamInfo::new(encoder.parameters(), ffmpeg::Rational::new(1, 48_000)),
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("HLS header must be written");
@@ -677,13 +676,13 @@ mod tests {
         let a = muxer
             .add_stream(
                 "audio-a",
-                TrackFormat::new(encoder_a.parameters(), ffmpeg::Rational::new(1, 48_000)),
+                StreamInfo::new(encoder_a.parameters(), ffmpeg::Rational::new(1, 48_000)),
             )
             .unwrap();
         let b = muxer
             .add_stream(
                 "audio-b",
-                TrackFormat::new(encoder_b.parameters(), ffmpeg::Rational::new(1, 48_000)),
+                StreamInfo::new(encoder_b.parameters(), ffmpeg::Rational::new(1, 48_000)),
             )
             .unwrap();
         let mut sinks = muxer.open().unwrap();

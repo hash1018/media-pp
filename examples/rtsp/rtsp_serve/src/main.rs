@@ -17,7 +17,7 @@ mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, RtspMuxer, RtspOptions, TrackFormat},
+        elements::{FileDemuxer, Pacer, RtspMuxer, RtspOptions},
         pipeline::Pipeline,
     };
 
@@ -39,16 +39,16 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let video_index = video.index;
-        let video_format = TrackFormat::from(&video);
+        let video_index = video.index();
+        let video_format = video;
 
         // Optional on purpose: this example took video only before
         // `RtspMuxer` could carry two tracks, and a file with no audio must
         // still work exactly as it did.
-        let audio_track = match source.best(media::Type::Audio).ok() {
-            Some(audio) => Some((audio.index, TrackFormat::from(&audio))),
-            None => None,
-        };
+        let audio_track = source
+            .best(media::Type::Audio)
+            .ok()
+            .map(|audio| (audio.index(), audio));
         // How many tracks go out, said when publishing starts and when it ends.
         let tracks = 1 + usize::from(audio_track.is_some());
 

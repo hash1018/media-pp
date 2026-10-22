@@ -53,7 +53,7 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         // Decoded frames stay in system memory; the window uploads them.
         let (screen, window) = VideoWindow::open(
@@ -75,7 +75,7 @@ mod example {
             if let Some(to_drawable) = to_drawable {
                 branch = branch.pipe(to_drawable);
             }
-            ctx.attach(source, video.index, branch.to(screen)?)?;
+            ctx.attach(source, video.index(), branch.to(screen)?)?;
             Ok(())
         })?;
 

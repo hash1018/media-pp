@@ -4,7 +4,8 @@ use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use crate::elements::StreamInfo;
 
 use crate::{
     element::ElementType,
@@ -200,7 +201,7 @@ impl RtmpMuxer {
     /// Registers one more track this broadcast will carry — in practice one
     /// video and one audio, which is what FLV holds. `format` describes it,
     /// typically `&encoder` for the encoder that feeds it (see
-    /// [`TrackFormat`]). `name` becomes this track's own
+    /// [`StreamInfo`]). `name` becomes this track's own
     /// [`Element::name`](crate::element::Element::name)/`pp_log` identity once [`RtmpMuxer::open`] turns it
     /// into a `RawSink`.
     ///
@@ -209,13 +210,11 @@ impl RtmpMuxer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        format: impl Into<TrackFormat>,
+        format: impl Into<StreamInfo>,
     ) -> Result<MuxerTrack> {
-        let TrackFormat {
-            parameters,
-            time_base,
-            ..
-        } = format.into();
+        let format = format.into();
+        let time_base = format.time_base();
+        let parameters = format.into_parameters();
         let mut stream = self
             .output
             .add_stream(parameters.id())

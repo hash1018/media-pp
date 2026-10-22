@@ -98,11 +98,11 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
 ///     let branch = ctx
 ///         .branch()
-///         .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+///         .pipe(SwDecoder::new("decoder", video.parameters().clone())?)
 ///         .queue("frames", 8) // how far decoding may run ahead
 ///         .pipe(Pacer::new("pacer"))
 ///         .to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -1015,9 +1015,9 @@ mod tests {
         let (demuxer, streams) = FileDemuxer::open("demuxer", &path).expect("open the fixture");
         let video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
             .expect("the fixture has video")
-            .index;
+            .index();
 
         let seen = Arc::new(AtomicUsize::new(0));
         let counter = crate::elements::AppSink::new("paced", {

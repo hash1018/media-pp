@@ -39,7 +39,7 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let count = Arc::new(AtomicUsize::new(0));
         let sink = {
@@ -58,7 +58,7 @@ mod example {
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
                 .to(sink)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

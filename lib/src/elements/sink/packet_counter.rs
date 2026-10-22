@@ -31,7 +31,7 @@ use crate::{
 ///
 /// let (pipeline, ()) = Pipeline::new("count", demuxer, |source, ctx| {
 ///     let branch = ctx.branch().to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

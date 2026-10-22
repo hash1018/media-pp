@@ -49,8 +49,8 @@ use crate::{
     bus::BusEvent,
     element::{Element, ElementType, Filter, IntoSource, Output, RawSink, element_pp_log},
     elements::{
-        Broadcast, BroadcastOptions, BroadcastSource, TestAudioOptions, TestAudioSource,
-        TestVideoOptions, TestVideoSource, TrackFormat,
+        Broadcast, BroadcastOptions, BroadcastSource, StreamInfo, TestAudioOptions,
+        TestAudioSource, TestVideoOptions, TestVideoSource,
     },
     pipeline::{Driven, DrivenPipeline, DrivenPipelineHandle, DrivenRunner},
     pp_log::PpLog,
@@ -284,7 +284,7 @@ impl Camera {
             (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
         }
         let mut sinks = broadcast
-            .publish(&[TrackFormat::new(parameters, UNIT)])
+            .publish(&[StreamInfo::new(parameters, UNIT)])
             .expect("a picture track is published");
         let stop = Arc::new(AtomicBool::new(false));
         let writer = thread::spawn({

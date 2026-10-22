@@ -62,11 +62,11 @@ pub enum AudioTempoError {
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
 ///     let branch = ctx
 ///         .branch()
-///         .pipe(SwDecoder::new("decoder", audio.parameters.clone())?)
+///         .pipe(SwDecoder::new("decoder", audio.parameters().clone())?)
 ///         .pipe(Pacer::new("pacer"))
 ///         .pipe(AudioTempo::new("tempo"))
 ///         .to(mixer)?;
-///     ctx.attach(source, audio.index, branch)?;
+///     ctx.attach(source, audio.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.set_rate(1.5)?; // half as fast again, at the same pitch

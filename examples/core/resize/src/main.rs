@@ -25,8 +25,8 @@ mod example {
     use media_pp::{
         Result,
         elements::{
-            FileDemuxer, FileMuxer, Mp4Layout, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
-            TrackFormat, VideoCodec,
+            FileDemuxer, FileMuxer, Mp4Layout, StreamInfo, SwDecoder, SwEncoder, SwEncoderOptions,
+            SwScaler, VideoCodec,
         },
         ffmpeg::{self, format::Pixel, software::scaling::Flags},
         pipeline::Pipeline,
@@ -64,15 +64,15 @@ mod example {
             ));
         }
         // SAFETY: a plain field of this stream's live, owned parameters.
-        let aspect = unsafe { (*video.parameters.as_ptr()).sample_aspect_ratio };
+        let aspect = unsafe { (*video.parameters().as_ptr()).sample_aspect_ratio };
         if aspect.num > 0 && aspect.den > 0 && aspect.num != aspect.den {
             return Err(message(
                 "resize expects square pixels; correct the input's sample aspect ratio first",
             ));
         }
         let orientation = video.orientation()?;
-        let frame_rate = video.frame_rate.unwrap_or(ffmpeg::Rational(30, 1));
-        let decoder = SwDecoder::new("decode", video.parameters.clone())?;
+        let frame_rate = video.frame_rate().unwrap_or(ffmpeg::Rational(30, 1));
+        let decoder = SwDecoder::new("decode", video.parameters().clone())?;
         let scaler = SwScaler::new("scale", Pixel::YUV420P, width, height, Flags::BILINEAR);
         let encoder = SwEncoder::for_stream(
             "encode",
@@ -94,7 +94,7 @@ mod example {
         let mut muxer = FileMuxer::create(output.path(), Mp4Layout::Standard)?;
         let picture = muxer.add_stream(
             "video",
-            TrackFormat::from(&encoder).with_orientation(orientation),
+            StreamInfo::from(&encoder).with_orientation(orientation),
         )?;
         let sound = audio
             .as_ref()
@@ -111,9 +111,9 @@ mod example {
                 .pipe(scaler)
                 .pipe(encoder)
                 .to(video_sink)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             if let (Some(audio), Some(sink)) = (audio, audio_sink) {
-                ctx.attach(source, audio.index, ctx.branch().to(sink)?)?;
+                ctx.attach(source, audio.index(), ctx.branch().to(sink)?)?;
             }
             Ok(())
         })?;

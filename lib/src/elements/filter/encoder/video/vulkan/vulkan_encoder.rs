@@ -155,12 +155,12 @@ pub enum VulkanEncoderError {
 /// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
-/// let decoder = VulkanDecoder::new("decode", video.parameters.clone(), &device, 4)?;
+/// let decoder = VulkanDecoder::new("decode", video.parameters().clone(), &device, 4)?;
 /// let encoder = VulkanEncoder::new("encode", &device, VulkanEncoderOptions {
 ///     codec: VulkanCodec::H264,
 ///     width,
 ///     height,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 6_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -171,7 +171,7 @@ pub enum VulkanEncoderError {
 /// let sink = muxer.open()?.take(track)?;
 /// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -458,7 +458,7 @@ fn owned(packet: &ffmpeg::Packet) -> Result<ffmpeg::Packet> {
 
 /// The track this encoder's packets make: its [`VulkanEncoder::parameters`],
 /// timed in its [`VulkanEncoder::time_base`].
-impl From<&VulkanEncoder> for crate::elements::TrackFormat {
+impl From<&VulkanEncoder> for crate::elements::StreamInfo {
     fn from(encoder: &VulkanEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base())
     }

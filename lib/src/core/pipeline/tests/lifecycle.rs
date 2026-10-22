@@ -83,9 +83,9 @@ fn pause_then_stop_returns_promptly() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().queue("q", 4).to(NoOpSink {
@@ -611,7 +611,7 @@ fn pausing_leaves_a_queue_backlog_in_the_queue() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("the fixture must open");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("the fixture must have a video stream")
         .clone();
     let shown = Arc::new(AtomicUsize::new(0));
@@ -623,11 +623,11 @@ fn pausing_leaves_a_queue_backlog_in_the_queue() {
     let (pipeline, ()) = Pipeline::new("pause-backlog", source, |source, ctx| {
         let branch = ctx
             .branch()
-            .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("decoder", video.parameters().clone())?)
             .queue("frames", FRAMES)
             .pipe(Pacer::new("pacer"))
             .to(sink)?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .expect("wiring");

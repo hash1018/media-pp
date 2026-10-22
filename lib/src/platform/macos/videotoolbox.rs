@@ -54,13 +54,13 @@ pub enum VideoToolboxDeviceError {
 /// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
 /// let video = source.best(media::Type::Video)?;
 /// // Both elements are made from the same `device`.
-/// let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device)?;
+/// let decoder = VideoToolboxDecoder::new("decoder", video.parameters().clone(), &device)?;
 /// let scaler = MetalScaler::new("scaler", &device, 1280, 720, MetalScalerInterp::Bilinear)?;
 /// let (counter, _frames) = FrameCounter::new("counter");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).pipe(scaler).to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

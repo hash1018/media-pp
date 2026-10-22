@@ -551,8 +551,8 @@ mod common {
             let video = demuxer
                 .best(ffmpeg::media::Type::Video)
                 .map_err(|error| media_pp::Error::Other(format!("`{path}`: {error}")))?;
-            let index = video.index;
-            let params = video.parameters.clone();
+            let index = video.index();
+            let params = video.parameters().clone();
             Ok(Self {
                 demuxer,
                 index,

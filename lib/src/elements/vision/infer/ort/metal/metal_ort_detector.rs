@@ -103,7 +103,7 @@ impl Default for MetalOrtDetectorOptions {
 ///
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let params = video.parameters.clone();
+/// # let params = video.parameters().clone();
 /// # let sink = AppSink::new("found", |_buf| Ok(()));
 /// let device = VideoToolboxDevice::new()?;
 /// let detector =
@@ -111,7 +111,7 @@ impl Default for MetalOrtDetectorOptions {
 /// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
 ///     let decoder = VideoToolboxDecoder::new("decoder", params, &device)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

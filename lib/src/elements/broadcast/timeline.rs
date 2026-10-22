@@ -95,8 +95,7 @@ impl Timeline {
 /// read: as many, each of the same medium and codec.
 pub(crate) fn same_shape(old: &[StreamInfo], new: &[StreamInfo]) -> bool {
     old.len() == new.len()
-        && old
-            .iter()
-            .zip(new)
-            .all(|(old, new)| old.kind == new.kind && old.parameters.id() == new.parameters.id())
+        && old.iter().zip(new).all(|(old, new)| {
+            old.kind() == new.kind() && old.parameters().id() == new.parameters().id()
+        })
 }

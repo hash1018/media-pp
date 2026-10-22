@@ -36,7 +36,7 @@ use super::{Compute, Transcribing, WhisperOptions, WhisperTranscriberError};
 ///
 /// let (source, _) = FileDemuxer::open("demux", "talk.mp4")?;
 /// let audio = source.best(ffmpeg::media::Type::Audio)?;
-/// let decoder = SwDecoder::new("decoder", audio.parameters.clone())?;
+/// let decoder = SwDecoder::new("decoder", audio.parameters().clone())?;
 /// let mono_f32 = ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed);
 /// let resampler = AudioResampler::new("resampler", AudioFormat::new(mono_f32, WHISPER_SAMPLE_RATE, 1));
 /// let options = WhisperOptions {
@@ -61,7 +61,7 @@ use super::{Compute, Transcribing, WhisperOptions, WhisperTranscriberError};
 ///         .queue("speech", 64)
 ///         .pipe(transcriber)
 ///         .to(lines)?;
-///     ctx.attach(source, audio.index, branch)?;
+///     ctx.attach(source, audio.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

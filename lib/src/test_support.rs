@@ -1388,13 +1388,8 @@ pub(crate) fn hdr10_source(carried: bool) -> Hdr10Source {
         }
     }
     Hdr10Source {
-        stream: crate::elements::StreamInfo {
-            index: 0,
-            kind: ffmpeg_next::media::Type::Video,
-            parameters,
-            time_base: ffmpeg_next::Rational::new(1, 30),
-            frame_rate: Some(ffmpeg_next::Rational::new(30, 1)),
-        },
+        stream: crate::elements::StreamInfo::new(parameters, ffmpeg_next::Rational::new(1, 30))
+            .with_frame_rate(ffmpeg_next::Rational::new(30, 1)),
         carried,
         mastering,
         light,

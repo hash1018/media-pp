@@ -22,7 +22,7 @@ mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, RtspMuxer, RtspOptions, TrackFormat},
+        elements::{FileDemuxer, Pacer, RtspMuxer, RtspOptions},
         pipeline::{Pipeline, SeekMode},
     };
 
@@ -44,16 +44,16 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let video_index = video.index;
-        let video_format = TrackFormat::from(&video);
+        let video_index = video.index();
+        let video_format = video;
 
         // Optional, as in `rtsp_serve`. Two tracks are also what makes the
         // seek below worth watching here: each rebases its own published
         // timestamps onto its own last ones.
-        let audio_track = match source.best(media::Type::Audio).ok() {
-            Some(audio) => Some((audio.index, TrackFormat::from(&audio))),
-            None => None,
-        };
+        let audio_track = source
+            .best(media::Type::Audio)
+            .ok()
+            .map(|audio| (audio.index(), audio));
         let tracks = 1 + usize::from(audio_track.is_some());
 
         println!("publishing to {url} (the RTSP server must already be running) ...");

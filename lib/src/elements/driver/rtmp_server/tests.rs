@@ -33,7 +33,7 @@ fn publish(url: &str, path: &str) -> crate::Result<Arc<Pipeline>> {
     let mut muxer = RtmpMuxer::create(url)?;
     let tracks = streams
         .iter()
-        .map(|stream| muxer.add_stream(format!("track-{}", stream.index), stream))
+        .map(|stream| muxer.add_stream(format!("track-{}", stream.index()), stream))
         .collect::<crate::Result<Vec<_>>>()?;
     let mut sinks = muxer.open()?;
     let sinks = tracks
@@ -44,10 +44,10 @@ fn publish(url: &str, path: &str) -> crate::Result<Arc<Pipeline>> {
         for (stream, sink) in streams.iter().zip(sinks) {
             let branch = ctx
                 .branch()
-                .queue(format!("published-{}", stream.index), 64)
-                .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                .queue(format!("published-{}", stream.index()), 64)
+                .pipe(Pacer::new(format!("pacer-{}", stream.index())))
                 .to(sink)?;
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
         }
         Ok(())
     })?;
@@ -95,19 +95,19 @@ fn a_publisher_is_taken_into_its_broadcast_as_it_sends() {
     let tracks = broadcast.tracks().unwrap();
     assert_eq!(tracks.len(), 2, "the fixture's picture and sound");
     let video = &tracks[0];
-    assert_eq!(video.kind, ffmpeg::media::Type::Video);
-    assert_eq!(video.parameters.id(), ffmpeg::codec::Id::H264);
+    assert_eq!(video.kind(), ffmpeg::media::Type::Video);
+    assert_eq!(video.parameters().id(), ffmpeg::codec::Id::H264);
     // SAFETY: plain fields of parameters this test holds a copy of.
     let (width, height, rate) = unsafe {
-        let video = video.parameters.as_ptr();
-        let audio = tracks[1].parameters.as_ptr();
+        let video = video.parameters().as_ptr();
+        let audio = tracks[1].parameters().as_ptr();
         ((*video).width, (*video).height, (*audio).sample_rate)
     };
     assert!(
         width > 0 && height > 0,
         "a picture's size: {width}x{height}"
     );
-    assert_eq!(tracks[1].parameters.id(), ffmpeg::codec::Id::AAC);
+    assert_eq!(tracks[1].parameters().id(), ffmpeg::codec::Id::AAC);
     assert!(rate > 0, "the sound's rate");
 
     let read = read(&broadcast, Duration::from_secs(2));

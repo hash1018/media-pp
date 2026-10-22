@@ -252,7 +252,7 @@ impl Player {
                 streams
                     .into_iter()
                     .find(|stream| {
-                        stream.index == index && stream.kind == ffmpeg::media::Type::Audio
+                        stream.index() == index && stream.kind() == ffmpeg::media::Type::Audio
                     })
                     .ok_or(PlayerError::NoSuchAudioStream(index))?,
             ),
@@ -295,10 +295,10 @@ impl Player {
                     let decoded = ctx
                         .branch()
                         .queue("audio-packets", PACKETS_QUEUED)
-                        .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+                        .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
                         .pipe(AudioResampler::new("audio-resampler", format))
                         .to_branch(sound)?;
-                    ctx.attach(source, audio.index, decoded)?;
+                    ctx.attach(source, audio.index(), decoded)?;
                 }
                 Ok(())
             })?;
@@ -329,7 +329,7 @@ impl Player {
             kind: DecodeThreadKind::Frame,
         };
         let decode = |target| {
-            VideoDecodeBin::open("video", video.parameters.clone(), target, Some(threading))
+            VideoDecodeBin::open("video", video.parameters().clone(), target, Some(threading))
         };
         let decoder = match decode(target) {
             Ok(decoder) => decoder,
@@ -347,7 +347,7 @@ impl Player {
         let to_drawable = if on_gpu {
             None
         } else {
-            SwScaler::if_needed("to-drawable", &video.parameters, &screen)?
+            SwScaler::if_needed("to-drawable", video.parameters(), &screen)?
         };
         let handle = decoder.handle();
 
@@ -363,11 +363,11 @@ impl Player {
             if let Some(to_drawable) = to_drawable {
                 picture = picture.pipe(to_drawable);
             }
-            ctx.attach(source, video.index, picture.to(screen)?)?;
+            ctx.attach(source, video.index(), picture.to(screen)?)?;
             if let (Some(audio), Some((speakers, format))) = (audio, output) {
                 ctx.attach(
                     source,
-                    audio.index,
+                    audio.index(),
                     sound(ctx, &audio, format, volume, speakers)?,
                 )?;
             }
@@ -727,7 +727,7 @@ fn sound(
 ) -> crate::Result<crate::pipeline::DetachedBranch> {
     ctx.branch()
         .queue("audio-packets", PACKETS_QUEUED)
-        .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+        .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
         .pipe(AudioResampler::new("audio-resampler", format))
         .pipe(volume)
         .queue("audio-output", 8)
@@ -877,7 +877,8 @@ mod tests {
             gpu,
             downstream_hw_frames: GPU_FRAMES_QUEUED as i32 + 3,
         };
-        if let Err(error) = VideoDecodeBin::open("probe", video.parameters, target, None) {
+        if let Err(error) = VideoDecodeBin::open("probe", video.parameters().clone(), target, None)
+        {
             eprintln!("skipping: this GPU does not take the stream ({error})");
             return;
         }
@@ -910,7 +911,8 @@ mod tests {
             device,
             downstream_hw_frames: GPU_FRAMES_QUEUED as i32 + 3,
         };
-        if let Err(error) = VideoDecodeBin::open("probe", video.parameters, target, None) {
+        if let Err(error) = VideoDecodeBin::open("probe", video.parameters().clone(), target, None)
+        {
             eprintln!("skipping: NVDEC does not take the stream ({error})");
             return;
         }
@@ -1121,8 +1123,8 @@ mod tests {
         let index_of = |kind| {
             streams
                 .iter()
-                .find(|stream| stream.kind == kind)
-                .map(|stream| stream.index)
+                .find(|stream| stream.kind() == kind)
+                .map(|stream| stream.index())
                 .unwrap()
         };
         let options = |audio_stream| PlayerOptions {

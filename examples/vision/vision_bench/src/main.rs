@@ -620,11 +620,11 @@ fn run() -> Result<()> {
         let stream = source.best(media::Type::Video)?;
         let info = Stream {
             index,
-            params: stream.parameters.clone(),
+            params: stream.parameters().clone(),
             size: stream.size().expect("a video stream says its size"),
-            rate: stream.frame_rate.unwrap_or(Rational::new(30, 1)),
+            rate: stream.frame_rate().unwrap_or(Rational::new(30, 1)),
         };
-        sources.push((source, stream.index, info));
+        sources.push((source, stream.index(), info));
     }
 
     if args.batch == 0 {

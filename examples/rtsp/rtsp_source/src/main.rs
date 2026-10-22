@@ -39,11 +39,11 @@ mod example {
 
         println!("stream count: {}", streams.len());
         for s in &streams {
-            println!("  [{}] {:?}", s.index, s.kind);
+            println!("  [{}] {:?}", s.index(), s.kind());
         }
 
         let video = source.best(media::Type::Video)?;
-        let index = video.index;
+        let index = video.index();
 
         let (counter, count) = PacketCounter::new("counter");
 

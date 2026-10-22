@@ -52,7 +52,7 @@ mod windows_example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let gpu = D3d11Gpu::new()?;
         let (renderer, window) = D3d11WindowRenderer::open(
@@ -91,7 +91,7 @@ mod windows_example {
                 .queue("scaled-frames", 8)
                 .pipe(pacer)
                 .to(renderer)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

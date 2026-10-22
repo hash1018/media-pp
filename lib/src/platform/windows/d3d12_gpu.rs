@@ -39,13 +39,13 @@ pub enum D3d12GpuError {
 /// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
 /// let video = source.best(media::Type::Video)?;
 /// // Both elements are made from the same `gpu`.
-/// let decoder = D3d12Decoder::new("decoder", video.parameters.clone(), &gpu)?;
+/// let decoder = D3d12Decoder::new("decoder", video.parameters().clone(), &gpu)?;
 /// let scaler = D3d12Scaler::new("scaler", &gpu, 1280, 720)?;
 /// let (counter, _frames) = FrameCounter::new("counter");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).pipe(scaler).to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

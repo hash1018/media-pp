@@ -91,7 +91,7 @@ impl Default for D3d12OrtDetectorOptions {
 ///
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let params = video.parameters.clone();
+/// # let params = video.parameters().clone();
 /// # let sink = AppSink::new("found", |_buf| Ok(()));
 /// let gpu = D3d12Gpu::new()?;
 /// let detector = D3d12OrtDetector::new(
@@ -103,7 +103,7 @@ impl Default for D3d12OrtDetectorOptions {
 /// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
 ///     let decoder = D3d12Decoder::new("decoder", params, &gpu)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

@@ -228,7 +228,7 @@ fn a_demuxer_declares_packets_on_every_stream_pad() {
     // and an audio pad are both `MediaBuffer::Packet` but not the same
     // contract, which is the whole point of splitting the kind.
     for (pad, stream) in demuxer.src_pads().iter().zip(&streams) {
-        let expected = match MediaKind::packet_for(stream.kind) {
+        let expected = match MediaKind::packet_for(stream.kind()) {
             Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
             None => OutputContract::Unknown,
         };
@@ -796,22 +796,22 @@ fn a_containers_audio_stream_cannot_feed_a_video_decoder() {
         "fixture streams: {:?}",
         streams
             .iter()
-            .map(|s| (s.index, s.kind))
+            .map(|s| (s.index(), s.kind()))
             .collect::<Vec<_>>()
     );
     let Some(audio) = streams
         .iter()
-        .find(|s| s.kind == ffmpeg::media::Type::Audio)
+        .find(|s| s.kind() == ffmpeg::media::Type::Audio)
     else {
         eprintln!("skipped: the fixture has no audio stream to mis-wire");
         return;
     };
-    let audio_index = audio.index;
+    let audio_index = audio.index();
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg::media::Type::Video)
         .expect("the fixture must have a video stream");
-    let video_params = video.parameters.clone();
+    let video_params = video.parameters().clone();
 
     let context = contract_context();
     let branch = context
@@ -837,13 +837,13 @@ fn a_containers_audio_stream_cannot_feed_a_video_decoder() {
     let branch = context
         .branch()
         .pipe(
-            SwDecoder::new("video-decoder", video.parameters.clone())
+            SwDecoder::new("video-decoder", video.parameters().clone())
                 .expect("the decoder must open"),
         )
         .to(DeclaringSink::boxed("renderer", video_frames()))
         .expect("the branch itself is consistent");
     context
-        .attach(&mut demuxer, video.index, branch)
+        .attach(&mut demuxer, video.index(), branch)
         .expect("the video pad and a video decoder are exactly the intended link");
 }
 

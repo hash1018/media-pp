@@ -69,10 +69,10 @@ impl Default for WhepOptions {
 ///
 /// let (source, streams) = WhepSource::open("relay", "https://example.com/cam1/whep", WhepOptions::default())?;
 /// let video = streams.iter().find(|s| s.kind == media_pp::ffmpeg::media::Type::Video).unwrap();
-/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// let (counter, _pictures) = FrameCounter::new("pictures");
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
-///     ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(counter)?)?;
+///     ctx.attach(source, video.index(), ctx.branch().pipe(decoder).to(counter)?)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -211,13 +211,7 @@ impl WhepSource {
                         OutputContract::Fixed(PortContract::packet(kind))
                     }),
             );
-            streams.push(StreamInfo {
-                index: streams.len(),
-                kind,
-                parameters,
-                time_base: info.time_base()?,
-                frame_rate: None,
-            });
+            streams.push(StreamInfo::new(parameters, info.time_base()?).with_index(streams.len()));
             kept.push(inbox);
         }
         if streams.is_empty() {

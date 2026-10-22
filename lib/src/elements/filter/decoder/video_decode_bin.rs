@@ -242,13 +242,13 @@ pub enum SoftwareReason {
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// // `DecodeTarget::D3d11 { gpu, downstream_hw_frames }` and the like decode on a GPU.
 /// let target = DecodeTarget::System;
-/// let decoder = VideoDecodeBin::open("decode", video.parameters.clone(), target, None)?;
+/// let decoder = VideoDecodeBin::open("decode", video.parameters().clone(), target, None)?;
 /// println!("{:?} pictures, {:?}", decoder.output_format(), decoder.path());
 /// let decoding = decoder.handle();
 /// let (counter, frames) = FrameCounter::new("count");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
-///     ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(counter)?)?;
+///     ctx.attach(source, video.index(), ctx.branch().pipe(decoder).to(counter)?)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

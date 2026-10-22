@@ -4,7 +4,8 @@ use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
 use super::track_sink::{Muxer, PendingStream, TrackOptions, TrackTimeline, open_tracks};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use crate::elements::StreamInfo;
 
 use crate::{
     element::ElementType,
@@ -47,11 +48,11 @@ pub enum RtspMuxerError {
 ///
 /// ```no_run
 /// # use media_pp::ffmpeg;
-/// # use media_pp::elements::{RtspMuxer, RtspOptions, TrackFormat};
+/// # use media_pp::elements::{RtspMuxer, RtspOptions, StreamInfo};
 /// # fn main() -> media_pp::Result<()> {
 /// # // Usually `&encoder`, for the encoder feeding each track.
-/// # let video_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 90_000));
-/// # let audio_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 48_000));
+/// # let video_format = StreamInfo::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 90_000));
+/// # let audio_format = StreamInfo::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 48_000));
 /// let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:8554/stream", RtspOptions::default())?;
 /// let video = muxer.add_stream("video", video_format)?; // usually `&encoder`
 /// let audio = muxer.add_stream("audio", audio_format)?;
@@ -146,7 +147,7 @@ impl RtspMuxer {
     }
 
     /// Registers one more track this session will publish. `format` (see
-    /// [`TrackFormat`]) must describe every packet subsequently passed to that
+    /// [`StreamInfo`]) must describe every packet subsequently passed to that
     /// track's [`RawSink::consume`](crate::element::RawSink::consume). `name` becomes the track's own
     /// [`Element::name`](crate::element::Element::name)/`pp_log` identity — pick something that tells the
     /// tracks apart in logs and [`crate::bus::BusEvent`]s, such as
@@ -157,13 +158,11 @@ impl RtspMuxer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        format: impl Into<TrackFormat>,
+        format: impl Into<StreamInfo>,
     ) -> Result<MuxerTrack> {
-        let TrackFormat {
-            parameters,
-            time_base,
-            ..
-        } = format.into();
+        let format = format.into();
+        let time_base = format.time_base();
+        let parameters = format.into_parameters();
         let pending = PendingStream::new(name, &parameters, time_base);
         let mut stream = self
             .output
@@ -363,7 +362,7 @@ impl Muxer for RtspMuxer {
 mod tests {
     use ffmpeg_next as ffmpeg;
 
-    use super::{RtspMuxer, RtspMuxerError, TrackFormat};
+    use super::{RtspMuxer, RtspMuxerError, StreamInfo};
     use crate::{elements::RtspOptions, error::Error};
 
     #[test]
@@ -388,7 +387,7 @@ mod tests {
         let _video = muxer
             .add_stream(
                 "video",
-                TrackFormat::new(
+                StreamInfo::new(
                     ffmpeg::codec::Parameters::new(),
                     ffmpeg::Rational(1, 90_000),
                 ),
@@ -427,7 +426,7 @@ mod tests {
             let _video = muxer
                 .add_stream(
                     "video",
-                    TrackFormat::new(parameters, ffmpeg::Rational(1, 90_000)),
+                    StreamInfo::new(parameters, ffmpeg::Rational(1, 90_000)),
                 )
                 .expect("register a track");
             let started = std::time::Instant::now();

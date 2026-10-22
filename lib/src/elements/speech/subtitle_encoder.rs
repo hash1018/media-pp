@@ -8,7 +8,7 @@ use crate::{
     buffer::{MediaBuffer, Metadata},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     element::{Attached, ElementType, Identity},
-    elements::TrackFormat,
+    elements::StreamInfo,
     error::Result,
     subtitle,
     transform::{Filter, FilterStage, Output, filter_stage},
@@ -61,7 +61,7 @@ pub enum SubtitleEncoderError {
 ///
 /// let (source, _) = FileDemuxer::open("demux", "talk.mp4")?;
 /// let audio = source.best(ffmpeg::media::Type::Audio)?;
-/// let decoder = SwDecoder::new("decoder", audio.parameters.clone())?;
+/// let decoder = SwDecoder::new("decoder", audio.parameters().clone())?;
 /// let mono_f32 = ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed);
 /// let resampler = AudioResampler::new("resampler", AudioFormat::new(mono_f32, WHISPER_SAMPLE_RATE, 1));
 /// let transcriber = SwWhisperTranscriber::new("whisper", "ggml-base.bin", WhisperOptions::default())?;
@@ -84,7 +84,7 @@ pub enum SubtitleEncoderError {
 ///         .pipe(encoder)
 ///         .to(text)?;
 ///     let tee = ctx.tee("sound").branch(copy).branch(listen).build()?;
-///     ctx.attach(source, audio.index, tee)?;
+///     ctx.attach(source, audio.index(), tee)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -134,9 +134,9 @@ impl SubtitleEncoder {
 
 /// The track a [`SubtitleEncoder`]'s packets go in: its codec, timed in
 /// milliseconds.
-impl From<&SubtitleEncoder> for TrackFormat {
+impl From<&SubtitleEncoder> for StreamInfo {
     fn from(encoder: &SubtitleEncoder) -> Self {
-        TrackFormat::new(encoder.codec().parameters(), TIME_BASE)
+        StreamInfo::new(encoder.codec().parameters(), TIME_BASE)
     }
 }
 
@@ -254,8 +254,8 @@ mod tests {
     #[test]
     fn its_track_is_its_codec_in_milliseconds() {
         let encoder = SubtitleEncoder::new("vtt", subtitle::Codec::WebVtt);
-        let format = TrackFormat::from(&encoder);
-        assert_eq!(format.time_base, TIME_BASE);
-        assert_eq!(format.parameters.id(), ffmpeg::codec::Id::WEBVTT);
+        let format = StreamInfo::from(&encoder);
+        assert_eq!(format.time_base(), TIME_BASE);
+        assert_eq!(format.parameters().id(), ffmpeg::codec::Id::WEBVTT);
     }
 }

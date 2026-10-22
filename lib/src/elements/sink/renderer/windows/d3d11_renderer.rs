@@ -202,10 +202,10 @@ pub enum D3d11RendererError {
 /// let renderer = D3d11Renderer::new("screen", ui_renderer(&gpu));
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
-///     let decoder = D3d11Decoder::new("decoder", video.parameters.clone(), &gpu, 20)?;
+///     let decoder = D3d11Decoder::new("decoder", video.parameters().clone(), &gpu, 20)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
 ///     let branch = branch.pipe(Pacer::new("pacer")).to(renderer)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// # Ok(())

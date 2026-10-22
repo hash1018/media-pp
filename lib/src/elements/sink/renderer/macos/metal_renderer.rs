@@ -172,7 +172,7 @@ pub enum MetalRendererError {
 ///
 /// // `layer_renderer` is your own `Box<dyn MetalFrameRenderer>`.
 /// let renderer = MetalRenderer::new("screen", layer_renderer);
-/// let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device)?;
+/// let decoder = VideoToolboxDecoder::new("decoder", video.parameters().clone(), &device)?;
 /// let branch = ctx.branch().pipe(decoder).queue("frames", 8);
 /// let branch = branch.pipe(Pacer::new("pacer")).to(renderer)?;
 /// ```

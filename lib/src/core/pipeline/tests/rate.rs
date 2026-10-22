@@ -15,7 +15,7 @@ fn paced_player() -> Option<(Arc<Pipeline>, Taken, Taken)> {
     let stream = |kind| {
         streams
             .iter()
-            .find(|stream| stream.kind == kind)
+            .find(|stream| stream.kind() == kind)
             .expect("the fixture has picture and sound")
             .clone()
     };
@@ -29,19 +29,19 @@ fn paced_player() -> Option<(Arc<Pipeline>, Taken, Taken)> {
         let picture = ctx
             .branch()
             .queue("video-packets", 64)
-            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
             .queue("video-frames", 8)
             .pipe(Pacer::new("video-pacer"))
             .to(screen)?;
-        ctx.attach(source, video.index, picture)?;
+        ctx.attach(source, video.index(), picture)?;
         let sound = ctx
             .branch()
             .queue("audio-packets", 64)
-            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
             .queue("audio-frames", 8)
             .pipe(Pacer::new("audio-pacer"))
             .to(speakers)?;
-        ctx.attach(source, audio.index, sound)?;
+        ctx.attach(source, audio.index(), sound)?;
         Ok(())
     })
     .expect("wire the player");
@@ -170,7 +170,7 @@ fn a_tempo_hands_sound_on_at_the_wall_clocks_pace() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
     let audio = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
         .expect("the fixture has sound")
         .clone();
     // Samples handed on, and the sample rate they are at.
@@ -180,7 +180,7 @@ fn a_tempo_hands_sound_on_at_the_wall_clocks_pace() {
         let sound = ctx
             .branch()
             .queue("audio-packets", 64)
-            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
             .queue("audio-frames", 8)
             .pipe(Pacer::new("audio-pacer"))
             .pipe(AudioTempo::new("audio-tempo"))
@@ -192,7 +192,7 @@ fn a_tempo_hands_sound_on_at_the_wall_clocks_pace() {
                 }
                 Ok(())
             }))?;
-        ctx.attach(source, audio.index, sound)?;
+        ctx.attach(source, audio.index(), sound)?;
         Ok(())
     })
     .expect("wire");
@@ -231,7 +231,7 @@ fn a_tempo_hands_a_preroll_its_sample() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
     let audio = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
         .expect("the fixture has sound")
         .clone();
     let taken = Arc::new(Mutex::new(0usize));
@@ -240,7 +240,7 @@ fn a_tempo_hands_a_preroll_its_sample() {
         let sound = ctx
             .branch()
             .queue("audio-packets", 64)
-            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
             .queue("audio-frames", 8)
             .pipe(Pacer::new("audio-pacer"))
             .pipe(AudioTempo::new("audio-tempo"))
@@ -250,7 +250,7 @@ fn a_tempo_hands_a_preroll_its_sample() {
                 }
                 Ok(())
             }))?;
-        ctx.attach(source, audio.index, sound)?;
+        ctx.attach(source, audio.index(), sound)?;
         Ok(())
     })
     .expect("wire");

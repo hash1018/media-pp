@@ -115,10 +115,10 @@ pub enum MetalWindowRendererError {
 /// let (screen, events) = MetalWindowRenderer::open("screen", WindowOptions::default())?;
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
-///     let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device)?;
+///     let decoder = VideoToolboxDecoder::new("decoder", video.parameters().clone(), &device)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 8);
 ///     let branch = branch.pipe(Pacer::new("pacer")).to(screen)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

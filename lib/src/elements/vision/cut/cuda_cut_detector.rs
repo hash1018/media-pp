@@ -69,7 +69,7 @@ pub enum CudaCutDetectorError {
 /// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let params = video.parameters.clone();
+/// # let params = video.parameters().clone();
 /// # let sink = AppSink::new("shots", |_buf| Ok(()));
 ///
 /// let device = CudaDevice::new()?;
@@ -81,7 +81,7 @@ pub enum CudaCutDetectorError {
 ///     let held = options.lookahead as i32;
 ///     let decoder = CudaDecoder::new("decoder", params, &device, held)?;
 ///     let branch = ctx.branch().pipe(decoder).pipe(cuts).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// # Ok(())

@@ -63,9 +63,9 @@ fn a_transform_follows_a_seek_piped_or_racked() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
-        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream")
-        .index;
+        .index();
 
     let (piped, piped_passed, piped_resets) = Counting::new("piped");
     let (racked, racked_passed, racked_resets) = Counting::new("racked");

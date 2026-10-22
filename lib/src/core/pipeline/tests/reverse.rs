@@ -20,7 +20,7 @@ fn player_queueing(path: &std::path::Path, packets: usize) -> (Arc<Pipeline>, Ta
     let stream = |kind| {
         streams
             .iter()
-            .find(|stream| stream.kind == kind)
+            .find(|stream| stream.kind() == kind)
             .expect("the fixture has picture and sound")
             .clone()
     };
@@ -34,19 +34,19 @@ fn player_queueing(path: &std::path::Path, packets: usize) -> (Arc<Pipeline>, Ta
         let picture = ctx
             .branch()
             .queue("video-packets", packets)
-            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
             .queue("video-frames", 8)
             .pipe(Pacer::new("video-pacer"))
             .to(screen)?;
-        ctx.attach(source, video.index, picture)?;
+        ctx.attach(source, video.index(), picture)?;
         let sound = ctx
             .branch()
             .queue("audio-packets", packets)
-            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
             .queue("audio-frames", 8)
             .pipe(Pacer::new("audio-pacer"))
             .to(speakers)?;
-        ctx.attach(source, audio.index, sound)?;
+        ctx.attach(source, audio.index(), sound)?;
         Ok(())
     })
     .expect("wire the player");
@@ -424,10 +424,10 @@ fn backwards_on_hardware_shows_the_same_pictures_as_forwards(
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("a picture")
         .clone();
-    let bin = match VideoDecodeBin::open("video", video.parameters.clone(), target, None) {
+    let bin = match VideoDecodeBin::open("video", video.parameters().clone(), target, None) {
         Ok(bin) => bin,
         Err(error) => {
             eprintln!("skipping: no {label} decoder on this machine ({error})");
@@ -454,7 +454,7 @@ fn backwards_on_hardware_shows_the_same_pictures_as_forwards(
             .queue("video-frames", 8)
             .pipe(download)
             .to(sums)?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .expect("wire");
@@ -656,12 +656,12 @@ fn watched(
     let (source, streams) = FileDemuxer::open("demux", path).expect("open the fixture");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("a picture")
         .clone();
     let told = Arc::new(Mutex::new(Vec::new()));
     let decoder = Watched {
-        inner: SwDecoder::new("video-decoder", video.parameters.clone()).expect("a decoder"),
+        inner: SwDecoder::new("video-decoder", video.parameters().clone()).expect("a decoder"),
         reversible,
         told: Arc::clone(&told),
     };
@@ -674,7 +674,7 @@ fn watched(
             .queue("video-frames", 8)
             .pipe(Pacer::new("video-pacer"))
             .to(screen)?;
-        ctx.attach(source, video.index, picture)?;
+        ctx.attach(source, video.index(), picture)?;
         Ok(())
     })
     .expect("wire");

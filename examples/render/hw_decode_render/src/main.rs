@@ -90,7 +90,7 @@ mod windows_example {
         // renderer draws with — required for the zero-copy path.
         let decoder = VideoDecodeBin::open(
             "decoder",
-            video.parameters.clone(),
+            video.parameters().clone(),
             DecodeTarget::D3d12 { gpu: gpu.clone() },
             None,
         )?;
@@ -105,7 +105,7 @@ mod windows_example {
                 .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(pacer)
                 .to(renderer)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 
@@ -167,7 +167,7 @@ mod linux_example {
 
         let mut decoder = VideoDecodeBin::open(
             "decoder",
-            video.parameters.clone(),
+            video.parameters().clone(),
             DecodeTarget::Cuda {
                 device: cuda.clone(),
                 downstream_hw_frames: VIDEO_QUEUE_DEPTH as i32,
@@ -199,7 +199,7 @@ mod linux_example {
                 .queue("frames", VIDEO_QUEUE_DEPTH)
                 .pipe(pacer)
                 .to(renderer)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 
@@ -256,7 +256,7 @@ mod macos_example {
 
         let mut decoder = VideoDecodeBin::open(
             "decoder",
-            video.parameters.clone(),
+            video.parameters().clone(),
             DecodeTarget::VideoToolbox { device },
             None,
         )?;
@@ -271,7 +271,7 @@ mod macos_example {
             println!("decoder and renderer: {fits}; converting in software");
             Some((
                 VideoToolboxDownload::new("download"),
-                SwScaler::if_needed("to-drawable", &video.parameters, &renderer)?,
+                SwScaler::if_needed("to-drawable", video.parameters(), &renderer)?,
             ))
         } else {
             None
@@ -290,7 +290,7 @@ mod macos_example {
                 .queue("frames", VIDEO_QUEUE_DEPTH)
                 .pipe(pacer)
                 .to(renderer)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

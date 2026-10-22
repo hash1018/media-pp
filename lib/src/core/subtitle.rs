@@ -408,7 +408,7 @@ mod tests {
         let text = muxer
             .add_stream(
                 "text",
-                crate::elements::TrackFormat::new(
+                crate::elements::StreamInfo::new(
                     codec.parameters(),
                     ffmpeg::Rational::new(1, 1000),
                 ),
@@ -479,7 +479,7 @@ mod tests {
         let text = muxer
             .add_stream(
                 "text",
-                crate::elements::TrackFormat::new(
+                crate::elements::StreamInfo::new(
                     Codec::SubRip.parameters(),
                     ffmpeg::Rational::new(1, 1000),
                 ),

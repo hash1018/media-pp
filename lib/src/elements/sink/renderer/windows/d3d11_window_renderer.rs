@@ -116,10 +116,10 @@ pub enum D3d11WindowRendererError {
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
 ///     // Decoded on the renderer's device; its surfaces cover the queue and a few more.
-///     let decoder = D3d11Decoder::new("decoder", video.parameters.clone(), &gpu, 20)?;
+///     let decoder = D3d11Decoder::new("decoder", video.parameters().clone(), &gpu, 20)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
 ///     let branch = branch.pipe(Pacer::new("pacer")).to(screen)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

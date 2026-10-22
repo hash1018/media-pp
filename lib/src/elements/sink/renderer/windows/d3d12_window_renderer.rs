@@ -125,10 +125,10 @@ pub enum D3d12WindowRendererError {
 /// let (screen, events) = D3d12WindowRenderer::open("screen", &gpu, WindowOptions::default())?;
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
-///     let decoder = D3d12Decoder::new("decoder", video.parameters.clone(), &gpu)?;
+///     let decoder = D3d12Decoder::new("decoder", video.parameters().clone(), &gpu)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 12);
 ///     let branch = branch.pipe(Pacer::new("pacer")).to(screen)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

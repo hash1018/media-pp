@@ -94,10 +94,10 @@ mod common {
         let video = source.best(media::Type::Video)?;
         let audio = source.best(media::Type::Audio)?;
         let streams = Streams {
-            video_index: video.index,
-            video_params: video.parameters.clone(),
-            audio_index: audio.index,
-            audio_params: audio.parameters.clone(),
+            video_index: video.index(),
+            video_params: video.parameters().clone(),
+            audio_index: audio.index(),
+            audio_params: audio.parameters().clone(),
         };
         Ok((source, streams))
     }

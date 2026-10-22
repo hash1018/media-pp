@@ -171,7 +171,7 @@ impl Default for CudaOrtDetectorOptions {
 ///
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let params = video.parameters.clone();
+/// # let params = video.parameters().clone();
 /// # let sink = AppSink::new("found", |_buf| Ok(()));
 /// let device = CudaDevice::new()?;
 /// let detector = CudaOrtDetector::new(
@@ -183,7 +183,7 @@ impl Default for CudaOrtDetectorOptions {
 /// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
 ///     let decoder = CudaDecoder::new("decoder", params, &device, 16)?;
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

@@ -63,7 +63,7 @@ mod windows_example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         // Decoded frames stay in system memory; the renderer uploads them.
         let gpu = D3d12Gpu::new()?;
@@ -88,7 +88,7 @@ mod windows_example {
             if let Some(to_drawable) = to_drawable {
                 branch = branch.pipe(to_drawable);
             }
-            ctx.attach(source, video.index, branch.to(renderer)?)?;
+            ctx.attach(source, video.index(), branch.to(renderer)?)?;
             Ok(())
         })?;
 
@@ -218,7 +218,7 @@ mod linux_example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let gpu = VulkanGpu::new()?;
         let (renderer, window) = VulkanWindowRenderer::open(
@@ -242,7 +242,7 @@ mod linux_example {
             if let Some(to_drawable) = to_drawable {
                 branch = branch.pipe(to_drawable);
             }
-            ctx.attach(source, video.index, branch.to(renderer)?)?;
+            ctx.attach(source, video.index(), branch.to(renderer)?)?;
             Ok(())
         })?;
 
@@ -359,7 +359,7 @@ mod macos_example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
         let (renderer, window) = MetalWindowRenderer::open(
             "renderer",
             WindowOptions {
@@ -380,7 +380,7 @@ mod macos_example {
             if let Some(to_drawable) = to_drawable {
                 branch = branch.pipe(to_drawable);
             }
-            ctx.attach(source, video.index, branch.to(renderer)?)?;
+            ctx.attach(source, video.index(), branch.to(renderer)?)?;
             Ok(())
         })?;
 

@@ -82,12 +82,12 @@ impl Rig {
         let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
         let video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
             .expect("the fixture has a picture")
             .clone();
         let audio = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
             .expect("the fixture has sound")
             .clone();
         let (screen, pictures) = Taker::new("screen");
@@ -96,19 +96,19 @@ impl Rig {
             let picture = ctx
                 .branch()
                 .queue("video-packets", 64)
-                .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+                .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
                 .queue("video-frames", 8)
                 .pipe(Pacer::new("video-pacer"))
                 .to(screen)?;
-            ctx.attach(source, video.index, picture)?;
+            ctx.attach(source, video.index(), picture)?;
             let sound = ctx
                 .branch()
                 .queue("audio-packets", 64)
-                .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+                .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
                 .queue("audio-frames", 8)
                 .pipe(Pacer::new("audio-pacer"))
                 .to(speakers)?;
-            ctx.attach(source, audio.index, sound)?;
+            ctx.attach(source, audio.index(), sound)?;
             Ok(())
         })
         .expect("wire the player");
@@ -304,7 +304,7 @@ fn a_step_moves_every_screen_a_picture_is_fanned_out_to() {
     let stream = |kind| {
         streams
             .iter()
-            .find(|stream| stream.kind == kind)
+            .find(|stream| stream.kind() == kind)
             .expect("the fixture has picture and sound")
             .clone()
     };
@@ -328,18 +328,18 @@ fn a_step_moves_every_screen_a_picture_is_fanned_out_to() {
         let picture = ctx
             .branch()
             .queue("video-packets", 64)
-            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
             .queue("video-frames", 8)
             .to_branch(tee.build()?)?;
-        ctx.attach(source, video.index, picture)?;
+        ctx.attach(source, video.index(), picture)?;
         let sound = ctx
             .branch()
             .queue("audio-packets", 64)
-            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
             .queue("audio-frames", 8)
             .pipe(Pacer::new("audio-pacer"))
             .to(speakers)?;
-        ctx.attach(source, audio.index, sound)?;
+        ctx.attach(source, audio.index(), sound)?;
         Ok(())
     })
     .expect("wire two screens and the sound");
@@ -409,7 +409,7 @@ fn a_step_back_from_a_keyframe_shows_the_picture_before_it() {
     let (source, streams) = FileDemuxer::open("demux", &fixture.path).expect("open");
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("a picture")
         .clone();
     let (screen, shown) = Taker::new("screen");
@@ -417,11 +417,11 @@ fn a_step_back_from_a_keyframe_shows_the_picture_before_it() {
         let picture = ctx
             .branch()
             .queue("video-packets", 64)
-            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
             .queue("video-frames", 8)
             .pipe(Pacer::new("video-pacer"))
             .to(screen)?;
-        ctx.attach(source, video.index, picture)?;
+        ctx.attach(source, video.index(), picture)?;
         Ok(())
     })
     .expect("wire");

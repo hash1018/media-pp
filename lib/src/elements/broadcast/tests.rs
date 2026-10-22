@@ -34,13 +34,13 @@ fn parameters(medium: ffmpeg::media::Type, codec: ffmpeg::codec::Id) -> ffmpeg::
 }
 
 /// An H.264 picture track and an AAC sound track, in that order.
-fn picture_and_sound() -> Vec<TrackFormat> {
+fn picture_and_sound() -> Vec<StreamInfo> {
     vec![
-        TrackFormat::new(
+        StreamInfo::new(
             parameters(ffmpeg::media::Type::Video, ffmpeg::codec::Id::H264),
             VIDEO_UNIT,
         ),
-        TrackFormat::new(
+        StreamInfo::new(
             parameters(ffmpeg::media::Type::Audio, ffmpeg::codec::Id::AAC),
             AUDIO_UNIT,
         ),
@@ -108,6 +108,34 @@ fn pictures_read(items: &[BroadcastItem]) -> Vec<(i64, bool)> {
 
 fn is_broadcast_error(error: &Error, want: fn(&BroadcastError) -> bool) -> bool {
     matches!(error, Error::BroadcastError(inner) if want(inner))
+}
+
+#[test]
+fn the_tracks_are_what_was_published_each_at_its_place() {
+    let broadcast = Broadcast::new("tracks", options(Duration::from_secs(10)));
+    let rate = ffmpeg::Rational::new(25, 1);
+    let mut published = picture_and_sound();
+    published[0] = published[0].clone().with_frame_rate(rate);
+    // Given out of place: the broadcast numbers its own tracks.
+    published[1] = published[1].clone().with_index(7);
+    broadcast.publish(&published).unwrap();
+
+    let tracks = broadcast.tracks().expect("published");
+    assert_eq!(
+        tracks[0].frame_rate(),
+        Some(rate),
+        "the rate goes on, once dropped"
+    );
+    assert_eq!(tracks[1].frame_rate(), None);
+    assert_eq!(
+        tracks.iter().map(StreamInfo::index).collect::<Vec<_>>(),
+        [0, 1],
+        "each at its place among them"
+    );
+    assert_eq!(
+        tracks.iter().map(StreamInfo::kind).collect::<Vec<_>>(),
+        [ffmpeg::media::Type::Video, ffmpeg::media::Type::Audio]
+    );
 }
 
 #[test]
@@ -489,7 +517,7 @@ fn publishing_refuses_what_cannot_be_carried_and_changes_nothing() {
         Err(BroadcastError::NoTracks)
     ));
     let mut tracks = picture_and_sound();
-    tracks.push(TrackFormat::new(
+    tracks.push(StreamInfo::new(
         parameters(ffmpeg::media::Type::Data, ffmpeg::codec::Id::None),
         VIDEO_UNIT,
     ));
@@ -607,14 +635,14 @@ fn a_broadcast_source_needs_tracks() {
 /// the end of it.
 fn play_into(broadcast: &Broadcast, path: &str) {
     let (demuxer, streams) = FileDemuxer::open("demuxer", path).expect("the fixture opens");
-    let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+    let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
     let sinks = broadcast
         .publish(&tracks)
         .expect("the fixture's tracks are carried");
     let (input, ()) = Pipeline::new("input", demuxer, |source, ctx| {
         for (stream, sink) in streams.iter().zip(sinks) {
             let branch = ctx.branch().queue("packets", 64).to(sink)?;
-            ctx.attach(source, stream.index, branch)?;
+            ctx.attach(source, stream.index(), branch)?;
         }
         Ok(())
     })
@@ -663,7 +691,7 @@ fn a_recording_through_a_broadcast_source_starts_at_a_keyframe_and_goes_on_acros
     // Long enough that the unpaced input never leaves the recording behind.
     let broadcast = Broadcast::new("camera", options(Duration::from_secs(60)));
     let (_, streams) = FileDemuxer::open("probe", &path).unwrap();
-    let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+    let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
     drop(broadcast.publish(&tracks).unwrap());
 
     let (source, streams) = BroadcastSource::new("recorder", &broadcast).unwrap();
@@ -673,7 +701,7 @@ fn a_recording_through_a_broadcast_source_starts_at_a_keyframe_and_goes_on_acros
         .iter()
         .map(|stream| {
             muxer
-                .add_stream(format!("track-{}", stream.index), stream)
+                .add_stream(format!("track-{}", stream.index()), stream)
                 .unwrap()
         })
         .collect();

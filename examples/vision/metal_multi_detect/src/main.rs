@@ -182,7 +182,7 @@ mod example {
 
             let (source, _) = FileDemuxer::open(format!("file {index}"), video)?;
             let stream = source.best(media::Type::Video)?;
-            let params = stream.parameters.clone();
+            let params = stream.parameters().clone();
             let device = &device;
             let (feed, ()) = Pipeline::new(format!("stream {index}"), source, |source, ctx| {
                 let decoder = VideoToolboxDecoder::new(format!("decoder {index}"), params, device)?;
@@ -191,7 +191,7 @@ mod example {
                     .pipe(decoder)
                     .queue(format!("pictures {index}"), 4)
                     .to(input)?;
-                ctx.attach(source, stream.index, branch)?;
+                ctx.attach(source, stream.index(), branch)?;
                 Ok(())
             })?;
             feeds.push(feed);

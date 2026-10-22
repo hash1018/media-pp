@@ -106,11 +106,11 @@ pub struct DecodeThreading {
 ///
 /// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
-/// let decoder = SwDecoder::new("decode", video.parameters.clone())?;
+/// let decoder = SwDecoder::new("decode", video.parameters().clone())?;
 /// let (counter, frames) = FrameCounter::new("count");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
-///     ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(counter)?)?;
+///     ctx.attach(source, video.index(), ctx.branch().pipe(decoder).to(counter)?)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

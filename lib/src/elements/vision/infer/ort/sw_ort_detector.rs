@@ -50,7 +50,7 @@ const MARGIN: f32 = 114.0 / 255.0;
 ///
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let params = video.parameters.clone();
+/// # let params = video.parameters().clone();
 /// let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
 ///     let decoder = SwDecoder::new("decoder", params)?;
 ///     let detector =
@@ -64,7 +64,7 @@ const MARGIN: f32 = 114.0 / 255.0;
 ///         Ok(())
 ///     });
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 8).pipe(detector).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

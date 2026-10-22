@@ -84,8 +84,8 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &video)?;
         let stream = source.best(media::Type::Video)?;
-        let params = stream.parameters.clone();
-        let index = stream.index;
+        let params = stream.parameters().clone();
+        let index = stream.index();
 
         let seen = Arc::new(AtomicUsize::new(0));
         let cuts = Arc::new(Mutex::new(Vec::new()));

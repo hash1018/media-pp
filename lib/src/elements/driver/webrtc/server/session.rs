@@ -26,7 +26,7 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Rtc};
 
 use crate::buffer::MediaBuffer;
 use crate::bus::BusEvent;
-use crate::elements::{Broadcast, BroadcastSource, TrackFormat};
+use crate::elements::{Broadcast, BroadcastSource, StreamInfo};
 use crate::pipeline::{Driven, DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info};
 
@@ -72,7 +72,7 @@ pub(crate) fn playable(broadcast: &Broadcast) -> bool {
         && broadcast.tracks().is_some_and(|tracks| {
             tracks
                 .iter()
-                .any(|track| str0m_codec(track.parameters.id()).is_some())
+                .any(|track| str0m_codec(track.parameters().id()).is_some())
         })
 }
 
@@ -212,7 +212,7 @@ struct Published {
     mid: Mid,
     kind: MediaKind,
     probe: StreamInfoProbe,
-    format: Option<TrackFormat>,
+    format: Option<StreamInfo>,
     /// Once published: where its packets go, and the pipeline taking them
     /// into the broadcast.
     inbox: Option<Inbox>,
@@ -649,10 +649,10 @@ impl Session {
         playing.mids = vec![None; tracks.len()];
         let mut sinks = Vec::new();
         for (index, track) in tracks.iter().enumerate() {
-            let Some(codec) = str0m_codec(track.parameters.id()) else {
+            let Some(codec) = str0m_codec(track.parameters().id()) else {
                 continue;
             };
-            let kind = match track.kind {
+            let kind = match track.kind() {
                 ffmpeg::media::Type::Video => MediaKind::Video,
                 ffmpeg::media::Type::Audio => MediaKind::Audio,
                 _ => continue,
@@ -671,7 +671,7 @@ impl Session {
                 Arc::new(Mutex::new(codecs(&mut self.rtc, mid))),
                 playing.outbox.clone(),
             );
-            if let Err(error) = sink.set_source_parameters(&track.parameters) {
+            if let Err(error) = sink.set_source_parameters(track.parameters()) {
                 pp_debug!(
                     pp_log: &self.pp_log,
                     "session {} cannot be sent track {index}: {error}",
@@ -752,7 +752,7 @@ impl Publishing {
         if track.format.is_none()
             && let Some(info) = track.probe.observe(data.params.spec(), &data.data)
         {
-            track.format = info.track_format().ok();
+            track.format = info.stream_info().ok();
         }
         self.held.push((index, packet));
         let first = *self.first_packet.get_or_insert_with(Instant::now);
@@ -779,7 +779,7 @@ impl Publishing {
             self.held.clear();
             return Err("nothing it sent could be described".into());
         }
-        let formats: Vec<TrackFormat> = ready
+        let formats: Vec<StreamInfo> = ready
             .iter()
             .filter_map(|&index| self.tracks[index].format.clone())
             .collect();

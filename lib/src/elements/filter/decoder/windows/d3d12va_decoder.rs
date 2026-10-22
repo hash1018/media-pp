@@ -80,12 +80,12 @@ pub enum D3d12DecoderError {
 /// let gpu = D3d12Gpu::new()?;
 /// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
-/// let decoder = D3d12Decoder::new("decode", video.parameters.clone(), &gpu)?;
+/// let decoder = D3d12Decoder::new("decode", video.parameters().clone(), &gpu)?;
 /// let (counter, frames) = FrameCounter::new("count");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

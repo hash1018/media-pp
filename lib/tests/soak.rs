@@ -180,7 +180,7 @@ fn open_fixture(path: &str) -> (FileDemuxer, usize, ffmpeg::codec::Parameters) {
     let video = source
         .best(ffmpeg::media::Type::Video)
         .expect("the fixture has a video stream");
-    (source, video.index, video.parameters)
+    (source, video.index(), video.parameters().clone())
 }
 
 /// One complete recording: build the whole graph, run it, tear it down, and

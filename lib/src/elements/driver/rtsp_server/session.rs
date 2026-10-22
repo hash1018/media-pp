@@ -861,7 +861,7 @@ impl Connection {
                     format!("rtsp-{id}-track-{track}"),
                     delivery,
                     stream,
-                    info.time_base,
+                    info.time_base(),
                     outbox.clone(),
                 ),
             ));

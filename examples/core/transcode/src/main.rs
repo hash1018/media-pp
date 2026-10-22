@@ -33,7 +33,7 @@ mod example {
     use file_common::{FileArgs, SafeOutput, run_to_end};
     use media_pp::{
         elements::{
-            DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, Mp4Layout, TrackFormat,
+            DecodeTarget, EncodeInput, FileDemuxer, FileMuxer, Mp4Layout, StreamInfo,
             VideoDecodeBin, VideoEncodeBin, VideoEncodeOptions,
         },
         ffmpeg,
@@ -72,12 +72,12 @@ mod example {
             ))
         })?;
         let frame_rate = video
-            .frame_rate
+            .frame_rate()
             .unwrap_or_else(|| ffmpeg::Rational::new(30, 1));
 
         let target = target()?;
         let decoder =
-            VideoDecodeBin::open("decode", video.parameters.clone(), target.clone(), None)?;
+            VideoDecodeBin::open("decode", video.parameters().clone(), target.clone(), None)?;
         let input =
             EncodeInput::for_decoded(&target, decoder.output_format()).ok_or_else(|| {
                 media_pp::Error::Other(format!(
@@ -109,7 +109,7 @@ mod example {
         let mut muxer = FileMuxer::create(output.path(), Mp4Layout::Standard)?;
         let video_track = muxer.add_stream(
             "video",
-            TrackFormat::from(&encoder).with_orientation(orientation),
+            StreamInfo::from(&encoder).with_orientation(orientation),
         )?;
         let audio_track = audio
             .as_ref()
@@ -126,9 +126,9 @@ mod example {
                 .queue("frames", QUEUED)
                 .pipe(encoder)
                 .to(video_sink)?;
-            ctx.attach(source, video.index, picture)?;
+            ctx.attach(source, video.index(), picture)?;
             if let (Some(audio), Some(sink)) = (audio, audio_sink) {
-                ctx.attach(source, audio.index, ctx.branch().to(sink)?)?;
+                ctx.attach(source, audio.index(), ctx.branch().to(sink)?)?;
             }
             Ok(())
         })?;

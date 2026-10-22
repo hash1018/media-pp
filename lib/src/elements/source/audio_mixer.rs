@@ -2064,8 +2064,8 @@ mod tests {
             let audio = demuxer
                 .best(ffmpeg::media::Type::Audio)
                 .expect("the fixture has sound");
-            let parameters = audio.parameters.clone();
-            let audio = audio.index;
+            let parameters = audio.parameters().clone();
+            let audio = audio.index();
             let decoder = SwDecoder::new("fixture-decoder", parameters).expect("open the decoder");
             let sink = mixer
                 .add_source("fixture".to_owned())

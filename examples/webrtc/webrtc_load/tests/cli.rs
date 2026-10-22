@@ -4,7 +4,7 @@ use media_pp::{
     buffer::{MediaBuffer, set_time_base},
     driver::DriverRunner,
     elements::{
-        AppSource, Broadcast, BroadcastOptions, Pacer, SwEncoder, SwEncoderOptions, TrackFormat,
+        AppSource, Broadcast, BroadcastOptions, Pacer, StreamInfo, SwEncoder, SwEncoderOptions,
         VideoCodec, WebRtcPathMode, WebRtcServer, WebRtcServerOptions,
     },
     ffmpeg::{self, format::Pixel},
@@ -91,7 +91,7 @@ fn camera(broadcast: &Broadcast) -> media_pp::Result<Arc<Pipeline>> {
             max_b_frames: None,
         },
     )?;
-    let sink = broadcast.publish(&[TrackFormat::from(&encoder)])?.remove(0);
+    let sink = broadcast.publish(&[StreamInfo::from(&encoder)])?.remove(0);
     let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
         let branch = ctx
             .branch()

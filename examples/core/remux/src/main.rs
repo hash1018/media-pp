@@ -64,15 +64,16 @@ mod example {
         let mut muxer = FileMuxer::create(output.path(), Mp4Layout::Standard)?;
         let mut kept = Vec::new();
         for stream in &streams {
-            if MediaKind::packet_for(stream.kind).is_none() {
+            if MediaKind::packet_for(stream.kind()).is_none() {
                 println!(
                     "skipping stream {} ({:?}) — not a kind this can carry",
-                    stream.index, stream.kind
+                    stream.index(),
+                    stream.kind()
                 );
                 continue;
             }
-            let track = muxer.add_stream(format!("{:?}", stream.kind), stream)?;
-            kept.push((stream.index, track));
+            let track = muxer.add_stream(format!("{:?}", stream.kind()), stream)?;
+            kept.push((stream.index(), track));
         }
         let mut sinks = muxer.open()?;
         let routes = kept

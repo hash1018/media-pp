@@ -45,13 +45,13 @@ pub enum D3d11GpuError {
 /// let (source, _) = FileDemuxer::open("demux", "video.mp4")?;
 /// let video = source.best(media::Type::Video)?;
 /// // Both elements are made from the same `gpu`.
-/// let decoder = D3d11Decoder::new("decoder", video.parameters.clone(), &gpu, 8)?;
+/// let decoder = D3d11Decoder::new("decoder", video.parameters().clone(), &gpu, 8)?;
 /// let download = D3d11Download::new("download", &gpu)?;
 /// let (counter, _frames) = FrameCounter::new("counter");
 ///
 /// let (pipeline, ()) = Pipeline::new("decode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).pipe(download).to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

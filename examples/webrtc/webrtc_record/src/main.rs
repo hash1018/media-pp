@@ -149,9 +149,9 @@ mod example {
             })?;
             let video = source.best(ffmpeg::media::Type::Video)?;
             let audio = source.best(ffmpeg::media::Type::Audio)?;
-            let (video_index, audio_index) = (video.index, audio.index);
-            let video_parameters = video.parameters.clone();
-            let audio_parameters = audio.parameters.clone();
+            let (video_index, audio_index) = (video.index(), audio.index());
+            let video_parameters = video.parameters().clone();
+            let audio_parameters = audio.parameters().clone();
             // SAFETY: read-only access to parameters owned by this function.
             let (width, height) = unsafe {
                 (
@@ -259,8 +259,8 @@ mod example {
         audio_info: media_pp::elements::WebRtcStreamInfo,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let mut muxer = FileMuxer::create(output, Mp4Layout::Standard)?;
-        let video_track = muxer.add_stream("received-video", video_info.track_format()?)?;
-        let audio_track = muxer.add_stream("received-audio", audio_info.track_format()?)?;
+        let video_track = muxer.add_stream("received-video", video_info.stream_info()?)?;
+        let audio_track = muxer.add_stream("received-audio", audio_info.stream_info()?)?;
         let mut sinks = muxer.open()?;
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;

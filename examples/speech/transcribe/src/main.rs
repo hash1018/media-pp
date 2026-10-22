@@ -169,7 +169,7 @@ mod example {
         // why the text track is registered now — see `FileMuxer::open`.
         let mut muxer = FileMuxer::create(&output_path, Mp4Layout::Standard)?;
         let video_track = match &video {
-            Some(video) => Some((video.index, muxer.add_stream("video", video)?)),
+            Some(video) => Some((video.index(), muxer.add_stream("video", video)?)),
             None => None,
         };
         let audio_track = muxer.add_stream("audio", &audio)?;
@@ -209,7 +209,7 @@ mod example {
             Ok(())
         });
 
-        let decoder = SwDecoder::new("audio-decode", audio.parameters.clone())?;
+        let decoder = SwDecoder::new("audio-decode", audio.parameters().clone())?;
         let resampler = AudioResampler::new(
             "to-whisper",
             AudioFormat::new(
@@ -246,7 +246,7 @@ mod example {
             // once to listen to.
             let copy = ctx.branch().to(audio_sink)?;
             let tee = ctx.tee("audio").branch(copy).branch(listen).build()?;
-            ctx.attach(source, audio.index, tee)?;
+            ctx.attach(source, audio.index(), tee)?;
             Ok(())
         })?;
 

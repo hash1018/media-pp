@@ -127,7 +127,7 @@ impl Default for RtspServerOptions {
 /// use media_pp::driver::DriverRunner;
 /// use media_pp::elements::{
 ///     Broadcast, BroadcastOptions, RtspOptions, RtspPathMode, RtspServer, RtspServerOptions,
-///     RtspSource, TrackFormat,
+///     RtspSource, StreamInfo,
 /// };
 /// use media_pp::pipeline::Pipeline;
 ///
@@ -140,12 +140,12 @@ impl Default for RtspServerOptions {
 /// // The camera, pulled once, written into the broadcast; players open
 /// // rtsp://<this machine>:8554/cam1.
 /// let (source, streams) = RtspSource::open("camera", "rtsp://192.168.0.10/stream", RtspOptions::default())?;
-/// let tracks: Vec<TrackFormat> = streams.iter().map(TrackFormat::from).collect();
+/// let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
 /// let sinks = camera.publish(&tracks)?;
 /// let (input, ()) = Pipeline::new("camera", source, |source, ctx| {
 ///     for (stream, sink) in streams.iter().zip(sinks) {
 ///         let branch = ctx.branch().queue("packets", 64).to(sink)?;
-///         ctx.attach(source, stream.index, branch)?;
+///         ctx.attach(source, stream.index(), branch)?;
 ///     }
 ///     Ok(())
 /// })?;

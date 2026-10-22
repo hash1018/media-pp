@@ -171,7 +171,7 @@ saying to turn it. Every decoder hands that on with each picture
   (`D3d11Renderer`, `CudaRenderer`, …) hand it over as stored.
 - An element that makes a picture anew (a scaler, an upload, a tone map)
   carries the matrix on. A recording re-encoded from such a file keeps it
-  only when told, with `TrackFormat::with_orientation(stream.orientation()?)`;
+  only when told, with `StreamInfo::with_orientation(stream.orientation()?)`;
   a stream copied through keeps it as it is.
 
 ## Elements of your own

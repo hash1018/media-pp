@@ -32,9 +32,9 @@ fn pipeline_id_is_whatever_new_was_given() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let (pipeline, ()) = Pipeline::new("my-pipeline", source, |source, ctx| {
         let branch = ctx.branch().to(NoOpSink {
@@ -59,9 +59,9 @@ fn topology_lists_source_through_terminal_per_branch() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let pacer = Pacer::new("pacer");
@@ -133,9 +133,9 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch_a = ctx.branch().to(NoOpSink {
@@ -204,9 +204,9 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch_a = ctx.branch().to(NoOpSink {
@@ -270,9 +270,9 @@ fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, tee_handle) = ctx.tee("tee").build_dynamic()?;
@@ -319,9 +319,9 @@ fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() 
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, tee_handle) = ctx.tee("tee").build_dynamic()?;
@@ -376,9 +376,9 @@ fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
-        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .find(|s| s.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
-    let index = video.index;
+    let index = video.index();
 
     const N: usize = 30;
     let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
@@ -451,9 +451,9 @@ fn duplicate_names_are_independent_when_detaching_by_branch_id() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream")
-        .index;
+        .index();
     let (pipeline, handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
@@ -487,9 +487,9 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream")
-        .index;
+        .index();
     let (pipeline, handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
@@ -548,9 +548,9 @@ fn dynamic_attach_is_rejected_during_a_timeline_operation() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("test video has a video stream")
-        .index;
+        .index();
     let (pipeline, handle) = Pipeline::new("attach-during-seek", source, |source, ctx| {
         let (tee, tee_handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee)?;
@@ -637,9 +637,9 @@ fn bus_messages_carry_the_posting_elements_stable_graph_id() {
     let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream")
-        .index;
+        .index();
     let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().to(NoOpSink {
             name: "stable-id-sink".into(),

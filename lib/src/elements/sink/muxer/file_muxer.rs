@@ -8,7 +8,8 @@ use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use crate::elements::StreamInfo;
 
 use crate::{
     element::ElementType,
@@ -219,7 +220,7 @@ impl FileMuxer {
     /// Registers one more track this file will hold. `format` describes it
     /// — typically `&encoder` for the encoder that feeds it, or the
     /// demuxed [`&StreamInfo`](crate::elements::StreamInfo) for a stream
-    /// copied through unchanged; see [`TrackFormat`]. `name` becomes
+    /// copied through unchanged; see [`StreamInfo`]. `name` becomes
     /// this track's own [`Element::name`](crate::element::Element::name)/`pp_log` identity once
     /// [`FileMuxer::open`] turns it into a `RawSink` — pick something that
     /// tells multiple tracks apart in logs/[`crate::bus::BusEvent`]s,
@@ -230,14 +231,12 @@ impl FileMuxer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        format: impl Into<TrackFormat>,
+        format: impl Into<StreamInfo>,
     ) -> Result<MuxerTrack> {
-        let TrackFormat {
-            parameters,
-            time_base,
-            fixed_parameter_sets,
-        } = format.into();
-        let hvc1 = self.hvc1(&parameters, fixed_parameter_sets);
+        let format = format.into();
+        let time_base = format.time_base();
+        let hvc1 = self.hvc1(format.parameters(), format.fixed_parameter_sets());
+        let parameters = format.into_parameters();
         let mut stream = self
             .output
             .add_stream(parameters.id())
@@ -552,7 +551,7 @@ mod tests {
         let audio = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
+                StreamInfo::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
             )
             .expect("add stream");
         let mut sink = muxer
@@ -579,7 +578,7 @@ mod tests {
         let audio = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
+                StreamInfo::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("open must write the header");
@@ -623,7 +622,7 @@ mod tests {
         let _audio = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
+                StreamInfo::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
             )
             .expect("add_stream must succeed");
         let sinks = muxer.open().expect("open must write the header");
@@ -656,13 +655,13 @@ mod tests {
         let a = muxer
             .add_stream(
                 "a",
-                TrackFormat::new(encoder_a.parameters(), ffmpeg::Rational::new(1, 48000)),
+                StreamInfo::new(encoder_a.parameters(), ffmpeg::Rational::new(1, 48000)),
             )
             .expect("add_stream a");
         let b = muxer
             .add_stream(
                 "b",
-                TrackFormat::new(encoder_b.parameters(), ffmpeg::Rational::new(1, 44100)),
+                StreamInfo::new(encoder_b.parameters(), ffmpeg::Rational::new(1, 44100)),
             )
             .expect("add_stream b");
         let mut sinks = muxer.open().expect("open must write the header");
@@ -740,7 +739,7 @@ mod tests {
         let audio = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
+                StreamInfo::new(encoder.parameters(), ffmpeg::Rational::new(1, 48000)),
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("open must write the header");
@@ -854,7 +853,7 @@ mod tests {
         let audio = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(encoder.parameters(), ffmpeg::Rational::new(1, 48_000)),
+                StreamInfo::new(encoder.parameters(), ffmpeg::Rational::new(1, 48_000)),
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer
@@ -911,13 +910,13 @@ mod tests {
             let (demuxer, _) = FileDemuxer::open("demuxer", &source).expect("open the fixture");
             let video = demuxer.best(ffmpeg::media::Type::Video).expect("video");
             // Turned first, then set again: the last one given is the one kept.
-            let format = TrackFormat::from(&video)
+            let format = StreamInfo::from(&video)
                 .with_orientation(Orientation::rotated(Rotation::Half))
                 .with_orientation(orientation);
             let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer.add_stream("video", format).expect("add");
             let sink = muxer.open().expect("header").take(track).expect("track");
-            let index = video.index;
+            let index = video.index();
             let (pipeline, ()) = Pipeline::new("remux", demuxer, move |source, context| {
                 let branch = context.branch().to(sink)?;
                 context.attach(source, index, branch)?;
@@ -938,14 +937,14 @@ mod tests {
             assert_eq!(stream.orientation(), Ok(orientation), "{name}: the stream");
             let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let kept = seen.clone();
-            let decoder = SwDecoder::new("decoder", stream.parameters.clone()).expect("decoder");
+            let decoder = SwDecoder::new("decoder", stream.parameters().clone()).expect("decoder");
             let sink = crate::elements::AppSink::new("sink", move |buf| {
                 if let MediaBuffer::Video(frame) = &buf {
                     kept.lock().unwrap().push(Orientation::of(frame));
                 }
                 Ok(())
             });
-            let index = stream.index;
+            let index = stream.index();
             let (pipeline, ()) = Pipeline::new("decode", written, move |source, context| {
                 let branch = context.branch().pipe(decoder).to(sink)?;
                 context.attach(source, index, branch)?;
@@ -1005,13 +1004,13 @@ mod tests {
         let video = demuxer
             .best(ffmpeg::media::Type::Video)
             .expect("the fixture has video");
-        let parameters = video.parameters.clone();
-        let time_base = video.time_base;
-        let video = video.index;
+        let parameters = video.parameters().clone();
+        let time_base = video.time_base();
+        let video = video.index();
 
         let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create the remux");
         let track = muxer
-            .add_stream("video", TrackFormat::new(parameters, time_base))
+            .add_stream("video", StreamInfo::new(parameters, time_base))
             .expect("add the video stream");
         let sink = muxer
             .open()
@@ -1149,11 +1148,11 @@ mod tests {
             stream(ffmpeg::media::Type::Video),
             stream(ffmpeg::media::Type::Audio),
         );
-        let video_decoder = SwDecoder::new("video-decoder", video.parameters.clone())
+        let video_decoder = SwDecoder::new("video-decoder", video.parameters().clone())
             .expect("open the video decoder");
-        let audio_decoder = SwDecoder::new("audio-decoder", audio.parameters.clone())
+        let audio_decoder = SwDecoder::new("audio-decoder", audio.parameters().clone())
             .expect("open the audio decoder");
-        let (video, audio) = (video.index, audio.index);
+        let (video, audio) = (video.index(), audio.index());
 
         // Re-encoded at the same rates it arrived with, so a difference in
         // the result is this crate's doing rather than a conversion's.
@@ -1308,15 +1307,15 @@ mod tests {
         let text_tb = ffmpeg::Rational::new(1, 1000);
         let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("the muxer must open");
         let video_track = muxer
-            .add_stream("video", TrackFormat::new(video_params, video_tb))
+            .add_stream("video", StreamInfo::new(video_params, video_tb))
             .expect("add_stream video");
         let audio_track = muxer
-            .add_stream("audio", TrackFormat::new(audio_params, audio_tb))
+            .add_stream("audio", StreamInfo::new(audio_params, audio_tb))
             .expect("add_stream audio");
         let text_track = muxer
             .add_stream(
                 "text",
-                TrackFormat::new(crate::subtitle::Codec::MovText.parameters(), text_tb),
+                StreamInfo::new(crate::subtitle::Codec::MovText.parameters(), text_tb),
             )
             .expect("add_stream text");
         let mut sinks = muxer.open().expect("open must write the header");
@@ -1575,7 +1574,7 @@ mod tests {
         let audio_track = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(audio.parameters(), ffmpeg::Rational::new(1, 48_000)),
+                StreamInfo::new(audio.parameters(), ffmpeg::Rational::new(1, 48_000)),
             )
             .expect("add audio");
         let mut sinks = muxer.open().expect("open must write the header");
@@ -1688,7 +1687,7 @@ mod tests {
         let track = muxer
             .add_stream(
                 "audio",
-                TrackFormat::new(audio.parameters(), ffmpeg::Rational::new(1, 48_000)),
+                StreamInfo::new(audio.parameters(), ffmpeg::Rational::new(1, 48_000)),
             )
             .expect("add audio");
         let mut sinks = muxer.open().expect("open must write the header");

@@ -30,7 +30,7 @@ pub(crate) fn payload_type(index: usize) -> u8 {
 pub(crate) fn carries(track: &StreamInfo) -> bool {
     use ffmpeg::codec::Id;
     matches!(
-        track.parameters.id(),
+        track.parameters().id(),
         Id::H264
             | Id::HEVC
             | Id::VP8
@@ -86,12 +86,12 @@ unsafe fn context(
             ffi::avformat_free_context(ctx);
             return Err(ffmpeg::Error::Other { errno: ENOMEM });
         }
-        let ret = ffi::avcodec_parameters_copy((*stream).codecpar, track.parameters.as_ptr());
+        let ret = ffi::avcodec_parameters_copy((*stream).codecpar, track.parameters().as_ptr());
         if ret < 0 {
             ffi::avformat_free_context(ctx);
             return Err(ffmpeg::Error::from(ret));
         }
-        (*stream).time_base = track.time_base.into();
+        (*stream).time_base = track.time_base().into();
         // Read both by the muxer as it writes and by `av_sdp_create`, so
         // what is described is what is sent.
         let ret = ffi::av_opt_set_int(
@@ -257,7 +257,7 @@ impl Packetizer {
             let mut this = Self {
                 ctx,
                 collected,
-                unit: track.time_base,
+                unit: track.time_base(),
                 clock: Rational(1, 90_000),
             };
             let ret = ffi::avformat_write_header(ctx, ptr::null_mut());
@@ -345,13 +345,7 @@ mod tests {
         codec: ffmpeg::codec::Id,
         unit: Rational,
     ) -> StreamInfo {
-        StreamInfo {
-            index,
-            kind: medium,
-            parameters: parameters(medium, codec),
-            time_base: unit,
-            frame_rate: None,
-        }
+        StreamInfo::new(parameters(medium, codec), unit).with_index(index)
     }
 
     #[test]

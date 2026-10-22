@@ -29,7 +29,7 @@ pub use frame_counter::FrameCounter;
 pub use muxer::{DashMode, DashMuxer, DashMuxerError, DashOptions};
 pub use muxer::{FileMuxer, FileMuxerError, Mp4Layout, SegmentPolicy, SegmentedFileMuxer};
 pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
-pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError, TrackFormat};
+pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError};
 pub use muxer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use muxer::{RtmpMuxer, RtmpMuxerError};
 pub use muxer::{RtspMuxer, RtspMuxerError};

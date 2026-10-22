@@ -34,12 +34,12 @@ pub enum Rotation {
 /// One of the eight a picture can be turned by without resampling it — the
 /// only ones a phone or a camera writes. [`Orientation::of`] reads a
 /// picture's, [`StreamInfo::orientation`] a stream's, and
-/// [`TrackFormat::with_orientation`] writes one into a file a picture is
+/// [`StreamInfo::with_orientation`] writes one into a file a picture is
 /// re-encoded to, where the container keeps it beside the pictures as the
 /// file being copied had.
 ///
 /// [`StreamInfo::orientation`]: crate::elements::StreamInfo::orientation
-/// [`TrackFormat::with_orientation`]: crate::elements::TrackFormat::with_orientation
+/// [`StreamInfo::with_orientation`]: crate::elements::StreamInfo::with_orientation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Orientation {
     /// The turn, after any mirroring.

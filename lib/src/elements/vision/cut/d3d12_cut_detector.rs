@@ -90,7 +90,7 @@ pub enum D3d12CutDetectorError {
 /// # use media_pp::{ffmpeg::media, pipeline::Pipeline};
 /// # let (source, _) = FileDemuxer::open("demux", "input.mp4")?;
 /// # let video = source.best(media::Type::Video)?;
-/// # let params = video.parameters.clone();
+/// # let params = video.parameters().clone();
 /// # let sink = AppSink::new("shots", |_buf| Ok(()));
 ///
 /// let gpu = D3d12Gpu::new()?;
@@ -98,7 +98,7 @@ pub enum D3d12CutDetectorError {
 /// let (pipeline, ()) = Pipeline::new("cuts", source, |source, ctx| {
 ///     let decoder = D3d12Decoder::new("decoder", params, &gpu)?;
 ///     let branch = ctx.branch().pipe(decoder).pipe(cuts).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// # Ok(())

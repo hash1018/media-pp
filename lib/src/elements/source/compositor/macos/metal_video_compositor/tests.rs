@@ -906,13 +906,13 @@ fn a_file_is_decoded_composed_and_encoded_on_the_gpu() {
     let (source, streams) = FileDemuxer::open("file", &path).unwrap();
     let video = streams
         .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
         .expect("the fixture has a picture")
         .clone();
-    if !VideoToolboxDecoder::supports(video.parameters.id()) {
+    if !VideoToolboxDecoder::supports(video.parameters().id()) {
         return;
     }
-    let decoder = VideoToolboxDecoder::new("decoder", video.parameters.clone(), &device).unwrap();
+    let decoder = VideoToolboxDecoder::new("decoder", video.parameters().clone(), &device).unwrap();
 
     let (compositor, handle) = MetalVideoCompositor::with_format(
         "export",
@@ -959,7 +959,7 @@ fn a_file_is_decoded_composed_and_encoded_on_the_gpu() {
             .pipe(decoder)
             .queue("frames", 2)
             .to(whole.sink)?;
-        ctx.attach(source, video.index, branch)?;
+        ctx.attach(source, video.index(), branch)?;
         Ok(())
     })
     .unwrap();

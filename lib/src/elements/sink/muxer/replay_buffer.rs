@@ -49,7 +49,8 @@ use ffmpeg_next::{self as ffmpeg, Rescale};
 use thiserror::Error as ThisError;
 
 use super::file_muxer::{FileMuxer, Mp4Layout};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use crate::elements::StreamInfo;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -165,12 +166,11 @@ pub struct ReplayBuffer {
 }
 
 /// One track as it was added: what a saved clip's header declares for it.
+#[derive(Clone)]
 struct StreamDef {
     name: Arc<str>,
-    parameters: ffmpeg::codec::Parameters,
-    time_base: ffmpeg::Rational,
-    /// As the track's `TrackFormat` said, for the clip's `FileMuxer`.
-    fixed_parameter_sets: bool,
+    /// As the track was added, for the clip's `FileMuxer`.
+    format: StreamInfo,
 }
 
 impl ReplayBuffer {
@@ -194,19 +194,13 @@ impl ReplayBuffer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        format: impl Into<TrackFormat>,
+        format: impl Into<StreamInfo>,
     ) -> MuxerTrack {
-        let TrackFormat {
-            parameters,
-            time_base,
-            fixed_parameter_sets,
-        } = format.into();
+        let format = format.into();
         let track = self.id.track(self.streams.len());
         self.streams.push(StreamDef {
             name: name.into().into(),
-            parameters,
-            time_base,
-            fixed_parameter_sets,
+            format,
         });
         track
     }
@@ -227,7 +221,7 @@ impl ReplayBuffer {
         let anchor = self
             .streams
             .iter()
-            .position(|stream| stream.parameters.medium() == ffmpeg::media::Type::Video)
+            .position(|stream| stream.format.kind() == ffmpeg::media::Type::Video)
             .unwrap_or(0);
         let tracks: Vec<(Arc<str>, Option<MediaKind>)> = self
             .streams
@@ -235,7 +229,7 @@ impl ReplayBuffer {
             .map(|stream| {
                 (
                     stream.name.clone(),
-                    MediaKind::packet_for(stream.parameters.medium()),
+                    MediaKind::packet_for(stream.format.kind()),
                 )
             })
             .collect();
@@ -318,7 +312,7 @@ impl Window {
         let Some(stamp) = packet.dts().or(packet.pts()) else {
             return;
         };
-        let at = stamp.rescale(self.streams[track].time_base, MICROSECONDS);
+        let at = stamp.rescale(self.streams[track].format.time_base(), MICROSECONDS);
         if track != self.anchor {
             self.held[track].push_back(Held { packet, at });
             self.trim_follower(track, length);
@@ -417,7 +411,7 @@ impl Window {
             .dts()
             .or(first.packet.pts())
             .expect("only a stamped packet is ever held");
-        let anchor_base = self.streams[self.anchor].time_base;
+        let anchor_base = self.streams[self.anchor].format.time_base();
         // Where the picture ends: the latest any held frame is shown until.
         // A picture reaches a muxer later than the sound beside it — it has
         // further to come, through a queue and an encoder holding frames
@@ -457,20 +451,11 @@ impl Window {
         packets.sort_by_key(|(at, _, _)| *at);
         let last_duration = last.packet.duration().rescale(anchor_base, MICROSECONDS);
         Ok(Clip {
-            streams: self
-                .streams
-                .iter()
-                .map(|stream| StreamDef {
-                    name: stream.name.clone(),
-                    parameters: stream.parameters.clone(),
-                    time_base: stream.time_base,
-                    fixed_parameter_sets: stream.fixed_parameter_sets,
-                })
-                .collect(),
+            streams: self.streams.to_vec(),
             origins: self
                 .streams
                 .iter()
-                .map(|stream| origin_stamp.rescale(anchor_base, stream.time_base))
+                .map(|stream| origin_stamp.rescale(anchor_base, stream.format.time_base()))
                 .collect(),
             packets,
             duration: micros(last.at - first.at + last_duration.max(0)),
@@ -500,16 +485,7 @@ impl Clip {
         let tracks = self
             .streams
             .iter()
-            .map(|stream| {
-                muxer.add_stream(
-                    stream.name.to_string(),
-                    TrackFormat {
-                        parameters: stream.parameters.clone(),
-                        time_base: stream.time_base,
-                        fixed_parameter_sets: stream.fixed_parameter_sets,
-                    },
-                )
-            })
+            .map(|stream| muxer.add_stream(stream.name.to_string(), stream.format.clone()))
             .collect::<Result<Vec<_>>>()?;
         let mut opened = muxer.open()?;
         let mut sinks = tracks
@@ -763,7 +739,7 @@ mod tests {
             .map(|(index, (parameters, time_base))| {
                 replay.add_stream(
                     format!("track-{index}"),
-                    TrackFormat::new(parameters.clone(), *time_base),
+                    StreamInfo::new(parameters.clone(), *time_base),
                 )
             })
             .collect();
@@ -1250,7 +1226,7 @@ mod tests {
         let Some(recorded) = fixture() else { return };
         let mut replay = ReplayBuffer::create(Duration::ZERO);
         let (parameters, time_base) = recorded.streams[0].clone();
-        let _track = replay.add_stream("video", TrackFormat::new(parameters, time_base));
+        let _track = replay.add_stream("video", StreamInfo::new(parameters, time_base));
         assert!(matches!(
             replay.open(),
             Err(Error::ReplayBufferError(ReplayBufferError::ZeroLength))

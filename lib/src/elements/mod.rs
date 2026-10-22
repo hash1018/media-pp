@@ -28,6 +28,7 @@ pub(crate) mod rtsp;
 pub mod sink;
 pub mod source;
 pub mod speech;
+mod stream_info;
 mod video_format;
 pub mod vision;
 
@@ -37,6 +38,7 @@ pub use broadcast::{
     BroadcastSource, BroadcastStats,
 };
 pub use rtsp::{RtspOptions, RtspTransport};
+pub use stream_info::StreamInfo;
 pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
@@ -200,7 +202,7 @@ pub use sink::{
     FileMuxerError, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat,
     Mp4Layout, MuxerSinks, MuxerTrack, MuxerTrackError, PacketCounter, ReplayBuffer,
     ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError, RtspMuxer, RtspMuxerError,
-    SegmentPolicy, SegmentedFileMuxer, SubmitError, TrackFormat,
+    SegmentPolicy, SegmentedFileMuxer, SubmitError,
 };
 #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
 pub use sink::{CoreAudioRenderer, CoreAudioRendererError, CoreAudioRendererOptions};
@@ -247,7 +249,7 @@ pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     CompositorInput, FileDemuxer, FileDemuxerError, FileDemuxerHandle, LayerFrame, MixFormat,
     MixerHandle, MixerInputSink, PipelineBridge, PipelineBridgeError, PipelineBridgeHandle,
-    PipelineBridgeOptions, RenderMode, RtspListenOptions, RtspSource, RtspSourceError, StreamInfo,
+    PipelineBridgeOptions, RenderMode, RtspListenOptions, RtspSource, RtspSourceError,
     SwTextLayerError, SwTextLayerHandle, SwVideoCompositor, SwVideoCompositorError,
     SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,
     SwVideoLayerHandle, TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,

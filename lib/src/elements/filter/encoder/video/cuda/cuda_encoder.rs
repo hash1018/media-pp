@@ -173,13 +173,13 @@ pub enum CudaEncoderError {
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
 /// // The queue's 4, and what NVENC holds while it encodes.
-/// let decoder = CudaDecoder::new("decode", video.parameters.clone(), &device, 6)?;
+/// let decoder = CudaDecoder::new("decode", video.parameters().clone(), &device, 6)?;
 /// let options = CudaEncoderOptions {
 ///     codec: CudaCodec::H265,
 ///     input_format: CudaFrameFormat::Nv12, // what an 8-bit stream decodes to
 ///     width,
 ///     height,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 6_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -191,7 +191,7 @@ pub enum CudaEncoderError {
 /// let sink = muxer.open()?.take(track)?;
 /// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -324,7 +324,7 @@ impl CudaEncoder {
         stream: &crate::elements::StreamInfo,
     ) -> std::result::Result<Self, CudaEncoderError> {
         crate::ensure_ffmpeg();
-        let hdr = HdrMetadata::of(&stream.parameters);
+        let hdr = HdrMetadata::of(stream.parameters());
         Self::open(name, device, options, stream.color(), &hdr)
     }
 
@@ -521,7 +521,7 @@ impl Encoding {
 
 /// The track this encoder's packets make: its [`CudaEncoder::parameters`], timed
 /// in its [`CudaEncoder::time_base`].
-impl From<&CudaEncoder> for crate::elements::TrackFormat {
+impl From<&CudaEncoder> for crate::elements::StreamInfo {
     fn from(encoder: &CudaEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base())
     }
@@ -1101,10 +1101,10 @@ mod tests {
         let (source, streams) = FileDemuxer::open("demux", &path).expect("failed to open");
         let video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
             .expect("the test video has no video stream");
-        let index = video.index;
-        let params = video.parameters.clone();
+        let index = video.index();
+        let params = video.parameters().clone();
         // SAFETY: `params` is a live `codec::Parameters` from the demuxer, whose
         // `width`/`height` are plain fields of `AVCodecParameters`.
         let (width, height) = unsafe {

@@ -19,9 +19,9 @@ use media_pp::elements::{
     FileMuxer, FrameCounter, HlsMode, HlsMuxer, HlsOptions, Mp4Layout, PacketCounter, RtspMuxer,
     RtspOptions, RtspPathMode, RtspServer, RtspServerHandle, RtspServerOptions, RtspSource,
     StreamInfo, SwAudioEncoder, SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions,
-    TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, TrackFormat, VideoCodec,
-    WebRtcError, WebRtcHttpEndpoint, WebRtcPathMode, WebRtcServer, WebRtcServerHandle,
-    WebRtcServerOptions, WhepOptions, WhepSource, WhipOptions, WhipPublisher,
+    TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, VideoCodec, WebRtcError,
+    WebRtcHttpEndpoint, WebRtcPathMode, WebRtcServer, WebRtcServerHandle, WebRtcServerOptions,
+    WhepOptions, WhepSource, WhipOptions, WhipPublisher,
 };
 use media_pp::ffmpeg::{self, media};
 use media_pp::pipeline::{Pipeline, PipelineBuilder};
@@ -177,18 +177,22 @@ struct Played {
 fn play<M>(source: impl media_pp::element::IntoSource<M>, streams: &[StreamInfo]) -> Played {
     let video = streams
         .iter()
-        .find(|stream| stream.kind == media::Type::Video)
+        .find(|stream| stream.kind() == media::Type::Video)
         .expect("a picture");
     let audio = streams
         .iter()
-        .find(|stream| stream.kind == media::Type::Audio);
-    let decoder = SwDecoder::new("decoder", video.parameters.clone()).unwrap();
+        .find(|stream| stream.kind() == media::Type::Audio);
+    let decoder = SwDecoder::new("decoder", video.parameters().clone()).unwrap();
     let (frames, pictures) = FrameCounter::new("pictures");
     let (packets, sound) = PacketCounter::new("sound");
     let (pipeline, ()) = Pipeline::new("player", source, |source, ctx| {
-        ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(frames)?)?;
+        ctx.attach(
+            source,
+            video.index(),
+            ctx.branch().pipe(decoder).to(frames)?,
+        )?;
         if let Some(audio) = audio {
-            ctx.attach(source, audio.index, ctx.branch().to(packets)?)?;
+            ctx.attach(source, audio.index(), ctx.branch().to(packets)?)?;
         }
         Ok(())
     })
@@ -237,11 +241,11 @@ fn publish_whip(url: &str, encoders: Encoders) -> Arc<Pipeline> {
 fn publish_rtsp(url: &str, encoders: Encoders) -> Arc<Pipeline> {
     let mut muxer = RtspMuxer::create(url, RtspOptions::default()).unwrap();
     let video = muxer
-        .add_stream("video", TrackFormat::from(&encoders.video))
+        .add_stream("video", StreamInfo::from(&encoders.video))
         .unwrap();
     let audio = encoders.audio.as_ref().map(|encoder| {
         muxer
-            .add_stream("audio", TrackFormat::from(encoder))
+            .add_stream("audio", StreamInfo::from(encoder))
             .unwrap()
     });
     let mut sinks = muxer.open().expect("the server takes the publisher");
@@ -268,9 +272,12 @@ fn record<M>(
         .iter()
         .map(|stream| {
             (
-                stream.index,
+                stream.index(),
                 muxer
-                    .add_stream(format!("track-{}", stream.index), TrackFormat::from(stream))
+                    .add_stream(
+                        format!("track-{}", stream.index()),
+                        StreamInfo::from(stream),
+                    )
                     .unwrap(),
             )
         })
@@ -304,9 +311,12 @@ fn record_hls<M>(
         .iter()
         .map(|stream| {
             (
-                stream.index,
+                stream.index(),
                 muxer
-                    .add_stream(format!("track-{}", stream.index), TrackFormat::from(stream))
+                    .add_stream(
+                        format!("track-{}", stream.index()),
+                        StreamInfo::from(stream),
+                    )
                     .unwrap(),
             )
         })
@@ -329,16 +339,20 @@ fn in_file(path: &std::path::Path) -> (usize, bool) {
     let (source, streams) = FileDemuxer::open("check", path).unwrap();
     let video = streams
         .iter()
-        .find(|stream| stream.kind == media::Type::Video)
+        .find(|stream| stream.kind() == media::Type::Video)
         .expect("the file has a picture")
         .clone();
     let sound = streams
         .iter()
-        .any(|stream| stream.kind == media::Type::Audio);
-    let decoder = SwDecoder::new("decoder", video.parameters.clone()).unwrap();
+        .any(|stream| stream.kind() == media::Type::Audio);
+    let decoder = SwDecoder::new("decoder", video.parameters().clone()).unwrap();
     let (frames, pictures) = FrameCounter::new("pictures");
     let (pipeline, ()) = Pipeline::new("check", source, |source, ctx| {
-        ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(frames)?)?;
+        ctx.attach(
+            source,
+            video.index(),
+            ctx.branch().pipe(decoder).to(frames)?,
+        )?;
         Ok(())
     })
     .unwrap();
@@ -461,7 +475,7 @@ fn rtsp_in_whep_out() {
         assert_eq!(
             streams
                 .iter()
-                .any(|stream| stream.kind == media::Type::Audio),
+                .any(|stream| stream.kind() == media::Type::Audio),
             carried,
             "{audio:?} sound {} WebRTC",
             if carried {
@@ -729,12 +743,16 @@ fn whep_out_driven() {
     .unwrap();
     let video = streams
         .iter()
-        .find(|stream| stream.kind == media::Type::Video)
+        .find(|stream| stream.kind() == media::Type::Video)
         .unwrap();
-    let decoder = SwDecoder::new("decoder", video.parameters.clone()).unwrap();
+    let decoder = SwDecoder::new("decoder", video.parameters().clone()).unwrap();
     let (frames, pictures) = FrameCounter::new("pictures");
     let (pipeline, ()) = DrivenPipeline::new("player", source, |source, ctx| {
-        ctx.attach(source, video.index, ctx.branch().pipe(decoder).to(frames)?)?;
+        ctx.attach(
+            source,
+            video.index(),
+            ctx.branch().pipe(decoder).to(frames)?,
+        )?;
         Ok(())
     })
     .unwrap();
@@ -830,11 +848,11 @@ mod rtmp {
     fn publish_rtmp(url: &str, encoders: Encoders) -> Arc<Pipeline> {
         let mut muxer = RtmpMuxer::create(url).unwrap();
         let video = muxer
-            .add_stream("video", TrackFormat::from(&encoders.video))
+            .add_stream("video", StreamInfo::from(&encoders.video))
             .unwrap();
         let audio = encoders.audio.as_ref().map(|encoder| {
             muxer
-                .add_stream("audio", TrackFormat::from(encoder))
+                .add_stream("audio", StreamInfo::from(encoder))
                 .unwrap()
         });
         let mut sinks = muxer.open().expect("the server takes the publisher");
@@ -873,7 +891,7 @@ mod rtmp {
         assert!(
             !streams
                 .iter()
-                .any(|stream| stream.kind == media::Type::Audio),
+                .any(|stream| stream.kind() == media::Type::Audio),
             "AAC is left out of WebRTC"
         );
         let webrtc_player = play(source, &streams);

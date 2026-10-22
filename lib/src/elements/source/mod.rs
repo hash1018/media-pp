@@ -117,7 +117,7 @@ pub use compositor::{
     VulkanVideoCompositorHandle, VulkanVideoCompositorInput, VulkanVideoCompositorInputSink,
     VulkanVideoLayerHandle,
 };
-pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle, StreamInfo};
+pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle};
 pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };

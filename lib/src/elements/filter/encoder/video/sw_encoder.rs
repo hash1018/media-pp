@@ -270,14 +270,14 @@ pub struct SwEncoderOptions {
 /// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
-/// let decoder = SwDecoder::new("decode", video.parameters.clone())?;
+/// let decoder = SwDecoder::new("decode", video.parameters().clone())?;
 /// let options = SwEncoderOptions {
 ///     codec: VideoCodec::OpenH264,
 ///     width,
 ///     height,
 ///     // What an 8-bit 4:2:0 stream decodes to.
 ///     pixel_format: ffmpeg::format::Pixel::YUV420P,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 4_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -290,7 +290,7 @@ pub struct SwEncoderOptions {
 ///
 /// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).pipe(encoder).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -406,7 +406,7 @@ impl SwEncoder {
         stream: &crate::elements::StreamInfo,
     ) -> Result<Self> {
         crate::ensure_ffmpeg();
-        let hdr = HdrMetadata::of(&stream.parameters);
+        let hdr = HdrMetadata::of(stream.parameters());
         Self::open(name, options, stream.color(), &hdr)
     }
 
@@ -551,7 +551,7 @@ impl Encoding {
 
 /// The track this encoder's packets make: its [`SwEncoder::parameters`], timed
 /// in its [`SwEncoder::time_base`].
-impl From<&SwEncoder> for crate::elements::TrackFormat {
+impl From<&SwEncoder> for crate::elements::StreamInfo {
     fn from(encoder: &SwEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base())
     }

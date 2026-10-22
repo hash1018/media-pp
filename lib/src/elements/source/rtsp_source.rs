@@ -19,7 +19,7 @@ use crate::{
     produce::source_stage,
 };
 
-use super::file_demuxer::StreamInfo;
+use crate::elements::StreamInfo;
 
 /// Why an [`RtspSource`] could not connect or read.
 ///
@@ -110,12 +110,12 @@ impl Default for RtspListenOptions {
 /// let url = "rtsp://192.168.0.10:554/stream";
 /// let (source, _streams) = RtspSource::open("camera", url, RtspOptions::default())?;
 /// let video = source.best(media::Type::Video)?;
-/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// let (counter, _frames) = FrameCounter::new("counter");
 ///
 /// let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
 ///     let branch = ctx.branch().queue("packets", 32).pipe(decoder).to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -487,7 +487,7 @@ impl RtspSource {
         // declares nothing and is left to the runtime check.
         let contracts = streams
             .iter()
-            .map(|s| match MediaKind::packet_for(s.kind) {
+            .map(|s| match MediaKind::packet_for(s.kind()) {
                 Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
                 None => OutputContract::Unknown,
             })
@@ -681,7 +681,7 @@ mod tests {
         };
         let (source, streams) =
             RtspSource::open("rtsp", &path, RtspOptions::default()).expect("open the fixture");
-        let kinds: Vec<_> = streams.iter().map(|stream| stream.kind).collect();
+        let kinds: Vec<_> = streams.iter().map(|stream| stream.kind()).collect();
         let seen: Arc<Vec<Mutex<Vec<ffmpeg::Rational>>>> =
             Arc::new(streams.iter().map(|_| Mutex::default()).collect());
         let ends = Arc::new(AtomicUsize::new(0));
@@ -726,7 +726,8 @@ mod tests {
             let seen = seen[output].lock().unwrap();
             assert!(!seen.is_empty(), "stream {output} handed nothing on");
             assert!(
-                seen.iter().all(|&time_base| time_base == stream.time_base),
+                seen.iter()
+                    .all(|&time_base| time_base == stream.time_base()),
                 "stream {output}'s packets carry its time base"
             );
         }
@@ -758,7 +759,7 @@ mod tests {
         use super::*;
         use crate::{
             bus::BusEvent,
-            elements::{AppSink, FileDemuxer, Pacer, RtspMuxer, RtspTransport, TrackFormat},
+            elements::{AppSink, FileDemuxer, Pacer, RtspMuxer, RtspTransport, StreamInfo},
             pipeline::Pipeline,
             stream::StreamEvent,
         };
@@ -836,17 +837,17 @@ mod tests {
                 };
                 let mut muxer = RtspMuxer::create(url(port), options)?;
                 let tracks = [
-                    muxer.add_stream("video", TrackFormat::from(&video))?,
-                    muxer.add_stream("audio", TrackFormat::from(&audio))?,
+                    muxer.add_stream("video", StreamInfo::from(&video))?,
+                    muxer.add_stream("audio", StreamInfo::from(&audio))?,
                 ];
                 let mut sinks = muxer.open()?;
                 for (stream, track) in [&video, &audio].into_iter().zip(tracks) {
                     let branch = ctx
                         .branch()
-                        .queue(format!("queue-{}", stream.index), 32)
-                        .pipe(Pacer::new(format!("pacer-{}", stream.index)))
+                        .queue(format!("queue-{}", stream.index()), 32)
+                        .pipe(Pacer::new(format!("pacer-{}", stream.index())))
                         .to(sinks.take(track)?)?;
-                    ctx.attach(source, stream.index, branch)?;
+                    ctx.attach(source, stream.index(), branch)?;
                 }
                 Ok(())
             })?;
@@ -945,13 +946,18 @@ mod tests {
             for sent in &published {
                 let got = streams
                     .iter()
-                    .find(|stream| stream.kind == sent.kind)
-                    .unwrap_or_else(|| panic!("no {:?} stream received", sent.kind));
-                assert_eq!(got.parameters.id(), sent.parameters.id(), "{:?}", sent.kind);
+                    .find(|stream| stream.kind() == sent.kind())
+                    .unwrap_or_else(|| panic!("no {:?} stream received", sent.kind()));
+                assert_eq!(
+                    got.parameters().id(),
+                    sent.parameters().id(),
+                    "{:?}",
+                    sent.kind()
+                );
                 // SAFETY: parameters both sides own, read only.
                 let (sent_raw, got_raw) =
-                    unsafe { (&*sent.parameters.as_ptr(), &*got.parameters.as_ptr()) };
-                match sent.kind {
+                    unsafe { (&*sent.parameters().as_ptr(), &*got.parameters().as_ptr()) };
+                match sent.kind() {
                     ffmpeg::media::Type::Video => assert_eq!(
                         (got_raw.width, got_raw.height),
                         (sent_raw.width, sent_raw.height),
@@ -991,28 +997,28 @@ mod tests {
             }
 
             for stream in &streams {
-                let packets = received.packets[stream.index].lock().unwrap();
+                let packets = received.packets[stream.index()].lock().unwrap();
                 assert!(
                     packets.len() >= 10,
                     "{:?}: {} packets received",
-                    stream.kind,
+                    stream.kind(),
                     packets.len()
                 );
                 assert!(
                     packets
                         .iter()
-                        .all(|&(_, time_base)| time_base == stream.time_base),
+                        .all(|&(_, time_base)| time_base == stream.time_base()),
                     "{:?}'s packets carry its time base",
-                    stream.kind
+                    stream.kind()
                 );
                 let pts: Vec<i64> = packets.iter().filter_map(|&(pts, _)| pts).collect();
                 let (first, last) = (pts.iter().min(), pts.iter().max());
-                let span = f64::from(stream.time_base)
+                let span = f64::from(stream.time_base())
                     * (last.copied().unwrap_or(0) - first.copied().unwrap_or(0)) as f64;
                 assert!(
                     span >= 1.0,
                     "{:?}'s timestamps advance across what was sent: {span:.2}s",
-                    stream.kind
+                    stream.kind()
                 );
             }
         }

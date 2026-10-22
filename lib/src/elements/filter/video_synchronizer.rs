@@ -92,17 +92,17 @@ enum Decision {
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
 ///     let pictures = ctx
 ///         .branch()
-///         .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+///         .pipe(SwDecoder::new("video-decoder", video.parameters().clone())?)
 ///         .queue("frames", 8)
 ///         .pipe(VideoSynchronizer::new("sync"))
 ///         .to(window)?;
-///     ctx.attach(source, video.index, pictures)?;
+///     ctx.attach(source, video.index(), pictures)?;
 ///     let sound = ctx
 ///         .branch()
-///         .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+///         .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
 ///         .queue("sound", 16)
 ///         .to(speakers)?;
-///     ctx.attach(source, audio.index, sound)?;
+///     ctx.attach(source, audio.index(), sound)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

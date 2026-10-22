@@ -98,7 +98,7 @@ mod example {
                 let (source, _) = FileDemuxer::open("demux", &path)?;
                 source.looping_handle().set_looping(true);
                 let video = source.best(ffmpeg::media::Type::Video)?;
-                let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+                let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
                 let (pipeline, ()) = Pipeline::new("virtual-camera", source, |source, ctx| {
                     let branch = ctx
                         .branch()
@@ -106,7 +106,7 @@ mod example {
                         .queue("frames", 8)
                         .pipe(Pacer::new("pacer"))
                         .to(camera)?;
-                    ctx.attach(source, video.index, branch)?;
+                    ctx.attach(source, video.index(), branch)?;
                     Ok(())
                 })?;
                 println!("showing {path} as the camera, looping");

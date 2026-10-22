@@ -59,7 +59,7 @@ mod windows_example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let gpu = D3d11Gpu::new()?;
         let (screen, window) = D3d11WindowRenderer::open(
@@ -90,7 +90,7 @@ mod windows_example {
                 .queue("frames", FRAMES) // the pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(Pacer::new("pacer"))
                 .to(screen)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

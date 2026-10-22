@@ -742,7 +742,7 @@ impl Rig {
 
     fn build_broadcast() -> Self {
         use crate::elements::{
-            Broadcast, BroadcastOptions, BroadcastSource, SwEncoder, SwEncoderOptions, TrackFormat,
+            Broadcast, BroadcastOptions, BroadcastSource, StreamInfo, SwEncoder, SwEncoderOptions,
             VideoCodec,
         };
         let options = TestVideoOptions {
@@ -766,7 +766,7 @@ impl Rig {
         .expect("open the encoder");
         let broadcast = Broadcast::new("camera", BroadcastOptions::default());
         let mut sinks = broadcast
-            .publish(&[TrackFormat::from(&encoder)])
+            .publish(&[StreamInfo::from(&encoder)])
             .expect("publish the camera");
         let sink = sinks.remove(0);
         let camera = TestVideoSource::new("camera", options);
@@ -890,12 +890,12 @@ impl Rig {
         let looping = source.looping_handle();
         let video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
             .expect("the fixture has a picture")
             .clone();
         let audio = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
             .cloned();
         let (packets, frames) = match shape.depth {
             Depth::Tight => (1, 1),
@@ -908,10 +908,10 @@ impl Rig {
                 Branches::PacketTee => {
                     let mut tee = ctx.tee("tee");
                     for (name, delay) in [("screen", 0), ("second-screen", 20)] {
-                        let (recorder, log) = Recorder::new(name, video.time_base);
+                        let (recorder, log) = Recorder::new(name, video.time_base());
                         terminals.push((name, log));
                         let chain = ctx.branch().queue(format!("{name}-packets"), packets);
-                        let chain = decoded(shape, chain, &video.parameters, name, frames)?;
+                        let chain = decoded(shape, chain, video.parameters(), name, frames)?;
                         let chain = filtered(shape, chain, name);
                         tee = tee.branch(
                             paced(shape, chain, name)
@@ -922,11 +922,11 @@ impl Rig {
                 }
                 Branches::PictureTee => {
                     let chain = ctx.branch().queue("video-packets", packets);
-                    let chain = decoded(shape, chain, &video.parameters, "video", frames)?;
+                    let chain = decoded(shape, chain, video.parameters(), "video", frames)?;
                     let chain = filtered(shape, chain, "video");
                     let mut tee = ctx.tee("tee");
                     for name in ["screen", "second-screen"] {
-                        let (recorder, log) = Recorder::new(name, video.time_base);
+                        let (recorder, log) = Recorder::new(name, video.time_base());
                         terminals.push((name, log));
                         let branch = ctx.branch().queue(format!("{name}-frames"), frames.min(2));
                         tee = tee.branch(paced(shape, branch, name).to(recorder)?);
@@ -934,25 +934,25 @@ impl Rig {
                     chain.to_branch(tee.build()?)?
                 }
                 Branches::One => {
-                    let (recorder, log) = Recorder::new("screen", video.time_base);
+                    let (recorder, log) = Recorder::new("screen", video.time_base());
                     terminals.push(("screen", log));
                     let chain = ctx.branch().queue("video-packets", packets);
-                    let chain = decoded(shape, chain, &video.parameters, "video", frames)?;
+                    let chain = decoded(shape, chain, video.parameters(), "video", frames)?;
                     let chain = filtered(shape, chain, "video");
                     paced(shape, chain, "video").to(recorder)?
                 }
             };
-            ctx.attach(source, video.index, picture)?;
+            ctx.attach(source, video.index(), picture)?;
 
             if let Some(audio) = &audio
                 && shape.sound != Sound::None
             {
-                let (recorder, log) = Recorder::new("speakers", audio.time_base);
+                let (recorder, log) = Recorder::new("speakers", audio.time_base());
                 terminals.push(("speakers", log));
                 let sound = ctx
                     .branch()
                     .queue("audio-packets", packets)
-                    .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+                    .pipe(SwDecoder::new("audio-decoder", audio.parameters().clone())?)
                     .queue("audio-frames", frames);
                 let sound = match shape.pacing {
                     Pacing::Unpaced => sound,
@@ -972,7 +972,7 @@ impl Rig {
                     )),
                     Sound::None => unreachable!("no sound branch without sound"),
                 };
-                ctx.attach(source, audio.index, sound.to(recorder)?)?;
+                ctx.attach(source, audio.index(), sound.to(recorder)?)?;
             }
             Ok(())
         })

@@ -20,6 +20,7 @@ use crate::{
         Attached, ElementType, Identity, Produced, ReversibleSource, SeekableSource, Source,
         SourceStage, Wait,
     },
+    elements::StreamInfo,
     pad::SrcPad,
     produce::source_stage,
 };
@@ -56,148 +57,6 @@ pub enum FileDemuxerError {
     /// [`FileDemuxer::best`].
     #[error("the file has no {0:?} stream")]
     NoStream(ffmpeg::media::Type),
-}
-
-/// One stream of a file opened by [`FileDemuxer::open`]: its index, kind,
-/// codec parameters and time base.
-///
-/// It is reported up front so callers can decide what to build downstream
-/// before the pipeline runs — everything a branch for it is built from,
-/// without asking again by index.
-#[derive(Clone)]
-pub struct StreamInfo {
-    /// Zero-based stream index used by the matching source pad.
-    pub index: usize,
-    /// Media kind reported by the container, such as audio or video.
-    pub kind: ffmpeg::media::Type,
-    /// What a decoder for it is built from — [`crate::elements::SwDecoder`],
-    /// [`crate::elements::VideoDecodeBin`], and the rest.
-    pub parameters: ffmpeg::codec::Parameters,
-    /// The unit its packets' timestamps are in — what a
-    /// [`crate::elements::Pacer`] for it is built with.
-    pub time_base: ffmpeg::Rational,
-    /// How many pictures a second a video stream has on average, as the
-    /// container says — what an encoder re-encoding it is opened at. `None`
-    /// for sound, and for a video stream that does not say.
-    pub frame_rate: Option<ffmpeg::Rational>,
-}
-
-impl StreamInfo {
-    /// What one of a container's streams says about itself.
-    pub(crate) fn of(stream: &ffmpeg::format::stream::Stream<'_>) -> Self {
-        // A copy of its own. What a stream hands out shares the whole
-        // input's ownership through an `Rc` — so it kept the file (or the
-        // RTSP connection) open for as long as the caller held this, and,
-        // this going to one thread and the source to another, counted that
-        // `Rc` from two threads at once.
-        let parameters = stream.parameters().clone();
-        let kind = parameters.medium();
-        let rate = stream.avg_frame_rate();
-        Self {
-            index: stream.index(),
-            kind,
-            frame_rate: (kind == ffmpeg::media::Type::Video
-                && rate.numerator() > 0
-                && rate.denominator() > 0)
-                .then_some(rate),
-            parameters,
-            time_base: stream.time_base(),
-        }
-    }
-
-    /// What a video stream says its Y'CbCr is — matrix, range, primaries
-    /// and transfer — for an encoder re-encoding its decoded pictures to
-    /// write into its own stream. `None` for sound, and for a video stream
-    /// that names no matrix.
-    pub fn color(&self) -> Option<crate::color::ColorDescription> {
-        // SAFETY: plain fields of parameters this value owns.
-        let raw = unsafe { &*self.parameters.as_ptr() };
-        let space = ffmpeg::color::Space::from(raw.color_space);
-        (self.kind == ffmpeg::media::Type::Video && space != ffmpeg::color::Space::Unspecified)
-            .then(|| crate::color::ColorDescription {
-                space,
-                range: raw.color_range.into(),
-                primaries: raw.color_primaries.into(),
-                transfer: raw.color_trc.into(),
-            })
-    }
-
-    /// Which way up a video stream's pictures are shown — the display
-    /// matrix its container keeps beside them, which a phone's portrait
-    /// recording carries — and upright where it keeps none, or for sound.
-    /// Each decoded picture carries it too, read by
-    /// [`Orientation::of`](crate::orientation::Orientation::of); what a file
-    /// its pictures are re-encoded to is to say is this, given to
-    /// [`TrackFormat::with_orientation`](crate::elements::TrackFormat::with_orientation).
-    ///
-    /// # Errors
-    ///
-    /// Where the matrix turns the pictures by other than quarter turns.
-    pub fn orientation(
-        &self,
-    ) -> Result<crate::orientation::Orientation, crate::orientation::UnsupportedOrientation> {
-        // SAFETY: plain fields of parameters this value owns; the side data
-        // is FFmpeg's own, a display matrix being nine `i32`s by its
-        // definition, which the size check makes sure of.
-        unsafe {
-            let raw = self.parameters.as_ptr();
-            let data = ffmpeg::ffi::av_packet_side_data_get(
-                (*raw).coded_side_data,
-                (*raw).nb_coded_side_data,
-                ffmpeg::ffi::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
-            );
-            if data.is_null() || (*data).size < 9 * size_of::<i32>() {
-                return Ok(crate::orientation::Orientation::UPRIGHT);
-            }
-            crate::orientation::Orientation::of_matrix(&*((*data).data as *const [i32; 9]))
-        }
-    }
-
-    /// What a video stream's pictures are in, decoded in software — 4:2:0
-    /// at eight bits or ten, say — as its parameters say. A hardware
-    /// decoder puts the same in its own layout: a 10-bit stream is P010 out
-    /// of NVDEC, which [`crate::contract::PixelLayoutSet::decoded_from`]
-    /// says. `None` for sound, and for a video stream that does not say.
-    pub fn pixel_format(&self) -> Option<ffmpeg::format::Pixel> {
-        // SAFETY: a plain field of parameters this value owns.
-        let format = unsafe { (*self.parameters.as_ptr()).format };
-        let known = 0..ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NB as i32;
-        if self.kind != ffmpeg::media::Type::Video || !known.contains(&format) {
-            return None;
-        }
-        // SAFETY: every value from naught to `AV_PIX_FMT_NB` names one of
-        // FFmpeg's pixel formats, which the enum has a variant for each of.
-        let format = unsafe { std::mem::transmute::<i32, ffmpeg::ffi::AVPixelFormat>(format) };
-        Some(format.into())
-    }
-
-    /// A video stream's picture size, width then height, as its parameters
-    /// say — what an encoder re-encoding it is opened at. `None` for sound,
-    /// and for a video stream that does not say.
-    pub fn size(&self) -> Option<(u32, u32)> {
-        // SAFETY: plain fields of parameters this value owns.
-        let (width, height) = unsafe {
-            let raw = self.parameters.as_ptr();
-            ((*raw).width, (*raw).height)
-        };
-        (self.kind == ffmpeg::media::Type::Video && width > 0 && height > 0)
-            .then_some((width as u32, height as u32))
-    }
-}
-
-/// By hand, since FFmpeg's parameters have no `Debug` of their own: the
-/// codec stands in for them.
-impl std::fmt::Debug for StreamInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamInfo")
-            .field("index", &self.index)
-            .field("kind", &self.kind)
-            .field("codec", &self.parameters.id())
-            .field("time_base", &self.time_base)
-            .field("frame_rate", &self.frame_rate)
-            .field("size", &self.size())
-            .finish()
-    }
 }
 
 /// Turns a [`FileDemuxer`]'s looping on and off while it runs, and reads its
@@ -315,7 +174,7 @@ impl FileDemuxerHandle {
 ///
 /// let (source, _streams) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(media::Type::Video)?;
-/// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+/// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// let (counter, frames) = FrameCounter::new("counter");
 ///
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
@@ -325,7 +184,7 @@ impl FileDemuxerHandle {
 ///         .queue("frames", 8)
 ///         .pipe(Pacer::new("pacer"))
 ///         .to(counter)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -514,10 +373,10 @@ const HDR10_PROBE_PACKETS: usize = 64;
 fn hdr10_from_bitstream(path: &Path, stream: &mut StreamInfo) -> bool {
     use crate::color::HdrMetadata;
     // SAFETY: a plain field of parameters the stream owns.
-    let transfer = unsafe { (*stream.parameters.as_ptr()).color_trc };
-    if stream.kind != ffmpeg::media::Type::Video
+    let transfer = unsafe { (*stream.parameters().as_ptr()).color_trc };
+    if stream.kind() != ffmpeg::media::Type::Video
         || transfer != ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
-        || !HdrMetadata::of(&stream.parameters).is_empty()
+        || !HdrMetadata::of(stream.parameters()).is_empty()
     {
         return false;
     }
@@ -525,7 +384,7 @@ fn hdr10_from_bitstream(path: &Path, stream: &mut StreamInfo) -> bool {
         return false;
     };
     let Ok(mut decoder) =
-        ffmpeg::codec::context::Context::from_parameters(stream.parameters.clone())
+        ffmpeg::codec::context::Context::from_parameters(stream.parameters().clone())
             .and_then(|context| context.decoder().video())
     else {
         return false;
@@ -534,7 +393,7 @@ fn hdr10_from_bitstream(path: &Path, stream: &mut StreamInfo) -> bool {
     let mut decoded = false;
     let mut sent = 0;
     for (read, packet) in input.packets() {
-        if read.index() != stream.index {
+        if read.index() != stream.index() {
             continue;
         }
         if decoder.send_packet(&packet).is_ok() && decoder.receive_frame(&mut picture).is_ok() {
@@ -554,7 +413,7 @@ fn hdr10_from_bitstream(path: &Path, stream: &mut StreamInfo) -> bool {
     if !decoded || hdr.is_empty() {
         return false;
     }
-    hdr.add_to(&mut stream.parameters);
+    hdr.add_to(stream.parameters_mut());
     true
 }
 
@@ -592,7 +451,7 @@ impl FileDemuxer {
         // check.
         let contracts = streams
             .iter()
-            .map(|s| match MediaKind::packet_for(s.kind) {
+            .map(|s| match MediaKind::packet_for(s.kind()) {
                 Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
                 None => OutputContract::Unknown,
             })
@@ -658,7 +517,7 @@ impl FileDemuxer {
     /// ```ignore
     /// let (source, _streams) = FileDemuxer::open("demux", path)?;
     /// let video = source.best(media::Type::Video)?;
-    /// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+    /// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
     /// ```
     ///
     /// The first stream of a kind is not always it. A file can carry a still
@@ -1324,7 +1183,7 @@ mod tests {
     fn a_pq_stream_whose_container_keeps_no_hdr10_says_what_its_bitstream_does() {
         use crate::element::{RawSink, SrcPads};
         use crate::elements::{
-            FileMuxer, Mp4Layout, SwEncoder, SwEncoderOptions, TrackFormat, VideoCodec,
+            FileMuxer, Mp4Layout, StreamInfo, SwEncoder, SwEncoderOptions, VideoCodec,
         };
         use crate::test_support::{assert_same_display, hdr10_beside, hdr10_source};
         use ffmpeg_next::ffi::AVPacketSideDataType as Kind;
@@ -1377,7 +1236,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!("media-pp-pq-beside-{beside}.mp4"));
             let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer
-                .add_stream("video", TrackFormat::new(parameters, encoder.time_base()))
+                .add_stream("video", StreamInfo::new(parameters, encoder.time_base()))
                 .expect("add");
             let sink = muxer.open().expect("header").take(track).expect("track");
             encoder.src_pads()[0].link(sink.into_raw());
@@ -1412,7 +1271,7 @@ mod tests {
             let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
             let best = demuxer.best(ffmpeg::media::Type::Video).expect("best");
             for (said, what) in [(&streams[0], "open"), (&best, "best")] {
-                let (mastering, light) = hdr10_beside(&said.parameters);
+                let (mastering, light) = hdr10_beside(said.parameters());
                 assert_same_display(
                     mastering,
                     Some(source.mastering.clone()),
@@ -1437,15 +1296,15 @@ mod tests {
         let (_, streams) = FileDemuxer::open("demux", &path).unwrap();
         let video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
             .unwrap();
         assert_eq!(video.size(), Some((320, 240)));
-        assert_eq!(video.frame_rate, Some(ffmpeg::Rational::new(30, 1)));
+        assert_eq!(video.frame_rate(), Some(ffmpeg::Rational::new(30, 1)));
         let sound = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
             .unwrap();
-        assert_eq!((sound.size(), sound.frame_rate), (None, None));
+        assert_eq!((sound.size(), sound.frame_rate()), (None, None));
     }
 
     /// What `open` says of the streams is the caller's own: it does not
@@ -1470,7 +1329,7 @@ mod tests {
         assert!(
             streams
                 .iter()
-                .any(|stream| stream.parameters.id() != ffmpeg::codec::Id::None),
+                .any(|stream| stream.parameters().id() != ffmpeg::codec::Id::None),
             "and what was said of it is still there to read"
         );
     }
@@ -1606,8 +1465,8 @@ mod tests {
 
         assert_eq!(streams.len(), demuxer.src_pads().len());
         for (position, stream) in streams.iter().enumerate() {
-            assert_eq!(stream.index, position);
-            assert!(stream.time_base.numerator() > 0 && stream.time_base.denominator() > 0);
+            assert_eq!(stream.index(), position);
+            assert!(stream.time_base().numerator() > 0 && stream.time_base().denominator() > 0);
         }
     }
 
@@ -1677,7 +1536,7 @@ mod tests {
         let video = demuxer
             .best(ffmpeg::media::Type::Video)
             .expect("test video has a video stream");
-        (video.index, video.time_base)
+        (video.index(), video.time_base())
     }
 
     /// A seek made while paused at the end of the file waits, as any paused
@@ -1848,7 +1707,7 @@ mod tests {
         // towards the lap — and `seek` parks whichever stream's packet it
         // happens to read first.
         let time_bases: Vec<ffmpeg::Rational> =
-            streams.iter().map(|stream| stream.time_base).collect();
+            streams.iter().map(|stream| stream.time_base()).collect();
         for (index, expected_time_base) in time_bases.into_iter().enumerate() {
             demuxer.src_pads()[index].link(Box::new(CountingSink {
                 count: Arc::new(AtomicUsize::new(0)),
@@ -2099,14 +1958,14 @@ mod tests {
         let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
         let video = streams
             .iter()
-            .find(|s| s.kind == ffmpeg::media::Type::Video)
+            .find(|s| s.kind() == ffmpeg::media::Type::Video)
             .expect("test video has a video stream");
 
         let count = Arc::new(AtomicUsize::new(0));
         let saw_eos = Arc::new(AtomicBool::new(false));
         let time_base_matches = Arc::new(AtomicBool::new(true));
-        let expected_time_base = video.time_base;
-        demuxer.src_pads()[video.index].link(Box::new(CountingSink {
+        let expected_time_base = video.time_base();
+        demuxer.src_pads()[video.index()].link(Box::new(CountingSink {
             count: count.clone(),
             saw_eos: saw_eos.clone(),
             expected_time_base,
@@ -2197,7 +2056,7 @@ mod tests {
         let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
         let video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
             .expect("test video has a video stream");
 
         let demuxing = demuxer.0.inner_mut();
@@ -2222,7 +2081,7 @@ mod tests {
         }
         assert_eq!(
             demuxing.ahead.back().map(|(index, _, _)| *index),
-            Some(video.index),
+            Some(video.index()),
             "read ahead as far as the first picture, and no further"
         );
     }
@@ -2306,9 +2165,9 @@ mod tests {
         let [held, ended] = [ffmpeg::media::Type::Video, ffmpeg::media::Type::Audio].map(|kind| {
             streams
                 .iter()
-                .find(|stream| stream.kind == kind)
+                .find(|stream| stream.kind() == kind)
                 .expect("the fixture has a picture and a sound")
-                .index
+                .index()
         });
         let (room, held_packets, held_ended) =
             EndRecorder::link(&mut demuxer.src_pads()[held], "held", false);
@@ -2424,8 +2283,8 @@ mod tests {
         let (demuxer, streams) = FileDemuxer::open("still-ahead", &path).unwrap();
         let first_video = streams
             .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
-            .map(|stream| stream.index);
+            .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
+            .map(|stream| stream.index());
         assert_eq!(first_video, Some(0), "the still comes first");
 
         // `best` passes over it, as the stream's whole description, and says
@@ -2433,9 +2292,9 @@ mod tests {
         let video = demuxer
             .best(ffmpeg::media::Type::Video)
             .expect("the file has a video stream");
-        assert_eq!(video.index, 1, "the video is the one to play");
-        assert_eq!(video.time_base, streams[1].time_base);
-        assert_eq!(video.parameters.id(), streams[1].parameters.id());
+        assert_eq!(video.index(), 1, "the video is the one to play");
+        assert_eq!(video.time_base(), streams[1].time_base());
+        assert_eq!(video.parameters().id(), streams[1].parameters().id());
         let missing = demuxer
             .best(ffmpeg::media::Type::Audio)
             .expect_err("the file has no audio");
@@ -2459,12 +2318,12 @@ mod tests {
             let stream = demuxer
                 .0
                 .inner()
-                .stream(info.index)
+                .stream(info.index())
                 .expect("a listed stream");
             let asked = stream.parameters();
-            assert_eq!(info.parameters.id(), asked.id());
-            assert_eq!(info.parameters.medium(), info.kind);
-            assert_eq!(info.time_base, stream.time_base());
+            assert_eq!(info.parameters().id(), asked.id());
+            assert_eq!(info.parameters().medium(), info.kind());
+            assert_eq!(info.time_base(), stream.time_base());
             assert!(
                 format!("{info:?}").contains(&format!("{:?}", asked.id())),
                 "its Debug names the codec"

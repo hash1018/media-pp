@@ -111,7 +111,7 @@ impl State {
         self.published_at = Some(Instant::now());
         self.key_track = tracks
             .iter()
-            .position(|track| track.kind == ffmpeg_next::media::Type::Video);
+            .position(|track| track.kind() == ffmpeg_next::media::Type::Video);
         self.open = vec![true; tracks.len()];
         self.flushed = vec![false; tracks.len()];
         self.tracks = Some(tracks);
@@ -196,7 +196,7 @@ impl State {
     ) -> ffmpeg_next::Rational {
         time_base(
             packet,
-            self.tracks.as_ref().map(|tracks| tracks[track].time_base),
+            self.tracks.as_ref().map(|tracks| tracks[track].time_base()),
         )
     }
 

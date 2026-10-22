@@ -546,7 +546,7 @@ fn bytes_as_f32_mut(bytes: &mut [u8]) -> &mut [f32] {
 
 /// The track this encoder's packets make: its [`SwAudioEncoder::parameters`], timed
 /// in its [`SwAudioEncoder::time_base`].
-impl From<&SwAudioEncoder> for crate::elements::TrackFormat {
+impl From<&SwAudioEncoder> for crate::elements::StreamInfo {
     fn from(encoder: &SwAudioEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base())
     }

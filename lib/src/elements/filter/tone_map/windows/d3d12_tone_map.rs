@@ -121,13 +121,13 @@ pub enum D3d12ToneMapError {
 /// let (source, _) = FileDemuxer::open("file", "hdr.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
-/// let decoder = D3d12Decoder::new("decode", video.parameters.clone(), &gpu)?;
+/// let decoder = D3d12Decoder::new("decode", video.parameters().clone(), &gpu)?;
 /// let tone_map = D3d12ToneMap::new("sdr", &gpu)?;
 /// let options = D3d12VideoEncoderOptions {
 ///     codec: D3d12VideoCodec::H265,
 ///     width,
 ///     height,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 8_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -140,7 +140,7 @@ pub enum D3d12ToneMapError {
 /// let sink = muxer.open()?.take(track)?;
 /// let (pipeline, ()) = Pipeline::new("to-sdr", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).pipe(tone_map).queue("frames", 4);
-///     ctx.attach(source, video.index, branch.pipe(encoder).to(sink)?)?;
+///     ctx.attach(source, video.index(), branch.pipe(encoder).to(sink)?)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

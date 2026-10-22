@@ -45,7 +45,7 @@ mod example {
 
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
-        let params = video.parameters.clone();
+        let params = video.parameters().clone();
 
         let count = Arc::new(AtomicUsize::new(0));
         let sink = VerifyingSink {
@@ -63,7 +63,7 @@ mod example {
                 .queue("frames", 8) // scaler/sink run on their own thread
                 .pipe(scaler)
                 .to(sink)?;
-            ctx.attach(source, video.index, branch)?;
+            ctx.attach(source, video.index(), branch)?;
             Ok(())
         })?;
 

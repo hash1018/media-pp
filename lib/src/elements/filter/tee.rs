@@ -55,9 +55,9 @@ use crate::{
 ///     let first = ctx.branch().queue("preview-queue", 8).to(preview)?;
 ///     let second = ctx.branch().queue("analysis-queue", 8).to(analysis)?;
 ///     let fan_out = ctx.tee("tee").branch(first).branch(second).build()?;
-///     let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+///     let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 ///     let branch = ctx.branch().pipe(decoder).to_branch(fan_out)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;

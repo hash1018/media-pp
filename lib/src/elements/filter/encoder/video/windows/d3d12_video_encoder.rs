@@ -163,12 +163,12 @@ pub enum D3d12VideoEncoderError {
 /// let (source, _) = FileDemuxer::open("file", "input.mp4")?;
 /// let video = source.best(ffmpeg::media::Type::Video)?;
 /// let (width, height) = video.size().ok_or(media_pp::Error::Other("no size".into()))?;
-/// let decoder = D3d12Decoder::new("decode", video.parameters.clone(), &gpu)?;
+/// let decoder = D3d12Decoder::new("decode", video.parameters().clone(), &gpu)?;
 /// let options = D3d12VideoEncoderOptions {
 ///     codec: D3d12VideoCodec::H265,
 ///     width,
 ///     height,
-///     frame_rate: video.frame_rate.unwrap_or(ffmpeg::Rational::new(30, 1)),
+///     frame_rate: video.frame_rate().unwrap_or(ffmpeg::Rational::new(30, 1)),
 ///     bit_rate: 6_000_000,
 ///     gop_size: 60,
 ///     max_b_frames: None,
@@ -180,7 +180,7 @@ pub enum D3d12VideoEncoderError {
 /// let sink = muxer.open()?.take(track)?;
 /// let (pipeline, ()) = Pipeline::new("transcode", source, |source, ctx| {
 ///     let branch = ctx.branch().pipe(decoder).queue("frames", 4).pipe(encoder).to(sink)?;
-///     ctx.attach(source, video.index, branch)?;
+///     ctx.attach(source, video.index(), branch)?;
 ///     Ok(())
 /// })?;
 /// pipeline.run()?;
@@ -493,7 +493,7 @@ impl Encoding {
 /// [`D3d12VideoEncoder::time_base`]. FFmpeg 8.0's `hevc_d3d12va` hands its
 /// parameter sets only in band, but they never change, so an MP4 still
 /// writes the HEVC as `hvc1`.
-impl From<&D3d12VideoEncoder> for crate::elements::TrackFormat {
+impl From<&D3d12VideoEncoder> for crate::elements::StreamInfo {
     fn from(encoder: &D3d12VideoEncoder) -> Self {
         Self::new(encoder.parameters(), encoder.time_base()).with_fixed_parameter_sets()
     }
@@ -703,7 +703,7 @@ mod tests {
         let mut plain = source.stream.clone();
         // SAFETY: a plain field of parameters this test owns.
         unsafe {
-            (*plain.parameters.as_mut_ptr()).color_space =
+            (*plain.parameters_mut().as_mut_ptr()).color_space =
                 ffmpeg::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED
         };
         assert!(plain.color().is_none());
@@ -726,7 +726,7 @@ mod tests {
     /// copied from elsewhere, whose sets could change, stay `hev1`.
     #[test]
     fn hevc_goes_into_an_mp4_as_hvc1() {
-        use crate::elements::{FileMuxer, Mp4Layout, TrackFormat};
+        use crate::elements::{FileMuxer, Mp4Layout, StreamInfo};
         let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_d3d12_gpu() else {
             return;
@@ -744,9 +744,9 @@ mod tests {
                 std::process::id()
             ));
             let format = if fixed {
-                TrackFormat::from(&encoder)
+                StreamInfo::from(&encoder)
             } else {
-                TrackFormat::new(encoder.parameters(), encoder.time_base())
+                StreamInfo::new(encoder.parameters(), encoder.time_base())
             };
             let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
             let track = muxer.add_stream("video", format).expect("add");
