@@ -78,6 +78,16 @@ fn pictures_of(path: &std::path::Path) -> Vec<Duration> {
     pictures
 }
 
+/// Where the pictures taken from `from` on stop going down and go up
+/// again: the last picture shown backwards, and every one shown forwards
+/// after it.
+fn turned_round(taken: &[Duration], from: usize) -> (Duration, Vec<Duration>) {
+    let turn = (from..taken.len() - 1)
+        .find(|&i| taken[i + 1] >= taken[i])
+        .unwrap_or_else(|| panic!("never went up again: {:?}", &taken[from..]));
+    (taken[turn], taken[turn + 1..].to_vec())
+}
+
 /// Waits until `done` or five seconds.
 fn wait_until(done: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -207,23 +217,24 @@ fn forwards_again_goes_on_from_the_picture_shown() {
         .last()
         .is_some_and(|&at| at <= every[70])));
 
-    pipeline.set_rate(1.0).expect("forwards again");
-    let turned = *pictures.lock().unwrap().last().unwrap();
+    // Counted before the turn, and the turn found in what was taken after:
+    // read once it returned, a picture played on meanwhile went into the
+    // count and not into what was compared, and looked skipped.
     let (pictures_before, sound_before) =
         (pictures.lock().unwrap().len(), sound.lock().unwrap().len());
+    pipeline.set_rate(1.0).expect("forwards again");
     assert!(wait_until(|| pictures.lock().unwrap().len()
         > pictures_before + 10
         && sound.lock().unwrap().len() > sound_before + 10));
-    let after = pictures.lock().unwrap()[pictures_before..].to_vec();
+    let (turned, after) = turned_round(&pictures.lock().unwrap(), pictures_before - 1);
     assert!(
         after.windows(2).all(|pair| pair[1] > pair[0]),
         "forwards again: {after:?}"
     );
-    assert!(
-        after
-            .first()
-            .is_some_and(|&first| first <= turned + Duration::from_millis(40)),
-        "on from the picture shown ({turned:?}): {after:?}"
+    assert_eq!(
+        after.first(),
+        Some(&turned),
+        "on from the picture shown: {after:?}"
     );
     let heard = sound.lock().unwrap()[sound_before];
     assert!(
