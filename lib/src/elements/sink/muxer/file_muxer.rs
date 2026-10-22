@@ -334,6 +334,7 @@ impl FileMuxer {
                 finish_on_stop: true,
                 destination: None,
                 timeline: None,
+                prune: None,
             },
         ))
     }

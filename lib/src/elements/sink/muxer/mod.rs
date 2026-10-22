@@ -1,6 +1,7 @@
 mod dash_muxer;
 mod file_muxer;
 mod hls_muxer;
+mod prune;
 mod replay_buffer;
 mod rtmp_muxer;
 mod rtsp_muxer;

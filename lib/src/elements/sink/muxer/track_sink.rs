@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use ffmpeg_next as ffmpeg;
 
+use super::prune::SegmentPruner;
 use super::tracks::{MuxerId, MuxerSinks};
 use crate::{
     buffer::MediaBuffer,
@@ -96,6 +97,10 @@ pub(super) struct TrackOptions {
     /// Makes each track's own timeline, for a muxer whose tracks follow a
     /// seek. `None` for one whose tracks refuse it.
     pub(super) timeline: Option<fn() -> Box<dyn TrackTimeline>>,
+    /// Deletes a live output's old segments where FFmpeg cannot, after
+    /// each keyframe written - where a segment may have been cut. `None`
+    /// for an output that keeps what it writes.
+    pub(super) prune: Option<SegmentPruner>,
 }
 
 /// Turns an output whose header has been written into one sink per track.
@@ -127,6 +132,7 @@ pub(super) fn open_tracks<M: Muxer>(
         }),
         total,
         destination: options.destination,
+        prune: options.prune,
         muxer: PhantomData,
     });
     id.sinks(
@@ -175,6 +181,7 @@ struct SharedOutput<M> {
     state: Mutex<OutputState>,
     total: usize,
     destination: Option<Arc<str>>,
+    prune: Option<SegmentPruner>,
     muxer: PhantomData<fn() -> M>,
 }
 
@@ -185,9 +192,15 @@ impl<M: Muxer> SharedOutput<M> {
         if state.finished {
             return Ok(());
         }
+        let key = packet.is_key();
         packet
             .write_interleaved(&mut state.output)
-            .map_err(M::ffmpeg_error)
+            .map_err(M::ffmpeg_error)?;
+        drop(state);
+        if key && let Some(prune) = &self.prune {
+            prune.prune();
+        }
+        Ok(())
     }
 
     /// One track reporting itself finished. Writes the trailer exactly once,
@@ -445,6 +458,7 @@ mod tests {
                 finish_on_stop: true,
                 destination: None,
                 timeline: None,
+                prune: None,
             },
         );
         assert!(seek_refused(&mut sink));
@@ -470,6 +484,7 @@ mod tests {
                 finish_on_stop: true,
                 destination: None,
                 timeline: None,
+                prune: None,
             },
         );
 
@@ -545,6 +560,7 @@ mod tests {
                 finish_on_stop: false,
                 destination: Some(Arc::from("rtsp://example/test")),
                 timeline: Some(|| Box::new(NoTimeline)),
+                prune: None,
             },
         );
         assert!(!seek_refused(&mut sink));

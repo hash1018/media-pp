@@ -264,6 +264,7 @@ impl RtmpMuxer {
                 finish_on_stop: true,
                 destination: Some(self.redacted_url),
                 timeline: None,
+                prune: None,
             },
         ))
     }

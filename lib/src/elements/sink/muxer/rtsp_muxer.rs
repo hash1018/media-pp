@@ -214,6 +214,7 @@ impl RtspMuxer {
                 // Each track rebases onto its own last output, not onto a
                 // shared one.
                 timeline: Some(|| Box::new(Timeline::default())),
+                prune: None,
             },
         ))
     }

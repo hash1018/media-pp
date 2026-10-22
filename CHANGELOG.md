@@ -243,6 +243,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A live `DashMuxer` lets its old segments go on every FFmpeg.** FFmpeg's
+  DASH muxer deletes through its file protocol, which an FFmpeg built with
+  MSVC — vcpkg's for Windows — has no delete in: the manifest moved on and
+  every segment stayed until the disk was full. The muxer now deletes them
+  itself, keeping one more than FFmpeg would, so that where FFmpeg deletes
+  it finds nothing to. (`HlsMuxer` was never affected: FFmpeg's HLS muxer
+  deletes with `unlink` itself.)
+
 - **A WebRTC client connects to a `WebRtcServer` at once, not a second
   later.** A client's DTLS ClientHello follows its nominating STUN at once,
   and the server, reading both in one batch, refused it: the session had

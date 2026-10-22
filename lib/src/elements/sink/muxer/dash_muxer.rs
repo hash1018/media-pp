@@ -9,6 +9,7 @@ use std::{
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::prune::SegmentPruner;
 use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
 use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 
@@ -26,9 +27,10 @@ const KEPT_PAST_THE_WINDOW: usize = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashMode {
     /// A sliding live manifest of the last `window_size` segments; older
-    /// segment files are deleted once they have left it — by FFmpeg, which
-    /// cannot where it was built with MSVC, as vcpkg builds it for Windows:
-    /// its file protocol has no delete there, and every segment stays.
+    /// segment files are deleted once they have left it. FFmpeg deletes
+    /// them where it can; where it was built with MSVC, as vcpkg builds it
+    /// for Windows, its file protocol cannot, and the muxer deletes them
+    /// itself.
     Live {
         /// How many completed segments the manifest lists.
         window_size: usize,
@@ -315,6 +317,17 @@ impl DashMuxer {
             .write_header_with(self.options.header_options())
             .map_err(DashMuxerError::from)?;
         drop(unused);
+        // FFmpeg keeps the window and one past it; one more again, so that
+        // where FFmpeg deletes, this finds nothing to.
+        let prune = match self.options.mode {
+            DashMode::Live { window_size } => Some(SegmentPruner::new(
+                SegmentPruner::dir_of(&self.options.manifest_path),
+                "chunk-stream",
+                ".m4s",
+                window_size + KEPT_PAST_THE_WINDOW + 1,
+            )),
+            DashMode::Event => None,
+        };
         Ok(open_tracks::<Self>(
             self.id,
             self.output,
@@ -323,6 +336,7 @@ impl DashMuxer {
                 finish_on_stop: true,
                 destination: None,
                 timeline: None,
+                prune,
             },
         ))
     }
@@ -478,9 +492,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A live manifest lists its window alone, and — where FFmpeg can
-    /// delete files — segments that left it go from the disk, but one, for
-    /// a player still fetching it.
+    /// A live manifest lists its window alone, and segments that left it go
+    /// from the disk, but one or two for a player still fetching them —
+    /// whether FFmpeg can delete a file or the muxer does it for it.
     #[test]
     fn a_live_manifest_keeps_its_window_and_lets_old_segments_go() {
         let dir = unique_test_dir("dash_live");
@@ -506,19 +520,12 @@ mod tests {
             .into_iter()
             .filter(|path| path.to_string_lossy().contains("chunk"))
             .count();
-        // An FFmpeg built with MSVC, as vcpkg builds it for Windows, has no
-        // `unistd.h`, and its file protocol cannot delete: it leaves every
-        // segment, the first among them.
-        if !dir.join("chunk-stream0-00001.m4s").exists() {
-            assert!(
-                (2..=2 + KEPT_PAST_THE_WINDOW + 1).contains(&chunks),
-                "eight seconds in one-second segments, a window of two kept: {chunks} on disk"
-            );
-        } else {
-            eprintln!(
-                "skipped the segments' deletion: this FFmpeg deleted none of them, as one that cannot delete a file"
-            );
-        }
+        // FFmpeg keeps the window and one more; where it cannot delete — built
+        // with MSVC, as on Windows CI — the muxer keeps one more again.
+        assert!(
+            (2..=2 + KEPT_PAST_THE_WINDOW + 1).contains(&chunks),
+            "eight seconds in one-second segments, a window of two kept: {chunks} on disk"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

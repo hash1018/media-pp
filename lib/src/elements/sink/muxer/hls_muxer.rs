@@ -27,9 +27,7 @@ pub enum HlsMode {
     Live {
         /// Maximum number of completed media segments retained in the playlist.
         window_size: usize,
-        /// Whether FFmpeg deletes segment files after they leave the window —
-        /// which it cannot where it was built with MSVC, as vcpkg builds it
-        /// for Windows: its file protocol has no delete there.
+        /// Whether FFmpeg deletes segment files after they leave the window.
         delete_old_segments: bool,
     },
     /// An append-only event playlist. Every segment remains listed and the
@@ -434,6 +432,7 @@ impl HlsMuxer {
                 finish_on_stop: true,
                 destination: None,
                 timeline: None,
+                prune: None,
             },
         ))
     }
