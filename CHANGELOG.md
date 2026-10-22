@@ -222,6 +222,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A WebRTC client connects to a `WebRtcServer` at once, not a second
+  later.** A client's DTLS ClientHello follows its nominating STUN at once,
+  and the server, reading both in one batch, refused it: the session had
+  not been polled since the nomination. Every connection waited a second
+  for the client to send it again, and under load — retransmissions lost
+  too, a second, two, four — a client gave up after ten. What comes from
+  an address a session has taken STUN from now goes to that session.
+
 - **A `WebRtcServer` session's id cannot be guessed.** The URL a WHEP or
   WHIP session is ended at — `DELETE /session/<id>` — was a count, so
   anyone could end anyone's session by counting. Half of its id is now

@@ -906,10 +906,20 @@ impl Shard {
                             contents,
                         },
                     );
+                    // An address a session has taken STUN from is that
+                    // session's for what else comes from it — DTLS and
+                    // media. Not asked of `accepts`, which takes them only
+                    // once the session has been polled since the client's
+                    // nomination: a ClientHello right behind the nominating
+                    // STUN, read in the same batch, was refused, and every
+                    // connection waited for the client to send it again a
+                    // second later. STUN is asked, as a new client may have
+                    // the address a session it does not belong to had.
+                    let stun = buffer.first().is_some_and(|first| *first < 4);
                     let known = senders.get(&source).copied().filter(|id| {
                         sessions
                             .get(id)
-                            .is_some_and(|session| session.accepts(&input))
+                            .is_some_and(|session| !stun || session.accepts(&input))
                     });
                     let found = known.or_else(|| {
                         let (id, _) = sessions

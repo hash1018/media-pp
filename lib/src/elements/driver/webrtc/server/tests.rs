@@ -65,6 +65,13 @@ struct Client {
     socket: UdpSocket,
     local: SocketAddr,
     events: Vec<Event>,
+    /// What arrived of each medium, whether each was a keyframe: kept
+    /// apart from `events` as it comes, so that looking at it after every
+    /// datagram does not go through thousands of them each time — which,
+    /// on a loaded machine, kept the client from reading its socket in
+    /// time and lost packets.
+    media: std::collections::HashMap<Mid, Vec<bool>>,
+    connected: bool,
 }
 
 impl Client {
@@ -91,6 +98,8 @@ impl Client {
             socket,
             local,
             events: Vec::new(),
+            media: std::collections::HashMap::new(),
+            connected: false,
         }
     }
 
@@ -141,7 +150,15 @@ impl Client {
                             .socket
                             .send_to(&transmit.contents, transmit.destination);
                     }
-                    Output::Event(event) => self.events.push(event),
+                    Output::Event(Event::MediaData(data)) => self
+                        .media
+                        .entry(data.mid)
+                        .or_default()
+                        .push(data.is_keyframe()),
+                    Output::Event(event) => {
+                        self.connected |= matches!(event, Event::Connected);
+                        self.events.push(event);
+                    }
                 }
             }
             self.socket
@@ -170,20 +187,12 @@ impl Client {
     }
 
     fn connected(&self) -> bool {
-        self.events
-            .iter()
-            .any(|event| matches!(event, Event::Connected))
+        self.connected
     }
 
     /// What arrived of `mid`: whether each was a keyframe.
-    fn received(&self, mid: Mid) -> Vec<bool> {
-        self.events
-            .iter()
-            .filter_map(|event| match event {
-                Event::MediaData(data) if data.mid == mid => Some(data.is_keyframe()),
-                _ => None,
-            })
-            .collect()
+    fn received(&self, mid: Mid) -> &[bool] {
+        self.media.get(&mid).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -871,5 +880,31 @@ fn a_session_says_how_it_is_doing() {
     assert!(handle.close(session));
     assert!(handle.session_stats().is_empty(), "gone with its session");
     camera.stop();
+    runner.stop();
+}
+
+/// A client's DTLS ClientHello follows its nominating STUN at once, and
+/// often arrives in the same batch the server reads. It was refused there —
+/// the session had not been polled since the nomination — so every
+/// connection waited a second for the client to send it again, and under
+/// load, as retransmissions were lost too, longer than a client waits.
+/// On the loopback a connection takes milliseconds.
+#[test]
+fn a_client_connects_without_waiting_to_send_again() {
+    let (runner, handle, _cam, _live) = server();
+    for _ in 0..3 {
+        let mut client = Client::new();
+        let (offer, pending, _, _) = client.offer(&[MediaKind::Video], Direction::SendOnly, None);
+        let (session, answer) = handle.publish("live", &offer).unwrap();
+        let began = Instant::now();
+        client.accept(pending, &answer);
+        assert!(client.run_until(Duration::from_secs(5), |client| client.connected()));
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_millis(500),
+            "connected in {took:?}: the DTLS handshake waited to be sent again"
+        );
+        assert!(handle.close(session), "the path takes the next publisher");
+    }
     runner.stop();
 }

@@ -33,6 +33,9 @@ const RATE: i32 = 15;
 /// seconds' worth, from a keyframe.
 const PICTURES: usize = 30;
 const WITHIN: Duration = Duration::from_secs(20);
+/// How long a recording runs before it is finished and read: some fifty
+/// pictures, from a keyframe.
+const RECORD_FOR: Duration = Duration::from_millis(3_500);
 
 /// The two encoders a live input is made with.
 struct Encoders {
@@ -368,7 +371,7 @@ impl Drop for Scratch {
 
 /// Records for long enough to have `PICTURES`, then finishes the recording.
 fn recorded_for_a_while(recorder: &Pipeline, input: &Pipeline) {
-    std::thread::sleep(Duration::from_millis(3_500));
+    std::thread::sleep(RECORD_FOR);
     recorder.finish();
     input.stop();
 }
@@ -783,6 +786,10 @@ fn recorded_while_played_both_ways() {
 
     plays(&webrtc_player, sound);
     plays(&rtsp_player, sound);
+    // A player joins with what the broadcast holds and catches up at
+    // once; the recording goes at the stream's own pace, so it is given
+    // its own time rather than the players'.
+    std::thread::sleep(RECORD_FOR);
     recorder.finish();
     let (pictures, has_sound) = in_file(&scratch.0.join("index.m3u8"));
     assert!(pictures >= PICTURES, "{pictures} pictures recorded");
