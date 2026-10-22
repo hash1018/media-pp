@@ -779,8 +779,9 @@ fn server_asking() -> (
     let kept = Arc::clone(&asked);
     let authorize = Authorize::new(move |request: &AccessRequest| {
         kept.lock().unwrap().push(request.clone());
-        let user = match (&request.credentials, request.access) {
-            (Credentials::Basic { user, password }, _) if password == "pw" => user.as_str(),
+        let user = match &request.credentials {
+            Credentials::Basic { user, password } if password == "pw" => user.as_str(),
+            Credentials::Digest(digest) if digest.verifies("pw") => digest.user(),
             _ => return false,
         };
         matches!(
@@ -869,7 +870,7 @@ fn players_and_publishers_get_in_with_their_credentials() {
     let Some(path) = crate::test_support::try_test_video() else {
         return;
     };
-    let (runner, handle, cam, live, _asked) = server_asking();
+    let (runner, handle, cam, live, asked) = server_asking();
     let _camera = feed(&cam, &path);
     wait_published(&cam);
 
@@ -896,5 +897,67 @@ fn players_and_publishers_get_in_with_their_credentials() {
     .unwrap();
     wait_published(&live);
     publisher.stop();
+    runner.stop();
+    // Offered Digest beside Basic, FFmpeg hashed its password every time.
+    let asked = asked.lock().unwrap();
+    let presented: Vec<_> = asked
+        .iter()
+        .filter(|request| !matches!(request.credentials, crate::elements::Credentials::None))
+        .collect();
+    assert!(!presented.is_empty());
+    assert!(
+        presented
+            .iter()
+            .all(|request| matches!(request.credentials, crate::elements::Credentials::Digest(_))),
+        "{presented:?}"
+    );
+}
+
+/// A Digest response counts only against the challenge this connection
+/// was given: made right, it is let in; made for another connection's
+/// challenge, it presents nothing and is asked again.
+#[test]
+fn a_digest_response_answers_this_connections_challenge_alone() {
+    let (runner, handle, _cam, _live, _asked) = server_asking();
+    let connect = || {
+        let stream = TcpStream::connect(handle.local_addr()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+    };
+    let url = handle.url("cam");
+    let challenge = |stream: &mut TcpStream| {
+        let refused = exchange(
+            stream,
+            &format!("DESCRIBE {url} RTSP/1.0\r\nCSeq: 1\r\n\r\n"),
+        );
+        refused
+            .split("nonce=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_else(|| panic!("a Digest challenge: {refused}"))
+            .to_owned()
+    };
+    let answer = |nonce: &str| {
+        let ha1 = super::digest::md5_hex(format!("viewer:{}:pw", super::digest::REALM).as_bytes());
+        let ha2 = super::digest::md5_hex(format!("DESCRIBE:{url}").as_bytes());
+        let response = super::digest::md5_hex(format!("{ha1}:{nonce}:{ha2}").as_bytes());
+        format!(
+            "DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAuthorization: Digest username=\"viewer\", realm=\"{}\", nonce=\"{nonce}\", uri=\"{url}\", response=\"{response}\"\r\n\r\n",
+            super::digest::REALM
+        )
+    };
+
+    let mut other = connect();
+    let others = challenge(&mut other);
+    let mut stream = connect();
+    let own = challenge(&mut stream);
+    assert_ne!(own, others);
+    let refused = exchange(&mut stream, &answer(&others));
+    assert!(refused.starts_with("RTSP/1.0 401"), "{refused}");
+    // Nothing is published at `cam`: past the check, it is not found.
+    let allowed = exchange(&mut stream, &answer(&own));
+    assert!(allowed.starts_with("RTSP/1.0 404"), "{allowed}");
     runner.stop();
 }

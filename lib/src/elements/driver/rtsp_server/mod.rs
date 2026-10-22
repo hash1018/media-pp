@@ -2,6 +2,7 @@
 
 mod announce;
 mod depacketize;
+mod digest;
 mod message;
 mod record;
 pub(crate) mod rtp;
@@ -9,6 +10,8 @@ mod session;
 #[cfg(test)]
 mod tests;
 mod track;
+
+pub use digest::RtspDigest;
 
 use std::collections::{HashMap, HashSet};
 use std::io;

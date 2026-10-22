@@ -61,8 +61,10 @@ compile error with no explanation.
   `WebRtcServer` through their options, it is asked for each client before
   anything else about its request, with the path, whether it would play or
   publish, where it connects from and the credentials it presented —
-  `Basic` from `rtsp://user:password@…`, `Bearer` from a WHIP or WHEP
-  client. Refused, a client is answered `401`. The WHEP page plays
+  `Digest` (or `Basic`) from `rtsp://user:password@…`, `Bearer` from a
+  WHIP or WHEP client. Refused, a client is answered `401`. A Digest
+  response carries no password: `RtspDigest::verifies` checks it against
+  the user's. The WHEP page plays
   `/<path>?token=…` with that token. Without one, everybody may, as before.
 
 - **`Broadcast::stats`**: whether it is live and since when, how many

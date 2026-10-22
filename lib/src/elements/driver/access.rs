@@ -21,13 +21,21 @@ pub enum Credentials {
     None,
     /// `Bearer <token>` — what a WHIP or WHEP client sends.
     Bearer(String),
-    /// `Basic` — what an RTSP player sends for `rtsp://user:password@…`.
+    /// `Basic` — what an RTSP player that cannot answer a Digest challenge
+    /// sends for `rtsp://user:password@…`: the password itself, readable by
+    /// anyone between them.
     Basic {
         /// The user name.
         user: String,
         /// The password.
         password: String,
     },
+    /// `Digest` — what an RTSP player sends for `rtsp://user:password@…`
+    /// where the server offers it, which an `RtspServer` does: the password
+    /// itself never sent, so it is checked against the user's with
+    /// [`RtspDigest::verifies`](crate::elements::RtspDigest::verifies).
+    #[cfg(feature = "rtsp-server")]
+    Digest(crate::elements::RtspDigest),
 }
 
 impl std::fmt::Debug for Credentials {
@@ -38,6 +46,8 @@ impl std::fmt::Debug for Credentials {
             Self::None => f.write_str("None"),
             Self::Bearer(_) => f.write_str("Bearer(..)"),
             Self::Basic { user, .. } => write!(f, "Basic {{ user: {user:?}, .. }}"),
+            #[cfg(feature = "rtsp-server")]
+            Self::Digest(digest) => write!(f, "Digest({digest:?})"),
         }
     }
 }
@@ -85,10 +95,12 @@ pub struct AccessRequest {
 /// answering whether it may. A server without one lets everybody.
 ///
 /// Refused, a client is answered `401 Unauthorized` — with
-/// `WWW-Authenticate: Basic` over RTSP, which is what makes a player given
-/// `rtsp://user:password@…` send them, and `Bearer` over HTTP. The
-/// decision is the application's alone: a list kept in memory, a token's
-/// signature checked, a lookup.
+/// `WWW-Authenticate: Digest` and `Basic` over RTSP, which is what makes a
+/// player given `rtsp://user:password@…` send them, hashed where it can, and
+/// `Bearer` over HTTP. The decision is the application's alone: a list kept
+/// in memory, a token's signature checked, a lookup. A Digest response
+/// carries no password, so an application that lets users in by password
+/// keeps each user's and checks it with `RtspDigest::verifies`.
 ///
 /// It is called on a thread of the server's. A WebRTC server's HTTP
 /// endpoint asks it on the request's own thread; an RTSP server asks it
@@ -108,6 +120,26 @@ pub struct AccessRequest {
 ///     Access::Play => true,
 ///     Access::Publish => request.credentials == Credentials::Bearer("s3cret".into()),
 /// });
+/// ```
+///
+/// Users with passwords, over RTSP — `rtsp-server` feature:
+///
+/// ```
+/// # #[cfg(feature = "rtsp-server")] {
+/// use media_pp::elements::{Authorize, Credentials};
+///
+/// fn password_of(user: &str) -> Option<&'static str> {
+///     (user == "ana").then_some("s3cret")
+/// }
+///
+/// let authorize = Authorize::new(|request| match &request.credentials {
+///     Credentials::Digest(digest) => {
+///         password_of(digest.user()).is_some_and(|password| digest.verifies(password))
+///     }
+///     Credentials::Basic { user, password } => password_of(user) == Some(password.as_str()),
+///     _ => false,
+/// });
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct Authorize(Arc<dyn Fn(&AccessRequest) -> bool + Send + Sync>);

@@ -20,7 +20,7 @@ mod webrtc;
 pub use access::{Access, AccessRequest, Authorize, Credentials};
 #[cfg(feature = "rtsp-server")]
 pub use rtsp_server::{
-    RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,
+    RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,
 };
 #[cfg(feature = "webrtc")]
 pub use webrtc::{

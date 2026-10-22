@@ -123,7 +123,9 @@ pub use driver::{
     WebRtcTrackSource, WhepOptions, WhepSource, WhipOptions, WhipPublisher, WhipSinks,
 };
 #[cfg(feature = "rtsp-server")]
-pub use driver::{RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions};
+pub use driver::{
+    RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,
+};
 pub use filter::{
     AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,
     AudioCompressorOptions, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions,

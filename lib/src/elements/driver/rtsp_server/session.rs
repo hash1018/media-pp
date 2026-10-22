@@ -29,6 +29,7 @@ use crate::pipeline::{DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
 use super::announce::{self, Announced};
+use super::digest::{self, RtspDigest};
 use super::message::{self, Incoming, Request, Response, Transport};
 use super::record::{Recording, Stopped};
 use super::rtp::{self, Packetizer};
@@ -226,6 +227,8 @@ struct Connection {
     /// What the server's [`Authorize`](crate::elements::Authorize) has let
     /// this connection do, on which path: asked once for each.
     allowed: Vec<(String, Access)>,
+    /// The challenge a Digest response on this connection answers.
+    nonce: String,
 }
 
 /// What a request leaves the connection to do.
@@ -259,6 +262,7 @@ pub(super) async fn serve(
         },
         heard: Instant::now(),
         allowed: Vec::new(),
+        nonce: digest::nonce(),
     };
     let mut playing: Option<Playing> = None;
     let why = 'connection: loop {
@@ -418,14 +422,42 @@ fn session_id() -> String {
     format!("{:016X}", RandomState::new().hash_one(seed))
 }
 
-/// What a request the server's `Authorize` refused is answered with:
-/// asking for a user and password, which a player given
-/// `rtsp://user:password@…` then sends.
-fn unauthorized() -> Response {
-    Response::new(401).header("WWW-Authenticate", "Basic realm=\"media-pp\"")
-}
-
 impl Connection {
+    /// What a request the server's `Authorize` refused is answered with:
+    /// asking for a user and password, which a player given
+    /// `rtsp://user:password@…` then sends — hashed against this
+    /// connection's challenge where it can, as a player does where it is
+    /// offered both.
+    fn unauthorized(&self) -> Response {
+        Response::new(401)
+            .header(
+                "WWW-Authenticate",
+                format!(
+                    "Digest realm=\"{}\", nonce=\"{}\"",
+                    digest::REALM,
+                    self.nonce
+                ),
+            )
+            .header(
+                "WWW-Authenticate",
+                format!("Basic realm=\"{}\"", digest::REALM),
+            )
+    }
+
+    /// What `request` presents for `path`: a Digest response to this
+    /// connection's own challenge, or what any other header says. A Digest
+    /// response to any other challenge — another connection's, one made up
+    /// — presents nothing.
+    fn credentials(&self, request: &Request, path: &str) -> Credentials {
+        let header = request.header("Authorization");
+        match header.and_then(|h| h.trim().get(..7)) {
+            Some(scheme) if scheme.eq_ignore_ascii_case("digest ") => header
+                .and_then(|h| RtspDigest::parse(h, &request.method, &self.nonce, path))
+                .map_or(Credentials::None, Credentials::Digest),
+            _ => Credentials::from_header(header),
+        }
+    }
+
     /// Whether the server's `Authorize`, where it has one, lets this
     /// connection do `access` on `path`, from what `request` presents.
     fn allows(&mut self, request: &Request, path: &str, access: Access) -> bool {
@@ -442,7 +474,7 @@ impl Connection {
         let asked = AccessRequest {
             path: path.to_owned(),
             access,
-            credentials: Credentials::from_header(request.header("Authorization")),
+            credentials: self.credentials(request, path),
             peer: self.peer,
         };
         // The application's answer may take a while; this runtime thread's
@@ -502,7 +534,7 @@ impl Connection {
             return Response::new(400);
         };
         if !self.allows(request, &target.path, Access::Play) {
-            return unauthorized();
+            return self.unauthorized();
         }
         let Some((broadcast, tracks, described)) = described(&self.shared, &target.path) else {
             return Response::new(404);
@@ -538,7 +570,7 @@ impl Connection {
             return Response::new(455);
         }
         if !self.allows(request, &target.path, Access::Publish) {
-            return unauthorized();
+            return self.unauthorized();
         }
         let Some(path) = self.shared.path(&target.path) else {
             return Response::new(404);
@@ -614,7 +646,7 @@ impl Connection {
         if self.session.is_none() {
             // A player may set up without describing first.
             if !self.allows(request, &target.path, Access::Play) {
-                return unauthorized();
+                return self.unauthorized();
             }
             let Some((broadcast, tracks, described)) = described(&self.shared, &target.path) else {
                 return Response::new(404);
