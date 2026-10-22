@@ -1,3 +1,4 @@
+mod dash_muxer;
 mod file_muxer;
 mod hls_muxer;
 mod replay_buffer;
@@ -7,6 +8,7 @@ mod segmented_file_muxer;
 mod track_sink;
 mod tracks;
 
+pub use dash_muxer::{DashMode, DashMuxer, DashMuxerError, DashOptions};
 pub use file_muxer::{FileMuxer, FileMuxerError, Mp4Layout};
 pub use hls_muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
 pub use replay_buffer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};

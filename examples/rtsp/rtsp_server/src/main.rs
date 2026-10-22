@@ -8,6 +8,8 @@
 //!                      Broadcast "file" ----\
 //!                                            RtspServer -> players
 //! publisher -> RtspServer -> Broadcast "live" /
+//!
+//! with --record:  Broadcast "file" -> BroadcastSource -> HlsMuxer (event playlist)
 //! ```
 //!
 //! Each player is sent the broadcast's packets as they are — nothing is
@@ -15,7 +17,7 @@
 //! publisher at a time; one that leaves ends its run, and the next one's
 //! players go on.
 //!
-//!     cargo run -p rtsp_server -- input.mp4 [address] [--seconds N] [--threads N]
+//!     cargo run -p rtsp_server -- input.mp4 [address] [--seconds N] [--threads N] [--record DIR]
 //!     ffplay rtsp://127.0.0.1:8554/file
 //!     ffmpeg -re -i video.mp4 -c copy -f rtsp rtsp://127.0.0.1:8554/live
 //!     ffplay rtsp://127.0.0.1:8554/live
@@ -23,7 +25,10 @@
 //! The address defaults to `127.0.0.1:8554`, this machine alone; give
 //! `0.0.0.0:8554` to serve the network. It runs until Enter is pressed, or
 //! for `--seconds`; `--threads` is how many threads the server runs its
-//! connections on, two by default.
+//! connections on, two by default. `--record` also records what `file`
+//! plays, as it plays it, into an HLS event playlist under `DIR` —
+//! `index.m3u8` and its fMP4 segments, playable while it grows and finished
+//! as the server stops.
 
 fn main() -> Result<(), media_pp::Report> {
     Ok(example::run()?)
@@ -36,18 +41,20 @@ mod example {
 
     use media_pp::driver::DriverRunner;
     use media_pp::elements::{
-        Broadcast, BroadcastOptions, FileDemuxer, Pacer, RtspPathMode, RtspServer,
-        RtspServerOptions, TrackFormat,
+        Broadcast, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode, HlsMuxer, HlsOptions,
+        Pacer, RtspPathMode, RtspServer, RtspServerOptions, TrackFormat,
     };
     use media_pp::pipeline::Pipeline;
 
-    const USAGE: &str = "usage: rtsp_server <input> [address] [--seconds N] [--threads N]";
+    const USAGE: &str =
+        "usage: rtsp_server <input> [address] [--seconds N] [--threads N] [--record DIR]";
 
     struct Args {
         input: String,
         address: String,
         seconds: Option<u64>,
         threads: Option<usize>,
+        record: Option<String>,
     }
 
     fn args() -> Option<Args> {
@@ -55,10 +62,13 @@ mod example {
         let mut address = None;
         let mut seconds = None;
         let mut threads = None;
+        let mut record = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--seconds" {
                 seconds = Some(args.next()?.parse().ok()?);
+            } else if arg == "--record" {
+                record = Some(args.next()?);
             } else if arg == "--threads" {
                 threads = Some(args.next()?.parse().ok().filter(|&n| n > 0)?);
             } else if input.is_none() {
@@ -74,6 +84,7 @@ mod example {
             address: address.unwrap_or_else(|| "127.0.0.1:8554".to_owned()),
             seconds,
             threads,
+            record,
         })
     }
 
@@ -116,6 +127,13 @@ mod example {
             Ok(())
         })?;
         camera.run()?;
+        let recorder = match &args.record {
+            Some(dir) => {
+                println!("recording into {dir}/index.m3u8");
+                Some(record(&file, dir)?)
+            }
+            None => None,
+        };
 
         let server = DriverRunner::new(server);
         server.run()?;
@@ -146,11 +164,43 @@ mod example {
             }
         }
 
+        if let Some(recorder) = recorder {
+            // Finished, not stopped: the playlist is closed with its end.
+            recorder.finish();
+        }
         server.stop();
         camera.stop();
         wait_stopped(&server);
         println!("stopped");
         Ok(())
+    }
+
+    /// Records `broadcast` while it is served, as an HLS event playlist
+    /// under `dir` — `index.m3u8`, its fMP4 segments of about two seconds,
+    /// cut at keyframes, and `init.mp4`: playable as it grows, back to its
+    /// start, and finished as the server stops.
+    fn record(broadcast: &Broadcast, dir: &str) -> media_pp::Result<Arc<Pipeline>> {
+        std::fs::create_dir_all(dir).map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let dir = std::path::Path::new(dir);
+        let mut options = HlsOptions::new(dir.join("index.m3u8"), dir.join("segment_%05d.m4s"));
+        options.mode = HlsMode::Event;
+        let (source, streams) = BroadcastSource::new("recorder", broadcast)?;
+        let mut muxer = HlsMuxer::create(options)?;
+        let mut tracks = Vec::new();
+        for stream in &streams {
+            let track =
+                muxer.add_stream(format!("track-{}", stream.index), TrackFormat::from(stream))?;
+            tracks.push((stream.index, track));
+        }
+        let mut sinks = muxer.open()?;
+        let (recorder, ()) = Pipeline::new("recorder", source, |source, ctx| {
+            for (index, track) in tracks {
+                ctx.attach(source, index, ctx.branch().to(sinks.take(track)?)?)?;
+            }
+            Ok(())
+        })?;
+        recorder.run()?;
+        Ok(recorder)
     }
 
     /// A channel that gets a message once Enter is pressed, or `seconds`

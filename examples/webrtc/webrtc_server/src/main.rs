@@ -8,6 +8,8 @@
 //!                      Broadcast "file" ----\
 //!                                            WebRtcServer -> players (WHEP)
 //! publisher (WHIP) -> Broadcast "live" -----/
+//!
+//! with --record:  Broadcast "file" -> BroadcastSource -> HlsMuxer (event playlist)
 //! ```
 //!
 //! Open `http://127.0.0.1:8080/file` in a browser: the page offers to play
@@ -17,7 +19,7 @@
 //! is left out. Plays of the file without B-frames, as a browser takes
 //! H.264.
 //!
-//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N]
+//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR]
 //!
 //! Both addresses default to this machine alone. To serve the network,
 //! give the address the network reaches this machine at to `--udp` — a
@@ -25,24 +27,26 @@
 //! until Enter is pressed, or for `--seconds`, printing what each session
 //! does. `--threads` is how many threads — each with a UDP port of its own,
 //! from the one `--udp` names on — it runs its sessions on, two by default.
+//! `--record` also records what `file` plays, as it plays it, into an HLS
+//! event playlist under `DIR` — `index.m3u8` and its fMP4 segments, playable
+//! while it grows and finished as the server stops.
 
 fn main() -> Result<(), media_pp::Report> {
     Ok(example::run()?)
 }
 
 mod example {
-    use std::sync::mpsc;
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
     use media_pp::driver::DriverRunner;
     use media_pp::elements::{
-        Broadcast, BroadcastOptions, FileDemuxer, Pacer, TrackFormat, WebRtcPathMode, WebRtcServer,
-        WebRtcServerOptions,
+        Broadcast, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode, HlsMuxer, HlsOptions,
+        Pacer, TrackFormat, WebRtcPathMode, WebRtcServer, WebRtcServerOptions,
     };
     use media_pp::pipeline::Pipeline;
 
-    const USAGE: &str =
-        "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--threads N] [--seconds N]";
+    const USAGE: &str = "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--threads N] [--seconds N] [--record DIR]";
 
     struct Args {
         input: String,
@@ -50,6 +54,7 @@ mod example {
         http: String,
         seconds: Option<u64>,
         threads: Option<usize>,
+        record: Option<String>,
     }
 
     fn args() -> Option<Args> {
@@ -58,6 +63,7 @@ mod example {
         let mut http = "127.0.0.1:8080".to_owned();
         let mut seconds = None;
         let mut threads = None;
+        let mut record = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -65,6 +71,7 @@ mod example {
                 "--http" => http = args.next()?,
                 "--seconds" => seconds = Some(args.next()?.parse().ok()?),
                 "--threads" => threads = Some(args.next()?.parse().ok().filter(|&n| n > 0)?),
+                "--record" => record = Some(args.next()?),
                 _ if input.is_none() => input = Some(arg),
                 _ => return None,
             }
@@ -75,6 +82,7 @@ mod example {
             http,
             seconds,
             threads,
+            record,
         })
     }
 
@@ -117,6 +125,13 @@ mod example {
             Ok(())
         })?;
         camera.run()?;
+        let recorder = match &args.record {
+            Some(dir) => {
+                println!("recording into {dir}/index.m3u8");
+                Some(record(&file, dir)?)
+            }
+            None => None,
+        };
 
         let server = DriverRunner::new(server);
         server.run()?;
@@ -144,6 +159,10 @@ mod example {
             }
         }
 
+        if let Some(recorder) = recorder {
+            // Finished, not stopped: the playlist is closed with its end.
+            recorder.finish();
+        }
         drop(http);
         server.stop();
         camera.stop();
@@ -152,6 +171,34 @@ mod example {
         }
         println!("stopped");
         Ok(())
+    }
+
+    /// Records `broadcast` while it is served, as an HLS event playlist
+    /// under `dir` — `index.m3u8`, its fMP4 segments of about two seconds,
+    /// cut at keyframes, and `init.mp4`: playable as it grows, back to its
+    /// start, and finished as the server stops.
+    fn record(broadcast: &Broadcast, dir: &str) -> media_pp::Result<Arc<Pipeline>> {
+        std::fs::create_dir_all(dir).map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let dir = std::path::Path::new(dir);
+        let mut options = HlsOptions::new(dir.join("index.m3u8"), dir.join("segment_%05d.m4s"));
+        options.mode = HlsMode::Event;
+        let (source, streams) = BroadcastSource::new("recorder", broadcast)?;
+        let mut muxer = HlsMuxer::create(options)?;
+        let mut tracks = Vec::new();
+        for stream in &streams {
+            let track =
+                muxer.add_stream(format!("track-{}", stream.index), TrackFormat::from(stream))?;
+            tracks.push((stream.index, track));
+        }
+        let mut sinks = muxer.open()?;
+        let (recorder, ()) = Pipeline::new("recorder", source, |source, ctx| {
+            for (index, track) in tracks {
+                ctx.attach(source, index, ctx.branch().to(sinks.take(track)?)?)?;
+            }
+            Ok(())
+        })?;
+        recorder.run()?;
+        Ok(recorder)
     }
 
     /// A channel that gets a message once Enter is pressed, or `seconds`

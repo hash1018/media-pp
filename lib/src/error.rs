@@ -101,7 +101,7 @@ use crate::{
     element::ProduceError,
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
-        AudioResamplerError, AudioTempoError, AudioVolumeError, AudioWaveformError,
+        AudioResamplerError, AudioTempoError, AudioVolumeError, AudioWaveformError, DashMuxerError,
         FileDemuxerError, FileMuxerError, FrameRateLimiterError, HlsMuxerError, MuxerTrackError,
         PacerError, RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError,
         SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
@@ -656,6 +656,10 @@ pub enum Error {
     /// HLS muxing or option validation failed.
     #[error(transparent)]
     HlsMuxerError(#[from] HlsMuxerError),
+
+    /// MPEG-DASH muxing or option validation failed.
+    #[error(transparent)]
+    DashMuxerError(#[from] DashMuxerError),
 
     /// Sending a stream to an RTSP endpoint failed.
     #[error(transparent)]

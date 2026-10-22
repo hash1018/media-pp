@@ -2,7 +2,10 @@
 # loopback with `-Video`, then for each number of `-Players` runs `rtsp_load`
 # for `-Seconds`, sampling the server process's processor time and memory as
 # it plays. Prints one line of the server's figures and `rtsp_load`'s summary
-# for each. Build both first: cargo build --release -p rtsp_server -p rtsp_load
+# for each. With -Record DIR the server also records what it serves into an
+# HLS event playlist there, and is left to end by itself after the runs, so
+# that the playlist is finished. Build both first:
+# cargo build --release -p rtsp_server -p rtsp_load
 # See docs/benchmarks/streaming/method.md.
 param(
     [Parameter(Mandatory = $true)][string]$Video,
@@ -10,15 +13,23 @@ param(
     [int]$Seconds = 30,
     [int]$Threads = 2,
     [switch]$Udp,
-    [int]$Port = 18600
+    [int]$Port = 18600,
+    [string]$Record = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Join-Path $PSScriptRoot "..\..\..\target\release"
 $work = Join-Path ([System.IO.Path]::GetTempPath()) "rtsp_load_bench"
 New-Item -ItemType Directory -Force $work | Out-Null
 $video = (Resolve-Path $Video).Path
+$serverSeconds = 100000
+$serverArguments = @("`"$video`"", "127.0.0.1:$Port", "--threads", "$Threads")
+if ($Record) {
+    $serverSeconds = 3 + $Players.Count * ($Seconds + 15)
+    $serverArguments += @("--record", "`"$Record`"")
+}
+$serverArguments += @("--seconds", "$serverSeconds")
 $server = Start-Process -FilePath "$root\rtsp_server.exe" -WorkingDirectory $work -PassThru -WindowStyle Hidden `
-    -ArgumentList @("`"$video`"", "127.0.0.1:$Port", "--seconds", "100000", "--threads", "$Threads") `
+    -ArgumentList $serverArguments `
     -RedirectStandardOutput "$work\server.out" -RedirectStandardError "$work\server.err"
 try {
     Start-Sleep -Seconds 3
@@ -46,5 +57,9 @@ try {
     }
 }
 finally {
+    if ($Record) {
+        # Let it end by itself, finishing the recording's playlist.
+        Wait-Process -Id $server.Id -Timeout ($serverSeconds + 30) -ErrorAction SilentlyContinue
+    }
     Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
 }

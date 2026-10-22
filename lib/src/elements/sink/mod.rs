@@ -1,7 +1,7 @@
 //! Elements that terminate a branch.
 //!
 //! Muxers write to files or streams ([`FileMuxer`], [`SegmentedFileMuxer`],
-//! [`HlsMuxer`], [`RtmpMuxer`], [`RtspMuxer`]) — or, in [`ReplayBuffer`]'s
+//! [`HlsMuxer`], [`DashMuxer`], [`RtmpMuxer`], [`RtspMuxer`]) — or, in [`ReplayBuffer`]'s
 //! case, hold the last stretch of it until asked to write it — renderers
 //! present to a device or window, and
 //! [`AppSink`] hands buffers back to the application. [`FrameCounter`] and
@@ -26,6 +26,7 @@ mod virtual_camera;
 pub use app_sink::AppSink;
 pub use counter::CounterHandle;
 pub use frame_counter::FrameCounter;
+pub use muxer::{DashMode, DashMuxer, DashMuxerError, DashOptions};
 pub use muxer::{FileMuxer, FileMuxerError, Mp4Layout, SegmentPolicy, SegmentedFileMuxer};
 pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
 pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError, TrackFormat};

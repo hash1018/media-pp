@@ -74,6 +74,30 @@ For each number of players, a run of 30 seconds:
   one that does not. The median, 99th percentile and largest over the
   players are given.
 
+## Rounds and ceilings
+
+The players run on the machine the server does, and whatever else it is
+doing moves a run's figures: the server's processor time at a few hundred
+players differs by a third between two runs of the same build. So every
+number of players up to the ceilings is run three times, one round after
+another, and the results give the range — the least and the most.
+
+A ceiling is then looked for past them, once each: more players until the
+server stops keeping up — its threads busy all the time, the lag spread
+growing without end, what it delivers no longer growing with the players.
+Where the players' processes and the server's together take the machine's
+cores, the ceiling found is this machine's, not the server's alone, and
+the results say so.
+
+## Recording while serving
+
+`rtsp_server` and `webrtc_server` take `--record DIR`: beside serving, a
+`BroadcastSource` of the same broadcast writes it into an `HlsMuxer` event
+playlist under `DIR`. The scripts below take `-Record DIR` for it, and let
+the server end by itself after the runs, so that the playlist is finished;
+read it back with FFmpeg — `ffprobe -count_packets DIR/index.m3u8`, and a
+decode to `-f null` — to see that every picture is there.
+
 ## Running it
 
 Build both, in release:
@@ -96,6 +120,13 @@ the same for `webrtc_server`:
 
 ```powershell
 examples\webrtc\webrtc_load\bench.ps1 -Video webrtc.mp4 -Players 50,100,200 -Seconds 30 -Threads 4
+```
+
+A run with the server recording, and a search for a ceiling:
+
+```powershell
+examples\rtsp\rtsp_load\bench.ps1 -Video stream.mp4 -Players 400 -Seconds 30 -Threads 2 -Record rec\rtsp
+examples\rtsp\rtsp_load\bench.ps1 -Video stream.mp4 -Players 1000,1200,1600,2000 -Seconds 30 -Threads 2
 ```
 
 Elsewhere, run the two by hand, and read the server's processor time

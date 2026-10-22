@@ -19,7 +19,7 @@ and AV1 pictures and Opus sound, so a file's AAC is left out; a browser takes
 H.264 without B-frames.
 
 ```sh
-cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N]
+cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR]
 ```
 
 Both addresses default to this machine alone. To serve the network, give the
@@ -30,3 +30,12 @@ page of your own — posts to `http://127.0.0.1:8080/live/whip`, and
 pressed, or for `--seconds`, printing what each session does. `--threads` is
 how many threads — each with a UDP port of its own, from the one `--udp` names
 on — it runs its sessions on, two by default.
+
+With `--record DIR` it also records what `file` plays, as it plays it, into
+an HLS event playlist under `DIR` — `index.m3u8`, fMP4 segments of about two
+seconds cut at keyframes, and `init.mp4` — which plays while it grows, back to
+its start, and is finished as the server stops:
+
+```text
+Broadcast "file" -> BroadcastSource -> HlsMuxer (event playlist)
+```

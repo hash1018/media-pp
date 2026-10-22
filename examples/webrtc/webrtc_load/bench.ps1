@@ -2,7 +2,9 @@
 # the loopback with `-Video`, then for each number of `-Players` runs
 # `webrtc_load` for `-Seconds`, sampling the server process's processor time
 # and memory as it plays. Prints one line of the server's figures and
-# `webrtc_load`'s summary for each. Build both first:
+# `webrtc_load`'s summary for each. With -Record DIR the server also records
+# what it serves into an HLS event playlist there, and is left to end by
+# itself after the runs, so that the playlist is finished. Build both first:
 # cargo build --release -p webrtc_server -p webrtc_load
 # See docs/benchmarks/streaming/method.md.
 param(
@@ -11,15 +13,23 @@ param(
     [int]$Seconds = 30,
     [int]$Threads = 2,
     [int]$UdpPort = 18700,
-    [int]$HttpPort = 18701
+    [int]$HttpPort = 18701,
+    [string]$Record = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Join-Path $PSScriptRoot "..\..\..\target\release"
 $work = Join-Path ([System.IO.Path]::GetTempPath()) "webrtc_load_bench"
 New-Item -ItemType Directory -Force $work | Out-Null
 $video = (Resolve-Path $Video).Path
+$serverSeconds = 100000
+$serverArguments = @("`"$video`"", "--udp", "127.0.0.1:$UdpPort", "--http", "127.0.0.1:$HttpPort", "--threads", "$Threads")
+if ($Record) {
+    $serverSeconds = 3 + $Players.Count * ($Seconds + 15)
+    $serverArguments += @("--record", "`"$Record`"")
+}
+$serverArguments += @("--seconds", "$serverSeconds")
 $server = Start-Process -FilePath "$root\webrtc_server.exe" -WorkingDirectory $work -PassThru -WindowStyle Hidden `
-    -ArgumentList @("`"$video`"", "--udp", "127.0.0.1:$UdpPort", "--http", "127.0.0.1:$HttpPort", "--threads", "$Threads", "--seconds", "100000") `
+    -ArgumentList $serverArguments `
     -RedirectStandardOutput "$work\server.out" -RedirectStandardError "$work\server.err"
 try {
     Start-Sleep -Seconds 3
@@ -46,5 +56,9 @@ try {
     }
 }
 finally {
+    if ($Record) {
+        # Let it end by itself, finishing the recording's playlist.
+        Wait-Process -Id $server.Id -Timeout ($serverSeconds + 30) -ErrorAction SilentlyContinue
+    }
     Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
 }

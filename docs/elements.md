@@ -82,7 +82,7 @@ fails.
 | Files cut by time or size | `SegmentedFileMuxer`, each cut on a keyframe |
 | The last stretch, saved on demand | `ReplayBuffer` |
 | One stream written once, read by many | `Broadcast`: its `BroadcastSink`s take an input's packets, and any number of `BroadcastSource`s (a pipeline each) and `BroadcastReader`s (your code, blocking or as a future) read them — never waiting on one another, each starting at a keyframe — while the input drops and comes back |
-| Streaming | `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `WhipPublisher` (to any WHIP server), `WebRtcTrackSink` with `WebRtcPeer` |
+| Streaming | `HlsMuxer`, `DashMuxer` (also HLS over its segments), `RtmpMuxer`, `RtspMuxer`, `WhipPublisher` (to any WHIP server), `WebRtcTrackSink` with `WebRtcPeer` |
 | Serving | `RtspServer` (`rtsp-server`): each `Broadcast` under a path, to any number of RTSP players over TCP or UDP, and a publisher's push into one; `WebRtcServer` (`webrtc`): the same to WebRTC players — browsers through WHEP — and WHIP publishers, with data channels |
 | A camera other applications open | `MfVirtualCamera` (Windows 11), `V4l2VirtualCamera` (Linux) |
 | Your code | `AppSink` |

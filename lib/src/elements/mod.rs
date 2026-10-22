@@ -189,11 +189,11 @@ pub use filter::{
     VulkanUpload, VulkanUploadError, VulkanVideoEffect, VulkanVideoEffectError,
 };
 pub use sink::{
-    AppSink, CounterHandle, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer,
-    HlsMuxerError, HlsOptions, HlsSegmentFormat, Mp4Layout, MuxerSinks, MuxerTrack,
-    MuxerTrackError, PacketCounter, ReplayBuffer, ReplayBufferError, ReplayBufferHandle, RtmpMuxer,
-    RtmpMuxerError, RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError,
-    TrackFormat,
+    AppSink, CounterHandle, DashMode, DashMuxer, DashMuxerError, DashOptions, FileMuxer,
+    FileMuxerError, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat,
+    Mp4Layout, MuxerSinks, MuxerTrack, MuxerTrackError, PacketCounter, ReplayBuffer,
+    ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError, RtspMuxer, RtspMuxerError,
+    SegmentPolicy, SegmentedFileMuxer, SubmitError, TrackFormat,
 };
 #[cfg(all(target_os = "macos", feature = "coreaudio-renderer"))]
 pub use sink::{CoreAudioRenderer, CoreAudioRendererError, CoreAudioRendererOptions};

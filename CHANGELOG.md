@@ -57,6 +57,14 @@ compile error with no explanation.
 
 ### Added
 
+- **`DashMuxer`: MPEG-DASH, and HLS over the same segments.** Made, given
+  its tracks and opened as `HlsMuxer` is, it writes an `.mpd` manifest and
+  fMP4 segments cut at keyframes — a sliding live window
+  (`DashMode::Live`) or every segment, finished as a static manifest at the
+  end (`DashMode::Event`). `DashOptions::hls_playlist` adds HLS playlists
+  over those very segments, so that one recording plays in DASH players and
+  Safari alike. Reading a manifest back takes an FFmpeg built with libxml2.
+
 - **`WhipPublisher` and `WhepSource`: WebRTC to and from any WHIP or WHEP
   server.** `WhipPublisher` is made, given its tracks and opened as
   `RtspMuxer` is, handing out a `WebRtcTrackSink` per track; `WhepSource` is

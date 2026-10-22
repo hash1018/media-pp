@@ -16,12 +16,12 @@ use media_pp::driver::DriverRunner;
 use media_pp::element::BoxSink;
 use media_pp::elements::{
     AudioCodec, Broadcast, BroadcastOptions, BroadcastSource, CounterHandle, FileDemuxer,
-    FileMuxer, FrameCounter, Mp4Layout, PacketCounter, RtspMuxer, RtspOptions, RtspPathMode,
-    RtspServer, RtspServerHandle, RtspServerOptions, RtspSource, StreamInfo, SwAudioEncoder,
-    SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions, TestAudioOptions,
-    TestAudioSource, TestVideoOptions, TestVideoSource, TrackFormat, VideoCodec, WebRtcError,
-    WebRtcHttpEndpoint, WebRtcPathMode, WebRtcServer, WebRtcServerHandle, WebRtcServerOptions,
-    WhepOptions, WhepSource, WhipOptions, WhipPublisher,
+    FileMuxer, FrameCounter, HlsMode, HlsMuxer, HlsOptions, Mp4Layout, PacketCounter, RtspMuxer,
+    RtspOptions, RtspPathMode, RtspServer, RtspServerHandle, RtspServerOptions, RtspSource,
+    StreamInfo, SwAudioEncoder, SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions,
+    TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, TrackFormat, VideoCodec,
+    WebRtcError, WebRtcHttpEndpoint, WebRtcPathMode, WebRtcServer, WebRtcServerHandle,
+    WebRtcServerOptions, WhepOptions, WhepSource, WhipOptions, WhipPublisher,
 };
 use media_pp::ffmpeg::{self, media};
 use media_pp::pipeline::{Pipeline, PipelineBuilder};
@@ -284,8 +284,44 @@ fn record<M>(
     pipeline
 }
 
-/// How many pictures the MP4 at `path` decodes to, and whether it has
-/// sound.
+/// Records `streams` of `source` as an HLS event playlist under `dir` —
+/// fMP4 segments of a second, as a server keeps what it serves for playing
+/// back later: playable as it grows, and whole once finished — running.
+fn record_hls<M>(
+    source: impl media_pp::element::IntoSource<M>,
+    streams: &[StreamInfo],
+    dir: &std::path::Path,
+) -> Arc<Pipeline> {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut options = HlsOptions::new(dir.join("index.m3u8"), dir.join("segment_%05d.m4s"));
+    options.mode = HlsMode::Event;
+    options.segment_duration = Duration::from_secs(1);
+    let mut muxer = HlsMuxer::create(options).unwrap();
+    let tracks: Vec<_> = streams
+        .iter()
+        .map(|stream| {
+            (
+                stream.index,
+                muxer
+                    .add_stream(format!("track-{}", stream.index), TrackFormat::from(stream))
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let mut sinks = muxer.open().unwrap();
+    let (pipeline, ()) = Pipeline::new("hls-recorder", source, |source, ctx| {
+        for (index, track) in tracks {
+            ctx.attach(source, index, ctx.branch().to(sinks.take(track)?)?)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    pipeline.run().unwrap();
+    pipeline
+}
+
+/// How many pictures the recording at `path` — an MP4, or an HLS
+/// playlist — decodes to, and whether it has sound.
 fn in_file(path: &std::path::Path) -> (usize, bool) {
     let (source, streams) = FileDemuxer::open("check", path).unwrap();
     let video = streams
@@ -326,6 +362,7 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -704,6 +741,61 @@ fn whep_out_driven() {
     wait_for("pictures decoded, driven", || pictures.get() >= PICTURES);
 
     handle.stop();
+    input.stop();
+    servers.stop();
+}
+
+/// One input recorded while it is played both ways at once: a WHIP
+/// publisher's stream into an HLS recording, to a WHEP player and to an
+/// RTSP player, all from the one broadcast — none of them waiting on
+/// another. The recording is read back through its playlist.
+#[test]
+fn recorded_while_played_both_ways() {
+    let encoders = encoders(AudioCodec::Opus);
+    let sound = encoders.audio.is_some();
+    let live_stream = Broadcast::new("live", BroadcastOptions::default());
+    let servers = Servers::serving(
+        "live",
+        &live_stream,
+        WebRtcPathMode::Publish,
+        RtspPathMode::Play,
+    );
+    let input = publish_whip(&servers.http.whip_url("live"), encoders);
+    until_live(&live_stream);
+
+    let scratch = Scratch::new("both-ways-hls");
+    let (source, streams) = BroadcastSource::new("recorder", &live_stream).unwrap();
+    let recorder = record_hls(source, &streams, &scratch.0);
+    let (source, streams) = WhepSource::open(
+        "webrtc-player",
+        &servers.http.whep_url("live"),
+        WhepOptions::default(),
+    )
+    .unwrap();
+    let webrtc_player = play(source, &streams);
+    let (source, streams) = RtspSource::open(
+        "rtsp-player",
+        servers.rtsp_handle.url("live"),
+        RtspOptions::default(),
+    )
+    .unwrap();
+    let rtsp_player = play(source, &streams);
+
+    plays(&webrtc_player, sound);
+    plays(&rtsp_player, sound);
+    recorder.finish();
+    let (pictures, has_sound) = in_file(&scratch.0.join("index.m3u8"));
+    assert!(pictures >= PICTURES, "{pictures} pictures recorded");
+    assert_eq!(has_sound, sound);
+    // The players went on as the recording finished.
+    let webrtc_before = webrtc_player.pictures.get();
+    let rtsp_before = rtsp_player.pictures.get();
+    wait_for("both players go on", || {
+        webrtc_player.pictures.get() > webrtc_before && rtsp_player.pictures.get() > rtsp_before
+    });
+
+    webrtc_player.pipeline.stop();
+    rtsp_player.pipeline.stop();
     input.stop();
     servers.stop();
 }
