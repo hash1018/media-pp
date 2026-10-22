@@ -167,7 +167,9 @@ impl Default for RtspServerOptions {
 /// and stays so. What came after that keyframe is sent at once to a player
 /// over TCP, whose connection paces it, and at twice the stream's speed to
 /// one over UDP, which nothing paces: sent at once, it overflows the
-/// player's socket. A UDP player costs the server several times what a TCP
+/// player's socket. A UDP player whose newest keyframe is more than a second
+/// behind waits for the next one instead, since what it loses of a longer
+/// stretch it cannot ask for again. A UDP player costs the server several times what a TCP
 /// one does — a system call for every RTP packet — so many of them want
 /// more [`RtspServerOptions::threads`]; `docs/benchmarks/streaming` has the
 /// figures.

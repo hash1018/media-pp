@@ -76,7 +76,29 @@ impl BroadcastSource {
         name: impl Into<String>,
         broadcast: &Broadcast,
     ) -> std::result::Result<(Self, Vec<StreamInfo>), BroadcastError> {
-        let mut reader = broadcast.subscribe();
+        Self::reading(name, broadcast, broadcast.subscribe())
+    }
+
+    /// A source as [`Self::new`] makes one, for a player across a network:
+    /// one that joins at the newest keyframe only where it is at most
+    /// `within` behind the newest packet, and at the next keyframe else —
+    /// what it would catch up on is sent faster than the stream goes, and
+    /// more than a second of a large picture's packets at once is more than
+    /// a WebRTC connection can send again what it loses of.
+    #[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+    pub(crate) fn joining_within(
+        name: impl Into<String>,
+        broadcast: &Broadcast,
+        within: std::time::Duration,
+    ) -> std::result::Result<(Self, Vec<StreamInfo>), BroadcastError> {
+        Self::reading(name, broadcast, broadcast.subscribe_within(within))
+    }
+
+    fn reading(
+        name: impl Into<String>,
+        broadcast: &Broadcast,
+        mut reader: BroadcastReader,
+    ) -> std::result::Result<(Self, Vec<StreamInfo>), BroadcastError> {
         let tracks = loop {
             match reader.try_next() {
                 Some(BroadcastItem::Started(tracks)) => break tracks,

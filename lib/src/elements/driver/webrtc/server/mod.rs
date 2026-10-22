@@ -364,7 +364,10 @@ impl Default for WebRtcServerOptions {
 /// tracks share one timeline, which goes on across the broadcast's runs.
 /// What the broadcast held then is sent at twice the stream's speed, so it
 /// catches up without a burst its socket cannot hold, and what comes after
-/// as it is written. A publisher's tracks are each a pipeline of a
+/// as it is written — at most a second of it: where the newest keyframe is
+/// further behind, the player waits for the next one, as a packet lost in a
+/// longer stretch of large pictures is past what the connection keeps to
+/// send again. A publisher's tracks are each a pipeline of a
 /// [`WebRtcTrackSource`](super::WebRtcTrackSource) into the path's
 /// broadcast, published once each has said enough of itself — H.264's
 /// parameter sets — and its leaving ends the run. The sinks and sources are

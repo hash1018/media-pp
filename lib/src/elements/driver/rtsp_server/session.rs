@@ -806,8 +806,24 @@ impl Connection {
         described: &[usize],
         delivery: &[Option<Delivery>],
     ) -> Result<Playing, u16> {
-        let (source, now) =
-            BroadcastSource::new(format!("rtsp-{id}-reader"), broadcast).map_err(|_| 404_u16)?;
+        // A UDP player is sent what it joins with at twice the stream's
+        // speed, and has no way to ask for what it loses of it: not a whole
+        // group of pictures. Over TCP the connection paces it and loses
+        // nothing, so a player starts at once.
+        let name = format!("rtsp-{id}-reader");
+        let over_udp = delivery
+            .iter()
+            .any(|delivery| matches!(delivery, Some(Delivery::Udp { .. })));
+        let (source, now) = if over_udp {
+            BroadcastSource::joining_within(
+                name,
+                broadcast,
+                crate::elements::broadcast::PLAYER_JOIN_WITHIN,
+            )
+        } else {
+            BroadcastSource::new(name, broadcast)
+        }
+        .map_err(|_| 404_u16)?;
         if !same_shape(tracks, &now) {
             pp_info!(
                 pp_log: &self.shared.pp_log,

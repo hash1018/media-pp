@@ -664,47 +664,28 @@ fn a_path_holds_one_publisher_and_a_path_for_players_none() {
     runner.stop();
 }
 
-/// What a UDP player joins with — everything since the newest keyframe — is
-/// sent at twice the stream's speed, not at once: UDP has no way to say slow
-/// down, and the burst overflowed players' sockets, losing half of what they
-/// were sent (docs/benchmarks/streaming/findings.md).
-#[test]
-fn a_udp_player_catches_up_at_twice_the_streams_speed() {
+/// A player of `cam` over UDP, set up and playing by hand: the socket its
+/// RTP arrives on, and its RTSP connection with the socket its RTCP does,
+/// which it holds as long as its session lasts.
+///
+/// Both ports are held: with the RTCP one left free, another test running
+/// beside this one could bind it and be sent this session's reports — and
+/// a test of this one's could be sent another's.
+fn play_over_udp(
+    handle: &RtspServerHandle,
+) -> (std::net::UdpSocket, (TcpStream, std::net::UdpSocket)) {
     use std::net::UdpSocket;
 
-    let (_runner, handle, broadcast) = server(true);
-    let video = TrackFormat::new(
+    let (rtp, rtcp) = loop {
+        let rtp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = rtp.local_addr().unwrap().port();
+        if let Some(Ok(rtcp)) = port
+            .checked_add(1)
+            .map(|next| UdpSocket::bind(("127.0.0.1", next)))
         {
-            let mut parameters = ffmpeg::codec::Parameters::new();
-            // SAFETY: parameters this test owns alone; plain fields.
-            unsafe {
-                (*parameters.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
-                (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
-                (*parameters.as_mut_ptr()).width = 320;
-                (*parameters.as_mut_ptr()).height = 240;
-            }
-            parameters
-        },
-        ffmpeg::Rational(1, 90_000),
-    );
-    let mut sinks = broadcast.publish(&[video]).unwrap();
-    // Four seconds of pictures from one keyframe, written at once: all of it
-    // is what a player joining now catches up on.
-    let pictures = 100;
-    for n in 0..pictures {
-        let mut data = vec![0, 0, 0, 1, if n == 0 { 0x65 } else { 0x41 }];
-        data.resize(2_000, 0xAB);
-        let mut packet = ffmpeg::Packet::copy(&data);
-        packet.set_pts(Some(n * 3_600));
-        packet.set_dts(Some(n * 3_600));
-        packet.set_time_base(ffmpeg::Rational(1, 90_000));
-        if n == 0 {
-            packet.set_flags(ffmpeg::packet::Flags::KEY);
+            break (rtp, rtcp);
         }
-        crate::element::RawSink::consume(&mut sinks[0], MediaBuffer::packet(packet)).unwrap();
-    }
-
-    let rtp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    };
     rtp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let port = rtp.local_addr().unwrap().port();
     let mut stream = TcpStream::connect(handle.local_addr()).unwrap();
@@ -733,6 +714,50 @@ fn a_udp_player_catches_up_at_twice_the_streams_speed() {
         &format!("PLAY {url} RTSP/1.0\r\nCSeq: 2\r\nSession: {session}\r\n\r\n"),
     );
     assert!(play.starts_with("RTSP/1.0 200"), "{play}");
+    (rtp, (stream, rtcp))
+}
+
+/// What a UDP player joins with — everything since the newest keyframe — is
+/// sent at twice the stream's speed, not at once: UDP has no way to say slow
+/// down, and the burst overflowed players' sockets, losing half of what they
+/// were sent (docs/benchmarks/streaming/findings.md).
+#[test]
+fn a_udp_player_catches_up_at_twice_the_streams_speed() {
+    let (_runner, handle, broadcast) = server(true);
+    let video = TrackFormat::new(
+        {
+            let mut parameters = ffmpeg::codec::Parameters::new();
+            // SAFETY: parameters this test owns alone; plain fields.
+            unsafe {
+                (*parameters.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
+                (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+                (*parameters.as_mut_ptr()).width = 320;
+                (*parameters.as_mut_ptr()).height = 240;
+            }
+            parameters
+        },
+        ffmpeg::Rational(1, 90_000),
+    );
+    let mut sinks = broadcast.publish(&[video]).unwrap();
+    // Just under a second of pictures from one keyframe, written at once —
+    // as much as a UDP player joins at a keyframe with (further behind, it
+    // waits for the next): all of it is what a player joining now catches
+    // up on.
+    let pictures = 24;
+    for n in 0..pictures {
+        let mut data = vec![0, 0, 0, 1, if n == 0 { 0x65 } else { 0x41 }];
+        data.resize(2_000, 0xAB);
+        let mut packet = ffmpeg::Packet::copy(&data);
+        packet.set_pts(Some(n * 3_600));
+        packet.set_dts(Some(n * 3_600));
+        packet.set_time_base(ffmpeg::Rational(1, 90_000));
+        if n == 0 {
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+        }
+        crate::element::RawSink::consume(&mut sinks[0], MediaBuffer::packet(packet)).unwrap();
+    }
+
+    let (rtp, _connection) = play_over_udp(&handle);
 
     let mut buffer = [0u8; 2048];
     let mut arrivals = Vec::new();
@@ -750,14 +775,14 @@ fn a_udp_player_catches_up_at_twice_the_streams_speed() {
     }
     assert!(last_picture.is_some());
     let took = arrivals[arrivals.len() - 1] - arrivals[0];
-    // Four seconds of pictures at twice their speed: two seconds, less the
-    // last picture's own 40 ms.
+    // 0.92 s of pictures at twice their speed: 0.46 s, less the last
+    // picture's own 20 ms.
     assert!(
-        took >= Duration::from_millis(1_700),
-        "four seconds of pictures arrived in {took:?}, at once rather than paced"
+        took >= Duration::from_millis(350),
+        "{pictures} pictures arrived in {took:?}, at once rather than paced"
     );
     assert!(
-        took < Duration::from_millis(3_000),
+        took < Duration::from_millis(900),
         "paced slower than twice: {took:?}"
     );
 }
@@ -960,4 +985,71 @@ fn a_digest_response_answers_this_connections_challenge_alone() {
     let allowed = exchange(&mut stream, &answer(&own));
     assert!(allowed.starts_with("RTSP/1.0 404"), "{allowed}");
     runner.stop();
+}
+
+/// A UDP player joins at the newest keyframe only where it is at most a
+/// second behind the newest picture; further, it waits for the next one
+/// rather than be sent the whole group at twice the stream's speed, which
+/// it has no way to ask for again what it loses of.
+#[test]
+fn a_udp_player_far_behind_the_newest_keyframe_starts_at_the_next() {
+    let (_runner, handle, broadcast) = server(true);
+    let video = TrackFormat::new(
+        {
+            let mut parameters = ffmpeg::codec::Parameters::new();
+            // SAFETY: parameters this test owns alone; plain fields.
+            unsafe {
+                (*parameters.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
+                (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+                (*parameters.as_mut_ptr()).width = 320;
+                (*parameters.as_mut_ptr()).height = 240;
+            }
+            parameters
+        },
+        ffmpeg::Rational(1, 90_000),
+    );
+    let mut sinks = broadcast.publish(&[video]).unwrap();
+    let mut write = |n: i64, key: bool| {
+        let mut data = vec![0, 0, 0, 1, if key { 0x65 } else { 0x41 }];
+        data.resize(2_000, 0xAB);
+        let mut packet = ffmpeg::Packet::copy(&data);
+        packet.set_pts(Some(n * 3_600));
+        packet.set_dts(Some(n * 3_600));
+        packet.set_time_base(ffmpeg::Rational(1, 90_000));
+        if key {
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+        }
+        crate::element::RawSink::consume(&mut sinks[0], MediaBuffer::packet(packet)).unwrap();
+    };
+    // Two seconds from one keyframe: the newest picture is 1.96 s past it.
+    for n in 0..50 {
+        write(n, n == 0);
+    }
+    let (rtp, _connection) = play_over_udp(&handle);
+    let mut buffer = [0u8; 2048];
+    rtp.set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    assert!(
+        rtp.recv(&mut buffer).is_err(),
+        "nothing of the old group of pictures is sent"
+    );
+
+    // The next group begins: the player starts at its keyframe.
+    for n in 50..56 {
+        write(n, n == 50);
+    }
+    rtp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut pictures = 0;
+    while pictures < 6 {
+        rtp.recv(&mut buffer).expect("the next group arrives");
+        if buffer[1] & 0x80 != 0 {
+            pictures += 1;
+        }
+    }
+    rtp.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    assert!(
+        rtp.recv(&mut buffer).is_err(),
+        "the six pictures of the next group, and nothing before them"
+    );
 }

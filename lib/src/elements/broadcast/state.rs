@@ -294,8 +294,24 @@ impl State {
 
     /// Where a reader joining now starts: the newest start held, or — with
     /// none held — wherever the next one is written.
-    pub(crate) fn join_at(&self) -> Join {
+    ///
+    /// With `within`, a newest keyframe further than that behind the newest
+    /// packet is passed over, and the reader waits for the next one: what it
+    /// would otherwise be handed at once to catch up on is more than a
+    /// player across a network takes in a burst.
+    pub(crate) fn join_at(&self, within: Option<Duration>) -> Join {
+        let behind = |start: u64| {
+            let at = self.entries[(start - self.first_seq) as usize].at;
+            self.newest.map_or(0.0, |newest| newest - at)
+        };
         match self.starts.back() {
+            Some(&start) if within.is_some_and(|within| behind(start) > within.as_secs_f64()) => {
+                Join {
+                    next: self.next_seq,
+                    waiting: true,
+                    back_from: self.next_seq,
+                }
+            }
             Some(&start) => Join {
                 next: start,
                 waiting: false,

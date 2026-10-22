@@ -12,6 +12,17 @@ compile error with no explanation.
 
 ### Changed
 
+- **A WebRTC player, or an RTSP one over UDP, starts at most a second
+  behind.** A player joins at the newest keyframe its path's broadcast
+  holds and is sent what came after at twice the stream's speed; a group
+  of pictures of large pictures is thousands of packets, and one lost in
+  them is past what a WebRTC connection keeps to send again — or, over UDP,
+  anything can ask for again — so the picture broke until the next
+  keyframe. Where the newest keyframe is more than a second behind, such a
+  player now waits for the next one: its first picture comes up to a group
+  of pictures later, but whole. An RTSP player over TCP, which its
+  connection paces and which loses nothing, still starts at once.
+
 - **A `WebRtcPeer` that falls behind goes on from a keyframe.** Its track
   sinks share one outbox; a peer backed up as far as it keeps lets go of
   what it holds and sends each track from its next keyframe, where it used

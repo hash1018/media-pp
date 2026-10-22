@@ -674,12 +674,13 @@ fn a_player_catches_up_on_large_pictures_in_time() {
         ffmpeg::Rational(1, 90_000),
     );
     let mut sinks = cam.publish(&[video]).unwrap();
-    // Two seconds of 100 kB pictures from one keyframe, in Annex B, written
-    // at once: some four thousand RTP packets for the player to catch up on
-    // in one. Nothing decodes them; the player only puts them back together.
-    // The keyframe carries its parameter sets, as one a player can start at
-    // does — a track sink refuses one that has none.
-    let pictures = 50usize;
+    // Just under a second of 100 kB pictures from one keyframe, in Annex B,
+    // written at once — as much as a player joins at a keyframe with (see
+    // `PLAYER_JOIN_WITHIN`): some two thousand RTP packets for it to catch
+    // up on in one. Nothing decodes them; the player only puts them back
+    // together. The keyframe carries its parameter sets, as one a player
+    // can start at does — a track sink refuses one that has none.
+    let pictures = 24usize;
     for n in 0..pictures as i64 {
         let mut data = match n {
             0 => vec![
@@ -714,10 +715,10 @@ fn a_player_catches_up_on_large_pictures_in_time() {
         "only {} of {pictures} pictures arrived",
         client.received(mids[0]).len()
     );
-    // At most two seconds of pictures at twice their speed: one second at
+    // Under a second of pictures at twice their speed: half a second at
     // most, with room.
     assert!(
-        took < Duration::from_millis(1_800),
+        took < Duration::from_millis(1_400),
         "{pictures} pictures took {took:?} to catch up on"
     );
     runner.stop();
@@ -1015,5 +1016,83 @@ fn ice_servers_are_told_to_clients_let_in_and_no_one_else() {
     assert_eq!(page.matches("</script>").count(), 1, "the page's own alone");
     drop(endpoint);
     camera.stop();
+    runner.stop();
+}
+
+/// A player joins at the newest keyframe only where it is at most a second
+/// behind the newest picture; further, it waits for the next keyframe
+/// rather than be sent the whole group of pictures at twice its speed.
+#[test]
+fn a_player_far_behind_the_newest_keyframe_starts_at_the_next() {
+    let (runner, handle, cam, _live) = server();
+    let video = TrackFormat::new(
+        {
+            let mut parameters = ffmpeg::codec::Parameters::new();
+            // SAFETY: parameters this test owns alone; plain fields.
+            unsafe {
+                (*parameters.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
+                (*parameters.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+                (*parameters.as_mut_ptr()).width = 640;
+                (*parameters.as_mut_ptr()).height = 360;
+            }
+            parameters
+        },
+        ffmpeg::Rational(1, 90_000),
+    );
+    let mut sinks = cam.publish(&[video]).unwrap();
+    // Picture `n` at 25 a second; a keyframe where `key` says, with its
+    // parameter sets.
+    let mut write = |n: i64, key: bool| {
+        let mut data = if key {
+            vec![
+                0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65,
+            ]
+        } else {
+            vec![0, 0, 0, 1, 0x41]
+        };
+        data.resize(2_000, 0xAB);
+        let mut packet = ffmpeg::Packet::copy(&data);
+        packet.set_pts(Some(n * 3_600));
+        packet.set_dts(Some(n * 3_600));
+        packet.set_time_base(ffmpeg::Rational(1, 90_000));
+        if key {
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+        }
+        crate::element::RawSink::consume(&mut sinks[0], crate::buffer::MediaBuffer::packet(packet))
+            .unwrap();
+    };
+    // Two seconds from one keyframe: the newest picture is 1.96 s past it.
+    for n in 0..50 {
+        write(n, n == 0);
+    }
+
+    let mut client = Client::new();
+    let (offer, pending, mids, _) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+    let (_, answer) = handle.play("cam", &offer).unwrap();
+    client.accept(pending, &answer);
+    assert!(client.run_until(Duration::from_secs(10), |client| client.connected()));
+    client.run_until(Duration::from_millis(500), |_| false);
+    assert!(
+        client.received(mids[0]).is_empty(),
+        "nothing of the old group of pictures: {} arrived",
+        client.received(mids[0]).len()
+    );
+
+    // The next group begins: the player starts at its keyframe.
+    for n in 50..56 {
+        write(n, n == 50);
+    }
+    assert!(
+        client.run_until(Duration::from_secs(10), |client| {
+            client.received(mids[0]).len() >= 5
+        }),
+        "the next group arrives"
+    );
+    let received = client.received(mids[0]);
+    assert!(received[0], "it starts at the next keyframe");
+    assert!(
+        received.len() <= 6,
+        "and at nothing before it: {received:?}"
+    );
     runner.stop();
 }

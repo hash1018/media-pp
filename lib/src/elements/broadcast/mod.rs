@@ -41,6 +41,15 @@ pub(crate) use state::time_base;
 #[cfg(feature = "rtsp-server")]
 pub(crate) use timeline::same_shape;
 
+/// How far behind the newest packet a server's player may join at a
+/// keyframe; further, and it starts at the next one. What it joins with is
+/// sent at twice the stream's speed, and a second of a large picture's
+/// packets is as much as a burst can carry without losing what cannot be
+/// sent again — so a player starts up to a group of pictures later, but
+/// whole.
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+pub(crate) const PLAYER_JOIN_WITHIN: Duration = Duration::from_secs(1);
+
 use state::State;
 
 /// Why a [`Broadcast`] or what it hands out refused something.
@@ -314,6 +323,15 @@ impl Broadcast {
     /// keyframe the broadcast holds. See [`BroadcastReader`].
     pub fn subscribe(&self) -> BroadcastReader {
         BroadcastReader::new(Arc::clone(&self.shared))
+    }
+
+    /// A reader as [`Self::subscribe`] makes one, but one that joins at the
+    /// newest keyframe only where it is at most `within` behind the newest
+    /// packet, and at the next keyframe else: for a player across a network,
+    /// to which what it joins with is sent faster than the stream goes.
+    #[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+    pub(crate) fn subscribe_within(&self, within: Duration) -> BroadcastReader {
+        BroadcastReader::joining_within(Arc::clone(&self.shared), Some(within))
     }
 
     /// The tracks of the run going now, or of the last one where none is —

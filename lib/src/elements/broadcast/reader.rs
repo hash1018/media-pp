@@ -99,6 +99,10 @@ pub struct BroadcastReader {
     /// broadcast's wakes that next one is — so that it is left once, not
     /// each time it is polled before then.
     waiting: Option<(u64, Waker)>,
+    /// How far behind the newest packet a keyframe it joins at may be;
+    /// further, and it waits for the next one. `None` joins at the newest
+    /// keyframe however far behind.
+    join_within: Option<Duration>,
 }
 
 /// Other tracks' packets written before the keyframe a reader starts at
@@ -121,6 +125,12 @@ struct Back {
 
 impl BroadcastReader {
     pub(super) fn new(shared: Arc<Shared>) -> Self {
+        Self::joining_within(shared, None)
+    }
+
+    /// A reader that joins at the newest keyframe only where it is at most
+    /// `within` behind the newest packet, and at the next keyframe else.
+    pub(super) fn joining_within(shared: Arc<Shared>, within: Option<Duration>) -> Self {
         shared
             .state
             .lock()
@@ -136,6 +146,7 @@ impl BroadcastReader {
             back_from: None,
             back: None,
             waiting: None,
+            join_within: within,
         }
     }
 
@@ -273,7 +284,7 @@ impl BroadcastReader {
 
     /// Starts reading at where a reader joining now starts.
     fn join(&mut self, state: &State) {
-        let join = state.join_at();
+        let join = state.join_at(self.join_within);
         self.next = join.next;
         self.waiting_for_start = join.waiting;
         self.back_from = Some(join.back_from);

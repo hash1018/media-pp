@@ -637,9 +637,15 @@ impl Session {
         let Role::Play(playing) = &mut self.role else {
             return Ok(());
         };
-        let (source, tracks) =
-            BroadcastSource::new(format!("webrtc-{}-reader", self.id), &self.broadcast)
-                .map_err(|error| error.to_string())?;
+        // Not a whole group of pictures to catch up on at twice the stream's
+        // speed: past what the connection keeps to send again, a packet lost
+        // in it breaks the picture until the next keyframe anyway.
+        let (source, tracks) = BroadcastSource::joining_within(
+            format!("webrtc-{}-reader", self.id),
+            &self.broadcast,
+            crate::elements::broadcast::PLAYER_JOIN_WITHIN,
+        )
+        .map_err(|error| error.to_string())?;
         playing.mids = vec![None; tracks.len()];
         let mut sinks = Vec::new();
         for (index, track) in tracks.iter().enumerate() {
