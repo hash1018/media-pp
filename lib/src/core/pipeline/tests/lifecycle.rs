@@ -302,7 +302,14 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
     );
 
     pipeline.run().unwrap();
-    thread::sleep(Duration::from_millis(100));
+    // Both running, however slowly they start on a busy machine: a fixed
+    // wait here once stopped them before the audio source had made a
+    // buffer, under a whole suite's load.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while video_count.load(Ordering::SeqCst) == 0 || audio_count.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "both branches receive something");
+        thread::sleep(Duration::from_millis(5));
+    }
     pipeline.stop();
 
     // Would hang here if `stop()` only reached one of the two sources
