@@ -1172,3 +1172,90 @@ fn a_camera_that_changes_its_picture_size_decodes_on_through_the_server() {
         "the decoder goes on at the new size: {sizes:?}"
     );
 }
+
+/// The same through a WHIP publisher of the server's own, as an encoder
+/// sends: in through the publish session, out through WHEP, in one track
+/// the whole way, decoded on at the new size.
+#[test]
+fn a_whip_publisher_that_changes_its_picture_size_plays_on_through_the_server() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::buffer::MediaBuffer;
+    use crate::elements::{
+        AppSink, SwDecoder, WhepOptions, WhepSource, WhipOptions, WhipPublisher,
+    };
+
+    let (parameters, small) = crate::test_support::h264_configured((320, 240));
+    let (_, large) = crate::test_support::h264_configured((640, 360));
+    let (runner, handle, _cam, live) = server();
+    let http = handle.serve_http("127.0.0.1:0").unwrap();
+    let mut publisher =
+        WhipPublisher::create("publisher", &http.whip_url("live"), WhipOptions::default()).unwrap();
+    let track = publisher.add_track(&parameters).unwrap();
+    let sink = publisher
+        .open()
+        .expect("the server takes the publisher")
+        .take(track)
+        .unwrap();
+    let (switch, stop) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let camera = crate::test_support::changing_camera(
+        sink,
+        small,
+        large,
+        Arc::clone(&switch),
+        Arc::clone(&stop),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !live.is_live() {
+        assert!(Instant::now() < deadline, "the publisher is taken in");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (source, streams) =
+        WhepSource::open("player", &http.whep_url("live"), WhepOptions::default()).unwrap();
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&sizes);
+    let decoder = SwDecoder::new("decoder", streams[0].parameters().clone()).unwrap();
+    let (pipeline, ()) = Pipeline::new("player", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(decoder)
+            .to(AppSink::new("screen", move |buf| {
+                if let MediaBuffer::Video(frame) = &buf {
+                    seen.lock().unwrap().push((frame.width(), frame.height()));
+                }
+                Ok(())
+            }))?;
+        ctx.attach(source, streams[0].index(), branch)?;
+        Ok(())
+    })
+    .unwrap();
+    pipeline.run().unwrap();
+
+    let wait = |size: (u32, u32)| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !sizes.lock().unwrap().contains(&size) {
+            assert!(Instant::now() < deadline, "no {size:?} picture decoded");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait((320, 240));
+    switch.store(true, Ordering::Release);
+    wait((640, 360));
+    pipeline.stop();
+    stop.store(true, Ordering::Release);
+    camera.join().unwrap();
+    drop(http);
+    runner.stop();
+
+    let sizes = sizes.lock().unwrap();
+    let first_large = sizes.iter().position(|&size| size == (640, 360)).unwrap();
+    assert!(
+        sizes[first_large..].iter().all(|&size| size == (640, 360)),
+        "the decoder goes on at the new size: {sizes:?}"
+    );
+}

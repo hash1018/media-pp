@@ -1632,7 +1632,7 @@ pub(crate) fn hdr10_beside(
 /// its keyframe — a camera reconfigured partway — until `stop` is set.
 #[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
 pub(crate) fn changing_camera(
-    mut sink: crate::elements::BroadcastSink,
+    mut sink: impl crate::element::RawSink + Send + 'static,
     small: Vec<ffmpeg_next::Packet>,
     large: Vec<ffmpeg_next::Packet>,
     switch: Arc<std::sync::atomic::AtomicBool>,
