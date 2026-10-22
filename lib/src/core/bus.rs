@@ -12,7 +12,12 @@
 
 use std::{
     fmt,
-    sync::{Arc, mpsc::RecvTimeoutError},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::RecvTimeoutError,
+    },
+    task::{Poll, Waker},
     time::Duration,
 };
 
@@ -200,6 +205,9 @@ fn log_error(pp_log: &PpLog, element_type: ElementType, name: &str, error: &Erro
 pub struct Bus {
     tx: Sender<BusMessage>,
     element_id: Option<ElementId>,
+    /// After `tx`, so it drops after it: the last sender wakes an async
+    /// wait only once the channel already reads as disconnected.
+    sender: Sending,
 }
 
 /// The receiving half of a [`Bus`], held by whoever owns the pipeline.
@@ -211,6 +219,53 @@ pub struct Bus {
 /// everything is [`BusEvent::Finished`], and the usual loop stops it there.
 pub struct BusReceiver {
     rx: Receiver<BusMessage>,
+    waiting: Arc<Waiting>,
+}
+
+/// What a [`BusReceiver::recv_async`] waits on: the wakers of those waiting,
+/// and how many [`Bus`] senders are left to wake them.
+///
+/// crossbeam's channel has no async side, and says nothing when its last
+/// sender goes, so the senders are counted here beside it.
+#[derive(Default)]
+struct Waiting {
+    wakers: Mutex<Vec<Waker>>,
+    senders: AtomicUsize,
+}
+
+impl Waiting {
+    fn wake(&self) {
+        let wakers = std::mem::take(&mut *self.wakers.lock().unwrap_or_else(|p| p.into_inner()));
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+/// One [`Bus`] sender's part in [`Waiting::senders`]: counted as it is
+/// made or cloned, and waking every waiter as the last one goes, since
+/// nothing will be posted after it.
+struct Sending(Arc<Waiting>);
+
+impl Sending {
+    fn new(waiting: Arc<Waiting>) -> Self {
+        waiting.senders.fetch_add(1, Ordering::AcqRel);
+        Self(waiting)
+    }
+}
+
+impl Clone for Sending {
+    fn clone(&self) -> Self {
+        Self::new(Arc::clone(&self.0))
+    }
+}
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        if self.0.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.wake();
+        }
+    }
 }
 
 /// One bus event together with the stable graph identity of the element
@@ -234,12 +289,14 @@ impl Bus {
     /// their [`BusMessage::element_id`] remains `None`.
     pub fn new() -> (Bus, BusReceiver) {
         let (tx, rx) = unbounded();
+        let waiting = Arc::new(Waiting::default());
         (
             Bus {
                 tx,
                 element_id: None,
+                sender: Sending::new(Arc::clone(&waiting)),
             },
-            BusReceiver { rx },
+            BusReceiver { rx, waiting },
         )
     }
 
@@ -247,15 +304,15 @@ impl Bus {
     /// element of it.
     pub(crate) fn for_pipeline(&self) -> Bus {
         Bus {
-            tx: self.tx.clone(),
             element_id: None,
+            ..self.clone()
         }
     }
 
     pub(crate) fn for_element(&self, element_id: ElementId) -> Bus {
         Bus {
-            tx: self.tx.clone(),
             element_id: Some(element_id),
+            ..self.clone()
         }
     }
 
@@ -333,6 +390,7 @@ impl Bus {
             element_id: self.element_id,
             event,
         });
+        self.sender.0.wake();
     }
 }
 
@@ -414,6 +472,46 @@ impl BusReceiver {
     /// have been drained.
     pub fn recv_message(&self) -> Option<BusMessage> {
         self.rx.recv().ok()
+    }
+
+    /// Waits for the next event without holding a thread, for a caller on an
+    /// async runtime — any: nothing here is tied to one.
+    ///
+    /// `None` once every [`Bus`] sender has gone and what was already posted
+    /// has been received, as [`Self::recv`] says it: which a pipeline's bus
+    /// does once [`Pipeline::stop`](crate::pipeline::Pipeline::stop) has
+    /// returned, so a task waiting here hears of a stop made elsewhere by
+    /// the bus ending. Dropping the future gives up the wait and loses no
+    /// event.
+    pub async fn recv_async(&self) -> Option<BusEvent> {
+        std::future::poll_fn(|cx| {
+            if let Some(ready) = self.ready() {
+                return Poll::Ready(ready);
+            }
+            self.waiting
+                .wakers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(cx.waker().clone());
+            // Looked at again with the waker in place: a post or the last
+            // sender going between the first look and now woke nothing.
+            match self.ready() {
+                Some(ready) => Poll::Ready(ready),
+                None => Poll::Pending,
+            }
+        })
+        .await
+        .map(|message| message.event)
+    }
+
+    /// What a wait has to answer now, if anything: a message, or `None`
+    /// for the channel having ended.
+    fn ready(&self) -> Option<Option<BusMessage>> {
+        match self.rx.try_recv() {
+            Ok(message) => Some(Some(message)),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Some(None),
+            Err(crossbeam_channel::TryRecvError::Empty) => None,
+        }
     }
 
     /// Receives one currently queued message without blocking.
@@ -523,5 +621,96 @@ mod tests {
             rx.recv_timeout(wait).err(),
             Some(RecvTimeoutError::Disconnected)
         );
+    }
+
+    /// Runs `future` to its end on this thread: an executor of the least
+    /// kind, so the async wait is tested without a runtime of any one.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        struct Unpark(std::thread::Thread);
+        impl std::task::Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return output;
+            }
+            std::thread::park();
+        }
+    }
+
+    /// An async wait is woken by a post from another thread, and by the
+    /// last sender going — once what was posted before it has been
+    /// received — so a task that waits on a pipeline's bus hears of a stop.
+    #[test]
+    fn recv_async_is_woken_by_a_post_and_by_the_last_sender_going() {
+        let (bus, rx) = Bus::new();
+        let pp_log = PpLog::new("Test", "test", None);
+        let element = bus.for_element(ElementId::for_test(1));
+
+        let posting = std::thread::spawn({
+            let pp_log = pp_log.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(50));
+                element.post(&pp_log, BusEvent::Finished);
+                std::thread::sleep(Duration::from_millis(50));
+                // The last senders go: this one, and `bus` below.
+                drop(element);
+            }
+        });
+        assert!(matches!(
+            block_on(rx.recv_async()),
+            Some(BusEvent::Finished)
+        ));
+        drop(bus);
+        posting.join().unwrap();
+        assert!(block_on(rx.recv_async()).is_none(), "the bus ended");
+    }
+
+    /// What was posted before the last sender went is still received by an
+    /// async wait, ahead of the end.
+    #[test]
+    fn recv_async_hands_over_what_was_posted_before_the_end() {
+        let (bus, rx) = Bus::new();
+        let pp_log = PpLog::new("Test", "test", None);
+        bus.post(&pp_log, BusEvent::Finished);
+        drop(bus);
+        assert!(matches!(
+            block_on(rx.recv_async()),
+            Some(BusEvent::Finished)
+        ));
+        assert!(block_on(rx.recv_async()).is_none());
+    }
+
+    /// A pipeline stopped from another thread ends the bus a task waits on:
+    /// what a task watching a live pipeline relies on to hear of a stop it
+    /// did not make itself.
+    #[test]
+    fn recv_async_ends_once_the_pipeline_is_stopped() {
+        use crate::elements::{FrameCounter, TestVideoOptions, TestVideoSource};
+        use crate::pipeline::Pipeline;
+
+        let source = TestVideoSource::new("source", TestVideoOptions::default());
+        let (counter, _pictures) = FrameCounter::new("counter");
+        let (pipeline, ()) = Pipeline::new("watched", source, |source, ctx| {
+            ctx.attach(source, 0, ctx.branch().to(counter)?)?;
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        let stopping = std::thread::spawn({
+            let pipeline = Arc::clone(&pipeline);
+            move || {
+                std::thread::sleep(Duration::from_millis(100));
+                pipeline.stop();
+            }
+        });
+        // Returns at all only because the stop ended the bus.
+        block_on(async { while pipeline.bus().recv_async().await.is_some() {} });
+        stopping.join().unwrap();
     }
 }
