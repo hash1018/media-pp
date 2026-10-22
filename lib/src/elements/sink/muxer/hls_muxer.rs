@@ -432,6 +432,7 @@ impl HlsMuxer {
                 destination: None,
                 timeline: None,
                 prune: None,
+                keeps_parameter_sets: self.options.segment_format == HlsSegmentFormat::Fmp4,
             },
         ))
     }

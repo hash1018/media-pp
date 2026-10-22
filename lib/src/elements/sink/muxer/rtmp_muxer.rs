@@ -264,6 +264,7 @@ impl RtmpMuxer {
                 destination: Some(self.redacted_url),
                 timeline: None,
                 prune: None,
+                keeps_parameter_sets: false,
             },
         ))
     }

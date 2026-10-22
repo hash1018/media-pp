@@ -336,6 +336,8 @@ impl DashMuxer {
                 destination: None,
                 timeline: None,
                 prune,
+                // Its segments are fragmented MP4, under one init segment.
+                keeps_parameter_sets: true,
             },
         ))
     }

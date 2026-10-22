@@ -28,6 +28,22 @@ pub enum MuxerTrackError {
         /// Where the track was in its own muxer's order.
         index: usize,
     },
+    /// The track's H.264 or H.265 pictures changed partway — another
+    /// size, profile, chroma format or bit depth — and the output keeps
+    /// the parameter sets it began with in its header, as an MP4 does.
+    /// Reported once; the track writes nothing more, and the output is
+    /// finished with what came before as the track ends.
+    #[error(
+        "track {track} changed its pictures partway, from {was} to {now}; its output keeps the first in its header"
+    )]
+    FormatChanged {
+        /// The track's name, as its `add_stream` gave it.
+        track: String,
+        /// What its pictures were.
+        was: String,
+        /// What they changed to.
+        now: String,
+    },
 }
 
 /// One track of one muxer, as its `add_stream` registered it — the way to

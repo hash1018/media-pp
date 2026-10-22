@@ -24,6 +24,7 @@ mod audio_format;
 pub mod broadcast;
 pub mod driver;
 pub mod filter;
+pub(crate) mod parameter_sets;
 pub(crate) mod rtsp;
 pub mod sink;
 pub mod source;

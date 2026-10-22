@@ -214,6 +214,7 @@ impl RtspMuxer {
                 // shared one.
                 timeline: Some(|| Box::new(Timeline::default())),
                 prune: None,
+                keeps_parameter_sets: false,
             },
         ))
     }

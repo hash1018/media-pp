@@ -21,12 +21,14 @@ use std::sync::{Arc, Mutex};
 use ffmpeg_next as ffmpeg;
 
 use super::prune::SegmentPruner;
+use super::tracks::MuxerTrackError;
 use super::tracks::{MuxerId, MuxerSinks};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Flow, RawSink, element_pp_log},
+    elements::parameter_sets::ShapeWatch,
     error::{Error, Result},
     pp_log::{PpLog, pp_error, pp_info},
     stream::StreamEvent,
@@ -46,6 +48,9 @@ pub(super) struct PendingStream {
     /// Taken from the parameters the track was registered with, so its sink
     /// can refuse the other medium's packets at wiring time.
     pub(super) kind: Option<MediaKind>,
+    /// What the track's pictures are, for an output that keeps its
+    /// parameter sets in its header — see [`TrackOptions::keeps_parameter_sets`].
+    pub(super) watch: Option<ShapeWatch>,
 }
 
 impl PendingStream {
@@ -58,6 +63,7 @@ impl PendingStream {
             name: name.into().into(),
             input_time_base,
             kind: MediaKind::packet_for(parameters.medium()),
+            watch: ShapeWatch::new(parameters),
         }
     }
 }
@@ -101,6 +107,11 @@ pub(super) struct TrackOptions {
     /// each keyframe written - where a segment may have been cut. `None`
     /// for an output that keeps what it writes.
     pub(super) prune: Option<SegmentPruner>,
+    /// Whether the output keeps each track's parameter sets in its header
+    /// for the whole of it — an MP4's sample entry — so that a track whose
+    /// H.264 or H.265 pictures change partway is refused from there, rather
+    /// than written into a file whose header says other pictures.
+    pub(super) keeps_parameter_sets: bool,
 }
 
 /// Turns an output whose header has been written into one sink per track.
@@ -155,6 +166,8 @@ pub(super) fn open_tracks<M: Muxer>(
                     kind: stream.kind,
                     finish_on_stop: options.finish_on_stop,
                     timeline: options.timeline.map(|make| make()),
+                    watch: stream.watch.filter(|_| options.keeps_parameter_sets),
+                    refused: false,
                     done: false,
                 })
             })
@@ -253,6 +266,11 @@ struct TrackSink<M> {
     finish_on_stop: bool,
     /// `Some` for a track that follows a seek — see [`TrackTimeline`].
     timeline: Option<Box<dyn TrackTimeline>>,
+    /// What its pictures began as, where the output keeps them in its
+    /// header.
+    watch: Option<ShapeWatch>,
+    /// Set once its pictures changed: what follows is not written.
+    refused: bool,
     /// Set once this track has counted itself finished, so an `Eos` and a
     /// later `Stop` for the same track cannot count it twice.
     done: bool,
@@ -308,6 +326,27 @@ impl<M: Muxer> RawSink for TrackSink<M> {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
+                if self.refused {
+                    return Ok(());
+                }
+                if packet.is_key()
+                    && let (Some(watch), Some(data)) = (&mut self.watch, packet.data())
+                    && let Some((was, now)) = watch.changed(data)
+                {
+                    // Said once; what follows goes nowhere, and the output
+                    // is finished with what came before as the track ends.
+                    self.refused = true;
+                    pp_error!(
+                        self,
+                        "the pictures changed from {was} to {now}; nothing more is written"
+                    );
+                    return Err(MuxerTrackError::FormatChanged {
+                        track: self.name.to_string(),
+                        was: was.to_string(),
+                        now: now.to_string(),
+                    }
+                    .into());
+                }
                 // A packet of its own, not changed in place: the
                 // `Arc<Packet>` may be shared with another branch off the
                 // same `Tee`, which must not see this track's timestamps or
@@ -463,6 +502,7 @@ mod tests {
                 destination: None,
                 timeline: None,
                 prune: None,
+                keeps_parameter_sets: false,
             },
         );
         assert!(seek_refused(&mut sink));
@@ -489,6 +529,7 @@ mod tests {
                 destination: None,
                 timeline: None,
                 prune: None,
+                keeps_parameter_sets: false,
             },
         );
 
@@ -565,6 +606,7 @@ mod tests {
                 destination: Some(Arc::from("rtsp://example/test")),
                 timeline: Some(|| Box::new(NoTimeline)),
                 prune: None,
+                keeps_parameter_sets: false,
             },
         );
         assert!(!seek_refused(&mut sink));

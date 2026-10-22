@@ -325,6 +325,7 @@ impl FileMuxer {
         } else {
             self.output.write_header().map_err(FileMuxerError::from)?;
         }
+        let keeps_parameter_sets = quicktime(self.output.format().name());
         Ok(open_tracks::<Self>(
             self.id,
             self.output,
@@ -334,6 +335,7 @@ impl FileMuxer {
                 destination: None,
                 timeline: None,
                 prune: None,
+                keeps_parameter_sets,
             },
         ))
     }
@@ -598,6 +600,71 @@ mod tests {
         let input = ffmpeg::format::input(&path).expect("muxed file must be readable back");
         assert_eq!(input.streams().count(), 1);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Pictures that change size partway are refused by an MP4 from there,
+    /// said once, and the file finished holds what came before: its header
+    /// keeps the first parameter sets for the whole file. Matroska takes
+    /// them all, as players read new sets in band there.
+    #[test]
+    fn an_mp4_refuses_a_track_whose_pictures_change_partway() {
+        use crate::elements::MuxerTrackError;
+
+        let (parameters, small) = crate::test_support::h264_configured((320, 240));
+        let (_, large) = crate::test_support::h264_configured((640, 360));
+        for (extension, refuses) in [("mp4", true), ("mkv", false)] {
+            let path = std::env::temp_dir().join(format!(
+                "file_muxer_changed_{}.{extension}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let mut muxer = FileMuxer::create(&path, Mp4Layout::Standard).expect("create");
+            let track = muxer
+                .add_stream(
+                    "video",
+                    StreamInfo::new(parameters.clone(), ffmpeg::Rational::new(1, 30)),
+                )
+                .expect("add_stream");
+            let mut sink = muxer.open().expect("open").take(track).expect("take");
+            let mut refused = 0;
+            for (index, packet) in small.iter().chain(&large).enumerate() {
+                let mut packet = packet.clone();
+                packet.set_pts(Some(index as i64));
+                packet.set_dts(Some(index as i64));
+                match sink.consume(MediaBuffer::Packet(Arc::new(packet).into())) {
+                    Ok(()) => {}
+                    Err(Error::MuxerTrackError(MuxerTrackError::FormatChanged {
+                        track,
+                        was,
+                        now,
+                    })) => {
+                        assert_eq!(track, "video");
+                        assert!(was.starts_with("320x240") && now.starts_with("640x360"));
+                        refused += 1;
+                    }
+                    Err(error) => panic!("{extension}: {error}"),
+                }
+            }
+            sink.stream_event(&crate::stream::StreamEvent::Eos)
+                .expect("the track ends");
+            drop(sink);
+
+            assert_eq!(
+                refused,
+                usize::from(refuses),
+                "{extension}: said once, if at all"
+            );
+            let mut input = ffmpeg::format::input(&path).expect("the file is finished");
+            let written = input.packets().count();
+            let expected = if refuses {
+                small.len()
+            } else {
+                small.len() + large.len()
+            };
+            assert_eq!(written, expected, "{extension}");
+            drop(input);
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     /// Regression test against a leaked file handle: dropping every track

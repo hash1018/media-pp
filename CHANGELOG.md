@@ -27,7 +27,20 @@ compile error with no explanation.
   `StreamInfo::new` and `with_frame_rate` make one. A field can now be added
   without breaking anything that reads it.
 
+- **`MuxerTrackError` has a `FormatChanged` variant**, so a `match` on it
+  needs an arm for it — see below.
+
 ### Changed
+
+- **A muxer of MP4 refuses a track whose pictures change partway.** An
+  H.264 or H.265 stream that goes on with other parameter sets — another
+  size, profile, chroma format or bit depth — was written into a file
+  whose header kept the first, which players show wrongly or not at all.
+  `FileMuxer` to an MP4 or MOV, `HlsMuxer` of fMP4 and `DashMuxer` now
+  answer the first keyframe of the new pictures with
+  `MuxerTrackError::FormatChanged`, write nothing more of the track, and
+  finish the output with what came before. Matroska, MPEG-TS, RTMP and
+  RTSP write on as before.
 
 - **A WebRTC player, or an RTSP one over UDP, starts at most a second
   behind.** A player joins at the newest keyframe its path's broadcast
@@ -84,6 +97,15 @@ compile error with no explanation.
   `match` on `RtspSourceError` needs an arm for each.
 
 ### Added
+
+- **`BusEvent::FormatChanged`: a source's stream changed its pictures
+  partway.** A camera reconfigured, or a WebRTC sender lowering its
+  picture size, goes on with new H.264 or H.265 parameter sets, and the
+  `StreamInfo` the source described it with no longer says what it
+  carries. `RtspSource`, `WhepSource` and `WebRtcTrackSource` now say so,
+  once for each output, at the first keyframe of the new pictures, and go
+  on handing the stream out; a software decoder follows it. Open the
+  source again to build what follows it for the stream as it is now.
 
 - **`WebRtcServerOptions::ice_servers`: STUN and TURN servers told to
   WHIP and WHEP clients.** As RFC 9725 tells them — a `Link` header each,

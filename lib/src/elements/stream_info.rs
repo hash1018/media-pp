@@ -20,8 +20,9 @@ use ffmpeg_next as ffmpeg;
 ///
 /// It is the stream as it began. A stream whose parameters change partway —
 /// a camera reconfigured, a WebRTC sender that changes its picture size —
-/// no longer matches it from there, and the way on is a new source, opened
-/// on what the stream is now.
+/// no longer matches it from there; a source that can tell says so on its
+/// bus ([`BusEvent::FormatChanged`](crate::bus::BusEvent::FormatChanged)),
+/// and the way on is a new source, opened on what the stream is now.
 ///
 /// [`Broadcast::publish`]: crate::elements::Broadcast::publish
 #[derive(Clone)]

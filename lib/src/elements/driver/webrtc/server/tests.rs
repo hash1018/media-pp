@@ -1096,3 +1096,89 @@ fn a_player_far_behind_the_newest_keyframe_starts_at_the_next() {
     );
     runner.stop();
 }
+
+/// A camera that changes its picture size partway, played over WHEP: the
+/// player's `WhepSource` says so on its bus, once, and a software decoder
+/// after it goes on with the new size.
+#[test]
+fn a_camera_that_changes_its_picture_size_is_said_to_and_decodes_on() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::buffer::MediaBuffer;
+    use crate::bus::BusEvent;
+    use crate::elements::{AppSink, SwDecoder, WhepOptions, WhepSource};
+
+    let (parameters, small) = crate::test_support::h264_configured((320, 240));
+    let (_, large) = crate::test_support::h264_configured((640, 360));
+    let (runner, handle, cam, _live) = server();
+    let http = handle.serve_http("127.0.0.1:0").unwrap();
+    let sink = cam
+        .publish(&[StreamInfo::new(parameters, ffmpeg::Rational::new(1, 30))])
+        .unwrap()
+        .remove(0);
+    let (switch, stop) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let camera = crate::test_support::changing_camera(
+        sink,
+        small,
+        large,
+        Arc::clone(&switch),
+        Arc::clone(&stop),
+    );
+
+    let (source, streams) =
+        WhepSource::open("player", &http.whep_url("cam"), WhepOptions::default()).unwrap();
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&sizes);
+    let decoder = SwDecoder::new("decoder", streams[0].parameters().clone()).unwrap();
+    let (pipeline, ()) = Pipeline::new("player", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(decoder)
+            .to(AppSink::new("screen", move |buf| {
+                if let MediaBuffer::Video(frame) = &buf {
+                    seen.lock().unwrap().push((frame.width(), frame.height()));
+                }
+                Ok(())
+            }))?;
+        ctx.attach(source, streams[0].index(), branch)?;
+        Ok(())
+    })
+    .unwrap();
+    pipeline.run().unwrap();
+
+    let wait = |size: (u32, u32)| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !sizes.lock().unwrap().contains(&size) {
+            assert!(Instant::now() < deadline, "no {size:?} picture decoded");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait((320, 240));
+    switch.store(true, Ordering::Release);
+    wait((640, 360));
+    pipeline.stop();
+    stop.store(true, Ordering::Release);
+    camera.join().unwrap();
+    drop(http);
+    runner.stop();
+
+    let changed: Vec<_> = pipeline
+        .bus()
+        .iter()
+        .filter(|event| matches!(event, BusEvent::FormatChanged { .. }))
+        .collect();
+    assert!(
+        matches!(&changed[..], [BusEvent::FormatChanged { output: 0, .. }]),
+        "said once, of the picture's output: {changed:?}"
+    );
+    let sizes = sizes.lock().unwrap();
+    let first_large = sizes.iter().position(|&size| size == (640, 360)).unwrap();
+    assert!(
+        sizes[first_large..].iter().all(|&size| size == (640, 360)),
+        "the decoder goes on at the new size: {sizes:?}"
+    );
+}

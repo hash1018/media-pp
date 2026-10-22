@@ -11,9 +11,14 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    bus::Bus,
     contract::{MediaKind, OutputContract, PortContract},
     element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
-    elements::{RtspOptions, rtsp::redact},
+    elements::{
+        RtspOptions,
+        parameter_sets::{OutputWatches, report_change},
+        rtsp::redact,
+    },
     error::Result,
     pad::SrcPad,
     produce::source_stage,
@@ -197,6 +202,12 @@ struct Reading {
     input: ffmpeg::format::context::Input,
     /// What each stream's output declares, by stream index.
     contracts: Vec<OutputContract>,
+    /// Whether each stream still carries the pictures it was described
+    /// with — see [`crate::bus::BusEvent::FormatChanged`].
+    watches: OutputWatches,
+    /// Where a stream that changed is reported, once the pipeline has
+    /// wired this.
+    bus: Option<Bus>,
     /// For a session [`RtspSource::listen`] received, what bounds each
     /// read. Declared after `input` on purpose: FFmpeg holds a pointer to
     /// its interrupt until the input is closed, and fields drop in the
@@ -501,6 +512,8 @@ impl RtspSource {
                     pp_log,
                     input,
                     contracts,
+                    watches: OutputWatches::new(&streams),
+                    bus: None,
                     listening,
                 },
             )),
@@ -577,10 +590,18 @@ impl Source for Reading {
                 if let Some(time_base) = self.stream(index).map(|stream| stream.time_base()) {
                     packet.set_time_base(time_base);
                 }
-                Ok(Produced::On(
-                    index,
-                    MediaBuffer::Packet(Arc::new(packet).into()),
-                ))
+                let buf = MediaBuffer::Packet(Arc::new(packet).into());
+                if let Some(change) = self.watches.changed(index, &buf) {
+                    report_change(
+                        self.bus.as_ref(),
+                        &self.pp_log,
+                        ElementType::RtspSource,
+                        self.pp_log.name(),
+                        index,
+                        change,
+                    );
+                }
+                Ok(Produced::On(index, buf))
             }
             // A real on-demand RTSP stream can send a clean EOF; a
             // live camera essentially never will, but treat it the
@@ -625,6 +646,7 @@ impl Source for Reading {
 
     fn attached(&mut self, cx: &Attached<'_>) {
         self.pp_log = cx.pp_log().clone();
+        self.bus = Some(cx.context().bus.clone());
     }
 }
 

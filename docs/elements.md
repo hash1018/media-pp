@@ -174,6 +174,24 @@ saying to turn it. Every decoder hands that on with each picture
   only when told, with `StreamInfo::with_orientation(stream.orientation()?)`;
   a stream copied through keeps it as it is.
 
+## A stream that changes partway
+
+A stream is described as it begins (`StreamInfo`). A camera reconfigured,
+or a WebRTC sender that lowers its picture size for its connection, goes on
+with new H.264 or H.265 parameter sets in band — another size, profile,
+chroma format or bit depth:
+
+- `RtspServer` and `WebRtcServer` carry it on as it comes, and `SwDecoder`
+  follows it.
+- `RtspSource`, `WhepSource` and `WebRtcTrackSource` say so on the bus,
+  once for each output (`BusEvent::FormatChanged`). What was built from the
+  old description is built anew by opening the source again.
+- A muxer whose header keeps the first parameter sets for the whole output
+  — `FileMuxer` to an MP4 or MOV, `HlsMuxer` of fMP4, `DashMuxer` — refuses
+  the track from there (`MuxerTrackError::FormatChanged`), and the output
+  is finished with what came before. Matroska and MPEG-TS take the new sets
+  as they come.
+
 ## Elements of your own
 
 An element of your own is a `Source`, a `Filter` or a `Sink` — its work

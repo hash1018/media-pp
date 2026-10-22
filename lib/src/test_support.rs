@@ -634,6 +634,37 @@ pub(crate) fn synthesize_reordered(name: &str, seconds: f64) -> Fixture {
         .expect("synthesize a reordered fixture")
 }
 
+/// Five pictures of OpenH264 at `size`, the first a keyframe with its
+/// parameter sets in band, and parameters carrying those sets, Annex-B, as
+/// the stream's configuration — as an RTSP session describes its stream.
+/// For a stream whose pictures change partway: two of these, one after the
+/// other.
+pub(crate) fn h264_configured(
+    size: (u32, u32),
+) -> (ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>) {
+    use ffmpeg_next as ffmpeg;
+
+    let (mut parameters, packets) =
+        try_encoded_packets("libopenh264", ffmpeg::format::Pixel::YUV420P, size, 128)
+            .expect("OpenH264 is always present");
+    let data = packets[0].data().expect("a keyframe");
+    let sets = &data[..data
+        .windows(5)
+        .position(|w| w[..4] == [0, 0, 0, 1] && w[4] & 0x1f == 5)
+        .expect("a picture after the sets")];
+    // SAFETY: parameters this function owns alone; the configuration is
+    // copied into a padded buffer FFmpeg allocates and frees with them.
+    unsafe {
+        let raw = parameters.as_mut_ptr();
+        let padding = ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+        let copy = ffmpeg::ffi::av_mallocz(sets.len() + padding).cast::<u8>();
+        std::ptr::copy_nonoverlapping(sets.as_ptr(), copy, sets.len());
+        (*raw).extradata = copy;
+        (*raw).extradata_size = sets.len() as i32;
+    }
+    (parameters, packets)
+}
+
 /// Five pictures from the FFmpeg encoder called `encoder`, as the parameters
 /// it describes them by and every packet it wrote — or `None`, after saying
 /// why, from a build without that encoder or one that will not take
@@ -1570,4 +1601,38 @@ pub(crate) fn hdr10_beside(
         read(Kind::AV_PKT_DATA_MASTERING_DISPLAY_METADATA),
         read(Kind::AV_PKT_DATA_CONTENT_LIGHT_LEVEL),
     )
+}
+
+/// Feeds `sink`, at thirty pictures a second, `small`'s pictures over and
+/// over until `switch` is set and `large`'s after, each run beginning at
+/// its keyframe — a camera reconfigured partway — until `stop` is set.
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+pub(crate) fn changing_camera(
+    mut sink: crate::elements::BroadcastSink,
+    small: Vec<ffmpeg_next::Packet>,
+    large: Vec<ffmpeg_next::Packet>,
+    switch: Arc<std::sync::atomic::AtomicBool>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    use crate::element::RawSink;
+    use std::sync::atomic::Ordering;
+    std::thread::spawn(move || {
+        let mut n = 0i64;
+        while !stop.load(Ordering::Acquire) {
+            let run = if switch.load(Ordering::Acquire) {
+                &large
+            } else {
+                &small
+            };
+            for packet in run {
+                let mut packet = packet.clone();
+                packet.set_pts(Some(n));
+                packet.set_dts(Some(n));
+                packet.set_duration(1);
+                n += 1;
+                let _ = sink.consume(MediaBuffer::Packet(Arc::new(packet).into()));
+                std::thread::sleep(std::time::Duration::from_millis(33));
+            }
+        }
+    })
 }
