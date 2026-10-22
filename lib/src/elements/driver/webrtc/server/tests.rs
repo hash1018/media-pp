@@ -710,3 +710,98 @@ fn a_player_catches_up_on_large_pictures_in_time() {
     );
     runner.stop();
 }
+
+/// With an `Authorize`, an offer over HTTP is put to it before anything
+/// else — one for a path not served too — and answered 401 where it is
+/// refused; the application's own `play` is not asked. A session's URL,
+/// all it takes to end it, says nothing of another session's.
+#[test]
+fn offers_over_http_are_authorized_and_session_urls_cannot_be_guessed() {
+    use crate::elements::{Access, AccessRequest, Authorize, Credentials};
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let authorize = Authorize::new(|request: &AccessRequest| {
+        request.credentials
+            == Credentials::Bearer(match request.access {
+                Access::Play => "watch".into(),
+                Access::Publish => "send".into(),
+            })
+    });
+    let (server, handle) = WebRtcServer::bind(
+        "server",
+        "127.0.0.1:0",
+        WebRtcServerOptions {
+            authorize: Some(authorize),
+            ..WebRtcServerOptions::default()
+        },
+    )
+    .expect("a loopback port is free");
+    let cam = Broadcast::new("cam", BroadcastOptions::default());
+    handle.add_path("cam", &cam, WebRtcPathMode::Play).unwrap();
+    let runner = DriverRunner::new(server);
+    runner.run().unwrap();
+    let camera = feed(&cam, &path);
+    let endpoint = handle.serve_http("127.0.0.1:0").unwrap();
+    let addr = endpoint.local_addr();
+
+    let preflight = http(addr, "OPTIONS /cam/whep HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(
+        preflight.contains("Access-Control-Allow-Headers: Content-Type, Authorization"),
+        "a page on another origin may send a token: {preflight}"
+    );
+    let post = |target: &str, authorization: &str| {
+        let mut client = Client::new();
+        let (offer, _, _, _) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+        http(
+            addr,
+            &format!(
+                "POST {target} HTTP/1.1\r\nHost: x\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{offer}",
+                offer.len()
+            ),
+        )
+    };
+    for (target, authorization) in [
+        ("/cam/whep", ""),
+        ("/cam/whep", "Authorization: Bearer send\r\n"),
+        ("/nowhere/whep", ""),
+    ] {
+        let refused = post(target, authorization);
+        assert!(
+            refused.starts_with("HTTP/1.1 401"),
+            "{target} {authorization}: {refused}"
+        );
+        assert!(refused.contains("WWW-Authenticate: Bearer"), "{refused}");
+    }
+    assert_eq!(handle.sessions(), 0);
+
+    let locations: Vec<String> = (0..2)
+        .map(|_| {
+            let answered = post("/cam/whep", "Authorization: Bearer watch\r\n");
+            assert!(answered.starts_with("HTTP/1.1 201"), "{answered}");
+            answered
+                .lines()
+                .find_map(|line| line.strip_prefix("Location: /session/"))
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let ids: Vec<SessionId> = locations.iter().map(|id| id.parse().unwrap()).collect();
+    for (location, id) in locations.iter().zip(&ids) {
+        assert_eq!(location.len(), 32, "{location}");
+        assert_eq!(&id.to_string(), location);
+    }
+    assert_ne!(
+        locations[0][..16],
+        locations[1][..16],
+        "half of an id is drawn from the server's key, not counted"
+    );
+
+    // The application's own call is its own decision.
+    let mut client = Client::new();
+    let (offer, _, _, _) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+    assert!(handle.play("cam", &offer).is_ok());
+    drop(endpoint);
+    camera.stop();
+    runner.stop();
+}

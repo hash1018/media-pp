@@ -34,7 +34,7 @@ pub mod vision;
 pub use audio_format::AudioFormat;
 pub use broadcast::{
     Broadcast, BroadcastError, BroadcastItem, BroadcastOptions, BroadcastReader, BroadcastSink,
-    BroadcastSource,
+    BroadcastSource, BroadcastStats,
 };
 pub use rtsp::{RtspOptions, RtspTransport};
 pub use video_format::VideoFormat;
@@ -113,6 +113,8 @@ pub use crate::platform::macos::videotoolbox::{
     VideoToolboxDevice, VideoToolboxDeviceError, VideoToolboxFrameFormat, VideoToolboxFramePool,
     VideoToolboxFramePoolError,
 };
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+pub use driver::{Access, AccessRequest, Authorize, Credentials};
 #[cfg(feature = "webrtc")]
 pub use driver::{
     AttachedTrack, SessionId, SessionRole, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle,

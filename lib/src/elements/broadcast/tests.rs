@@ -845,3 +845,53 @@ fn a_driven_broadcast_source_is_woken_by_writes_and_ends_with_the_broadcast() {
     drop(pipeline);
     assert_eq!(broadcast.subscribers(), 0);
 }
+
+#[test]
+fn stats_say_what_it_was_written_who_reads_it_and_who_fell_behind() {
+    let broadcast = Broadcast::new("stats", options(Duration::from_secs(2)));
+    let before = broadcast.stats();
+    assert!(!before.live);
+    assert_eq!(
+        (
+            before.publications,
+            before.bytes,
+            before.packets,
+            before.readers
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!((before.live_since, before.last_written), (None, None));
+
+    let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
+    let mut reader = broadcast.subscribe();
+    assert!(matches!(reader.try_next(), Some(BroadcastItem::Started(_))));
+    // A second: 25 pictures of 100 bytes, and the 46 sounds of 10 bytes
+    // written beside them.
+    write_seconds(&mut sinks, 0, 1);
+    let live = broadcast.stats();
+    assert!(live.live && live.live_since.is_some() && live.last_written.is_some());
+    assert_eq!((live.publications, live.readers), (1, 1));
+    assert_eq!((live.packets, live.bytes), (25 + 46, 25 * 100 + 46 * 10));
+    assert_eq!(live.fell_behind, 0);
+
+    // Far more than it keeps while the reader reads nothing.
+    write_seconds(&mut sinks, 25, 30);
+    assert!(matches!(reader.try_next(), Some(BroadcastItem::Skipped)));
+    let behind = broadcast.stats();
+    assert_eq!(behind.fell_behind, 1);
+    // 750 pictures, and the sounds from the 46th to the 1453rd.
+    assert_eq!(behind.packets, live.packets + 750 + (1453 - 46));
+
+    // An input coming back is published once more; the counts go on.
+    let mut again = broadcast.publish(&picture_and_sound()).unwrap();
+    write_seconds(&mut again, 0, 1);
+    let after = broadcast.stats();
+    assert_eq!(after.publications, 2);
+    assert_eq!(after.packets, behind.packets + 25 + 46);
+    drop(again);
+    drop(sinks);
+    let ended = broadcast.stats();
+    assert!(!ended.live);
+    assert_eq!(ended.live_since, None, "nothing is live");
+    assert!(ended.last_written.is_some(), "what was written stays known");
+}

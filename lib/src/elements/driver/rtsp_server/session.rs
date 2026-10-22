@@ -23,6 +23,7 @@ use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::mpsc;
 
 use crate::elements::broadcast::same_shape;
+use crate::elements::driver::access::{Access, AccessRequest, Credentials};
 use crate::elements::{Broadcast, BroadcastSource, StreamInfo};
 use crate::pipeline::{DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
@@ -222,6 +223,9 @@ struct Connection {
     routes: Routes,
     /// When a publisher last sent anything — a packet or a request.
     heard: Instant,
+    /// What the server's [`Authorize`](crate::elements::Authorize) has let
+    /// this connection do, on which path: asked once for each.
+    allowed: Vec<(String, Access)>,
 }
 
 /// What a request leaves the connection to do.
@@ -254,6 +258,7 @@ pub(super) async fn serve(
             connection: datagrams,
         },
         heard: Instant::now(),
+        allowed: Vec::new(),
     };
     let mut playing: Option<Playing> = None;
     let why = 'connection: loop {
@@ -413,7 +418,50 @@ fn session_id() -> String {
     format!("{:016X}", RandomState::new().hash_one(seed))
 }
 
+/// What a request the server's `Authorize` refused is answered with:
+/// asking for a user and password, which a player given
+/// `rtsp://user:password@…` then sends.
+fn unauthorized() -> Response {
+    Response::new(401).header("WWW-Authenticate", "Basic realm=\"media-pp\"")
+}
+
 impl Connection {
+    /// Whether the server's `Authorize`, where it has one, lets this
+    /// connection do `access` on `path`, from what `request` presents.
+    fn allows(&mut self, request: &Request, path: &str, access: Access) -> bool {
+        let Some(authorize) = &self.shared.authorize else {
+            return true;
+        };
+        if self
+            .allowed
+            .iter()
+            .any(|(allowed, granted)| allowed == path && *granted == access)
+        {
+            return true;
+        }
+        let asked = AccessRequest {
+            path: path.to_owned(),
+            access,
+            credentials: Credentials::from_header(request.header("Authorization")),
+            peer: self.peer,
+        };
+        // The application's answer may take a while; this runtime thread's
+        // other connections go on meanwhile.
+        let allowed = tokio::task::block_in_place(|| authorize.allows(&asked));
+        if allowed {
+            pp_debug!(pp_log: &self.shared.pp_log, "{} may {access:?} {path}", self.peer);
+            self.allowed.push((asked.path, access));
+        } else {
+            pp_info!(
+                pp_log: &self.shared.pp_log,
+                "refused {access:?} of {path} to {} presenting {:?}",
+                self.peer,
+                asked.credentials
+            );
+        }
+        allowed
+    }
+
     /// The response to `request`, and what the connection does after it.
     fn answer(&mut self, request: &Request, playing: &mut Option<Playing>) -> (Response, After) {
         let in_session = matches!(
@@ -449,10 +497,13 @@ impl Connection {
         }
     }
 
-    fn describe(&self, request: &Request) -> Response {
+    fn describe(&mut self, request: &Request) -> Response {
         let Some(target) = message::target(&request.url) else {
             return Response::new(400);
         };
+        if !self.allows(request, &target.path, Access::Play) {
+            return unauthorized();
+        }
         let Some((broadcast, tracks, described)) = described(&self.shared, &target.path) else {
             return Response::new(404);
         };
@@ -485,6 +536,9 @@ impl Connection {
         };
         if self.session.is_some() {
             return Response::new(455);
+        }
+        if !self.allows(request, &target.path, Access::Publish) {
+            return unauthorized();
         }
         let Some(path) = self.shared.path(&target.path) else {
             return Response::new(404);
@@ -558,6 +612,10 @@ impl Connection {
             return Response::new(459);
         }
         if self.session.is_none() {
+            // A player may set up without describing first.
+            if !self.allows(request, &target.path, Access::Play) {
+                return unauthorized();
+            }
             let Some((broadcast, tracks, described)) = described(&self.shared, &target.path) else {
                 return Response::new(404);
             };

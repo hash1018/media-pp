@@ -90,6 +90,12 @@ pub(crate) struct State {
     pub(crate) newest: Option<f64>,
     pub(crate) closed: bool,
     pub(crate) subscribers: usize,
+    /// When the publication going now was published.
+    pub(crate) published_at: Option<Instant>,
+    /// What has been written and kept, across every run.
+    pub(crate) bytes_written: u64,
+    pub(crate) packets_written: u64,
+    pub(crate) last_written: Option<Instant>,
     wakers: Vec<Waker>,
     /// How many times [`Self::wake`] has woken them: a reader whose waker
     /// went in since the last time is still waiting in `wakers`.
@@ -102,6 +108,7 @@ impl State {
     /// the last run kept; answers the publication's number.
     pub(crate) fn publish(&mut self, tracks: Vec<StreamInfo>) -> u64 {
         self.publication += 1;
+        self.published_at = Some(Instant::now());
         self.key_track = tracks
             .iter()
             .position(|track| track.kind == ffmpeg_next::media::Type::Video);
@@ -161,6 +168,9 @@ impl State {
             self.newest = Some(self.newest.map_or(at, |newest| newest.max(at)));
         }
         self.bytes += packet.size();
+        self.bytes_written += packet.size() as u64;
+        self.packets_written += 1;
+        self.last_written = Some(now);
         if start {
             self.starts.push_back(self.next_seq);
         }

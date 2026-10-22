@@ -57,6 +57,20 @@ compile error with no explanation.
 
 ### Added
 
+- **Who may play and publish: `Authorize`.** Given to `RtspServer` or
+  `WebRtcServer` through their options, it is asked for each client before
+  anything else about its request, with the path, whether it would play or
+  publish, where it connects from and the credentials it presented —
+  `Basic` from `rtsp://user:password@…`, `Bearer` from a WHIP or WHEP
+  client. Refused, a client is answered `401`. The WHEP page plays
+  `/<path>?token=…` with that token. Without one, everybody may, as before.
+
+- **`Broadcast::stats`**: whether it is live and since when, how many
+  times it was published, how many readers it has, the packets and bytes
+  written into it and when the last was, and how many times a reader fell
+  behind and was moved on — for a dashboard or a list of what a server
+  serves.
+
 - **`DashMuxer`: MPEG-DASH, and HLS over the same segments.** Made, given
   its tracks and opened as `HlsMuxer` is, it writes an `.mpd` manifest and
   fMP4 segments cut at keyframes — a sliding live window
@@ -200,6 +214,12 @@ compile error with no explanation.
   aspect ratio and copying its best audio stream without resetting time.
 
 ### Fixed
+
+- **A `WebRtcServer` session's id cannot be guessed.** The URL a WHEP or
+  WHIP session is ended at — `DELETE /session/<id>` — was a count, so
+  anyone could end anyone's session by counting. Half of its id is now
+  drawn from a key the server alone knows, and a `SessionId` is shown as
+  thirty-two hex digits where it was sixteen.
 
 - **A `BroadcastSource` copied every packet it handed on.** Restamping a
   packet onto its own timeline cloned it, and `ffmpeg::Packet::clone`

@@ -23,8 +23,9 @@ mod source;
 mod state;
 mod timeline;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error as ThisError;
 
@@ -199,6 +200,8 @@ pub(crate) struct Shared {
     /// Rung whenever something is written or the broadcast changes, for a
     /// reader that waits on a thread of its own.
     pub(crate) changed: Condvar,
+    /// How many times a reader has been moved on for falling behind.
+    pub(crate) fell_behind: AtomicU64,
 }
 
 impl Shared {
@@ -242,6 +245,7 @@ impl Broadcast {
             pp_log,
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
+            fell_behind: AtomicU64::new(0),
         });
         Self {
             _owner: Arc::new(Owner(Arc::clone(&shared))),
@@ -339,6 +343,22 @@ impl Broadcast {
         state.subscribers
     }
 
+    /// What it is doing and has done, for a dashboard or a list of what a
+    /// server serves. See [`BroadcastStats`].
+    pub fn stats(&self) -> BroadcastStats {
+        let state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        BroadcastStats {
+            live: state.live,
+            live_since: state.published_at.filter(|_| state.live),
+            publications: state.publication,
+            readers: state.subscribers,
+            bytes: state.bytes_written,
+            packets: state.packets_written,
+            last_written: state.last_written,
+            fell_behind: self.shared.fell_behind.load(Ordering::Relaxed),
+        }
+    }
+
     /// Closes it now rather than when the last handle goes: readers are told
     /// it is closed once they have read what it holds, and sinks are refused
     /// with [`BroadcastError::Closed`].
@@ -353,6 +373,40 @@ impl std::fmt::Debug for Broadcast {
             .field("name", &self.shared.name)
             .finish()
     }
+}
+
+/// What a [`Broadcast`] is doing and has done, read with
+/// [`Broadcast::stats`]: a snapshot, taken at once under its lock.
+///
+/// The counts only rise, from the broadcast's making: a rate is two
+/// snapshots apart — the input's bitrate is the difference in [`bytes`]
+/// over the time between them, times eight.
+///
+/// [`bytes`]: Self::bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BroadcastStats {
+    /// Whether a run is going — as [`Broadcast::is_live`].
+    pub live: bool,
+    /// Since when the publication going now was published, while one is;
+    /// a seek in the pipeline writing it goes on from the same time.
+    pub live_since: Option<Instant>,
+    /// How many times it has been published: an input that dropped and came
+    /// back — a publisher reconnecting — counts once more each time.
+    pub publications: u64,
+    /// How many readers it has now — as [`Broadcast::subscribers`]: every
+    /// player of every server serving it, and every recording of it.
+    pub readers: usize,
+    /// The packets' bytes written into it.
+    pub bytes: u64,
+    /// The packets written into it.
+    pub packets: u64,
+    /// When the last packet was written: a live broadcast written nothing
+    /// for a while has an input that stalled without leaving.
+    pub last_written: Option<Instant>,
+    /// How many times a reader fell behind as far as it keeps and was
+    /// moved on to its newest keyframe — a picture its player skipped.
+    pub fell_behind: u64,
 }
 
 /// The tracks, for a log record.

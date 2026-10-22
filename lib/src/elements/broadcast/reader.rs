@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -233,6 +234,7 @@ impl BroadcastReader {
             return self.closed_in(state);
         }
         if self.next < state.first_seq {
+            self.shared.fell_behind.fetch_add(1, Ordering::Relaxed);
             self.join(state);
             return Some(BroadcastItem::Skipped);
         }

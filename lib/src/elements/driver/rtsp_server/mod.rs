@@ -22,7 +22,7 @@ use thiserror::Error as ThisError;
 use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
-use crate::elements::Broadcast;
+use crate::elements::{Authorize, Broadcast};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
@@ -83,6 +83,9 @@ pub struct RtspServerOptions {
     /// gone, and its run ended — one over UDP, or one that stopped without
     /// closing its connection. Ten seconds by default.
     pub publisher_timeout: Duration,
+    /// Who may play and publish which paths, asked for each client before
+    /// it may; `None`, the default, lets everybody. See [`Authorize`].
+    pub authorize: Option<Authorize>,
 }
 
 impl Default for RtspServerOptions {
@@ -92,6 +95,7 @@ impl Default for RtspServerOptions {
             udp: true,
             write_timeout: Duration::from_secs(10),
             publisher_timeout: Duration::from_secs(10),
+            authorize: None,
         }
     }
 }
@@ -206,6 +210,7 @@ pub(crate) struct Shared {
     pub(crate) udp_ports: Option<(u16, u16)>,
     pub(crate) write_timeout: Duration,
     pub(crate) publisher_timeout: Duration,
+    pub(crate) authorize: Option<Authorize>,
     /// How many players are playing now.
     pub(crate) playing: AtomicUsize,
     /// The paths a publisher holds.
@@ -292,6 +297,7 @@ impl RtspServer {
             udp_ports,
             write_timeout: options.write_timeout,
             publisher_timeout: options.publisher_timeout,
+            authorize: options.authorize,
             playing: AtomicUsize::new(0),
             publishing: Mutex::new(HashSet::new()),
             routes: Mutex::new(HashMap::new()),

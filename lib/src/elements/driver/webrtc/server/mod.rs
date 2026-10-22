@@ -6,6 +6,8 @@ mod session;
 mod tests;
 
 use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -20,7 +22,7 @@ use thiserror::Error as ThisError;
 use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
-use crate::elements::Broadcast;
+use crate::elements::{Authorize, Broadcast};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
@@ -111,10 +113,12 @@ pub enum WebRtcPathMode {
 }
 
 /// One session of a [`WebRtcServer`]: a player or a publisher. Shown, and
-/// read back, as sixteen hex digits — what a WHEP or WHIP session's URL
-/// ends in.
+/// read back, as thirty-two hex digits — what a WHEP or WHIP session's URL
+/// ends in, and all it takes to end the session over HTTP: so half of it
+/// is drawn from a key this server alone knows, and one session's id says
+/// nothing of another's.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SessionId(u64);
+pub struct SessionId(u128);
 
 impl std::fmt::Debug for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -124,7 +128,7 @@ impl std::fmt::Debug for SessionId {
 
 impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:016x}", self.0)
+        write!(f, "{:032x}", self.0)
     }
 }
 
@@ -132,7 +136,7 @@ impl std::str::FromStr for SessionId {
     type Err = std::num::ParseIntError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        u64::from_str_radix(s, 16).map(SessionId)
+        u128::from_str_radix(s, 16).map(SessionId)
     }
 }
 
@@ -201,6 +205,13 @@ pub struct WebRtcServerOptions {
     /// candidate's port counting up with them — so a firewall or a router
     /// forwards that range.
     pub threads: usize,
+    /// Who may play and publish which paths over
+    /// [`WebRtcServerHandle::serve_http`] — WHEP and WHIP — asked for each
+    /// offer before it is answered; `None`, the default, lets everybody.
+    /// [`WebRtcServerHandle::play`] and [`WebRtcServerHandle::publish`]
+    /// called by the application itself are not asked: what reaches them
+    /// the application has let through already. See [`Authorize`].
+    pub authorize: Option<Authorize>,
 }
 
 impl Default for WebRtcServerOptions {
@@ -208,6 +219,7 @@ impl Default for WebRtcServerOptions {
         Self {
             candidates: Vec::new(),
             threads: 2,
+            authorize: None,
         }
     }
 }
@@ -317,6 +329,10 @@ pub(crate) struct Shared {
     paths: Mutex<HashMap<String, Path>>,
     local_addr: SocketAddr,
     next_session: AtomicU64,
+    /// Keys what a session's id is made of beyond its number, so that one
+    /// cannot be guessed from another.
+    session_key: RandomState,
+    pub(crate) authorize: Option<Authorize>,
     sessions: AtomicUsize,
     /// How many sessions each thread has.
     per_thread: Vec<AtomicUsize>,
@@ -453,6 +469,8 @@ impl WebRtcServer {
             per_thread: (0..threads).map(|_| AtomicUsize::new(0)).collect(),
             publishing: Mutex::new(HashMap::new()),
             events: unbounded(),
+            session_key: RandomState::new(),
+            authorize: options.authorize.clone(),
         });
         Ok((
             Self {
@@ -934,7 +952,10 @@ impl Shard {
             return Err(WebRtcServerError::NothingToPlay(path.to_owned()));
         }
         let number = shared.next_session.fetch_add(1, Ordering::Relaxed);
-        let id = SessionId((number << THREAD_BITS) | self.index as u64);
+        let id = SessionId(
+            u128::from(shared.session_key.hash_one(number)) << 64
+                | u128::from((number << THREAD_BITS) | self.index as u64),
+        );
         // A publisher holds its path from here: looked at and taken under
         // one lock, so that two threads cannot each give it one.
         let mut publishing = shared.publishing.lock().unwrap_or_else(|p| p.into_inner());

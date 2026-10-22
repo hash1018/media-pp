@@ -9,11 +9,15 @@
 //! tracks belong to. `RtspServer` serves
 //! [`Broadcast`](crate::elements::Broadcast)s, which pipelines write into.
 
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+mod access;
 #[cfg(feature = "rtsp-server")]
 mod rtsp_server;
 #[cfg(feature = "webrtc")]
 mod webrtc;
 
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+pub use access::{Access, AccessRequest, Authorize, Credentials};
 #[cfg(feature = "rtsp-server")]
 pub use rtsp_server::{
     RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,

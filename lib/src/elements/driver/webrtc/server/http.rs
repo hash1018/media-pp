@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::pp_log::{pp_debug, pp_warn};
+use crate::elements::driver::access::{Access, AccessRequest, Credentials};
+use crate::pp_log::{pp_debug, pp_info, pp_warn};
 
 use super::{SessionId, WebRtcServerError, WebRtcServerHandle};
 
@@ -29,7 +30,9 @@ const MAX_IN_FLIGHT: usize = 512;
 ///   SDP answer, and the session's URL in `Location`.
 /// - `DELETE` on that URL ends the session.
 /// - `GET /<path>` is a page that plays `<path>` in a browser, through
-///   WHEP: what to open to see that a path plays.
+///   WHEP: what to open to see that a path plays. Opened as
+///   `/<path>?token=<token>`, it posts its offer with that token as
+///   `Authorization: Bearer`.
 /// - `OPTIONS` answers what a browser asks before it posts from another
 ///   origin, and every answer allows any origin.
 ///
@@ -39,7 +42,11 @@ const MAX_IN_FLIGHT: usize = 512;
 /// together do not wait on one another. A request still being answered as it
 /// is dropped is answered first, within the few seconds a request is given.
 /// Plain HTTP: put it behind a proxy that terminates TLS for a page served
-/// over HTTPS.
+/// over HTTPS — and for any token sent to it.
+///
+/// With [`WebRtcServerOptions::authorize`](super::WebRtcServerOptions::authorize),
+/// each offer is put to it first, with the `Authorization` header it came
+/// with, and answered `401 Unauthorized` where it is refused.
 pub struct WebRtcHttpEndpoint {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -124,7 +131,7 @@ fn serve(listener: &TcpListener, server: &WebRtcServerHandle, stop: &AtomicBool)
                 let spawned = thread::Builder::new()
                     .name("webrtc-http-request".into())
                     .spawn(move || {
-                        if let Err(error) = answer(stream, &server) {
+                        if let Err(error) = answer(stream, peer, &server) {
                             pp_debug!(
                                 pp_log: &server.shared.pp_log,
                                 "an HTTP request from {peer} failed: {error}"
@@ -148,7 +155,7 @@ fn serve(listener: &TcpListener, server: &WebRtcServerHandle, stop: &AtomicBool)
 }
 
 /// One request, answered.
-fn answer(stream: TcpStream, server: &WebRtcServerHandle) -> io::Result<()> {
+fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(READ_WITHIN))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -160,6 +167,7 @@ fn answer(stream: TcpStream, server: &WebRtcServerHandle) -> io::Result<()> {
         parts.next().unwrap_or("").to_owned(),
     );
     let mut length = 0;
+    let mut authorization = None;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -169,10 +177,13 @@ fn answer(stream: TcpStream, server: &WebRtcServerHandle) -> io::Result<()> {
         if header.is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.trim().eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().unwrap_or(0);
+        if let Some((name, value)) = header.split_once(':') {
+            let name = name.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.trim().to_owned());
+            }
         }
     }
     if length > MAX_BODY {
@@ -189,6 +200,27 @@ fn answer(stream: TcpStream, server: &WebRtcServerHandle) -> io::Result<()> {
             "",
         ),
         ("POST", Some((path, kind @ ("whep" | "whip")))) => {
+            let access = if kind == "whep" {
+                Access::Play
+            } else {
+                Access::Publish
+            };
+            if let Some(authorize) = &server.shared.authorize {
+                let asked = AccessRequest {
+                    path: path.to_owned(),
+                    access,
+                    credentials: Credentials::from_header(authorization.as_deref()),
+                    peer,
+                };
+                if !authorize.allows(&asked) {
+                    pp_info!(
+                        pp_log: &server.shared.pp_log,
+                        "refused {access:?} of {path} to {peer} presenting {:?}",
+                        asked.credentials
+                    );
+                    return respond(stream, 401, &[("WWW-Authenticate", "Bearer".into())], "");
+                }
+            }
             let offer = String::from_utf8_lossy(&body);
             let opened = if kind == "whep" {
                 server.play(path, &offer)
@@ -266,9 +298,12 @@ async function play() {
     pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === "complete") done(); };
     setTimeout(done, 2000);
   });
+  const headers = { "Content-Type": "application/sdp" };
+  const token = new URLSearchParams(location.search).get("token");
+  if (token) headers["Authorization"] = "Bearer " + token;
   const answer = await fetch("/{path}/whep", {
     method: "POST",
-    headers: { "Content-Type": "application/sdp" },
+    headers,
     body: pc.localDescription.sdp,
   });
   if (answer.status !== 201) {
@@ -294,6 +329,7 @@ fn respond(
         201 => "Created",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
@@ -303,7 +339,7 @@ fn respond(
         "HTTP/1.1 {status} {reason}\r\n\
          Access-Control-Allow-Origin: *\r\n\
          Access-Control-Allow-Methods: POST, DELETE, OPTIONS\r\n\
-         Access-Control-Allow-Headers: Content-Type\r\n\
+         Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
          Access-Control-Expose-Headers: Location\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n",

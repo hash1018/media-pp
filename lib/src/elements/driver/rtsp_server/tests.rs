@@ -13,8 +13,8 @@ use super::*;
 use crate::buffer::MediaBuffer;
 use crate::driver::DriverRunner;
 use crate::elements::{
-    BroadcastOptions, FileDemuxer, Pacer, RtspOptions, RtspSource, RtspTransport, StreamInfo,
-    TrackFormat,
+    AccessRequest, Authorize, BroadcastOptions, FileDemuxer, Pacer, RtspOptions, RtspSource,
+    RtspTransport, StreamInfo, TrackFormat,
 };
 use crate::pipeline::Pipeline;
 use crate::test_support::CapturingSink;
@@ -760,4 +760,141 @@ fn a_udp_player_catches_up_at_twice_the_streams_speed() {
         took < Duration::from_millis(3_000),
         "paced slower than twice: {took:?}"
     );
+}
+
+/// What an `Authorize` was asked, in order.
+type Asked = Arc<Mutex<Vec<AccessRequest>>>;
+
+/// A server whose `Authorize` lets `viewer:pw` play `cam` and `camera:pw`
+/// publish into `live`, and nobody anything else; what it was asked, kept.
+fn server_asking() -> (
+    Arc<DriverRunner>,
+    RtspServerHandle,
+    Broadcast,
+    Broadcast,
+    Asked,
+) {
+    use crate::elements::{Access, Credentials};
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&asked);
+    let authorize = Authorize::new(move |request: &AccessRequest| {
+        kept.lock().unwrap().push(request.clone());
+        let user = match (&request.credentials, request.access) {
+            (Credentials::Basic { user, password }, _) if password == "pw" => user.as_str(),
+            _ => return false,
+        };
+        matches!(
+            (request.access, request.path.as_str(), user),
+            (Access::Play, "cam", "viewer") | (Access::Publish, "live", "camera")
+        )
+    });
+    let (server, handle) = RtspServer::bind(
+        "server",
+        "127.0.0.1:0",
+        RtspServerOptions {
+            udp: false,
+            authorize: Some(authorize),
+            ..RtspServerOptions::default()
+        },
+    )
+    .expect("a loopback port is free");
+    let cam = Broadcast::new("cam", BroadcastOptions::default());
+    let live = Broadcast::new("live", BroadcastOptions::default());
+    handle.add_path("cam", &cam, RtspPathMode::Play).unwrap();
+    handle
+        .add_path("live", &live, RtspPathMode::Record)
+        .unwrap();
+    let runner = DriverRunner::new(server);
+    runner.run().unwrap();
+    (runner, handle, cam, live, asked)
+}
+
+fn with_user(url: &str, user: &str) -> String {
+    url.replacen("rtsp://", &format!("rtsp://{user}:pw@"), 1)
+}
+
+/// Refused, a request is answered 401 asking for a user and password —
+/// before the server says whether the path is there at all — and the
+/// credentials a request comes with are what decide.
+#[test]
+fn a_server_that_authorizes_asks_for_credentials_first() {
+    let (runner, handle, _cam, _live, asked) = server_asking();
+    let mut stream = TcpStream::connect(handle.local_addr()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    for (cseq, path) in [(1, "cam"), (2, "nowhere")] {
+        let refused = exchange(
+            &mut stream,
+            &format!(
+                "DESCRIBE {} RTSP/1.0\r\nCSeq: {cseq}\r\n\r\n",
+                handle.url(path)
+            ),
+        );
+        assert!(
+            refused.starts_with("RTSP/1.0 401 Unauthorized\r\n"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("WWW-Authenticate: Basic realm=\"media-pp\""),
+            "{refused}"
+        );
+    }
+    // viewer:pw, which this server lets play `cam`; nothing is published
+    // there yet, so it is past the check and not found.
+    let allowed = exchange(
+        &mut stream,
+        &format!(
+            "DESCRIBE {} RTSP/1.0\r\nCSeq: 3\r\nAuthorization: Basic dmlld2VyOnB3\r\n\r\n",
+            handle.url("cam")
+        ),
+    );
+    assert!(
+        allowed.starts_with("RTSP/1.0 404 Not Found\r\n"),
+        "{allowed}"
+    );
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 3);
+    assert_eq!(asked[2].path, "cam");
+    assert_eq!(asked[2].peer, stream.local_addr().unwrap());
+    drop(asked);
+    runner.stop();
+}
+
+/// FFmpeg's RTSP client and muxer, given `rtsp://user:password@…`, answer
+/// the 401 with them, and play and publish as anyone would; without, or
+/// as the wrong user, they are refused.
+#[test]
+fn players_and_publishers_get_in_with_their_credentials() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, cam, live, _asked) = server_asking();
+    let _camera = feed(&cam, &path);
+    wait_published(&cam);
+
+    let options = || RtspOptions {
+        transport: RtspTransport::Tcp,
+        timeout: Duration::from_secs(5),
+    };
+    assert!(RtspSource::open("player", handle.url("cam"), options()).is_err());
+    assert!(
+        RtspSource::open("player", with_user(&handle.url("cam"), "camera"), options()).is_err(),
+        "camera:pw may publish, not play"
+    );
+    let player = play(&with_user(&handle.url("cam"), "viewer"), RtspTransport::Tcp);
+    player.wait_for(10);
+    check_played(&player);
+    player.pipeline.stop();
+
+    assert!(publish(&handle.url("live"), &path, RtspTransport::Tcp).is_err());
+    let publisher = publish(
+        &with_user(&handle.url("live"), "camera"),
+        &path,
+        RtspTransport::Tcp,
+    )
+    .unwrap();
+    wait_published(&live);
+    publisher.stop();
+    runner.stop();
 }
