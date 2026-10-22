@@ -1638,7 +1638,6 @@ pub(crate) fn changing_camera(
     switch: Arc<std::sync::atomic::AtomicBool>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
-    use crate::element::RawSink;
     use std::sync::atomic::Ordering;
     std::thread::spawn(move || {
         let mut n = 0i64;
