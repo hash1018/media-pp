@@ -95,6 +95,12 @@ pub(crate) struct Session {
     /// handed `waker` for.
     woken: Arc<Woken>,
     waker: Waker,
+    /// When it next wants driving, as its last drive said — see
+    /// [`Self::due`].
+    next: Instant,
+    /// Whether something was put in since it was last driven: a datagram,
+    /// something to send on a data channel.
+    stirred: bool,
     pp_log: PpLog,
 }
 
@@ -254,6 +260,8 @@ impl Session {
                 role,
                 waker: Waker::from(Arc::clone(&woken)),
                 woken,
+                next: now,
+                stirred: true,
                 pp_log,
             },
             answer.to_sdp_string(),
@@ -270,6 +278,21 @@ impl Session {
 
     pub(crate) fn input(&mut self, input: Input) {
         let _ = self.rtc.handle_input(input);
+        self.stirred = true;
+    }
+
+    /// Whether it is to be driven now: something was put in, what its
+    /// pipelines wait on woke them, or the time it asked for has come. A
+    /// session with none of these has nothing to do, and the server's loop
+    /// passes it by for a look at two values — with hundreds of players,
+    /// most of them most of the time.
+    pub(crate) fn due(&self, now: Instant) -> bool {
+        self.stirred || now >= self.next || self.woken.0.load(Ordering::Acquire)
+    }
+
+    /// When it next wants driving, woken or not.
+    pub(crate) fn next(&self) -> Instant {
+        self.next
     }
 
     /// Moves the session on to `now`: its pipelines polled, what is due
@@ -322,6 +345,8 @@ impl Session {
         if !self.connected && now.duration_since(self.opened) > CONNECT_WITHIN {
             return Err("it never connected".into());
         }
+        self.next = next;
+        self.stirred = false;
         Ok(next)
     }
 
@@ -449,6 +474,7 @@ impl Session {
     pub(crate) fn send(&mut self, label: &str, binary: bool, data: &[u8]) -> Result<(), ()> {
         let id = *self.channels.get(label).ok_or(())?;
         let mut channel = self.rtc.channel(id).ok_or(())?;
+        self.stirred = true;
         channel.write(binary, data).map(|_| ()).map_err(|_| ())
     }
 

@@ -767,20 +767,35 @@ impl Shard {
             return;
         };
         let mut sessions: HashMap<SessionId, Session> = HashMap::new();
+        // Which session each address sends from — looked at first, rather
+        // than asking every session whether a datagram is its.
+        let mut senders: HashMap<SocketAddr, SessionId> = HashMap::new();
         let mut buffer = vec![0u8; 65_536];
         let local = self.local;
         while !stop.is_stopped() {
             while let Ok(command) = self.commands.try_recv() {
                 self.command(command, &socket, &mut sessions, shared);
             }
+            // A session a handle closed leaves its addresses behind; a
+            // session has one or two, so many more than sessions is that.
+            if senders.len() > 2 * sessions.len() + 16 {
+                senders.retain(|_, id| sessions.contains_key(id));
+            }
             let now = Instant::now();
             let mut next = now + POLL;
             let mut ended = Vec::new();
             for (id, session) in &mut sessions {
+                if !session.due(now) {
+                    next = next.min(session.next());
+                    continue;
+                }
                 match session.drive(now, &socket, shared) {
                     Ok(deadline) => next = next.min(deadline),
                     Err(why) => ended.push((*id, why)),
                 }
+            }
+            if !ended.is_empty() {
+                senders.retain(|_, id| !ended.iter().any(|(gone, _)| gone == id));
             }
             for (id, why) in ended {
                 self.end(id, why, &mut sessions, shared);
@@ -810,10 +825,19 @@ impl Shard {
                             contents,
                         },
                     );
-                    if let Some(session) = sessions
-                        .values_mut()
-                        .find(|session| session.accepts(&input))
-                    {
+                    let known = senders.get(&source).copied().filter(|id| {
+                        sessions
+                            .get(id)
+                            .is_some_and(|session| session.accepts(&input))
+                    });
+                    let found = known.or_else(|| {
+                        let (id, _) = sessions
+                            .iter()
+                            .find(|(_, session)| session.accepts(&input))?;
+                        senders.insert(source, *id);
+                        Some(*id)
+                    });
+                    if let Some(session) = found.and_then(|id| sessions.get_mut(&id)) {
                         session.input(input);
                     }
                 }
