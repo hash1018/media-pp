@@ -58,7 +58,9 @@ pub struct HlsOptions {
     /// Media playlist written by FFmpeg, normally ending in `.m3u8`.
     pub playlist_path: PathBuf,
     /// `printf`-style media segment path containing one integer conversion,
-    /// for example `output/segment_%05d.m4s`.
+    /// for example `output/segment_%05d.m4s` — or, with
+    /// [`HlsOptions::single_file`], the one file every segment goes into,
+    /// which needs none.
     pub segment_pattern: PathBuf,
     /// Target segment duration. FFmpeg cuts on the next video keyframe, so
     /// the actual duration can be longer when keyframes are sparse.
@@ -73,6 +75,20 @@ pub struct HlsOptions {
     /// Optional URI prefix written before segment references in the media
     /// playlist, for example `https://cdn.example.com/live/`.
     pub base_url: Option<String>,
+    /// Every segment written one after another into the one file
+    /// `segment_pattern` names, the playlist listing each by its byte range
+    /// in it (`#EXT-X-BYTERANGE`). An fMP4 one's initialization section is
+    /// the head of that file, listed by its range too, and
+    /// [`HlsOptions::init_filename`] goes unused.
+    ///
+    /// For a recording kept for days: short segments, for seeking and for
+    /// following it while it is written, without a file for each — an hour
+    /// of four-second segments is one file rather than nine hundred. A
+    /// server answers each segment with a range request on that file. The
+    /// file is written under its own name as it grows, the playlist
+    /// replaced whole after each segment as ever. Not with
+    /// [`HlsMode::Live`]'s deletion, which removes whole files.
+    pub single_file: bool,
 }
 
 impl HlsOptions {
@@ -91,6 +107,7 @@ impl HlsOptions {
             segment_format: HlsSegmentFormat::Fmp4,
             init_filename: "init.mp4".into(),
             base_url: None,
+            single_file: false,
         }
     }
 
@@ -108,7 +125,7 @@ impl HlsOptions {
         }
 
         let pattern = path_as_utf8(&self.segment_pattern, "segment_pattern")?;
-        if !has_integer_conversion(pattern) {
+        if !self.single_file && !has_integer_conversion(pattern) {
             return Err(HlsMuxerError::MissingSegmentIndex(
                 self.segment_pattern.clone(),
             ));
@@ -128,7 +145,14 @@ impl HlsOptions {
         let segment_pattern = path_for_ffmpeg(&self.segment_pattern, "segment_pattern")?;
         options.set("hls_segment_filename", &segment_pattern);
 
-        let mut flags = vec!["temp_file", "independent_segments"];
+        let mut flags = vec!["independent_segments"];
+        if self.single_file {
+            // Not with `temp_file`, which keeps the one file under a `.tmp`
+            // name — the name the playlist then gives — until the end.
+            flags.push("single_file");
+        } else {
+            flags.push("temp_file");
+        }
         match self.mode {
             HlsMode::Live {
                 window_size,
@@ -579,6 +603,71 @@ mod tests {
             .expect("the generated playlist must contain media packets");
         drop(input);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A recording's playlist: every segment in one fMP4 file, each listed
+    /// by its byte range, the event playlist ended as the stream ends — and
+    /// read back by FFmpeg through those ranges.
+    #[test]
+    fn writes_every_segment_into_one_file_by_byte_range() {
+        let dir = unique_test_dir("hls_single_file");
+        std::fs::create_dir_all(&dir).unwrap();
+        let playlist_path = dir.join("index.m3u8");
+        let mut options = HlsOptions::new(&playlist_path, dir.join("media.m4s"));
+        options.segment_duration = Duration::from_secs(1);
+        options.mode = HlsMode::Event;
+        options.single_file = true;
+
+        encode_silence(options, 150);
+
+        let playlist = std::fs::read_to_string(&playlist_path).unwrap();
+        assert!(
+            playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT"),
+            "{playlist}"
+        );
+        assert!(
+            playlist.contains("#EXT-X-MAP:URI=\"media.m4s\",BYTERANGE="),
+            "the initialization section heads the one file:\n{playlist}"
+        );
+        assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
+        let ranges = playlist
+            .lines()
+            .filter(|line| line.starts_with("#EXT-X-BYTERANGE:"))
+            .count();
+        assert!(ranges >= 2, "a range for each segment:\n{playlist}");
+        let uris: Vec<_> = playlist
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(uris.len(), ranges, "{playlist}");
+        assert!(uris.iter().all(|uri| *uri == "media.m4s"), "{uris:?}");
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(files.len(), 2, "the playlist and media alone: {files:?}");
+
+        let mut input = ffmpeg::format::input(&playlist_path)
+            .expect("FFmpeg must be able to read the byte-range playlist");
+        let mut packets = 0;
+        let mut packet = ffmpeg::Packet::empty();
+        while packet.read(&mut input).is_ok() {
+            packets += 1;
+        }
+        assert!(packets > 100, "read {packets} packets back");
+        drop(input);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_single_file_needs_no_index_in_its_name() {
+        let mut options = HlsOptions::new("index.m3u8", "media.m4s");
+        assert!(matches!(
+            options.validate(),
+            Err(HlsMuxerError::MissingSegmentIndex(_))
+        ));
+        options.single_file = true;
+        assert!(options.validate().is_ok());
     }
 
     #[test]
