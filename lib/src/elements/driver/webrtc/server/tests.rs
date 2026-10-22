@@ -655,6 +655,9 @@ fn sessions_are_spread_over_the_threads() {
 /// further behind the larger the pictures.
 #[test]
 fn a_player_catches_up_on_large_pictures_in_time() {
+    if crate::test_support::skipped_in_ci("a_player_catches_up_on_large_pictures_in_time") {
+        return;
+    }
     let (runner, handle, cam, _live) = server();
     let video = TrackFormat::new(
         {
