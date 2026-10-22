@@ -36,7 +36,7 @@ use super::super::inbox::{Delivered, Inbox};
 use super::super::outbox::{Outbox, Outgoing};
 use super::super::stream_info::{StreamInfoProbe, str0m_codec};
 use super::super::track::{WebRtcTrackSink, WebRtcTrackSource};
-use super::{SessionId, SessionRole, Shared, WebRtcServerError, WebRtcServerEvent};
+use super::{SessionId, SessionRole, SessionStats, Shared, WebRtcServerError, WebRtcServerEvent};
 
 /// How much faster than it plays a player is sent what the broadcast held
 /// when it connected: twice, so it catches up in as long as that was,
@@ -76,6 +76,9 @@ pub(crate) fn playable(broadcast: &Broadcast) -> bool {
         })
 }
 
+/// How often a session's connection measures it.
+const STATS_EVERY: Duration = Duration::from_secs(1);
+
 /// One session.
 pub(crate) struct Session {
     id: SessionId,
@@ -101,6 +104,10 @@ pub(crate) struct Session {
     /// Whether something was put in since it was last driven: a datagram,
     /// something to send on a data channel.
     stirred: bool,
+    /// Its figures, as last measured; and each medium's requests so far,
+    /// resends and keyframes, which the figures add up.
+    stats: SessionStats,
+    requests: HashMap<Mid, (u64, u64)>,
     pp_log: PpLog,
 }
 
@@ -227,7 +234,10 @@ impl Session {
         let offer = SdpOffer::from_sdp_string(offer)
             .map_err(|error| WebRtcServerError::InvalidOffer(error.to_string()))?;
         let now = Instant::now();
-        let mut rtc = Rtc::builder().set_ice_lite(true).build(now);
+        let mut rtc = Rtc::builder()
+            .set_ice_lite(true)
+            .set_stats_interval(Some(STATS_EVERY))
+            .build(now);
         for candidate in candidates {
             rtc.add_local_candidate(candidate.clone());
         }
@@ -235,6 +245,22 @@ impl Session {
             .sdp_api()
             .accept_offer(offer)
             .map_err(|error| WebRtcServerError::InvalidOffer(error.to_string()))?;
+        let stats = SessionStats {
+            session: id,
+            path: path.to_owned(),
+            role,
+            opened: now,
+            connected: false,
+            remote: None,
+            rtt: None,
+            loss: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+            resend_requests: 0,
+            keyframe_requests: 0,
+            fell_behind: 0,
+            updated: None,
+        };
         let role = match role {
             SessionRole::Play => Role::Play(Box::new(Playing {
                 pipeline: None,
@@ -262,10 +288,37 @@ impl Session {
                 woken,
                 next: now,
                 stirred: true,
+                stats,
+                requests: HashMap::new(),
                 pp_log,
             },
             answer.to_sdp_string(),
         ))
+    }
+
+    /// Its figures, as last measured.
+    pub(crate) fn stats(&self) -> &SessionStats {
+        &self.stats
+    }
+
+    /// Puts its figures where the server's handle reads them.
+    fn tell_stats(&mut self, shared: &Shared) {
+        if let Role::Play(playing) = &self.role {
+            self.stats.fell_behind = playing.outbox.fell_behind();
+        }
+        let (resends, keyframes) = self
+            .requests
+            .values()
+            .fold((0, 0), |(r, k), (resends, keyframes)| {
+                (r + resends, k + keyframes)
+            });
+        self.stats.resend_requests = resends;
+        self.stats.keyframe_requests = keyframes;
+        shared
+            .stats
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(self.id, self.stats.clone());
     }
 
     pub(crate) fn path(&self) -> &str {
@@ -485,6 +538,8 @@ impl Session {
         match event {
             Event::Connected => {
                 self.connected = true;
+                self.stats.connected = true;
+                self.tell_stats(shared);
                 pp_info!(pp_log: &self.pp_log, "session {} connected", self.id);
                 let role = match &mut self.role {
                     Role::Play(playing) => {
@@ -543,6 +598,32 @@ impl Session {
                 });
             }
             Event::ChannelClose(id) => self.channels.retain(|_, open| *open != id),
+            Event::PeerStats(peer) => {
+                let pair = peer.selected_candidate_pair.as_ref();
+                self.stats.remote = pair.map(|pair| pair.remote.addr);
+                // RTCP's measure where there is one; a receive-only
+                // session has none, and ICE's own keepalives measure it.
+                self.stats.rtt = peer
+                    .rtt
+                    .or_else(|| pair.and_then(|pair| pair.current_round_trip_time));
+                self.stats.loss = match self.stats.role {
+                    SessionRole::Play => peer.egress_loss_fraction,
+                    SessionRole::Publish => peer.ingress_loss_fraction,
+                }
+                .or(self.stats.loss);
+                self.stats.bytes_sent = peer.peer_bytes_tx;
+                self.stats.bytes_received = peer.peer_bytes_rx;
+                self.stats.updated = Some(peer.timestamp);
+                self.tell_stats(shared);
+            }
+            Event::MediaEgressStats(egress) => {
+                self.requests
+                    .insert(egress.mid, (egress.nacks, egress.plis + egress.firs));
+            }
+            Event::MediaIngressStats(ingress) => {
+                self.requests
+                    .insert(ingress.mid, (ingress.nacks, ingress.plis + ingress.firs));
+            }
             _ => {}
         }
         Ok(())

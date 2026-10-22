@@ -57,6 +57,11 @@ compile error with no explanation.
 
 ### Added
 
+- **`WebRtcServerHandle::session_stats`**: every open session's figures,
+  measured about once a second — where its client is, the round trip, the
+  share of packets lost, the bytes each way, resends and keyframes asked
+  for, and how many times a player fell behind and skipped to a keyframe.
+
 - **Who may play and publish: `Authorize`.** Given to `RtspServer` or
   `WebRtcServer` through their options, it is asked for each client before
   anything else about its request, with the path, whether it would play or

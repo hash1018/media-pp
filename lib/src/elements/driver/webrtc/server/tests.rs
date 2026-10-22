@@ -805,3 +805,71 @@ fn offers_over_http_are_authorized_and_session_urls_cannot_be_guessed() {
     camera.stop();
     runner.stop();
 }
+
+/// A playing session's figures: opened before it connects, then where the
+/// client is, what it was sent and the round trip, about once a second —
+/// and gone with the session.
+#[test]
+fn a_session_says_how_it_is_doing() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, cam, _live) = server();
+    let camera = feed(&cam, &path);
+
+    let mut client = Client::new();
+    let (offer, pending, mids, _) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+    let (session, answer) = handle.play("cam", &offer).unwrap();
+    let opened = handle.session_stats();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].session, session);
+    assert_eq!(opened[0].path, "cam");
+    assert_eq!(opened[0].role, SessionRole::Play);
+    assert!(!opened[0].connected && opened[0].updated.is_none());
+
+    client.accept(pending, &answer);
+    let measured = |handle: &WebRtcServerHandle| {
+        handle
+            .session_stats()
+            .into_iter()
+            .find(|stats| stats.session == session && stats.rtt.is_some() && stats.bytes_sent > 0)
+    };
+    let mut stats = None;
+    assert!(
+        client.run_until(Duration::from_secs(20), |client| {
+            stats = measured(&handle);
+            stats.is_some() && client.received(mids[0]).len() >= 30
+        }),
+        "measured: {:?}",
+        handle.session_stats()
+    );
+    let stats = stats.unwrap();
+    assert!(stats.connected);
+    assert_eq!(stats.remote, Some(client.local), "where the client is");
+    assert!(
+        stats.rtt.unwrap() < Duration::from_secs(1),
+        "a loopback's round trip: {:?}",
+        stats.rtt
+    );
+    assert!(stats.loss.is_none_or(|loss| (0.0..=1.0).contains(&loss)));
+    assert_eq!(stats.fell_behind, 0);
+    // Measured again a second on, it has been sent more.
+    let mut later = None;
+    assert!(
+        client.run_until(Duration::from_secs(10), |_| {
+            later = measured(&handle).filter(|later| later.updated > stats.updated);
+            later.is_some()
+        }),
+        "measured again"
+    );
+    let later = later.unwrap();
+    assert!(
+        later.bytes_sent > stats.bytes_sent,
+        "{stats:?} then {later:?}"
+    );
+
+    assert!(handle.close(session));
+    assert!(handle.session_stats().is_empty(), "gone with its session");
+    camera.stop();
+    runner.stop();
+}

@@ -189,6 +189,52 @@ pub enum WebRtcServerEvent {
     },
 }
 
+/// How one of a [`WebRtcServer`]'s sessions is doing: what its client
+/// reports and its connection measures, about once a second — read with
+/// [`WebRtcServerHandle::session_stats`], for a dashboard.
+///
+/// The counts only rise, from the session's opening; a rate is two
+/// readings apart. Where the client has not reported yet — a session
+/// still connecting, a client that sends no reports — a figure is `None`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct SessionStats {
+    /// Which session.
+    pub session: SessionId,
+    /// Its path.
+    pub path: String,
+    /// What it does.
+    pub role: SessionRole,
+    /// When it was opened.
+    pub opened: Instant,
+    /// Whether it has connected: ICE and DTLS done, media flowing.
+    pub connected: bool,
+    /// Where the client's packets come from, once it has connected.
+    pub remote: Option<SocketAddr>,
+    /// The round trip to the client and back, as last measured.
+    pub rtt: Option<Duration>,
+    /// The share of packets lost on the way, from 0 to 1, over the last
+    /// second or so: of what a player was sent, as it reports, or of what
+    /// a publisher sent, as the server counts.
+    pub loss: Option<f32>,
+    /// The bytes sent to the client, everything the connection carried.
+    pub bytes_sent: u64,
+    /// The bytes received from it.
+    pub bytes_received: u64,
+    /// How many times a lost packet was asked to be sent again: by a
+    /// player of the server, or by the server of a publisher.
+    pub resend_requests: u64,
+    /// How many times a keyframe was asked for, the same way: a player
+    /// whose picture broke, or the server of a publisher.
+    pub keyframe_requests: u64,
+    /// How many times a player fell so far behind that what was waiting
+    /// for it was let go of and it went on from a keyframe — a picture it
+    /// skipped. Always 0 for a publisher.
+    pub fell_behind: u64,
+    /// When these figures were last measured.
+    pub updated: Option<Instant>,
+}
+
 /// How a [`WebRtcServer`] runs.
 #[derive(Debug, Clone)]
 pub struct WebRtcServerOptions {
@@ -339,6 +385,9 @@ pub(crate) struct Shared {
     /// Which session publishes into each path that has a publisher.
     publishing: Mutex<HashMap<String, SessionId>>,
     events: (Sender<WebRtcServerEvent>, Receiver<WebRtcServerEvent>),
+    /// Each open session's latest figures, written by its thread as
+    /// they change.
+    pub(crate) stats: Mutex<HashMap<SessionId, SessionStats>>,
 }
 
 #[derive(Clone)]
@@ -469,6 +518,7 @@ impl WebRtcServer {
             per_thread: (0..threads).map(|_| AtomicUsize::new(0)).collect(),
             publishing: Mutex::new(HashMap::new()),
             events: unbounded(),
+            stats: Mutex::new(HashMap::new()),
             session_key: RandomState::new(),
             authorize: options.authorize.clone(),
         });
@@ -683,6 +733,19 @@ impl WebRtcServerHandle {
         self.shared.local_addr
     }
 
+    /// Every open session's figures, as its connection last measured
+    /// them — about once a second — in no particular order. See
+    /// [`SessionStats`].
+    pub fn session_stats(&self) -> Vec<SessionStats> {
+        self.shared
+            .stats
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
     /// How many sessions are open, players and publishers together.
     pub fn sessions(&self) -> usize {
         self.shared.sessions.load(Ordering::Acquire)
@@ -892,6 +955,11 @@ impl Shard {
                 let reply = self
                     .open(&path, role, &offer, shared)
                     .map(|(id, session, sdp)| {
+                        shared
+                            .stats
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(id, session.stats().clone());
                         sessions.insert(id, session);
                         shared.sessions.fetch_add(1, Ordering::AcqRel);
                         shared.per_thread[self.index].fetch_add(1, Ordering::AcqRel);
@@ -989,6 +1057,11 @@ impl Shard {
         let Some(session) = sessions.remove(&id) else {
             return;
         };
+        shared
+            .stats
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
         shared.sessions.fetch_sub(1, Ordering::AcqRel);
         shared.per_thread[self.index].fetch_sub(1, Ordering::AcqRel);
         shared

@@ -73,6 +73,8 @@ struct State {
     capacity: usize,
     /// The tracks letting go of what they are handed until a keyframe.
     skipping: HashSet<TrackId>,
+    /// How many times it fell behind and let go of what it held.
+    fell_behind: u64,
     /// Whether the connection is gone, so that nothing more is taken.
     closed: bool,
 }
@@ -96,6 +98,7 @@ impl Outbox {
             queue: VecDeque::new(),
             capacity: capacity.max(1),
             skipping: HashSet::new(),
+            fell_behind: 0,
             closed: false,
         })))
     }
@@ -129,7 +132,13 @@ impl Outbox {
             state.queue.push_back(outgoing);
         }
         state.skipping = behind;
+        state.fell_behind += 1;
         Pushed::FellBehind
+    }
+
+    /// How many times it has fallen behind.
+    pub(super) fn fell_behind(&self) -> u64 {
+        self.lock().fell_behind
     }
 
     /// Everything it holds, in order.
