@@ -15,7 +15,7 @@ behind. The questions are the ones a deployment has to answer:
 |---|---|
 | [method.md](method.md) | The harness, the stream, what is measured, the rounds and ceilings, and how to run it |
 | [windows-i5-12400f.md](windows-i5-12400f.md) | The machine, and every run's results on it, each read |
-| [findings.md](findings.md) | What measuring changed: UDP players losing half of what they were sent, and a WebRTC server sending a packet a turn of its loop |
+| [findings.md](findings.md) | What measuring changed: UDP players losing half of what they were sent, a WebRTC server sending a packet a turn of its loop, and sender reports counted as losses |
 
 ## In short
 
@@ -25,22 +25,23 @@ the range over three rounds:
 
 | Players | Over | Server threads | Delivered | Server processor | Server memory | Lost |
 |---:|---|---:|---:|---:|---:|---:|
-| 100 | TCP | 2 | 1.3 Gbit/s | 0.26–0.39 cores | 49 MB | 0 |
-| 400 | TCP | 2 | 5.0 Gbit/s | 0.67–0.97 cores | 63 MB | 0 |
-| 800 | TCP | 2 | 9.8 Gbit/s | 1.68–1.76 cores | 81–85 MB | 0 |
-| 100 | UDP | 2 | 1.3 Gbit/s | 0.89–0.92 cores | 46 MB | 0 |
-| 400 | UDP | 6 | 5.0 Gbit/s | 4.30–4.47 cores | 64–66 MB | 0 |
-| 50 | WebRTC | 1 | 0.6 Gbit/s | 0.59–0.75 cores | 140–143 MB | 1–5 pictures after a gap |
-| 200 | WebRTC | 6 | 2.4 Gbit/s | 4.23–4.36 cores | 473–479 MB | 14–22 pictures after a gap |
+| 100 | TCP | 2 | 1.3 Gbit/s | 0.49–0.58 cores | 48–49 MB | 0 |
+| 400 | TCP | 2 | 5.0 Gbit/s | 0.89–0.95 cores | 62–63 MB | 0 |
+| 800 | TCP | 2 | 9.8 Gbit/s | 1.58–1.63 cores | 81–82 MB | 0 |
+| 100 | UDP | 2 | 1.3 Gbit/s | 0.87–0.94 cores | 46–47 MB | 0 |
+| 400 | UDP | 6 | 4.9 Gbit/s | 4.28–4.38 cores | 63–64 MB | 0 |
+| 50 | WebRTC | 1 | 0.6 Gbit/s | 0.59–0.62 cores | 145–146 MB | 1–3 pictures after a gap |
+| 200 | WebRTC | 6 | 2.4 Gbit/s | 3.99–4.17 cores | 470–478 MB | 14–30 pictures after a gap |
 
-A player over TCP costs the server about 0.18 of a core per Gbit/s, and
+A player over TCP costs the server about 0.16 to 0.19 of a core per Gbit/s, and
 memory hardly at all: every player reads the one broadcast, and only its
 RTP packets are its own. Two threads carry a thousand such players and
 then are full; six carry at least twelve hundred. Over UDP a player costs
 four to five times as much — a system call for every RTP packet rather
 than one for every picture — so the two threads a server has by default
 carry about a hundred UDP players of this stream before they fall behind,
-and six about four hundred. No run below those ceilings lost a packet. A
+and six about five hundred. No run lost a packet, past those ceilings
+as well. A
 network card, not the server, is what runs out first: a gigabit link
 carries some 75 players of this stream.
 
@@ -52,9 +53,8 @@ six cores. The stream for WebRTC is the same without B-frames, with Opus
 sound — what a browser takes.
 
 Recording what is served — one `BroadcastSource` more, into an HLS event
-playlist — cost nothing the rounds' own spread did not cover, at four
-hundred TCP players and at a hundred WebRTC ones, and every picture was
-in the recording.
+playlist — cost a tenth of a core at most, at four hundred TCP players and
+at a hundred WebRTC ones, and every picture was in the recording.
 
 ## Running it
 

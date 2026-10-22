@@ -45,11 +45,13 @@ H.264 at 12.3 Mbit/s with two B-frames, AAC at 128 kbit/s; any encoder with
 those settings will do. For WebRTC, the same without B-frames and with Opus
 sound, which is what a browser takes: `-bf 0 -c:a libopus -b:a 96k`.
 
-The keyframe interval matters: a player starts at the newest keyframe the
-broadcast holds, and is sent what came after it at once over TCP — at twice
-its speed over UDP and WebRTC — so a stream with keyframes ten seconds apart
-has every player start with up to ten seconds to catch up, which is the
-stream's, not the server's.
+The keyframe interval matters. A TCP player starts at the newest keyframe
+the broadcast holds and is sent what came after it at once, so a stream
+with keyframes ten seconds apart has it start with up to ten seconds to
+catch up, which is the stream's, not the server's. A UDP or WebRTC player
+starts there only while that keyframe is no more than a second behind the
+newest picture, and is sent what came after it at twice its speed;
+otherwise it waits for the next keyframe.
 
 ## What is measured
 
@@ -65,7 +67,9 @@ For each number of players, a run of 30 seconds:
 - **Lost** — RTP packets a player never received, by the gaps in each
   track's sequence numbers. A player the server moves on to a newer
   keyframe — one that fell behind further than the broadcast keeps — shows
-  here.
+  here. A UDP player holds the RTCP port it asked for as well as its RTP
+  one, though it reads nothing from it: let go, it could be another's RTP
+  port, and the sender reports sent to it would count there as a loss.
 - **Lag spread** — for each picture's last packet, its arrival less the
   newest timestamp sent before it; the spread of that over the run after a
   player's first three seconds, the largest less the smallest. It is how

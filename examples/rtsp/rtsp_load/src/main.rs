@@ -254,6 +254,11 @@ mod example {
         let (base, sections) = sections(url, &described)?;
         let mut tracks = Vec::new();
         let mut sockets = Vec::new();
+        // Each track's RTCP port is held for as long as it plays, though
+        // nothing is read from it: let go, another player could be given it
+        // for its RTP, and the server's sender reports to this one would
+        // arrive there and read as a jump in its sequence numbers.
+        let mut rtcp_ports = Vec::new();
         let mut session_id: Option<String> = None;
         for (index, (control, clock, video)) in sections.into_iter().enumerate() {
             let transport = if udp {
@@ -265,7 +270,7 @@ mod example {
                 );
                 receive_buffer(&rtp, 8 * 1024 * 1024);
                 sockets.push(rtp);
-                drop(rtcp);
+                rtcp_ports.push(rtcp);
                 format!("RTP/AVP;unicast;client_port={}-{}", ports.0, ports.1)
             } else {
                 format!(

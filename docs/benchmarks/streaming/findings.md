@@ -55,8 +55,9 @@ more than a player's socket holds, and most of it was dropped there.
 
 A UDP player is now sent what the broadcast held when it joined at twice
 its speed (`UDP_CATCH_UP`), so it catches up in as long as it was behind,
-and is then sent each packet as it is written. It still starts at once,
-at the keyframe.
+and is then sent each packet as it is written. It starts at once, at the
+keyframe, where that keyframe is no more than a second behind; further
+behind, it waits for the next one.
 
 **Sockets the size of a fraction of a keyframe.** Every UDP player's
 packets leave through the server's one RTP socket, and on Windows a socket
@@ -93,3 +94,19 @@ tried at once with `try_send_to` and awaited only when the socket's buffer
 is full. That took a fifth off the server's processor time at a hundred
 players of the first stream and two threads (0.99 to 0.81 cores); the
 system call itself is what remains.
+
+## Sender reports were counted as lost packets
+
+Measured again after UDP players began to start no more than a second
+behind, two of the six runs of two hundred UDP players each had two
+players that lost some twelve thousand packets — ten seconds of the
+stream — while every player received the stream's whole rate. Nothing was
+missing: `rtsp_load` let go of each track's RTCP port as soon as it had
+asked for it, the system gave that port to another player as its RTP port,
+and the server's sender reports to the first player arrived there. Read as
+RTP, a report's length field is a sequence number far from the expected
+one, and the next real packet after it counted as everything in between
+lost. The players now hold both ports for as long as they play, and no run
+loses a packet; the losses the first measurement gave at five and eight
+hundred players, past the ceiling, were most likely the same. The RTSP
+server's own tests had the same fault, and hold both ports since b6e0e00.
