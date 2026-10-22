@@ -184,11 +184,14 @@ chroma format or bit depth:
 - `RtspServer` and `WebRtcServer` carry it on as it comes, in the same
   track.
 - A decoder follows it, handing on pictures of the new size — `SwDecoder`,
-  `D3d11Decoder`, `D3d12Decoder`, `CudaDecoder` and `VulkanDecoder`, which
-  opens its codec context anew for it. `SwScaler` and the D3D11, D3D12,
-  CUDA and Vulkan scalers take any size in and go on writing their own, so
-  an encoder after one is not disturbed. The macOS decoder and scaler have
-  not been tried.
+  `D3d11Decoder`, `D3d12Decoder`, `CudaDecoder`, `VideoToolboxDecoder` and
+  `VulkanDecoder`, which opens its codec context anew for it. `SwScaler` and
+  the D3D11, D3D12, CUDA, Vulkan and Metal scalers take any size in and go on
+  writing their own, so an encoder after one is not disturbed.
+- An encoder opened at one size — `SwEncoder` and the D3D11, D3D12, CUDA,
+  Vulkan and VideoToolbox encoders — refuses each picture of another with
+  its typed size error and goes on encoding once the size it was opened at
+  comes back. Put a scaler in front of it where the size may change.
 - A muxer whose header keeps the first parameter sets for the whole output
   — `FileMuxer` to an MP4 or MOV, `HlsMuxer` of fMP4, `DashMuxer` — refuses
   the track from there (`MuxerTrackError::FormatChanged`), and the output

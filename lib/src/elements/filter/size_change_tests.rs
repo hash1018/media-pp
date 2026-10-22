@@ -157,6 +157,7 @@ fn assert_scaled(what: &str, (sizes, errors): (Vec<(u32, u32)>, Vec<String>)) {
 /// not this.
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "macos", feature = "videotoolbox"),
     feature = "cuda",
     feature = "vulkan"
 ))]
@@ -355,6 +356,68 @@ fn vulkan_decoding_and_scaling_follow_a_change_of_size() {
     assert_scaled(
         "VulkanScaler after VulkanDecoder",
         sizes_through(packets, move |branch| Ok(branch.pipe(decoder).pipe(scaler))),
+    );
+}
+
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+#[test]
+fn videotoolbox_decoding_follows_a_change_of_size() {
+    use crate::elements::VideoToolboxDecoder;
+
+    let Some(device) = crate::test_support::try_videotoolbox_device() else {
+        return;
+    };
+    let (parameters, packets) = changing();
+    let make = || VideoToolboxDecoder::new("decoder", parameters.clone(), &device).ok();
+    if !decodes_here("VideoToolboxDecoder", make(), &packets) {
+        return;
+    }
+    let decoder = make().unwrap();
+    assert_decoded(
+        "VideoToolboxDecoder",
+        sizes_through(packets, move |branch| piped(branch, decoder)),
+    );
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[test]
+fn metal_upload_and_scaling_follow_a_change_of_size() {
+    use crate::elements::{
+        MetalScaler, MetalScalerInterp, SwDecoder, VideoToolboxDecoder, VideoToolboxUpload,
+    };
+
+    let Some(device) = crate::test_support::try_videotoolbox_device() else {
+        return;
+    };
+    let (parameters, packets) = changing();
+    let decoder = SwDecoder::new("decoder", parameters.clone()).unwrap();
+    let upload = VideoToolboxUpload::new("upload", &device);
+    assert_decoded(
+        "VideoToolboxUpload",
+        sizes_through(packets.clone(), move |branch| {
+            Ok(branch.pipe(decoder).pipe(upload))
+        }),
+    );
+    let scaler =
+        || MetalScaler::new("scaler", &device, OUT.0, OUT.1, MetalScalerInterp::Bilinear).unwrap();
+    let decoder = SwDecoder::new("decoder", parameters.clone()).unwrap();
+    let upload = VideoToolboxUpload::new("upload", &device);
+    let scale = scaler();
+    assert_scaled(
+        "MetalScaler after VideoToolboxUpload",
+        sizes_through(packets.clone(), move |branch| {
+            Ok(branch.pipe(decoder).pipe(upload).pipe(scale))
+        }),
+    );
+    let make = || VideoToolboxDecoder::new("decoder", parameters.clone(), &device).ok();
+    if !decodes_here("VideoToolboxDecoder", make(), &packets) {
+        return;
+    }
+    let decoder = make().unwrap();
+    let scale = scaler();
+    assert_scaled(
+        "MetalScaler after VideoToolboxDecoder",
+        sizes_through(packets, move |branch| Ok(branch.pipe(decoder).pipe(scale))),
     );
 }
 
@@ -579,16 +642,64 @@ fn a_vulkan_encoder_refuses_another_size_and_goes_on() {
     );
 }
 
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+#[test]
+fn a_videotoolbox_encoder_refuses_another_size_and_goes_on() {
+    use crate::elements::{
+        VideoToolboxCodec, VideoToolboxDecoder, VideoToolboxEncoder, VideoToolboxEncoderOptions,
+        VideoToolboxFrameFormat,
+    };
+
+    let Some(device) = crate::test_support::try_videotoolbox_device() else {
+        return;
+    };
+    let (parameters, packets) = changing();
+    let make = || VideoToolboxDecoder::new("decoder", parameters.clone(), &device).ok();
+    if !decodes_here("VideoToolboxDecoder", make(), &packets) {
+        return;
+    }
+    let Ok(encoder) = VideoToolboxEncoder::new(
+        "encoder",
+        &device,
+        VideoToolboxEncoderOptions {
+            codec: VideoToolboxCodec::H264,
+            format: VideoToolboxFrameFormat::Nv12,
+            width: SMALL.0,
+            height: SMALL.1,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 1_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    ) else {
+        eprintln!("skipping: no VideoToolbox H.264 encoder opens here");
+        return;
+    };
+    let decoder = make().unwrap();
+    assert_refused_and_on(
+        "VideoToolboxEncoder",
+        run(packets, move |branch| {
+            Ok(branch.pipe(decoder).pipe(encoder))
+        }),
+    );
+}
+
 /// The same through every decoder for H.265, from whichever H.265 encoder
 /// this machine has: `VulkanDecoder` watches H.265's parameter sets too.
 #[test]
 fn hevc_decoding_follows_a_change_of_size() {
     use crate::elements::SwDecoder;
 
-    let Some((parameters, packets)) = ["hevc_nvenc", "hevc_mf", "hevc_qsv", "hevc_amf", "libx265"]
-        .into_iter()
-        .find_map(changing_from)
-    else {
+    let Some((parameters, packets)) = [
+        "hevc_nvenc",
+        "hevc_mf",
+        "hevc_qsv",
+        "hevc_amf",
+        "hevc_videotoolbox",
+        "libx265",
+    ]
+    .into_iter()
+    .find_map(changing_from) else {
         eprintln!("skipping: no H.265 encoder opens here");
         return;
     };
@@ -630,6 +741,18 @@ fn hevc_decoding_follows_a_change_of_size() {
             let decoder = make().unwrap();
             assert_decoded(
                 "CudaDecoder, H.265",
+                sizes_through(packets.clone(), move |branch| piped(branch, decoder)),
+            );
+        }
+    }
+    #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+    if let Some(device) = crate::test_support::try_videotoolbox_device() {
+        use crate::elements::VideoToolboxDecoder;
+        let make = || VideoToolboxDecoder::new("decoder", parameters.clone(), &device).ok();
+        if decodes_here("VideoToolboxDecoder, H.265", make(), &packets) {
+            let decoder = make().unwrap();
+            assert_decoded(
+                "VideoToolboxDecoder, H.265",
                 sizes_through(packets.clone(), move |branch| piped(branch, decoder)),
             );
         }
