@@ -1101,12 +1101,15 @@ fn recv_only(track: AttachedTrack) -> WebRtcTrackSource {
     source
 }
 
-fn push_packets(sink: &mut WebRtcTrackSink) {
-    for i in 0..5 {
+/// Five packets, the first a keyframe with its parameter sets, stamped on
+/// from where the `round` before ended — sent again round after round, as a
+/// stream sends its keyframes, until the peer has seen one.
+fn push_packets(sink: &mut WebRtcTrackSink, round: i64) {
+    for i in round * 5..round * 5 + 5 {
         // `write_track` needs a real time base to build str0m's own
         // `MediaTime` from — a bare `Packet::copy` defaults to 0/0,
         // which is silently unusable (dropped, not an error).
-        let payload: &[u8] = if i == 0 {
+        let payload: &[u8] = if i % 5 == 0 {
             // A complete Annex-B access unit with SPS/PPS. H.264 stream info
             // intentionally does not become ready from a merely-labeled
             // payload; the actual parameter sets must cross RTP first.
@@ -1232,11 +1235,6 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     assert_eq!(sink_b.negotiated_codecs(), source_b.negotiated_codecs());
     assert_eq!(source_b.codec(), None);
 
-    // Let the answer actually apply before pushing media through it.
-    thread::sleep(Duration::from_millis(100));
-
-    push_packets(&mut sink_a);
-
     // peer-b's return direction uses a real OpenH264 encoder. Besides
     // checking the observed RTP codec below, peer-a decodes this stream and
     // must produce a frame; a mislabeled VP8 payload would fail there.
@@ -1283,9 +1281,24 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     let info_a = source_a
         .wait_stream_info(Duration::from_secs(2))
         .expect("peer-a should observe peer-b's H.264 payload");
-    let info_b = source_b
-        .wait_stream_info(Duration::from_secs(2))
-        .expect("peer-b should observe peer-a's H.264 payload");
+    // peer-a's keyframe goes out again until peer-b has seen one, as a
+    // stream's keyframes do. It went once, after a fixed wait for the answer
+    // to apply on both sides; on a loaded machine that wait was too short,
+    // the one keyframe was lost, and peer-b never saw the parameter sets.
+    let info_b = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut round = 0;
+        loop {
+            push_packets(&mut sink_a, round);
+            match source_b.wait_stream_info(Duration::from_millis(200)) {
+                Ok(info) => break info,
+                Err(error) if Instant::now() >= deadline => {
+                    panic!("peer-b should observe peer-a's H.264 payload: {error}")
+                }
+                Err(_) => round += 1,
+            }
+        }
+    };
     assert_eq!(info_a.codec(), Codec::H264);
     assert_eq!(info_b.codec(), Codec::H264);
     assert_eq!(source_a.codec(), Some(Codec::H264));
