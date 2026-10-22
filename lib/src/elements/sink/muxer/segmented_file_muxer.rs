@@ -579,7 +579,8 @@ impl SegmentGroup {
             return packet;
         }
         let moved = |value: i64| (value - origin).max(0);
-        let mut rebased = (*packet).clone();
+        // Its payload shared, not copied: only its timestamps move.
+        let mut rebased = crate::buffer::shared_packet(&packet);
         rebased.set_pts(packet.pts().map(moved));
         rebased.set_dts(packet.dts().map(moved));
         Arc::new(rebased)

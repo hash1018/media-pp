@@ -522,7 +522,9 @@ impl Clip {
             // a track interleaved just ahead of the keyframe can carry a
             // packet a fraction older than it.
             let moved = |value: i64| (value - origin).max(0);
-            let mut rebased = (*packet).clone();
+            // Its payload shared, not copied: only its timestamps move,
+            // and a replay's worth of copies at once was what it held twice.
+            let mut rebased = crate::buffer::shared_packet(&packet);
             rebased.set_pts(packet.pts().map(moved));
             rebased.set_dts(packet.dts().map(moved));
             sinks[track].consume(MediaBuffer::Packet(Arc::new(rebased).into()))?;

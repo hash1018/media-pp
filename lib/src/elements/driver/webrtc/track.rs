@@ -847,7 +847,7 @@ impl WebRtcTrackSink {
                 .checked_add(offset)
                 .ok_or(WebRtcError::PacketTimestampNormalizationOverflow { value, offset })
         };
-        let mut normalized = (**packet).clone();
+        let mut normalized = crate::buffer::shared_packet(&packet);
         normalized.set_pts(Some(shifted(pts)?));
         normalized.set_dts(packet.dts().map(shifted).transpose()?);
         let mut normalized: PacketBuffer = Arc::new(normalized).into();

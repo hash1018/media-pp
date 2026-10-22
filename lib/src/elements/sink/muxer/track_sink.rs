@@ -291,10 +291,12 @@ impl<M: Muxer> RawSink for TrackSink<M> {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
-                // Cloned, not changed in place: the `Arc<Packet>` may be
-                // shared with another branch off the same `Tee`, which must
-                // not see this track's timestamps or stream index.
-                let mut packet = (**packet).clone();
+                // A packet of its own, not changed in place: the
+                // `Arc<Packet>` may be shared with another branch off the
+                // same `Tee`, which must not see this track's timestamps or
+                // stream index. Its payload is shared all the same — the
+                // muxer only reads it, as FFmpeg's own `tee` muxer relies on.
+                let mut packet = crate::buffer::shared_packet(&packet);
                 let unit = packet.time_base();
                 let from = if unit.numerator() > 0 && unit.denominator() > 0 {
                     unit

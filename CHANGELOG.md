@@ -185,7 +185,12 @@ compile error with no explanation.
   makes its copy writable — a full copy of a payload the broadcast still
   holds. Every reader paid it for every packet: a server's every player,
   and the memory of whatever such a reader held at once. It now shares the
-  broadcast's payload, as `RtspServer`'s packetizer does.
+  broadcast's payload, as `RtspServer`'s packetizer does. So do the muxers
+  (`FileMuxer`, `Mp4Muxer` and the rest, and `SegmentedFileMuxer` before
+  them, which copied twice), `ReplayBuffer` saving what it holds — a
+  replay's worth of copies at once — and a `WebRtcTrackSink` shifting a
+  negative first timestamp: each copied every packet only to change its
+  timestamps or stream. What they write is byte for byte as before.
 
 - **`WebRtcTrackSink` sent some of an MP4's H.264 pictures unconverted.**
   Given a demuxer's `avcC` parameters, it took any payload opening with a
