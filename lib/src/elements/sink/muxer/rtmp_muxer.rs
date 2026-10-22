@@ -223,6 +223,13 @@ impl RtmpMuxer {
         let pending = PendingStream::new(name, &parameters, time_base);
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
+        // A track from an MP4 carries the tag `avc1` there, which FLV's
+        // muxer refuses as "incompatible": it writes its own.
+        // SAFETY: `as_mut_ptr` on parameters this stream owns, written before
+        // the stream is handed to the muxer.
+        unsafe {
+            (*stream.parameters().as_mut_ptr()).codec_tag = 0;
+        }
         let track = self.id.track(self.streams.len());
         self.streams.push(pending);
         Ok(track)

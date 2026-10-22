@@ -1,5 +1,5 @@
 //! Background tasks that run beside pipelines rather than in them: the
-//! WebRTC peer and its tracks, and the RTSP server.
+//! WebRTC peer and its tracks, and the RTSP, WebRTC and RTMP servers.
 //!
 //! They are not part of a dataflow graph. A [`Driver`](crate::driver::Driver)
 //! has no pads of its own; it runs a loop and mints ordinary
@@ -9,15 +9,21 @@
 //! tracks belong to. `RtspServer` serves
 //! [`Broadcast`](crate::elements::Broadcast)s, which pipelines write into.
 
-#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+#[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
 mod access;
+#[cfg(any(feature = "rtsp-server", feature = "rtmp-server"))]
+mod parameters;
+#[cfg(feature = "rtmp-server")]
+mod rtmp_server;
 #[cfg(feature = "rtsp-server")]
 mod rtsp_server;
 #[cfg(feature = "webrtc")]
 mod webrtc;
 
-#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+#[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
 pub use access::{Access, AccessRequest, Authorize, Credentials};
+#[cfg(feature = "rtmp-server")]
+pub use rtmp_server::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions};
 #[cfg(feature = "rtsp-server")]
 pub use rtsp_server::{
     RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,

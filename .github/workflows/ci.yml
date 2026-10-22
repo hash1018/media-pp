@@ -102,6 +102,10 @@ jobs:
         shell: pwsh
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
+      - name: Lint (RTMP server)
+        shell: pwsh
+        run: cargo clippy -p media-pp --all-targets --features rtmp-server -- -D warnings
+
       - name: Lint (WebRTC)
         shell: pwsh
         run: cargo clippy -p media-pp -p webrtc_server -p webrtc_load --all-targets --features webrtc -- -D warnings
@@ -172,6 +176,12 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc -p media-pp --no-deps --features rtsp-server
 
+      - name: Check API documentation (RTMP server)
+        shell: pwsh
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p media-pp --no-deps --features rtmp-server
+
       # Hardware-dependent tests detect the missing device and skip with a
       # reason (`try_device()`), so these run the whole logic suite here and
       # the D3D11/NVENC/capture parts on a developer machine. The soak
@@ -240,6 +250,11 @@ jobs:
           cargo test -p media-pp --features rtsp-server --lib -- rtsp_server
           cargo test -p rtsp_server -p rtsp_load
 
+      # FFmpeg's RTMP client against the server, on the loopback.
+      - name: Test (RTMP server)
+        shell: pwsh
+        run: cargo test -p media-pp --features rtmp-server --lib -- rtmp_server
+
       # str0m clients of the tests' own against the server, on the loopback.
       - name: Test (WebRTC server)
         shell: pwsh
@@ -248,9 +263,9 @@ jobs:
           cargo test -p webrtc_server -p webrtc_load
 
       # A stream across every pair of protocols: WHIP and WHEP clients,
-      # both servers, and recordings — on the loopback.
+      # every server, and recordings — on the loopback.
       - name: Test (across protocols)
-        run: cargo test -p media-pp --features webrtc,rtsp-server --test streaming
+        run: cargo test -p media-pp --features webrtc,rtsp-server,rtmp-server --test streaming
 
   linux:
     runs-on: ubuntu-26.04
@@ -328,6 +343,9 @@ jobs:
       - name: Lint (RTSP server)
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
+      - name: Lint (RTMP server)
+        run: cargo clippy -p media-pp --all-targets --features rtmp-server -- -D warnings
+
       - name: Lint (WebRTC)
         run: cargo clippy -p media-pp -p webrtc_server -p webrtc_load --all-targets --features webrtc -- -D warnings
 
@@ -362,6 +380,7 @@ jobs:
           cargo doc -p media-pp --no-deps --features whisper
           cargo doc -p media-pp --no-deps --features rnnoise
           cargo doc -p media-pp --no-deps --features rtsp-server
+          cargo doc -p media-pp --no-deps --features rtmp-server
 
       # What docs.rs runs for a release: `cargo-docs-rs` reads
       # `[package.metadata.docs.rs]` and passes what docs.rs passes —
@@ -426,15 +445,18 @@ jobs:
           cargo test -p media-pp --features rtsp-server --lib -- rtsp_server
           cargo test -p rtsp_server -p rtsp_load
 
+      - name: Test (RTMP server)
+        run: cargo test -p media-pp --features rtmp-server --lib -- rtmp_server
+
       - name: Test (WebRTC server)
         run: |
           cargo test -p media-pp --features webrtc --lib -- webrtc::server
           cargo test -p webrtc_server -p webrtc_load
 
       # A stream across every pair of protocols: WHIP and WHEP clients,
-      # both servers, and recordings — on the loopback.
+      # every server, and recordings — on the loopback.
       - name: Test (across protocols)
-        run: cargo test -p media-pp --features webrtc,rtsp-server --test streaming
+        run: cargo test -p media-pp --features webrtc,rtsp-server,rtmp-server --test streaming
 
       # PipeWire-session-dependent tests skip themselves with a reason
       # (`try_capture_source()`-style helper) when this headless runner has
@@ -482,6 +504,9 @@ jobs:
       - name: Lint (RTSP server)
         run: cargo clippy -p media-pp -p rtsp_server -p rtsp_load --all-targets --features rtsp-server -- -D warnings
 
+      - name: Lint (RTMP server)
+        run: cargo clippy -p media-pp --all-targets --features rtmp-server -- -D warnings
+
       - name: Lint (WebRTC)
         run: cargo clippy -p media-pp -p webrtc_server -p webrtc_load --all-targets --features webrtc -- -D warnings
 
@@ -520,6 +545,7 @@ jobs:
           cargo doc -p media-pp --no-deps
           cargo doc -p media-pp --no-deps --features videotoolbox,metal,avfoundation-capture,screencapturekit-capture,coreaudio-capture,coreaudio-renderer
           cargo doc -p media-pp --no-deps --features rtsp-server
+          cargo doc -p media-pp --no-deps --features rtmp-server
 
       - name: Test file-export examples
         run: cargo test -p file_common -p remux -p resize

@@ -57,6 +57,18 @@ compile error with no explanation.
 
 ### Added
 
+- **`RtmpServer`: what OBS and most encoders publish, taken in.** Under
+  the `rtmp-server` feature, with no dependency beyond FFmpeg: a publisher
+  pushing to `rtmp://<host>/<app>/<stream>` is written into the
+  `Broadcast` added at `app/stream`, for an `RtspServer`, a
+  `WebRtcServer` or a recording to read. H.264 and AAC as RTMP has always
+  carried them, and H.265, AV1, VP9 and Opus as Enhanced RTMP does, go in
+  as they come, nothing decoded; a picture's size comes from the metadata
+  or the first keyframe, and a new configuration mid-stream publishes the
+  broadcast again. A publisher that drops and comes back goes on into the
+  same broadcast. `Authorize` decides who may publish, from `?user=&pass=`
+  or `?token=` in the stream name.
+
 - **`WebRtcServerHandle::session_stats`**: every open session's figures,
   measured about once a second — where its client is, the round trip, the
   share of packets lost, the bytes each way, resends and keyframes asked
@@ -229,6 +241,9 @@ compile error with no explanation.
   for the client to send it again, and under load — retransmissions lost
   too, a second, two, four — a client gave up after ten. What comes from
   an address a session has taken STUN from now goes to that session.
+
+- **`RtmpMuxer` takes a track from an MP4.** It kept the track's `avc1`
+  tag, which FLV's muxer refuses as incompatible; it now writes its own.
 
 - **A `WebRtcServer` session's id cannot be guessed.** The URL a WHEP or
   WHIP session is ended at — `DELETE /session/<id>` — was a count, so

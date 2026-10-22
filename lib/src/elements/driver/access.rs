@@ -1,5 +1,5 @@
 //! Who may play or publish a server's paths: [`Authorize`], shared by the
-//! RTSP and the WebRTC server.
+//! RTSP, WebRTC and RTMP servers.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,6 +52,9 @@ impl std::fmt::Debug for Credentials {
     }
 }
 
+// An RTMP server reads its publishers' credentials from a query, not a
+// header.
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
 impl Credentials {
     /// What an `Authorization` header's value says, where there is one.
     pub(crate) fn from_header(value: Option<&str>) -> Self {
@@ -162,6 +165,7 @@ impl std::fmt::Debug for Authorize {
 }
 
 /// Standard base64, padded or not; `None` for anything else.
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
 fn base64_decode(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
     let mut bits = 0u32;
@@ -189,6 +193,7 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
     #[test]
     fn a_header_says_its_credentials() {
         assert_eq!(

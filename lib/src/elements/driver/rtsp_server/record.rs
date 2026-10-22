@@ -1,9 +1,8 @@
 //! A publisher's stream written into its path's broadcast: [`Recording`].
 
-use std::ptr;
 use std::time::{Duration, Instant};
 
-use ffmpeg_next::{self as ffmpeg, ffi};
+use ffmpeg_next as ffmpeg;
 
 use crate::buffer::MediaBuffer;
 use crate::element::RawSink;
@@ -12,6 +11,7 @@ use crate::error::Error;
 
 use super::announce::{Announced, Payload};
 use super::depacketize::{Depacketizer, key_unit, nal_units};
+use crate::elements::driver::parameters::{picture_size, set_extradata};
 
 /// How long a recording holds what it is sent while it waits for every
 /// picture's size, and how much — past either, it publishes without.
@@ -167,7 +167,7 @@ fn complete(
     }
     let mut stream = extradata;
     stream.extend_from_slice(unit);
-    let Some((width, height)) = size(track.codec, &stream) else {
+    let Some((width, height)) = picture_size(track.codec, &[], &stream) else {
         return false;
     };
     // SAFETY: parameters this recording owns alone; plain fields.
@@ -176,59 +176,4 @@ fn complete(
         (*parameters.as_mut_ptr()).height = height;
     }
     true
-}
-
-fn set_extradata(parameters: &mut ffmpeg::codec::Parameters, extradata: &[u8]) {
-    // SAFETY: the parameters' own extradata, replaced with a buffer from
-    // FFmpeg's allocator with its padding, as FFmpeg frees it.
-    unsafe {
-        let par = parameters.as_mut_ptr();
-        let data = ffi::av_mallocz(extradata.len() + ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize)
-            .cast::<u8>();
-        if data.is_null() {
-            return;
-        }
-        ptr::copy_nonoverlapping(extradata.as_ptr(), data, extradata.len());
-        ffi::av_freep(ptr::addr_of_mut!((*par).extradata).cast());
-        (*par).extradata = data;
-        (*par).extradata_size = extradata.len() as i32;
-    }
-}
-
-/// A picture's size, as FFmpeg's parser of `codec` reads it from `stream`
-/// — parameter sets and a keyframe, in Annex B.
-fn size(codec: ffmpeg::codec::Id, stream: &[u8]) -> Option<(i32, i32)> {
-    let mut padded = stream.to_vec();
-    padded.resize(stream.len() + ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize, 0);
-    // SAFETY: a parser and a codec context made, used and freed here; the
-    // input is padded as the parser reads past its end.
-    unsafe {
-        let parser = ffi::av_parser_init(ffi::AVCodecID::from(codec) as i32);
-        if parser.is_null() {
-            return None;
-        }
-        let mut context = ffi::avcodec_alloc_context3(ptr::null());
-        if context.is_null() {
-            ffi::av_parser_close(parser);
-            return None;
-        }
-        (*parser).flags |= ffi::PARSER_FLAG_COMPLETE_FRAMES;
-        let mut out = ptr::null_mut();
-        let mut out_size = 0;
-        ffi::av_parser_parse2(
-            parser,
-            context,
-            &mut out,
-            &mut out_size,
-            padded.as_ptr(),
-            stream.len() as i32,
-            ffi::AV_NOPTS_VALUE,
-            ffi::AV_NOPTS_VALUE,
-            0,
-        );
-        let size = ((*parser).width, (*parser).height);
-        ffi::av_parser_close(parser);
-        ffi::avcodec_free_context(&mut context);
-        (size.0 > 0 && size.1 > 0).then_some(size)
-    }
 }

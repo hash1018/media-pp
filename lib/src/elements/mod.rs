@@ -113,7 +113,7 @@ pub use crate::platform::macos::videotoolbox::{
     VideoToolboxDevice, VideoToolboxDeviceError, VideoToolboxFrameFormat, VideoToolboxFramePool,
     VideoToolboxFramePoolError,
 };
-#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+#[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
 pub use driver::{Access, AccessRequest, Authorize, Credentials};
 #[cfg(feature = "webrtc")]
 pub use driver::{
@@ -122,6 +122,8 @@ pub use driver::{
     WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcStreamInfo, WebRtcTrackSink,
     WebRtcTrackSource, WhepOptions, WhepSource, WhipOptions, WhipPublisher, WhipSinks,
 };
+#[cfg(feature = "rtmp-server")]
+pub use driver::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions};
 #[cfg(feature = "rtsp-server")]
 pub use driver::{
     RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,

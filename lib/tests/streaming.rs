@@ -806,3 +806,102 @@ fn recorded_while_played_both_ways() {
     input.stop();
     servers.stop();
 }
+
+/// RTMP in — what OBS and most encoders send — out through RTSP and
+/// WebRTC, and recorded.
+#[cfg(feature = "rtmp-server")]
+mod rtmp {
+    use super::*;
+    use media_pp::elements::{RtmpMuxer, RtmpServer, RtmpServerHandle, RtmpServerOptions};
+
+    /// An RTMP server on the loopback taking publishers into `broadcast`
+    /// at `path`.
+    fn rtmp_server(path: &str, broadcast: &Broadcast) -> (Arc<DriverRunner>, RtmpServerHandle) {
+        let (server, handle) =
+            RtmpServer::bind("rtmp", "127.0.0.1:0", RtmpServerOptions::default()).unwrap();
+        handle.add_path(path, broadcast).unwrap();
+        let runner = DriverRunner::new(server);
+        runner.run().unwrap();
+        (runner, handle)
+    }
+
+    /// An RTMP publisher of `encoders` to `url` — FFmpeg's own client —
+    /// and the input feeding it.
+    fn publish_rtmp(url: &str, encoders: Encoders) -> Arc<Pipeline> {
+        let mut muxer = RtmpMuxer::create(url).unwrap();
+        let video = muxer
+            .add_stream("video", TrackFormat::from(&encoders.video))
+            .unwrap();
+        let audio = encoders.audio.as_ref().map(|encoder| {
+            muxer
+                .add_stream("audio", TrackFormat::from(encoder))
+                .unwrap()
+        });
+        let mut sinks = muxer.open().expect("the server takes the publisher");
+        let video = sinks.take(video).unwrap();
+        let audio = audio.map(|track| sinks.take(track).unwrap());
+        live(encoders, video, audio)
+    }
+
+    #[test]
+    fn rtmp_in_rtsp_and_whep_out() {
+        let encoders = encoders(AudioCodec::Aac);
+        let studio = Broadcast::new("studio", BroadcastOptions::default());
+        let servers = Servers::serving(
+            "live/studio",
+            &studio,
+            WebRtcPathMode::Play,
+            RtspPathMode::Play,
+        );
+        let (rtmp, ingest) = rtmp_server("live/studio", &studio);
+        let input = publish_rtmp(&ingest.url("live/studio"), encoders);
+        until_live(&studio);
+
+        let (source, streams) = RtspSource::open(
+            "rtsp-player",
+            servers.rtsp_handle.url("live/studio"),
+            RtspOptions::default(),
+        )
+        .unwrap();
+        let rtsp_player = play(source, &streams);
+        let (source, streams) = WhepSource::open(
+            "webrtc-player",
+            &servers.http.whep_url("live/studio"),
+            WhepOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            !streams
+                .iter()
+                .any(|stream| stream.kind == media::Type::Audio),
+            "AAC is left out of WebRTC"
+        );
+        let webrtc_player = play(source, &streams);
+        plays(&rtsp_player, true);
+        plays(&webrtc_player, false);
+
+        rtsp_player.pipeline.stop();
+        webrtc_player.pipeline.stop();
+        input.stop();
+        rtmp.stop();
+        servers.stop();
+    }
+
+    #[test]
+    fn rtmp_in_recorded() {
+        let encoders = encoders(AudioCodec::Aac);
+        let studio = Broadcast::new("studio", BroadcastOptions::default());
+        let (rtmp, ingest) = rtmp_server("live/studio", &studio);
+        let input = publish_rtmp(&ingest.url("live/studio"), encoders);
+        until_live(&studio);
+
+        let scratch = Scratch::new("rtmp-hls");
+        let (source, streams) = BroadcastSource::new("recorder", &studio).unwrap();
+        let recorder = record_hls(source, &streams, &scratch.0);
+        recorded_for_a_while(&recorder, &input);
+        let (pictures, has_sound) = in_file(&scratch.0.join("index.m3u8"));
+        assert!(pictures >= PICTURES, "{pictures} pictures recorded");
+        assert!(has_sound, "AAC goes into the recording as it came");
+        rtmp.stop();
+    }
+}

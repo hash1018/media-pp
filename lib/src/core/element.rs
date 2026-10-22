@@ -128,6 +128,8 @@ pub enum ElementType {
     WebRtcPeer,
     /// RTSP server driver, serving broadcasts.
     RtspServer,
+    /// RTMP server driver, taking publishers into broadcasts.
+    RtmpServer,
     /// WebRTC server driver, serving broadcasts.
     WebRtcServer,
     /// WHIP client, publishing to a WebRTC server.

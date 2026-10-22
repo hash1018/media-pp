@@ -927,6 +927,11 @@ pub enum Error {
     #[error(transparent)]
     RtspServerError(#[from] crate::elements::RtspServerError),
 
+    /// See [`crate::elements::RtmpServerError`].
+    #[cfg(feature = "rtmp-server")]
+    #[error(transparent)]
+    RtmpServerError(#[from] crate::elements::RtmpServerError),
+
     /// See [`crate::elements::WebRtcServerError`].
     #[cfg(feature = "webrtc")]
     #[error(transparent)]
