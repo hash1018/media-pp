@@ -78,7 +78,8 @@ impl Timeline {
         if dts.or(pts).is_some_and(|ts| ts < 0) {
             return None;
         }
-        let mut stamped = packet.clone();
+        // Its payload shared with the broadcast, not copied for this reader.
+        let mut stamped = crate::buffer::shared_packet(packet);
         stamped.set_pts(pts);
         stamped.set_dts(dts);
         if let Some(last) = pts.or(dts) {

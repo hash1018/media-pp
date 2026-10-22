@@ -281,7 +281,9 @@ impl Packetizer {
         if packet.pts().is_none() {
             return Ok(Vec::new());
         }
-        let mut packet = packet.clone();
+        // Its payload shared, not copied for this player: the muxer only
+        // reads it.
+        let mut packet = crate::buffer::shared_packet(packet);
         packet.set_stream(0);
         packet.rescale_ts(self.unit, self.clock);
         // SAFETY: the context is open, and the packet ours, for the call.

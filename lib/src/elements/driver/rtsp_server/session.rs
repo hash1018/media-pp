@@ -124,6 +124,9 @@ struct Playing {
     pipeline: DrivenPipeline,
     handle: DrivenPipelineHandle,
     outbox: Outbox,
+    /// Each described track's, by its number, where it was set up: what
+    /// cuts its packets into RTP as they are sent.
+    packetizers: Vec<Option<Packetizer>>,
     _count: Count,
 }
 
@@ -325,7 +328,31 @@ pub(super) async fn serve(
                         };
                     }
                 };
-                if let Err(why) = deliver(outgoing, &mut write, udp.as_deref(), &shared, &pp_log).await {
+                // Cut here, as it is sent, and not borrowed across the send.
+                let Some(Some(packetizer)) = playing
+                    .as_mut()
+                    .and_then(|play| play.packetizers.get_mut(outgoing.stream))
+                else {
+                    continue;
+                };
+                let packets = match packetizer.packetize(&outgoing.packet) {
+                    Ok(packets) => packets,
+                    Err(error) => {
+                        pp_debug!(pp_log: &pp_log, "{peer}: a packet was not sent: {error}");
+                        continue;
+                    }
+                };
+                if let Err(why) = deliver(
+                    outgoing.delivery,
+                    packets,
+                    outgoing.due,
+                    &mut write,
+                    udp.as_deref(),
+                    &shared,
+                    &pp_log,
+                )
+                .await
+                {
                     break 'connection why;
                 }
             }
@@ -705,6 +732,7 @@ impl Connection {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| i64::try_from(since.as_micros()).unwrap_or(0));
         let outbox = Outbox::default();
+        let mut packetizers: Vec<Option<Packetizer>> = described.iter().map(|_| None).collect();
         let mut sinks = Vec::new();
         for (stream, &track) in described.iter().enumerate() {
             let Some(delivery) = delivery[stream] else {
@@ -720,12 +748,13 @@ impl Connection {
                     );
                     500_u16
                 })?;
+            packetizers[stream] = Some(packetizer);
             sinks.push((
                 track,
                 RtspTrackSink::new(
                     format!("rtsp-{id}-track-{track}"),
                     delivery,
-                    packetizer,
+                    stream,
                     info.time_base,
                     outbox.clone(),
                 ),
@@ -745,6 +774,7 @@ impl Connection {
             handle: pipeline.handle(),
             pipeline,
             outbox,
+            packetizers,
             _count: Count::new(&self.shared),
         })
     }
@@ -856,11 +886,9 @@ fn described(shared: &Shared, path: &str) -> Option<(Broadcast, Vec<StreamInfo>,
 /// Sends what a player is to be sent: what fails to send over TCP ends the
 /// connection, with why.
 async fn deliver(
-    Outgoing {
-        delivery,
-        packets,
-        due,
-    }: Outgoing,
+    delivery: Delivery,
+    packets: Vec<Vec<u8>>,
+    due: Option<Instant>,
     write: &mut OwnedWriteHalf,
     udp: Option<&Udp>,
     shared: &Shared,

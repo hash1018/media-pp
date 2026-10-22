@@ -180,6 +180,13 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A `BroadcastSource` copied every packet it handed on.** Restamping a
+  packet onto its own timeline cloned it, and `ffmpeg::Packet::clone`
+  makes its copy writable — a full copy of a payload the broadcast still
+  holds. Every reader paid it for every packet: a server's every player,
+  and the memory of whatever such a reader held at once. It now shares the
+  broadcast's payload, as `RtspServer`'s packetizer does.
+
 - **`WebRtcTrackSink` sent some of an MP4's H.264 pictures unconverted.**
   Given a demuxer's `avcC` parameters, it took any payload opening with a
   start code for one already Annex-B — and a NAL unit of 256 to 511 bytes

@@ -433,6 +433,26 @@ pub fn set_time_base(frame: &mut ffmpeg::Frame, time_base: ffmpeg::Rational) {
     unsafe { (*frame.as_mut_ptr()).time_base = time_base.into() };
 }
 
+/// A packet sharing `packet`'s payload, with fields of its own to change —
+/// timestamps, stream index, flags — and a payload not to be written.
+///
+/// `Packet::clone` makes its copy writable, which for a payload another
+/// reference holds — a broadcast's, a sibling branch's — copies all of it:
+/// once for every player, for every packet a broadcast hands on. Where the
+/// payload is only read on, this shares it.
+pub(crate) fn shared_packet(packet: &ffmpeg::Packet) -> ffmpeg::Packet {
+    use ffmpeg::packet::{Mut, Ref};
+    let mut shared = ffmpeg::Packet::empty();
+    // SAFETY: both are live packets; `av_packet_ref` makes `shared` another
+    // reference to `packet`'s buffer — or a copy of data that has none — and
+    // copies its properties, leaving `packet` as it was.
+    let ret = unsafe { ffi::av_packet_ref(shared.as_mut_ptr(), packet.as_ptr()) };
+    if ret < 0 {
+        return packet.clone();
+    }
+    shared
+}
+
 /// Hands `source`'s timing to `destination`: its PTS, and the unit it is in
 /// — and which way up it is shown, the display matrix a phone's portrait
 /// recording carries ([`crate::orientation::Orientation::of`]), so that a
@@ -747,5 +767,30 @@ mod tests {
             (4, 2, Some(5))
         );
         assert_eq!(buffer.kind(), "Video");
+    }
+
+    /// A packet made to restamp another shares its payload — a broadcast
+    /// read by a hundred players once copied every packet a hundred times,
+    /// since `Packet::clone` makes its copy writable — and its fields are
+    /// its own.
+    #[test]
+    fn a_shared_packet_shares_the_payload_and_not_the_timestamps() {
+        let mut source = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+        source.set_pts(Some(10));
+        let mut shared = shared_packet(&source);
+        shared.set_pts(Some(99));
+        assert_eq!(source.pts(), Some(10));
+        assert_eq!(shared.pts(), Some(99));
+        assert_eq!(shared.data(), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(
+            shared.data().map(<[u8]>::as_ptr),
+            source.data().map(<[u8]>::as_ptr),
+            "the payload is shared, not copied"
+        );
+        assert_ne!(
+            source.clone().data().map(<[u8]>::as_ptr),
+            source.data().map(<[u8]>::as_ptr),
+            "where a clone copies it"
+        );
     }
 }

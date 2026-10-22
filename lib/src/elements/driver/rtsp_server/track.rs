@@ -7,13 +7,11 @@ use std::time::{Duration, Instant};
 
 use ffmpeg_next::Rational;
 
-use crate::buffer::MediaBuffer;
+use crate::buffer::{MediaBuffer, PacketBuffer};
 use crate::element::{Element, ElementType, RawSink, element_pp_log};
 use crate::elements::broadcast::time_base;
 use crate::error::Result;
-use crate::pp_log::{PpLog, pp_debug};
-
-use super::rtp::Packetizer;
+use crate::pp_log::PpLog;
 
 /// How much faster than it plays a UDP player is sent what the broadcast
 /// held when it joined: twice, so it catches up in as long as that was.
@@ -30,17 +28,21 @@ pub(super) enum Delivery {
     Udp { rtp: SocketAddr, rtcp: SocketAddr },
 }
 
-/// What is to be sent to a player, and where.
+/// A packet to be sent to a player, and where: cut into RTP by the
+/// connection as it sends it, so that what waits to be sent is the packet
+/// every other reader shares, not RTP of this player's own.
 pub(super) struct Outgoing {
     pub(super) delivery: Delivery,
-    pub(super) packets: Vec<Vec<u8>>,
+    /// Which of the session's described tracks it is — its packetizer's.
+    pub(super) stream: usize,
+    pub(super) packet: PacketBuffer,
     /// Not before when, for a UDP player catching up.
     pub(super) due: Option<Instant>,
 }
 
-/// What a playing session's track sinks have cut into RTP for its
-/// connection to send, in order — every track's in one, so they leave in
-/// the order the broadcast had them.
+/// What a playing session's track sinks have for its connection to send,
+/// in order — every track's in one, so they leave in the order the
+/// broadcast had them.
 #[derive(Clone, Default)]
 pub(super) struct Outbox(Arc<Mutex<Held>>);
 
@@ -70,15 +72,14 @@ impl Outbox {
     }
 }
 
-/// Sends one track of a playing RTSP session: cuts each packet it is
-/// handed into RTP — with the sender reports among them — and puts them in
-/// the session's outbox, which the connection sends. A packet that cannot
-/// be cut is let go of, and the next goes on.
+/// Sends one track of a playing RTSP session: puts each packet it is
+/// handed in the session's outbox, with when a UDP player catching up is
+/// due it, for the connection to cut into RTP and send.
 pub(super) struct RtspTrackSink {
     pp_log: PpLog,
     name: Arc<str>,
     delivery: Delivery,
-    packetizer: Packetizer,
+    stream: usize,
     /// The unit the track's packets count in, where one does not say.
     unit: Rational,
     outbox: Outbox,
@@ -88,7 +89,7 @@ impl RtspTrackSink {
     pub(super) fn new(
         name: String,
         delivery: Delivery,
-        packetizer: Packetizer,
+        stream: usize,
         unit: Rational,
         outbox: Outbox,
     ) -> Self {
@@ -97,7 +98,7 @@ impl RtspTrackSink {
             pp_log: element_pp_log(ElementType::RtspServer, &name, None),
             name,
             delivery,
-            packetizer,
+            stream,
             unit,
             outbox,
         }
@@ -127,13 +128,6 @@ impl RawSink for RtspTrackSink {
         let MediaBuffer::Packet(packet) = buf else {
             return Ok(());
         };
-        let packets = match self.packetizer.packetize(&packet) {
-            Ok(packets) => packets,
-            Err(error) => {
-                pp_debug!(pp_log: &self.pp_log, "a packet was not sent: {error}");
-                return Ok(());
-            }
-        };
         let mut held = self.outbox.lock();
         let due = match self.delivery {
             Delivery::Udp { .. } => packet.dts().or(packet.pts()).map(|ts| {
@@ -145,7 +139,8 @@ impl RawSink for RtspTrackSink {
         };
         held.queue.push_back(Outgoing {
             delivery: self.delivery,
-            packets,
+            stream: self.stream,
+            packet,
             due,
         });
         Ok(())
