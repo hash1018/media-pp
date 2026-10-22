@@ -23,8 +23,13 @@ const OUT: (u32, u32) = (480, 270);
 /// stream: five pictures small, five large, five small again, each run
 /// beginning at a keyframe carrying its own parameter sets.
 fn changing() -> (ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>) {
-    let (parameters, small) = crate::test_support::h264_configured(SMALL);
-    let (_, large) = crate::test_support::h264_configured(LARGE);
+    changing_from("libopenh264").expect("OpenH264 is always present")
+}
+
+/// [`changing`], from the FFmpeg encoder called `encoder`, where it opens.
+fn changing_from(encoder: &str) -> Option<(ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>)> {
+    let (parameters, small) = crate::test_support::try_configured(encoder, SMALL)?;
+    let (_, large) = crate::test_support::try_configured(encoder, LARGE)?;
     let packets = small
         .iter()
         .chain(&large)
@@ -38,11 +43,22 @@ fn changing() -> (ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>) {
             packet
         })
         .collect();
-    (parameters, packets)
+    Some((parameters, packets))
 }
 
-/// The sizes of the pictures `chain` hands on for the changing stream, and
-/// every error the pipeline reported.
+/// What `chain` handed on for `packets`.
+#[derive(Debug)]
+struct Ran {
+    /// The size of each picture.
+    sizes: Vec<(u32, u32)>,
+    /// How many packets.
+    packets: usize,
+    /// Every error the pipeline reported.
+    errors: Vec<String>,
+}
+
+/// The sizes of the pictures `chain` hands on for `packets`, and every
+/// error the pipeline reported.
 fn sizes_through(
     packets: Vec<ffmpeg::Packet>,
     chain: impl FnOnce(
@@ -51,13 +67,34 @@ fn sizes_through(
     + Send
     + 'static,
 ) -> (Vec<(u32, u32)>, Vec<String>) {
+    let ran = run(packets, chain);
+    (ran.sizes, ran.errors)
+}
+
+/// Feeds `packets` through `chain` to its end.
+fn run(
+    packets: Vec<ffmpeg::Packet>,
+    chain: impl FnOnce(
+        crate::pipeline::ChainBuilder,
+    ) -> crate::error::Result<crate::pipeline::ChainBuilder>
+    + Send
+    + 'static,
+) -> Ran {
     let (source, handle) = AppSource::new("packets", 64);
     let sizes = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&sizes);
+    let packets_out = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&packets_out);
     let (pipeline, ()) = Pipeline::new("size-change", source, move |source, ctx| {
         let branch = chain(ctx.branch())?.to(AppSink::new("pictures", move |buf| {
-            if let MediaBuffer::Video(frame) = &buf {
-                seen.lock().unwrap().push((frame.width(), frame.height()));
+            match &buf {
+                MediaBuffer::Video(frame) => {
+                    seen.lock().unwrap().push((frame.width(), frame.height()));
+                }
+                MediaBuffer::Packet(_) => {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                MediaBuffer::Audio(_) => {}
             }
             Ok(())
         }))?;
@@ -90,7 +127,11 @@ fn sizes_through(
     }
     pipeline.stop();
     let sizes = sizes.lock().unwrap().clone();
-    (sizes, errors)
+    Ran {
+        sizes,
+        packets: packets_out.load(std::sync::atomic::Ordering::Relaxed),
+        errors,
+    }
 }
 
 /// What a decoder ought to hand on: every picture, at its own size.
@@ -133,7 +174,7 @@ fn decodes_here<M>(
     if errors.is_empty() && sizes == [SMALL; 5] {
         return true;
     }
-    eprintln!("skipping {what}: it does not decode H.264 here ({errors:?}, {sizes:?})");
+    eprintln!("skipping {what}: it does not decode the stream here ({errors:?}, {sizes:?})");
     false
 }
 
@@ -315,4 +356,294 @@ fn vulkan_decoding_and_scaling_follow_a_change_of_size() {
         "VulkanScaler after VulkanDecoder",
         sizes_through(packets, move |branch| Ok(branch.pipe(decoder).pipe(scaler))),
     );
+}
+
+/// What an encoder opened at the first size ought to do with the changing
+/// stream: refuse each picture of the other size, as a typed error rather
+/// than anything worse, and go on encoding once the first size is back —
+/// both of its runs, every picture.
+fn assert_refused_and_on(what: &str, ran: Ran) {
+    assert_eq!(
+        ran.packets, 10,
+        "{what}: both runs of the first size encoded: {ran:?}"
+    );
+    assert_eq!(
+        ran.errors.len(),
+        5,
+        "{what}: each picture of the other size refused: {ran:?}"
+    );
+    assert!(
+        ran.errors
+            .iter()
+            .all(|error| error.contains("640") && error.contains("360")),
+        "{what}: refused for its size: {:?}",
+        ran.errors
+    );
+}
+
+#[test]
+fn a_software_encoder_refuses_another_size_and_goes_on() {
+    use crate::elements::{SwDecoder, SwEncoder, SwEncoderOptions, VideoCodec};
+
+    let (parameters, packets) = changing();
+    let decoder = SwDecoder::new("decoder", parameters).unwrap();
+    let encoder = SwEncoder::new(
+        "encoder",
+        SwEncoderOptions {
+            codec: VideoCodec::OpenH264,
+            width: SMALL.0,
+            height: SMALL.1,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 300_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    )
+    .unwrap();
+    assert_refused_and_on(
+        "SwEncoder",
+        run(packets, move |branch| {
+            Ok(branch.pipe(decoder).pipe(encoder))
+        }),
+    );
+}
+
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[test]
+fn a_d3d11_encoder_refuses_another_size_and_goes_on() {
+    use crate::elements::{
+        D3d11Decoder, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
+        D3d11VideoInputFormat,
+    };
+
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
+        return;
+    };
+    let (parameters, packets) = changing();
+    let make = || D3d11Decoder::new("decoder", parameters.clone(), &gpu, 8).ok();
+    if !decodes_here("D3d11Decoder", make(), &packets) {
+        return;
+    }
+    let encoder = [
+        D3d11VideoCodec::H264Nvenc,
+        D3d11VideoCodec::H264MediaFoundation,
+    ]
+    .into_iter()
+    .find_map(|codec| {
+        D3d11VideoEncoder::new(
+            "encoder",
+            &gpu,
+            D3d11VideoEncoderOptions {
+                codec,
+                input_format: D3d11VideoInputFormat::Nv12,
+                width: SMALL.0,
+                height: SMALL.1,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 1_000_000,
+                gop_size: 30,
+                max_b_frames: None,
+            },
+        )
+        .ok()
+    });
+    let Some(encoder) = encoder else {
+        eprintln!("skipping: no D3D11 H.264 encoder opens here");
+        return;
+    };
+    let decoder = make().unwrap();
+    assert_refused_and_on(
+        "D3d11VideoEncoder",
+        run(packets, move |branch| {
+            Ok(branch.pipe(decoder).pipe(encoder))
+        }),
+    );
+}
+
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+#[test]
+fn a_d3d12_encoder_refuses_another_size_and_goes_on() {
+    use crate::elements::{
+        D3d12Decoder, D3d12VideoCodec, D3d12VideoEncoder, D3d12VideoEncoderOptions,
+    };
+
+    let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
+        return;
+    };
+    let (parameters, packets) = changing();
+    let make = || D3d12Decoder::new("decoder", parameters.clone(), &gpu).ok();
+    if !decodes_here("D3d12Decoder", make(), &packets) {
+        return;
+    }
+    let Ok(encoder) = D3d12VideoEncoder::new(
+        "encoder",
+        &gpu,
+        D3d12VideoEncoderOptions {
+            codec: D3d12VideoCodec::H264,
+            width: SMALL.0,
+            height: SMALL.1,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 1_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    ) else {
+        eprintln!("skipping: no D3D12 H.264 encoder opens here");
+        return;
+    };
+    let decoder = make().unwrap();
+    assert_refused_and_on(
+        "D3d12VideoEncoder",
+        run(packets, move |branch| {
+            Ok(branch.pipe(decoder).pipe(encoder))
+        }),
+    );
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn a_cuda_encoder_refuses_another_size_and_goes_on() {
+    use crate::elements::{
+        CudaCodec, CudaDecoder, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
+    };
+
+    let Some((device, _lock)) = crate::test_support::try_cuda_device() else {
+        return;
+    };
+    let (parameters, packets) = changing();
+    let make = || CudaDecoder::new("decoder", parameters.clone(), &device, 8).ok();
+    if !decodes_here("CudaDecoder", make(), &packets) {
+        return;
+    }
+    let Ok(encoder) = CudaEncoder::new(
+        "encoder",
+        &device,
+        CudaEncoderOptions {
+            codec: CudaCodec::H264,
+            input_format: CudaFrameFormat::Nv12,
+            width: SMALL.0,
+            height: SMALL.1,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 1_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    ) else {
+        eprintln!("skipping: NVENC does not open here");
+        return;
+    };
+    let decoder = make().unwrap();
+    assert_refused_and_on(
+        "CudaEncoder",
+        run(packets, move |branch| {
+            Ok(branch.pipe(decoder).pipe(encoder))
+        }),
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn a_vulkan_encoder_refuses_another_size_and_goes_on() {
+    use crate::elements::{VulkanCodec, VulkanDecoder, VulkanEncoder, VulkanEncoderOptions};
+
+    let Some(device) = crate::test_support::try_vulkan_device() else {
+        return;
+    };
+    let (parameters, packets) = changing();
+    let make = || VulkanDecoder::new("decoder", parameters.clone(), &device, 8).ok();
+    if !decodes_here("VulkanDecoder", make(), &packets) {
+        return;
+    }
+    let Ok(encoder) = VulkanEncoder::new(
+        "encoder",
+        &device,
+        VulkanEncoderOptions {
+            codec: VulkanCodec::H264,
+            width: SMALL.0,
+            height: SMALL.1,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 1_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        },
+    ) else {
+        eprintln!("skipping: no Vulkan H.264 encoder opens here");
+        return;
+    };
+    let decoder = make().unwrap();
+    assert_refused_and_on(
+        "VulkanEncoder",
+        run(packets, move |branch| {
+            Ok(branch.pipe(decoder).pipe(encoder))
+        }),
+    );
+}
+
+/// The same through every decoder for H.265, from whichever H.265 encoder
+/// this machine has: `VulkanDecoder` watches H.265's parameter sets too.
+#[test]
+fn hevc_decoding_follows_a_change_of_size() {
+    use crate::elements::SwDecoder;
+
+    let Some((parameters, packets)) = ["hevc_nvenc", "hevc_mf", "hevc_qsv", "hevc_amf", "libx265"]
+        .into_iter()
+        .find_map(changing_from)
+    else {
+        eprintln!("skipping: no H.265 encoder opens here");
+        return;
+    };
+    let decoder = SwDecoder::new("decoder", parameters.clone()).unwrap();
+    assert_decoded(
+        "SwDecoder, H.265",
+        sizes_through(packets.clone(), move |branch| piped(branch, decoder)),
+    );
+
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    if let Some(gpu) = crate::test_support::try_d3d11_gpu() {
+        use crate::elements::D3d11Decoder;
+        let make = || D3d11Decoder::new("decoder", parameters.clone(), &gpu, 8).ok();
+        if decodes_here("D3d11Decoder, H.265", make(), &packets) {
+            let decoder = make().unwrap();
+            assert_decoded(
+                "D3d11Decoder, H.265",
+                sizes_through(packets.clone(), move |branch| piped(branch, decoder)),
+            );
+        }
+    }
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    if let Some(gpu) = crate::test_support::try_d3d12_gpu() {
+        use crate::elements::D3d12Decoder;
+        let make = || D3d12Decoder::new("decoder", parameters.clone(), &gpu).ok();
+        if decodes_here("D3d12Decoder, H.265", make(), &packets) {
+            let decoder = make().unwrap();
+            assert_decoded(
+                "D3d12Decoder, H.265",
+                sizes_through(packets.clone(), move |branch| piped(branch, decoder)),
+            );
+        }
+    }
+    #[cfg(feature = "cuda")]
+    if let Some((device, _lock)) = crate::test_support::try_cuda_device() {
+        use crate::elements::CudaDecoder;
+        let make = || CudaDecoder::new("decoder", parameters.clone(), &device, 8).ok();
+        if decodes_here("CudaDecoder, H.265", make(), &packets) {
+            let decoder = make().unwrap();
+            assert_decoded(
+                "CudaDecoder, H.265",
+                sizes_through(packets.clone(), move |branch| piped(branch, decoder)),
+            );
+        }
+    }
+    #[cfg(feature = "vulkan")]
+    if let Some(device) = crate::test_support::try_vulkan_device() {
+        use crate::elements::VulkanDecoder;
+        let make = || VulkanDecoder::new("decoder", parameters.clone(), &device, 8).ok();
+        if decodes_here("VulkanDecoder, H.265", make(), &packets) {
+            let decoder = make().unwrap();
+            assert_decoded(
+                "VulkanDecoder, H.265",
+                sizes_through(packets, move |branch| piped(branch, decoder)),
+            );
+        }
+    }
 }

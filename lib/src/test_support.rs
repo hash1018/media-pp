@@ -642,16 +642,40 @@ pub(crate) fn synthesize_reordered(name: &str, seconds: f64) -> Fixture {
 pub(crate) fn h264_configured(
     size: (u32, u32),
 ) -> (ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>) {
+    try_configured("libopenh264", size).expect("OpenH264 is always present")
+}
+
+/// [`h264_configured`] from the FFmpeg encoder called `encoder` — H.264 or
+/// H.265 — or `None`, after saying why, where this build or machine has
+/// none that opens.
+pub(crate) fn try_configured(
+    encoder: &str,
+    size: (u32, u32),
+) -> Option<(ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>)> {
     use ffmpeg_next as ffmpeg;
 
     let (mut parameters, packets) =
-        try_encoded_packets("libopenh264", ffmpeg::format::Pixel::YUV420P, size, 128)
-            .expect("OpenH264 is always present");
-    let data = packets[0].data().expect("a keyframe");
-    let sets = &data[..data
-        .windows(5)
-        .position(|w| w[..4] == [0, 0, 0, 1] && w[4] & 0x1f == 5)
-        .expect("a picture after the sets")];
+        try_encoded_packets(encoder, ffmpeg::format::Pixel::YUV420P, size, 128)?;
+    let hevc = parameters.id() == ffmpeg::codec::Id::HEVC;
+    let data = packets.first()?.data()?;
+    // The sets are everything before the keyframe's first picture slice.
+    let slice = (0..data.len().saturating_sub(3)).find(|&at| {
+        data[at..].starts_with(&[0, 0, 1])
+            && data.get(at + 3).is_some_and(|&header| {
+                if hevc {
+                    (header >> 1) & 0x3f < 32
+                } else {
+                    matches!(header & 0x1f, 1 | 5)
+                }
+            })
+    })?;
+    // A four-byte start code's leading zero belongs to the slice, not the sets.
+    let end = if slice > 0 && data[slice - 1] == 0 {
+        slice - 1
+    } else {
+        slice
+    };
+    let sets = &data[..end];
     // SAFETY: parameters this function owns alone; the configuration is
     // copied into a padded buffer FFmpeg allocates and frees with them.
     unsafe {
@@ -662,7 +686,7 @@ pub(crate) fn h264_configured(
         (*raw).extradata = copy;
         (*raw).extradata_size = sets.len() as i32;
     }
-    (parameters, packets)
+    Some((parameters, packets))
 }
 
 /// Five pictures from the FFmpeg encoder called `encoder`, as the parameters
