@@ -896,6 +896,7 @@ impl Shard {
                     Err(_) => break,
                 };
                 let arrived = Instant::now();
+                let stun = buffer[..length].first().is_some_and(|first| *first < 4);
                 if let Ok(contents) = buffer[..length].try_into() {
                     let input = Input::Receive(
                         arrived,
@@ -915,7 +916,6 @@ impl Shard {
                     // connection waited for the client to send it again a
                     // second later. STUN is asked, as a new client may have
                     // the address a session it does not belong to had.
-                    let stun = buffer.first().is_some_and(|first| *first < 4);
                     let known = senders.get(&source).copied().filter(|id| {
                         sessions
                             .get(id)
@@ -931,6 +931,15 @@ impl Shard {
                     if let Some(session) = found.and_then(|id| sessions.get_mut(&id)) {
                         session.input(input);
                     }
+                }
+                // A session that took STUN is driven before anything else is
+                // read: str0m begins DTLS as it is polled after the client's
+                // nomination, and drops what DTLS comes before ("prior to
+                // DTLS start") — a ClientHello read in the same batch was
+                // lost to the client's retransmission. What else waits is
+                // read once the sessions have been driven, at once.
+                if stun {
+                    break;
                 }
                 if first {
                     first = false;

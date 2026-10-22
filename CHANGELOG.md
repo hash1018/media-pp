@@ -240,7 +240,9 @@ compile error with no explanation.
   not been polled since the nomination. Every connection waited a second
   for the client to send it again, and under load — retransmissions lost
   too, a second, two, four — a client gave up after ten. What comes from
-  an address a session has taken STUN from now goes to that session.
+  an address a session has taken STUN from now goes to that session, and
+  a session that took STUN is driven before anything more is read, since
+  str0m begins DTLS only as it is polled and drops what comes before.
 
 - **`RtmpMuxer` takes a track from an MP4.** It kept the track's `avc1`
   tag, which FLV's muxer refuses as incompatible; it now writes its own.
