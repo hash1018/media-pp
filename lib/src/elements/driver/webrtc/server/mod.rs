@@ -258,6 +258,38 @@ pub struct WebRtcServerOptions {
     /// called by the application itself are not asked: what reaches them
     /// the application has let through already. See [`Authorize`].
     pub authorize: Option<Authorize>,
+    /// STUN and TURN servers a client of
+    /// [`WebRtcServerHandle::serve_http`] may reach this server through,
+    /// told it as WHIP and WHEP tell them: a `Link` header each, on the
+    /// answer to its offer and on the answer to an `OPTIONS` whose
+    /// credentials [`Self::authorize`] lets through, so that a client
+    /// behind a network that blocks UDP can ask for a TURN relay before it
+    /// makes its offer. Its page passes them to the browser. Empty, the
+    /// default, tells none.
+    pub ice_servers: Vec<IceServer>,
+}
+
+/// A STUN or TURN server, as [`WebRtcServerOptions::ice_servers`] tells a
+/// client it: what `RTCIceServer` holds in a browser.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IceServer {
+    /// Its URLs: `stun:host:port`, `turn:host:port?transport=udp`,
+    /// `turns:host:443?transport=tcp`.
+    pub urls: Vec<String>,
+    /// The user name a TURN server takes, where it takes one.
+    pub username: Option<String>,
+    /// The password a TURN server takes with it.
+    pub credential: Option<String>,
+}
+
+impl std::fmt::Debug for IceServer {
+    /// Never shows the credential.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IceServer")
+            .field("urls", &self.urls)
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for WebRtcServerOptions {
@@ -266,6 +298,7 @@ impl Default for WebRtcServerOptions {
             candidates: Vec::new(),
             threads: 2,
             authorize: None,
+            ice_servers: Vec::new(),
         }
     }
 }
@@ -379,6 +412,7 @@ pub(crate) struct Shared {
     /// cannot be guessed from another.
     session_key: RandomState,
     pub(crate) authorize: Option<Authorize>,
+    pub(crate) ice_servers: Vec<IceServer>,
     sessions: AtomicUsize,
     /// How many sessions each thread has.
     per_thread: Vec<AtomicUsize>,
@@ -521,6 +555,7 @@ impl WebRtcServer {
             stats: Mutex::new(HashMap::new()),
             session_key: RandomState::new(),
             authorize: options.authorize.clone(),
+            ice_servers: options.ice_servers.clone(),
         });
         Ok((
             Self {

@@ -13,8 +13,8 @@ mod whip;
 pub use command::{TrackId, WebRtcError};
 pub use peer::WebRtcPeer;
 pub use server::{
-    SessionId, SessionRole, SessionStats, WebRtcHttpEndpoint, WebRtcPathMode, WebRtcServer,
-    WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions,
+    IceServer, SessionId, SessionRole, SessionStats, WebRtcHttpEndpoint, WebRtcPathMode,
+    WebRtcServer, WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions,
 };
 pub use stream_info::WebRtcStreamInfo;
 pub use track::{AttachedTrack, TrackEndpoints, WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource};

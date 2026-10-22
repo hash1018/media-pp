@@ -921,3 +921,99 @@ fn a_client_connects_without_waiting_to_send_again() {
     );
     runner.stop();
 }
+
+/// STUN and TURN servers are told as WHIP and WHEP tell them — `Link`
+/// headers on the answer to an offer, and on an `OPTIONS` whose credentials
+/// pass — and given to the page's browser; a TURN server's credentials are
+/// told no one else, and nothing in them breaks a header or the page.
+#[test]
+fn ice_servers_are_told_to_clients_let_in_and_no_one_else() {
+    use crate::elements::{AccessRequest, Authorize, Credentials, IceServer};
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (server, handle) = WebRtcServer::bind(
+        "server",
+        "127.0.0.1:0",
+        WebRtcServerOptions {
+            authorize: Some(Authorize::new(|request: &AccessRequest| {
+                request.credentials == Credentials::Bearer("watch".into())
+            })),
+            ice_servers: vec![
+                IceServer {
+                    urls: vec!["stun:stun.example.org:3478".into()],
+                    username: None,
+                    credential: None,
+                },
+                IceServer {
+                    urls: vec!["turn:turn.example.org:3478?transport=udp".into()],
+                    username: Some("user".into()),
+                    credential: Some("pa\"ss</script>".into()),
+                },
+            ],
+            ..WebRtcServerOptions::default()
+        },
+    )
+    .unwrap();
+    let cam = Broadcast::new("cam", BroadcastOptions::default());
+    handle.add_path("cam", &cam, WebRtcPathMode::Play).unwrap();
+    let runner = DriverRunner::new(server);
+    runner.run().unwrap();
+    let camera = feed(&cam, &path);
+    let endpoint = handle.serve_http("127.0.0.1:0").unwrap();
+    let addr = endpoint.local_addr();
+    let options = |authorization: &str| {
+        http(
+            addr,
+            &format!("OPTIONS /cam/whep HTTP/1.1\r\nHost: x\r\n{authorization}\r\n"),
+        )
+    };
+    let links = |response: &str| {
+        response
+            .lines()
+            .filter(|line| line.starts_with("Link: "))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+
+    let preflight = options("");
+    assert!(preflight.starts_with("HTTP/1.1 204"), "{preflight}");
+    assert!(preflight.contains("Access-Control-Expose-Headers: Location, Link"));
+    assert!(
+        links(&preflight).is_empty(),
+        "nothing for a preflight: {preflight}"
+    );
+    assert!(links(&options("Authorization: Bearer wrong\r\n")).is_empty());
+    let told = links(&options("Authorization: Bearer watch\r\n"));
+    assert_eq!(
+        told,
+        [
+            "Link: <stun:stun.example.org:3478>; rel=\"ice-server\"",
+            "Link: <turn:turn.example.org:3478?transport=udp>; rel=\"ice-server\"; username=\"user\"; credential=\"pa\\\"ss</script>\"; credential-type=\"password\"",
+        ]
+    );
+
+    let mut client = Client::new();
+    let (offer, ..) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+    let answered = http(
+        addr,
+        &format!(
+            "POST /cam/whep HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer watch\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{offer}",
+            offer.len()
+        ),
+    );
+    assert!(answered.starts_with("HTTP/1.1 201"), "{answered}");
+    assert_eq!(links(&answered), told);
+
+    let page = http(addr, "GET /cam HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(
+        page.contains(
+            &format!(r#"iceServers: [{{"urls":["stun:stun.example.org:3478"]}},{{"urls":["turn:turn.example.org:3478?transport=udp"],"username":"user","credential":"pa{b}"ss{b}u003c/script{b}u003e"}}]"#, b = char::from(92))
+        ),
+        "{page}"
+    );
+    assert_eq!(page.matches("</script>").count(), 1, "the page's own alone");
+    drop(endpoint);
+    camera.stop();
+    runner.stop();
+}

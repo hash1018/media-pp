@@ -57,6 +57,15 @@ compile error with no explanation.
 
 ### Added
 
+- **`WebRtcServerOptions::ice_servers`: STUN and TURN servers told to
+  WHIP and WHEP clients.** As RFC 9725 tells them — a `Link` header each,
+  with a TURN server's credentials — on the answer to an offer, and on the
+  answer to an `OPTIONS` whose credentials `Authorize` lets through, so
+  that a client behind a network that blocks UDP can ask for a relay before
+  it offers; the server's own page hands them to the browser. A TURN
+  server's credentials are told no one `Authorize` refuses, and
+  `IceServer`'s `Debug` never shows them.
+
 - **`RtmpServer`: what OBS and most encoders publish, taken in.** Under
   the `rtmp-server` feature, with no dependency beyond FFmpeg: a publisher
   pushing to `rtmp://<host>/<app>/<stream>` is written into the

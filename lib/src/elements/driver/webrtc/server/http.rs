@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::elements::driver::access::{Access, AccessRequest, Credentials};
 use crate::pp_log::{pp_debug, pp_info, pp_warn};
 
-use super::{SessionId, WebRtcServerError, WebRtcServerHandle};
+use super::{IceServer, SessionId, WebRtcServerError, WebRtcServerHandle};
 
 /// The most an offer may take.
 const MAX_BODY: usize = 256 * 1024;
@@ -192,7 +192,33 @@ fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> i
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
     let path = target.split('?').next().unwrap_or("").trim_matches('/');
+    let access = |kind| {
+        if kind == "whep" {
+            Access::Play
+        } else {
+            Access::Publish
+        }
+    };
     match (method.as_str(), path.rsplit_once('/')) {
+        ("OPTIONS", Some((path, kind @ ("whep" | "whip")))) => {
+            // A browser's preflight carries no credentials, and is answered
+            // as ever; a client asking what ICE servers to gather from before
+            // it offers is told them once its credentials pass — a TURN
+            // server's credentials are not for anyone who asks.
+            let mut headers = vec![("Access-Control-Max-Age", "86400".to_owned())];
+            if authorization.is_some() || server.shared.authorize.is_none() {
+                let request = Asked {
+                    path,
+                    access: access(kind),
+                    authorization: authorization.as_deref(),
+                    peer,
+                };
+                if allowed(server, &request, false) {
+                    headers.extend(ice_server_links(&server.shared.ice_servers));
+                }
+            }
+            respond(stream, 204, &headers, "")
+        }
         ("OPTIONS", _) => respond(
             stream,
             204,
@@ -200,26 +226,14 @@ fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> i
             "",
         ),
         ("POST", Some((path, kind @ ("whep" | "whip")))) => {
-            let access = if kind == "whep" {
-                Access::Play
-            } else {
-                Access::Publish
+            let request = Asked {
+                path,
+                access: access(kind),
+                authorization: authorization.as_deref(),
+                peer,
             };
-            if let Some(authorize) = &server.shared.authorize {
-                let asked = AccessRequest {
-                    path: path.to_owned(),
-                    access,
-                    credentials: Credentials::from_header(authorization.as_deref()),
-                    peer,
-                };
-                if !authorize.allows(&asked) {
-                    pp_info!(
-                        pp_log: &server.shared.pp_log,
-                        "refused {access:?} of {path} to {peer} presenting {:?}",
-                        asked.credentials
-                    );
-                    return respond(stream, 401, &[("WWW-Authenticate", "Bearer".into())], "");
-                }
+            if !allowed(server, &request, true) {
+                return respond(stream, 401, &[("WWW-Authenticate", "Bearer".into())], "");
             }
             let offer = String::from_utf8_lossy(&body);
             let opened = if kind == "whep" {
@@ -228,15 +242,14 @@ fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> i
                 server.publish(path, &offer)
             };
             match opened {
-                Ok((session, sdp)) => respond(
-                    stream,
-                    201,
-                    &[
-                        ("Content-Type", "application/sdp".into()),
+                Ok((session, sdp)) => {
+                    let mut headers = vec![
+                        ("Content-Type", "application/sdp".to_owned()),
                         ("Location", format!("/session/{session}")),
-                    ],
-                    &sdp,
-                ),
+                    ];
+                    headers.extend(ice_server_links(&server.shared.ice_servers));
+                    respond(stream, 201, &headers, &sdp)
+                }
                 Err(error) => {
                     let status = match error {
                         WebRtcServerError::NoSuchPath(_) => 404,
@@ -253,7 +266,10 @@ fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> i
             stream,
             200,
             &[("Content-Type", "text/html; charset=utf-8".into())],
-            &PAGE.replace("{path}", path),
+            &PAGE.replace("{path}", path).replace(
+                "{ice_servers}",
+                &ice_servers_json(&server.shared.ice_servers),
+            ),
         ),
         ("DELETE", Some(("session", id))) => match id.parse::<SessionId>() {
             Ok(session) if server.close(session) => respond(stream, 200, &[], ""),
@@ -261,6 +277,109 @@ fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> i
         },
         _ => respond(stream, 404, &[], ""),
     }
+}
+
+/// What a request asks, for the server's `Authorize`.
+struct Asked<'a> {
+    path: &'a str,
+    access: Access,
+    authorization: Option<&'a str>,
+    peer: SocketAddr,
+}
+
+/// Whether the server's `Authorize`, where it has one, lets `request` in;
+/// a refusal logged where `log` says so — not a preflight's.
+fn allowed(server: &WebRtcServerHandle, request: &Asked<'_>, log: bool) -> bool {
+    let Some(authorize) = &server.shared.authorize else {
+        return true;
+    };
+    let asked = AccessRequest {
+        path: request.path.to_owned(),
+        access: request.access,
+        credentials: Credentials::from_header(request.authorization),
+        peer: request.peer,
+    };
+    let allowed = authorize.allows(&asked);
+    if !allowed && log {
+        pp_info!(
+            pp_log: &server.shared.pp_log,
+            "refused {:?} of {} to {} presenting {:?}",
+            asked.access,
+            asked.path,
+            asked.peer,
+            asked.credentials
+        );
+    }
+    allowed
+}
+
+/// `servers` as WHIP and WHEP tell them (RFC 9725): a `Link` header for each
+/// URL, with its credentials where it has them.
+fn ice_server_links(servers: &[IceServer]) -> Vec<(&'static str, String)> {
+    let mut links = Vec::new();
+    for server in servers {
+        for url in &server.urls {
+            let mut link = format!("<{}>; rel=\"ice-server\"", url.replace(['<', '>'], ""));
+            if let Some(username) = &server.username {
+                link.push_str(&format!("; username=\"{}\"", quoted(username)));
+            }
+            if let Some(credential) = &server.credential {
+                link.push_str(&format!(
+                    "; credential=\"{}\"; credential-type=\"password\"",
+                    quoted(credential)
+                ));
+            }
+            links.push(("Link", link));
+        }
+    }
+    links
+}
+
+/// `text` inside an HTTP quoted string.
+fn quoted(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .flat_map(|c| match c {
+            '"' | '\\' => vec!['\\', c],
+            c => vec![c],
+        })
+        .collect()
+}
+
+/// `servers` as the page's `RTCPeerConnection` takes them: a JSON array,
+/// written so that nothing in it can end the page's script.
+fn ice_servers_json(servers: &[IceServer]) -> String {
+    let string = |text: &str| {
+        let mut out = String::from("\"");
+        for c in text.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '<' => out.push_str("\\u003c"),
+                '>' => out.push_str("\\u003e"),
+                c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    };
+    let entries: Vec<String> = servers
+        .iter()
+        .map(|server| {
+            let urls: Vec<String> = server.urls.iter().map(|url| string(url)).collect();
+            let mut entry = format!("{{\"urls\":[{}]", urls.join(","));
+            if let Some(username) = &server.username {
+                entry.push_str(&format!(",\"username\":{}", string(username)));
+            }
+            if let Some(credential) = &server.credential {
+                entry.push_str(&format!(",\"credential\":{}", string(credential)));
+            }
+            entry.push('}');
+            entry
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
 }
 
 /// The page `GET /<path>` answers with: a video playing `<path>` through
@@ -284,7 +403,7 @@ const PAGE: &str = r#"<!doctype html>
 const state = document.getElementById("state");
 const video = document.getElementById("video");
 async function play() {
-  const pc = new RTCPeerConnection();
+  const pc = new RTCPeerConnection({ iceServers: {ice_servers} });
   pc.addTransceiver("video", { direction: "recvonly" });
   pc.addTransceiver("audio", { direction: "recvonly" });
   pc.ontrack = (event) => {
@@ -340,7 +459,7 @@ fn respond(
          Access-Control-Allow-Origin: *\r\n\
          Access-Control-Allow-Methods: POST, DELETE, OPTIONS\r\n\
          Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
-         Access-Control-Expose-Headers: Location\r\n\
+         Access-Control-Expose-Headers: Location, Link\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n",
         body.len()

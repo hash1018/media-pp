@@ -117,10 +117,11 @@ pub use crate::platform::macos::videotoolbox::{
 pub use driver::{Access, AccessRequest, Authorize, Credentials};
 #[cfg(feature = "webrtc")]
 pub use driver::{
-    AttachedTrack, SessionId, SessionRole, SessionStats, TrackEndpoints, TrackId, WebRtcError,
-    WebRtcHandle, WebRtcHttpEndpoint, WebRtcPathMode, WebRtcPeer, WebRtcServer, WebRtcServerError,
-    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcStreamInfo, WebRtcTrackSink,
-    WebRtcTrackSource, WhepOptions, WhepSource, WhipOptions, WhipPublisher, WhipSinks,
+    AttachedTrack, IceServer, SessionId, SessionRole, SessionStats, TrackEndpoints, TrackId,
+    WebRtcError, WebRtcHandle, WebRtcHttpEndpoint, WebRtcPathMode, WebRtcPeer, WebRtcServer,
+    WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions,
+    WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource, WhepOptions, WhepSource, WhipOptions,
+    WhipPublisher, WhipSinks,
 };
 #[cfg(feature = "rtmp-server")]
 pub use driver::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions};
