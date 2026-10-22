@@ -267,7 +267,10 @@ mod example {
         Ok((addr, format!("/{path}")))
     }
 
-    /// One HTTP request, and its response's head and body.
+    /// One HTTP request, and its response's head and body: the response is
+    /// read to the connection's end, so each request asks for that with
+    /// `Connection: close` — a server that keeps connections open, as most
+    /// do, would otherwise leave this waiting.
     fn http(addr: SocketAddr, request: &str) -> Result<(String, String), String> {
         let mut stream = TcpStream::connect(addr).map_err(|e| format!("connect: {e}"))?;
         stream
@@ -311,17 +314,18 @@ mod example {
         let (head, body) = http(
             server,
             &format!(
-                "POST {path} HTTP/1.1\r\nHost: {server}\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{offer}",
+                "POST {path} HTTP/1.1\r\nHost: {server}\r\nConnection: close\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{offer}",
                 offer.len()
             ),
         )?;
         if !head.starts_with("HTTP/1.1 201") {
             return Err(format!("WHEP: {}", head.lines().next().unwrap_or("")));
         }
-        let location = head
-            .lines()
-            .find_map(|line| line.strip_prefix("Location: "))
-            .map(str::to_owned);
+        let location = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("location")
+                .then(|| value.trim().to_owned())
+        });
         let answer = SdpAnswer::from_sdp_string(&body).map_err(|e| e.to_string())?;
         rtc.sdp_api()
             .accept_answer(pending, answer)
@@ -413,7 +417,9 @@ mod example {
         if let Some(location) = location {
             let _ = http(
                 server,
-                &format!("DELETE {location} HTTP/1.1\r\nHost: {server}\r\n\r\n"),
+                &format!(
+                    "DELETE {location} HTTP/1.1\r\nHost: {server}\r\nConnection: close\r\n\r\n"
+                ),
             );
         }
         result
