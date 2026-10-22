@@ -478,18 +478,14 @@ impl WebRtcPeer {
     }
 
     fn write_track(&mut self, outgoing: Outgoing) -> Result<()> {
-        let Outgoing {
-            track: id,
-            codec,
-            packet,
-        } = outgoing;
+        let id = outgoing.track;
         let Some(TrackOutState::Open(mid)) = self.tracks_out.get(&id) else {
             // Not open yet (or unknown/never added) — dropped, see
             // `WebRtcHandle::add_track`'s docs.
             return Ok(());
         };
         let mid = *mid;
-        connection::write(&mut self.rtc, mid, id, codec, &packet)
+        connection::write(&mut self.rtc, mid, &outgoing)
             .inspect_err(|error| pp_error!(self, "writing track {id:?} failed: {error}"))?;
         Ok(())
     }

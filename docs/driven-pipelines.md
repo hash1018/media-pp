@@ -393,13 +393,22 @@ Each stage lands on its own, with its tests, as the streaming stages did.
      by what the connection puts in — and the loop that takes str0m's
      output and writes a packet (`connection.rs`). The sink converts
      `hvcC` as the server did. The peer is on them, its tests passing.
-   - **3b** — `WebRtcServer`'s sessions on driven pipelines and the same
-     pieces: a player `BroadcastSource → WebRtcTrackSink` per track it
+   - **3b** — done. `WebRtcServer`'s sessions on driven pipelines and the
+     same pieces: a player `BroadcastSource → WebRtcTrackSink` per track it
      takes, a publisher `WebRtcTrackSource → BroadcastSink` per track,
      polled by the thread that owns the session; the server's own reader,
      timeline, Annex B conversion and str0m loop removed, its catch-up
-     pacing kept on the outbox; paths as §5.4. The server's tests,
-     unchanged in what they assert, pass.
+     pacing kept on the outbox. A track sink now writes Annex B as a packet
+     is written rather than as it is taken, so a player catching up holds
+     the packets every reader shares, not copies. The server's tests,
+     unchanged in what they assert, pass; one's input keyframe gained the
+     parameter sets a track sink requires. Moving the server found a bug in
+     the sink: an `avcC` NAL unit of 256 to 511 bytes has a length that
+     reads as a start code, and was sent unconverted. 100 WebRTC players on
+     four threads cost 2.19 cores where they cost 2.58 (bench file and
+     method of `docs/benchmarks/streaming`), at 0.4 MB more a player. Paths
+     as §5.4 are left for when an application needs a pipeline of its own
+     for a path.
 4. **RTSP.** `RtspTrackSink`; `RtspServer`'s sessions likewise, polled from
    their tasks.
 5. **Measured.** `rtsp_load` and `webrtc_load` against the same figures as

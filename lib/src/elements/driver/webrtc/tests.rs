@@ -68,11 +68,9 @@ impl Pushes {
             taken.extend(self.0.take_all());
         }
         let outgoing = taken.pop_front().ok_or("nothing was pushed")?;
-        Ok(Push(
-            outgoing.track,
-            Some(outgoing.codec),
-            MediaBuffer::Packet(outgoing.packet),
-        ))
+        // As the connection writes it.
+        let packet = super::track::rewritten_packet(&outgoing.packet, &outgoing.payload());
+        Ok(Push(outgoing.track, Some(outgoing.codec), packet))
     }
 }
 
@@ -388,6 +386,38 @@ fn a_demuxers_hvcc_configuration_rewrites_its_packets_as_annex_b() {
         ]
     );
     assert_eq!(sent[1], [0, 0, 0, 1, 0x02, 1]);
+}
+
+/// A NAL unit of 256 to 511 bytes has a four-byte length that opens
+/// `00 00 01` — a start code to the eye. Taken for an Annex-B payload, such a
+/// packet was sent as it was, and a receiver read its length as a NAL unit
+/// of type 25: one picture in several of an MP4's, found when the WebRTC
+/// server began sending through this sink.
+#[test]
+fn a_length_that_looks_like_a_start_code_is_still_a_length() {
+    let (mut sink, command_rx) = h264_sink(22, 1);
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &AVCC))
+        .expect("H.264 is negotiated for this track");
+    let mut nalu = vec![0x41u8];
+    nalu.resize(300, 0x9a);
+    let payload = [&(nalu.len() as u32).to_be_bytes()[..], &nalu[..]].concat();
+    assert_eq!(
+        &payload[..3],
+        &[0, 0, 1],
+        "a length that reads as a start code"
+    );
+    sink.consume(video_packet(&payload, false))
+        .expect("an avcC-configured sink takes the packets that record describes");
+    let Push(TrackId(22), _, MediaBuffer::Packet(packet)) =
+        command_rx.recv().expect("packet was queued")
+    else {
+        panic!("expected a packet");
+    };
+    assert_eq!(
+        packet.data().unwrap(),
+        [&[0, 0, 0, 1][..], &nalu[..]].concat(),
+        "rewritten as Annex-B"
+    );
 }
 
 /// The record says the payloads are length-prefixed, and this one is not.

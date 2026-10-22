@@ -19,7 +19,7 @@ use str0m::{
 };
 
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, PacketBuffer},
     contract::{InputContract, OutputContract, PortContract},
     element::{
         Attached, Element, ElementType, Identity, Produced, RawSink, Source, SourceStage, Wait,
@@ -31,7 +31,7 @@ use crate::{
 
 use super::{
     command::{Command, TrackId, WebRtcError},
-    outbox::{Outbox, Outgoing, Pushed},
+    outbox::{Outbox, Outgoing, Pushed, Rewrite},
     stream_info::{WebRtcStreamInfo, annex_b_nalus, str0m_codec},
 };
 
@@ -64,10 +64,10 @@ fn annex_b_codec(codec: Codec) -> bool {
     matches!(codec, Codec::H264 | Codec::H265 | Codec::H266)
 }
 
-/// Whether an access unit already carries the parameter sets a receiver
-/// needs to start decoding, or `None` for a codec whose NAL header layout
-/// this does not read.
-fn carries_parameter_sets(payload: &[u8], codec: Codec) -> Option<bool> {
+/// Whether an access unit's NAL units already carry the parameter sets a
+/// receiver needs to start decoding, or `None` for a codec whose NAL header
+/// layout this does not read.
+fn carries_parameter_sets(nalus: &[&[u8]], codec: Codec) -> Option<bool> {
     let (sps, pps) = match codec {
         Codec::H264 => (7, 8),
         Codec::H265 => (33, 34),
@@ -84,7 +84,7 @@ fn carries_parameter_sets(payload: &[u8], codec: Codec) -> Option<bool> {
         Codec::H266 => nalu.get(1).map(|byte| byte >> 3),
         _ => nalu.first().map(|byte| (byte >> 1) & 0x3f),
     };
-    let present: Vec<u8> = annex_b_nalus(payload).iter().filter_map(nal_type).collect();
+    let present: Vec<u8> = nalus.iter().filter_map(nal_type).collect();
     Some(present.contains(&sps) && present.contains(&pps))
 }
 
@@ -172,15 +172,14 @@ fn hvcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
     ))
 }
 
-/// Rewrites a length-prefixed access unit as Annex-B, replacing each NAL
-/// unit's length with a start code.
+/// The NAL units of a length-prefixed access unit.
 ///
 /// Returns `None` when the payload does not consume exactly — a truncated
 /// unit, or a prefix size that does not match the one the `avcC` record
 /// declared. Guessing at either would emit a stream that looks well formed
 /// and decodes to nothing.
-fn length_prefixed_to_annex_b(payload: &[u8], nal_length_size: usize) -> Option<Vec<u8>> {
-    let mut annex_b = Vec::with_capacity(payload.len() + START_CODE.len());
+fn length_prefixed_nalus(payload: &[u8], nal_length_size: usize) -> Option<Vec<&[u8]>> {
+    let mut nalus = Vec::new();
     let mut offset = 0;
     while offset < payload.len() {
         let prefix = payload.get(offset..offset + nal_length_size)?;
@@ -192,11 +191,26 @@ fn length_prefixed_to_annex_b(payload: &[u8], nal_length_size: usize) -> Option<
         if length == 0 || end > payload.len() {
             return None;
         }
-        annex_b.extend_from_slice(&START_CODE);
-        annex_b.extend_from_slice(&payload[offset..end]);
+        nalus.push(&payload[offset..end]);
         offset = end;
     }
-    (!annex_b.is_empty()).then_some(annex_b)
+    (!nalus.is_empty()).then_some(nalus)
+}
+
+/// Rewrites a length-prefixed access unit as Annex-B, replacing each NAL
+/// unit's length with a start code — `None` where it is not one; see
+/// [`length_prefixed_nalus`].
+pub(super) fn length_prefixed_to_annex_b(
+    payload: &[u8],
+    nal_length_size: usize,
+) -> Option<Vec<u8>> {
+    let nalus = length_prefixed_nalus(payload, nal_length_size)?;
+    let mut annex_b = Vec::with_capacity(payload.len() + START_CODE.len());
+    for nalu in nalus {
+        annex_b.extend_from_slice(&START_CODE);
+        annex_b.extend_from_slice(nalu);
+    }
+    Some(annex_b)
 }
 
 /// Rebuilds `packet` around a new payload, carrying every field the RTP
@@ -205,7 +219,8 @@ fn length_prefixed_to_annex_b(payload: &[u8], nal_length_size: usize) -> Option<
 /// The time base above all: `Packet::copy` leaves it 0/0, and a packet str0m
 /// cannot build a `MediaTime` from is dropped rather than refused — the
 /// failure would be a peer that simply receives nothing.
-fn rewritten_packet(packet: &ffmpeg::Packet, payload: &[u8]) -> MediaBuffer {
+#[cfg(test)]
+pub(super) fn rewritten_packet(packet: &ffmpeg::Packet, payload: &[u8]) -> MediaBuffer {
     let mut rewritten = ffmpeg::Packet::copy(payload);
     rewritten.set_time_base(packet.time_base());
     rewritten.set_pts(packet.pts());
@@ -410,7 +425,7 @@ pub struct WebRtcTrackSink {
     timestamp_offset: Option<i64>,
     /// The Annex-B codec headers to put back in front of every keyframe —
     /// see [`WebRtcTrackSink::set_source_parameters`].
-    parameter_sets: Option<Vec<u8>>,
+    parameter_sets: Option<Arc<[u8]>>,
     /// The NAL length prefix size of incoming payloads, set when
     /// [`WebRtcTrackSink::set_source_parameters`] was given an `avcC` record
     /// instead of Annex-B headers. Its presence is what says every payload
@@ -573,7 +588,7 @@ impl WebRtcTrackSink {
             }
         };
         self.codec = Some(codec);
-        self.parameter_sets = parameter_sets;
+        self.parameter_sets = parameter_sets.map(Arc::from);
         self.nal_length_size = nal_length_size;
         self.forget_what_was_checked();
         Ok(())
@@ -667,24 +682,33 @@ impl RawSink for WebRtcTrackSink {
             pp_error!(self, "outbound codec is not declared");
             return Err(WebRtcError::OutboundCodecNotDeclared(self.id).into());
         }
-        if let MediaBuffer::Packet(_) = &buf {
-            let codec = self.codec.expect("checked above");
-            let negotiated = self.negotiated_codecs();
-            if !negotiated.contains(&codec) {
-                pp_error!(self, "outbound codec {codec:?} is not negotiated");
-                return Err(WebRtcError::OutboundCodecNotNegotiated {
-                    track_id: self.id,
-                    codec,
-                    negotiated,
-                }
-                .into());
-            }
-        }
-        let buf = self.prepare_bitstream(buf)?;
-        let buf = self.prepend_parameter_sets(buf);
-        let buf = self.normalize_packet_timestamp(buf)?;
         let (MediaBuffer::Packet(packet), Some(codec)) = (buf, self.codec) else {
             return Ok(()); // refused above
+        };
+        // Looked at under the lock, not copied out: once a packet.
+        if !self
+            .negotiated_codecs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&codec)
+        {
+            pp_error!(self, "outbound codec {codec:?} is not negotiated");
+            return Err(WebRtcError::OutboundCodecNotNegotiated {
+                track_id: self.id,
+                codec,
+                negotiated: self.negotiated_codecs(),
+            }
+            .into());
+        }
+        let nal_length_size = self.prepare_bitstream(&packet)?;
+        let packet = self.normalize_packet_timestamp(packet)?;
+        // What it is rewritten into goes with it, and is made as it is
+        // written: what waits in an outbox is then the packet every other
+        // reader shares, not a copy of this track's own — a server's
+        // player catching up holds a keyframe interval of them.
+        let rewrite = Rewrite {
+            nal_length_size,
+            prepend: self.parameter_sets.clone(),
         };
         // The connection gone means this track is dead — surfaced as `Err`
         // rather than swallowed, so whatever pipeline this sink is in learns
@@ -699,6 +723,7 @@ impl RawSink for WebRtcTrackSink {
             track: self.id,
             codec,
             packet,
+            rewrite,
         }) {
             Pushed::Taken | Pushed::Skipped => Ok(()),
             Pushed::FellBehind => {
@@ -717,33 +742,8 @@ impl RawSink for WebRtcTrackSink {
 }
 
 impl WebRtcTrackSink {
-    /// Puts the codec headers in front of a keyframe, if this sink was given
-    /// any — see [`WebRtcTrackSink::set_source_parameters`].
-    ///
-    /// Only in front of keyframes, and only when the payload does not open
-    /// with them already: an encoder that was *not* opened with a global
-    /// header still writes them in-band, and doubling them costs bytes on
-    /// every keyframe for nothing.
-    fn prepend_parameter_sets(&self, buf: MediaBuffer) -> MediaBuffer {
-        let Some(headers) = self.parameter_sets.as_deref() else {
-            return buf;
-        };
-        let MediaBuffer::Packet(packet) = &buf else {
-            return buf;
-        };
-        let Some(payload) = packet.data() else {
-            return buf;
-        };
-        if !packet.is_key() || payload.starts_with(headers) {
-            return buf;
-        }
-        let mut joined = Vec::with_capacity(headers.len() + payload.len());
-        joined.extend_from_slice(headers);
-        joined.extend_from_slice(payload);
-        rewritten_packet(packet, &joined)
-    }
-
-    /// Puts an Annex-B codec's payload into the form RTP carries, and refuses
+    /// Says how an Annex-B codec's payload is put into the form RTP carries
+    /// — the NAL length prefix to rewrite, where there is one — and refuses
     /// what cannot reach a decoder.
     ///
     /// Two things can be wrong, and both are invisible without this. str0m
@@ -757,38 +757,41 @@ impl WebRtcTrackSink {
     ///
     /// Each check runs once per track, since neither the bitstream form nor
     /// where an encoder keeps its headers changes part-way through.
-    fn prepare_bitstream(&mut self, buf: MediaBuffer) -> Result<MediaBuffer> {
+    fn prepare_bitstream(&mut self, packet: &PacketBuffer) -> Result<Option<usize>> {
         let Some(codec) = self.codec.filter(|codec| annex_b_codec(*codec)) else {
-            return Ok(buf);
-        };
-        let MediaBuffer::Packet(packet) = &buf else {
-            return Ok(buf);
+            return Ok(None);
         };
         let Some(payload) = packet.data() else {
-            return Ok(buf);
+            return Ok(None);
         };
 
-        let converted = match self.nal_length_size {
-            // Already in the form RTP carries, whatever the record said. A
-            // caller can declare a demuxer's parameters — for the parameter
-            // sets, which are only there — while what reaches this sink has
-            // been converted on the way. Read as length-prefixed, such a
-            // payload's leading start code parses as a one-byte NAL unit and
-            // the packet is refused as malformed, which names neither the
-            // cause nor the fix. Four bytes to rule out, per packet rather
-            // than once, because this is the one thing about a payload that
-            // something upstream can change without redeclaring anything.
-            Some(_) if starts_with_start_code(payload) => None,
-            Some(nal_length_size) => {
-                let Some(annex_b) = length_prefixed_to_annex_b(payload, nal_length_size) else {
+        let prefixed = match self.nal_length_size {
+            Some(nal_length_size) => match length_prefixed_nalus(payload, nal_length_size) {
+                Some(nalus) => Some((nal_length_size, nalus)),
+                // Already in the form RTP carries, whatever the record said.
+                // A caller can declare a demuxer's parameters — for the
+                // parameter sets, which are only there — while what reaches
+                // this sink has been converted on the way. Read as
+                // length-prefixed, such a payload's leading start code parses
+                // as a one-byte NAL unit and the packet is refused as
+                // malformed, which names neither the cause nor the fix.
+                // Looked at per packet rather than once, because this is the
+                // one thing about a payload that something upstream can
+                // change without redeclaring anything.
+                //
+                // Only once the payload has failed to read as what the record
+                // said: a NAL unit of 256 to 511 bytes has a length that opens
+                // `00 00 01`, a start code to the eye, and taken for one it
+                // was sent unconverted — one picture in several of an MP4's.
+                None if starts_with_start_code(payload) => None,
+                None => {
                     pp_error!(
                         self,
                         "outbound packet is not a valid length-prefixed access unit"
                     );
                     return Err(WebRtcError::MalformedLengthPrefixedPacket(self.id).into());
-                };
-                Some(annex_b)
-            }
+                }
+            },
             None => {
                 // Not marked checked on failure: a `Queue` reports this and
                 // carries on with the next buffer, and refusing only the
@@ -806,26 +809,22 @@ impl WebRtcTrackSink {
         };
 
         if packet.is_key() && self.parameter_sets.is_none() && !self.parameter_sets_checked {
-            let outgoing = converted.as_deref().unwrap_or(payload);
-            if carries_parameter_sets(outgoing, codec) == Some(false) {
+            let carries = match &prefixed {
+                Some((_, nalus)) => carries_parameter_sets(nalus, codec),
+                None => carries_parameter_sets(&annex_b_nalus(payload), codec),
+            };
+            if carries == Some(false) {
                 pp_error!(self, "outbound keyframe carries no parameter sets");
                 return Err(WebRtcError::MissingParameterSets(self.id).into());
             }
             self.parameter_sets_checked = true;
         }
-
-        match converted {
-            Some(annex_b) => Ok(rewritten_packet(packet, &annex_b)),
-            None => Ok(buf),
-        }
+        Ok(prefixed.map(|(nal_length_size, _)| nal_length_size))
     }
 
-    fn normalize_packet_timestamp(&mut self, buf: MediaBuffer) -> Result<MediaBuffer> {
-        let MediaBuffer::Packet(packet) = buf else {
-            return Ok(buf);
-        };
+    fn normalize_packet_timestamp(&mut self, packet: PacketBuffer) -> Result<PacketBuffer> {
         let Some(pts) = packet.pts() else {
-            return Ok(MediaBuffer::Packet(packet));
+            return Ok(packet);
         };
         let offset = match self.timestamp_offset {
             Some(offset) => offset,
@@ -840,7 +839,7 @@ impl WebRtcTrackSink {
         };
         self.timestamp_offset = Some(offset);
         if offset == 0 {
-            return Ok(MediaBuffer::Packet(packet));
+            return Ok(packet);
         }
 
         let shifted = |value: i64| {
@@ -851,7 +850,11 @@ impl WebRtcTrackSink {
         let mut normalized = (**packet).clone();
         normalized.set_pts(Some(shifted(pts)?));
         normalized.set_dts(packet.dts().map(shifted).transpose()?);
-        Ok(MediaBuffer::Packet(Arc::new(normalized).into()))
+        let mut normalized: PacketBuffer = Arc::new(normalized).into();
+        if let Some(metadata) = packet.metadata_arc() {
+            normalized = normalized.with_metadata(Arc::clone(metadata));
+        }
+        Ok(normalized)
     }
 }
 

@@ -1,6 +1,5 @@
 //! A WebRTC server serving [`Broadcast`]s: [`WebRtcServer`].
 
-mod annex_b;
 mod http;
 mod session;
 #[cfg(test)]
@@ -263,14 +262,23 @@ impl Default for WebRtcServerOptions {
 /// Each of its threads runs the sessions given it, each a `str0m`
 /// connection, fed what the thread's socket receives and polled for what it
 /// sends; a thread keeps one core busy at most (`docs/benchmarks/streaming`
-/// has what a player costs it). A player is
-/// a reader of its path's broadcast from the moment it connects, so it
-/// starts at a keyframe; what the broadcast held then is sent at twice the
-/// stream's speed, so it catches up without a burst its socket cannot hold,
-/// and what comes after as it is written. Its tracks share one timeline, which
-/// goes on across the broadcast's runs. A publisher's tracks are published
-/// into the path's broadcast once each has said enough of itself — H.264's
-/// parameter sets — and its leaving ends the run.
+/// has what a player costs it).
+///
+/// What goes through a session is a pipeline of its own with no thread of
+/// its own — a [`DrivenPipeline`](crate::pipeline::DrivenPipeline) the
+/// session's thread polls as what it waits on wakes it. A player's is a
+/// [`BroadcastSource`](crate::elements::BroadcastSource) of its path's
+/// broadcast and a [`WebRtcTrackSink`](super::WebRtcTrackSink) for each
+/// track it takes, begun as it connects, so it starts at a keyframe; its
+/// tracks share one timeline, which goes on across the broadcast's runs.
+/// What the broadcast held then is sent at twice the stream's speed, so it
+/// catches up without a burst its socket cannot hold, and what comes after
+/// as it is written. A publisher's tracks are each a pipeline of a
+/// [`WebRtcTrackSource`](super::WebRtcTrackSource) into the path's
+/// broadcast, published once each has said enough of itself — H.264's
+/// parameter sets — and its leaving ends the run. The sinks and sources are
+/// the ones a [`WebRtcPeer`](super::WebRtcPeer) hands out: a peer and a
+/// server's session are one connection, driven by different owners.
 pub struct WebRtcServer {
     name: Arc<str>,
     pp_log: PpLog,

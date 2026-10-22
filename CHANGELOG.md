@@ -180,6 +180,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`WebRtcTrackSink` sent some of an MP4's H.264 pictures unconverted.**
+  Given a demuxer's `avcC` parameters, it took any payload opening with a
+  start code for one already Annex-B — and a NAL unit of 256 to 511 bytes
+  has a four-byte length that opens `00 00 01`. Such a picture left with its
+  length in front, which a receiver read as a NAL unit of type 25. A
+  payload is now read as the record says first, and taken for Annex-B only
+  where it does not read so.
+
 - **A `WebRtcPeer` sends faster than a thousand packets a second.** Its loop
   took the deadline `str0m`'s pacer gives after every packet — one already
   past — as the end of its turn, and so sent one packet a turn; it now

@@ -1,22 +1,59 @@
 //! What a connection's track sinks hand it to send: [`Outbox`].
 
 use std::{
+    borrow::Cow,
     collections::{HashSet, VecDeque},
     sync::{Arc, Mutex, MutexGuard},
+    time::Instant,
 };
 
 use str0m::format::Codec;
 
 use crate::buffer::PacketBuffer;
 
-use super::command::TrackId;
+use super::{command::TrackId, track::length_prefixed_to_annex_b};
 
 /// One packet a track sink has made ready for its connection: in the
-/// codec it was declared in, in the form RTP carries, its time from zero.
+/// codec it was declared in, its time from zero, and how its payload is put
+/// in the form RTP carries as it is written — see [`Self::payload`].
 pub(super) struct Outgoing {
     pub(super) track: TrackId,
     pub(super) codec: Codec,
     pub(super) packet: PacketBuffer,
+    pub(super) rewrite: Rewrite,
+}
+
+/// How an outgoing packet's payload becomes Annex-B with its parameter sets
+/// ahead of a keyframe: made as it is written, so that what waits to be
+/// written is the packet shared with every other reader rather than a copy.
+/// Both `None` is the payload as it is.
+#[derive(Default)]
+pub(super) struct Rewrite {
+    /// The NAL length prefix size of a length-prefixed payload, already
+    /// found whole by the sink.
+    pub(super) nal_length_size: Option<usize>,
+    /// The parameter sets to put ahead of a keyframe that does not open
+    /// with them already.
+    pub(super) prepend: Option<Arc<[u8]>>,
+}
+
+impl Outgoing {
+    /// What is written: the payload in the form RTP carries.
+    pub(super) fn payload(&self) -> Vec<u8> {
+        let data = self.packet.data().unwrap_or(&[]);
+        let converted = match self.rewrite.nal_length_size {
+            Some(size) => {
+                length_prefixed_to_annex_b(data, size).map_or(Cow::Borrowed(data), Cow::Owned)
+            }
+            None => Cow::Borrowed(data),
+        };
+        match &self.rewrite.prepend {
+            Some(sets) if self.packet.is_key() && !converted.starts_with(sets) => {
+                [&sets[..], &converted[..]].concat()
+            }
+            _ => converted.into_owned(),
+        }
+    }
 }
 
 /// What a connection is to send, in order, from every one of its track
@@ -100,6 +137,21 @@ impl Outbox {
         std::mem::take(&mut self.lock().queue)
     }
 
+    /// The next packet where it is due by `now` — `due` says when it is —
+    /// or else when it will be, `None` with nothing held.
+    pub(super) fn take_due(
+        &self,
+        now: Instant,
+        due: impl FnOnce(&Outgoing) -> Instant,
+    ) -> Result<Outgoing, Option<Instant>> {
+        let mut state = self.lock();
+        let at = due(state.queue.front().ok_or(None)?);
+        if at > now {
+            return Err(Some(at));
+        }
+        state.queue.pop_front().ok_or(None)
+    }
+
     /// The connection is gone: what is held is let go of, and nothing more
     /// is taken.
     pub(super) fn close(&self) {
@@ -126,6 +178,7 @@ mod tests {
             track: TrackId(track),
             codec: Codec::H264,
             packet: Arc::new(packet).into(),
+            rewrite: Rewrite::default(),
         }
     }
 
@@ -144,6 +197,18 @@ mod tests {
         assert_eq!(outbox.push(outgoing(0, false)), Pushed::FellBehind);
         let held: Vec<_> = outbox.take_all().iter().map(|held| held.track).collect();
         assert!(held.is_empty(), "{held:?}");
+    }
+
+    #[test]
+    fn it_hands_out_a_packet_only_once_it_is_due() {
+        let outbox = Outbox::new(4);
+        let now = Instant::now();
+        let later = now + std::time::Duration::from_secs(1);
+        assert!(matches!(outbox.take_due(now, |_| now), Err(None)));
+        outbox.push(outgoing(0, true));
+        assert!(matches!(outbox.take_due(now, |_| later), Err(Some(at)) if at == later));
+        assert!(outbox.take_due(now, |_| now).is_ok());
+        assert!(matches!(outbox.take_due(now, |_| now), Err(None)));
     }
 
     #[test]

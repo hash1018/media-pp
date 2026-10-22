@@ -15,7 +15,6 @@ use str0m::media::{Direction, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
-use super::annex_b::AnnexB;
 use super::*;
 use crate::driver::DriverRunner;
 use crate::elements::{BroadcastOptions, FileDemuxer, Pacer, TrackFormat};
@@ -312,22 +311,31 @@ fn a_publisher_is_played_back() {
         .iter()
         .find(|s| s.kind == ffmpeg::media::Type::Video)
         .unwrap();
-    let annex_b = AnnexB::for_track(super::session::extradata(&video.parameters), false);
+    // Made Annex B, with the parameter sets ahead of each keyframe, as a
+    // track sink makes what it sends.
+    let outbox = super::super::outbox::Outbox::new(1 << 16);
+    let mut sink = super::super::track::WebRtcTrackSink::new(
+        super::super::command::TrackId(0),
+        MediaKind::Video,
+        None,
+        Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
+        outbox.clone(),
+    );
+    sink.set_source_parameters(&video.parameters).unwrap();
     let mut input = ffmpeg::format::input(&path).unwrap();
     let pictures: Vec<(Vec<u8>, i64)> = input
         .packets()
         .filter(|(stream, _)| stream.index() == video.index)
-        .map(|(_, packet)| {
+        .map(|(_, mut packet)| {
             let ts = packet
                 .pts()
                 .unwrap()
                 .rescale(video.time_base, ffmpeg::Rational(1, 90_000));
-            (
-                annex_b
-                    .convert(packet.data().unwrap(), packet.is_key())
-                    .unwrap(),
-                ts,
-            )
+            packet.set_time_base(video.time_base);
+            crate::element::RawSink::consume(&mut sink, crate::buffer::MediaBuffer::packet(packet))
+                .unwrap();
+            let sent = outbox.take_all().pop_front().unwrap();
+            (sent.payload(), ts)
         })
         .collect();
 
@@ -657,9 +665,16 @@ fn a_player_catches_up_on_large_pictures_in_time() {
     // Two seconds of 100 kB pictures from one keyframe, in Annex B, written
     // at once: some four thousand RTP packets for the player to catch up on
     // in one. Nothing decodes them; the player only puts them back together.
+    // The keyframe carries its parameter sets, as one a player can start at
+    // does — a track sink refuses one that has none.
     let pictures = 50usize;
     for n in 0..pictures as i64 {
-        let mut data = vec![0, 0, 0, 1, if n == 0 { 0x65 } else { 0x41 }];
+        let mut data = match n {
+            0 => vec![
+                0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65,
+            ],
+            _ => vec![0, 0, 0, 1, 0x41],
+        };
         data.resize(100_000, 0xAB);
         let mut packet = ffmpeg::Packet::copy(&data);
         packet.set_pts(Some(n * 3_600));

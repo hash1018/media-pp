@@ -9,15 +9,11 @@ use std::time::Instant;
 use ffmpeg_next as ffmpeg;
 use str0m::{
     Event, Input, Output, Rtc, RtcError,
-    format::Codec,
     media::{MediaData, Mid},
     net::Transmit,
 };
 
-use super::{
-    command::{TrackId, WebRtcError},
-    peer::packet_rtp_time,
-};
+use super::{command::WebRtcError, outbox::Outgoing, peer::packet_rtp_time};
 
 /// What a connection has for its owner next.
 // Handed straight on and never kept, so the size of an event costs a move,
@@ -74,21 +70,15 @@ impl Outputs {
     }
 }
 
-/// Writes `packet` — `codec`, Annex-B where it is H.264 or later, its time
-/// from zero — into the media `mid` of `rtc`, under the payload type its
-/// negotiation gave `codec`. Never guesses another: str0m packetizes
-/// whatever bytes it is handed under the type chosen, so an H.264 packet
-/// sent as VP8 is a well-formed stream no receiver can decode.
+/// Writes `outgoing` into the media `mid` of `rtc`, under the payload type
+/// its negotiation gave the packet's codec. Never guesses another: str0m
+/// packetizes whatever bytes it is handed under the type chosen, so an
+/// H.264 packet sent as VP8 is a well-formed stream no receiver can decode.
 ///
 /// Nothing is written, and nothing said, where `mid` has no writer — a
 /// track not negotiated yet, or one gone.
-pub(super) fn write(
-    rtc: &mut Rtc,
-    mid: Mid,
-    track: TrackId,
-    codec: Codec,
-    packet: &ffmpeg::Packet,
-) -> Result<(), WebRtcError> {
+pub(super) fn write(rtc: &mut Rtc, mid: Mid, outgoing: &Outgoing) -> Result<(), WebRtcError> {
+    let (track, codec) = (outgoing.track, outgoing.codec);
     let Some(writer) = rtc.writer(mid) else {
         return Ok(());
     };
@@ -110,9 +100,8 @@ pub(super) fn write(
             negotiated,
         });
     };
-    let data = packet.data().unwrap_or(&[]).to_vec();
-    let rtp_time = packet_rtp_time(packet)?;
-    writer.write(pt, Instant::now(), rtp_time, data)?;
+    let rtp_time = packet_rtp_time(&outgoing.packet)?;
+    writer.write(pt, Instant::now(), rtp_time, outgoing.payload())?;
     Ok(())
 }
 
