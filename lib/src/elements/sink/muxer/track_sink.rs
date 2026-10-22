@@ -213,6 +213,10 @@ impl<M: Muxer> SharedOutput<M> {
         }
         state.finished = true;
         write_trailer(&mut state.output).map_err(M::ffmpeg_error)?;
+        drop(state);
+        if let Some(prune) = &self.prune {
+            prune.prune_now();
+        }
         Ok(true)
     }
 }

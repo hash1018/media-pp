@@ -502,9 +502,26 @@ mod tests {
         let mut options = DashOptions::new(&manifest);
         options.segment_duration = Duration::from_secs(1);
         options.mode = DashMode::Live { window_size: 2 };
+        // Six segments of a representation FFmpeg writes none of here, so
+        // never deletes: what goes of them is the muxer's own doing, on an
+        // FFmpeg that deletes as on one that cannot — the window, the one
+        // FFmpeg keeps past it and one more stay. The seconds go by faster
+        // than they play, as written here.
+        let foreign = |number: u32| dir.join(format!("chunk-stream9-{number:05}.m4s"));
+        for number in 1..=6 {
+            std::fs::write(foreign(number), b"x").unwrap();
+        }
 
         encode_silence(options, 400);
 
+        assert!(
+            !foreign(1).exists() && !foreign(2).exists(),
+            "the muxer deletes what left the window"
+        );
+        assert!((3..=6).all(|number| foreign(number).exists()));
+        for number in 3..=6 {
+            std::fs::remove_file(foreign(number)).unwrap();
+        }
         let mpd = std::fs::read_to_string(&manifest).unwrap();
         let start = mpd
             .split("startNumber=\"")

@@ -14,8 +14,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How often a pruner looks: a segment is a second or more, and every sound
-/// packet is a keyframe.
+/// packet is a keyframe. Every so many keyframes as well, for an output
+/// written faster than it plays, whose seconds go by in a few keyframes'
+/// time.
 const EVERY: Duration = Duration::from_millis(500);
+const EVERY_KEYFRAMES: u32 = 50;
 
 /// Deletes all but the newest segments of each sequence in a directory.
 ///
@@ -29,7 +32,8 @@ pub(super) struct SegmentPruner {
     prefix: String,
     suffix: String,
     keep: usize,
-    looked: Mutex<Option<Instant>>,
+    /// When it last looked, and how many keyframes it was asked at since.
+    looked: Mutex<(Option<Instant>, u32)>,
 }
 
 impl SegmentPruner {
@@ -44,7 +48,7 @@ impl SegmentPruner {
             prefix: prefix.into(),
             suffix: suffix.into(),
             keep: keep.max(1),
-            looked: Mutex::new(None),
+            looked: Mutex::new((None, 0)),
         }
     }
 
@@ -57,17 +61,26 @@ impl SegmentPruner {
         }
     }
 
-    /// Deletes what is older than the newest `keep` of each sequence, at
-    /// most twice a second. What cannot be read or deleted is left; a later
-    /// call tries again.
+    /// Deletes what is older than the newest `keep` of each sequence, after
+    /// a keyframe is written: at most twice a second, or once in
+    /// [`EVERY_KEYFRAMES`] where they come faster. What cannot be read or
+    /// deleted is left; a later call tries again.
     pub(super) fn prune(&self) {
         {
             let mut looked = self.looked.lock().unwrap_or_else(|p| p.into_inner());
-            if looked.is_some_and(|at| at.elapsed() < EVERY) {
+            let (at, since) = &mut *looked;
+            *since += 1;
+            if at.is_some_and(|at| at.elapsed() < EVERY) && *since < EVERY_KEYFRAMES {
                 return;
             }
-            *looked = Some(Instant::now());
+            *looked = (Some(Instant::now()), 0);
         }
+        self.prune_now();
+    }
+
+    /// Deletes what is older than the newest `keep` of each sequence now:
+    /// as the output is finished, whatever the last look was.
+    pub(super) fn prune_now(&self) {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return;
         };
@@ -154,6 +167,56 @@ mod tests {
             ],
             "by number, not by name: 00010 is newer than 00002"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "media_pp_prune_{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn segments(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    /// Keyframes written faster than they play — a stream re-muxed, a
+    /// test — come within the half second a pruner waits between looks;
+    /// it looks every so many of them as well, and once more as the output
+    /// is finished, so that what is left is the window whatever the pace.
+    #[test]
+    fn a_fast_writer_is_pruned_by_keyframes_and_at_its_finish() {
+        let dir = scratch("fast");
+        let write = |number: u32| {
+            std::fs::write(dir.join(format!("chunk-stream0-{number:05}.m4s")), b"x").unwrap()
+        };
+        let pruner = SegmentPruner::new(&dir, "chunk-stream", ".m4s", 2);
+        for number in 1..=4 {
+            write(number);
+        }
+        pruner.prune();
+        assert_eq!(segments(&dir), 2, "the first keyframe looks");
+        for number in 5..=8 {
+            write(number);
+        }
+        pruner.prune();
+        assert_eq!(segments(&dir), 6, "not again within the half second");
+        for _ in 0..EVERY_KEYFRAMES {
+            pruner.prune();
+        }
+        assert_eq!(segments(&dir), 2, "but within so many keyframes");
+        for number in 9..=10 {
+            write(number);
+        }
+        pruner.prune_now();
+        assert_eq!(segments(&dir), 2, "and as the output is finished");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
