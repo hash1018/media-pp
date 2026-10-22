@@ -182,7 +182,13 @@ with new H.264 or H.265 parameter sets in band — another size, profile,
 chroma format or bit depth:
 
 - `RtspServer` and `WebRtcServer` carry it on as it comes, in the same
-  track, and `SwDecoder` follows it.
+  track.
+- A decoder follows it, handing on pictures of the new size — `SwDecoder`,
+  `D3d11Decoder`, `D3d12Decoder`, `CudaDecoder` and `VulkanDecoder`, which
+  opens its codec context anew for it. `SwScaler` and the D3D11, D3D12,
+  CUDA and Vulkan scalers take any size in and go on writing their own, so
+  an encoder after one is not disturbed. The macOS decoder and scaler have
+  not been tried.
 - A muxer whose header keeps the first parameter sets for the whole output
   — `FileMuxer` to an MP4 or MOV, `HlsMuxer` of fMP4, `DashMuxer` — refuses
   the track from there (`MuxerTrackError::FormatChanged`), and the output

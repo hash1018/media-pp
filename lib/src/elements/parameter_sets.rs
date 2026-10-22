@@ -109,6 +109,15 @@ impl ShapeWatch {
         self.began
     }
 
+    /// [`Self::changed`], taking what the pictures changed to as what they
+    /// are from here: for what follows a stream rather than refusing it.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn follow(&mut self, data: &[u8]) -> Option<(Shape, Shape)> {
+        let change = self.changed(data)?;
+        self.began = Some(change.1);
+        Some(change)
+    }
+
     /// The shape a keyframe's packet says its pictures now are, where its
     /// sets say other than the stream began as; `None` for one that says
     /// the same, says nothing, or cannot be read. The first set a stream

@@ -37,6 +37,8 @@ mod pacer;
 mod pause_gate;
 mod rack;
 pub(crate) mod scaler;
+#[cfg(test)]
+mod size_change_tests;
 pub(crate) mod tee;
 mod timestamp_origin;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]

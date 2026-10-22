@@ -14,7 +14,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Flow, RawSink, ReversibleDecoder, SrcPads, element_pp_log},
-    elements::{VulkanDevice, filter::is_codec_drain_boundary},
+    elements::{VulkanDevice, filter::is_codec_drain_boundary, parameter_sets::ShapeWatch},
     pad::SrcPad,
     platform::ffmpeg::AvBufferRef,
     pool::UnboundObjectPool,
@@ -122,6 +122,13 @@ pub struct VulkanDecoder {
     stretch: Stretch,
     /// What it leaves undecoded while pictures come too late — see `Qos`.
     qos: Qos,
+    /// What the codec context is opened from again where the pictures
+    /// change size — see [`Self::reopen`].
+    parameters: ffmpeg::codec::Parameters,
+    extra_hw_frames: i32,
+    /// What the stream's pictures are, from its H.264 or H.265 parameter
+    /// sets; `None` for a codec whose sets are not read.
+    watch: Option<ShapeWatch>,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -159,33 +166,9 @@ impl VulkanDecoder {
             VulkanDecoderError::InvalidSurfaceBudget(downstream_hw_frames),
         )?;
 
-        let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
-        if context.medium() != ffmpeg::media::Type::Video {
-            return Err(VulkanDecoderError::UnsupportedMediaType(context.medium()));
-        }
-        let codec = vulkan_capable_decoder(context.id())
-            .ok_or(VulkanDecoderError::UnsupportedCodec(context.id()))?;
-
         let hw_device_ctx = device.retain();
-        let codec_device_ctx = hw_device_ctx
-            .try_clone()
-            .ok_or(VulkanDecoderError::HwDeviceRef)?;
         let refused = NegotiationRefusal::new();
-        // SAFETY: `ctx_ptr` is the codec context this owns and has not opened
-        // yet, which is the only point at which these fields may be set. The
-        // device reference is transferred with `into_raw`, so the codec frees
-        // it and this no longer does. `opaque` points at `refused`, which the
-        // decoder keeps for as long as the codec context.
-        unsafe {
-            let ctx_ptr = context.as_mut_ptr();
-            (*ctx_ptr).opaque = refused.opaque();
-            (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
-            (*ctx_ptr).get_format = Some(get_format);
-            (*ctx_ptr).extra_hw_frames = extra_hw_frames;
-        }
-
-        let decoder = context.decoder().open_as(codec)?.video()?;
-
+        let decoder = open(params.clone(), &hw_device_ctx, extra_hw_frames, &refused)?;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
@@ -206,7 +189,40 @@ impl VulkanDecoder {
             refused,
             stretch: Stretch::default(),
             qos: Qos::default(),
+            watch: ShapeWatch::new(&params),
+            parameters: params,
+            extra_hw_frames,
         })
+    }
+
+    /// Opens the codec context anew for pictures of another size, having
+    /// handed on what the old one still held.
+    ///
+    /// FFmpeg's Vulkan decoding cannot change the size of a context already
+    /// decoding: with one decoding thread — what this opens — reinitializing
+    /// it in place crashes the process inside libavcodec (FFmpeg 8.0, where
+    /// `ffmpeg -threads 1 -hwaccel vulkan` does the same). A context opened
+    /// fresh on the new keyframe is only ever initialized, never changed.
+    /// Frame threading would avoid it too, at a picture's delay.
+    fn reopen(&mut self, was: &str, now: &str) -> crate::error::Result<()> {
+        pp_info!(
+            self,
+            "the pictures change from {was} to {now}: opening the decoder anew"
+        );
+        self.decoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(|error| self.decode_error(error))?;
+        self.drain()?;
+        let mut decoder = open(
+            self.parameters.clone(),
+            &self._hw_device_ctx,
+            self.extra_hw_frames,
+            &self.refused,
+        )?;
+        self.qos.reset(&mut decoder);
+        self.decoder = decoder;
+        Ok(())
     }
 
     /// Whether this FFmpeg build has a decoder for `codec` that can decode on
@@ -310,6 +326,12 @@ impl RawSink for VulkanDecoder {
             MediaBuffer::Packet(packet) => {
                 // Decoded frames carry a `pts` but not the unit it is in.
                 self.preroll_gate.observe_packet(&packet);
+                if packet.is_key()
+                    && let (Some(watch), Some(data)) = (&mut self.watch, packet.data())
+                    && let Some((was, now)) = watch.follow(data)
+                {
+                    self.reopen(&was.to_string(), &now.to_string())?;
+                }
                 self.qos.follow(&mut self.decoder, &self.pp_log);
                 self.decoder
                     .send_packet(&**packet)
@@ -381,6 +403,38 @@ impl Drop for VulkanDecoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
     }
+}
+
+/// A codec context for `params` decoding on Vulkan through `hw_device_ctx`,
+/// opened, with `refused` to hear of the GPU refusing the stream.
+fn open(
+    params: ffmpeg::codec::Parameters,
+    hw_device_ctx: &Arc<AvBufferRef>,
+    extra_hw_frames: i32,
+    refused: &NegotiationRefusal,
+) -> Result<ffmpeg::decoder::Video, VulkanDecoderError> {
+    let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
+    if context.medium() != ffmpeg::media::Type::Video {
+        return Err(VulkanDecoderError::UnsupportedMediaType(context.medium()));
+    }
+    let codec = vulkan_capable_decoder(context.id())
+        .ok_or(VulkanDecoderError::UnsupportedCodec(context.id()))?;
+    let codec_device_ctx = hw_device_ctx
+        .try_clone()
+        .ok_or(VulkanDecoderError::HwDeviceRef)?;
+    // SAFETY: `ctx_ptr` is the codec context this owns and has not opened
+    // yet, which is the only point at which these fields may be set. The
+    // device reference is transferred with `into_raw`, so the codec frees
+    // it and this no longer does. `opaque` points at `refused`, which the
+    // decoder keeps for as long as the codec context.
+    unsafe {
+        let ctx_ptr = context.as_mut_ptr();
+        (*ctx_ptr).opaque = refused.opaque();
+        (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
+        (*ctx_ptr).get_format = Some(get_format);
+        (*ctx_ptr).extra_hw_frames = extra_hw_frames;
+    }
+    Ok(context.decoder().open_as(codec)?.video()?)
 }
 
 /// The first decoder for `id` that decodes on Vulkan — see

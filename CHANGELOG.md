@@ -284,6 +284,15 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A `VulkanDecoder` goes on where the pictures change size, instead of
+  crashing the process.** FFmpeg 8.0's Vulkan decoding, with the one
+  decoding thread this opens it with, crashes inside libavcodec changing a
+  context's size in place — `ffmpeg -threads 1 -hwaccel vulkan` does the
+  same — which a camera reconfigured or a WebRTC sender lowering its
+  resolution sets off. Where an H.264 or H.265 keyframe's parameter sets
+  say other pictures, the decoder now hands on what it still holds and
+  opens its codec context anew. Other codecs on Vulkan are not watched.
+
 - **A `Broadcast` keeps its tracks' frame rate.** `Broadcast::tracks`, and
   every `BroadcastSource` and `BroadcastReader` of it, said `None` even
   for a track published from a stream that says its rate — a demuxed
