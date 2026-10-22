@@ -8,6 +8,8 @@
 //!                      Broadcast "file" ----\
 //!                                            WebRtcServer -> players (WHEP)
 //! publisher (WHIP) -> Broadcast "live" -----/
+//!                            ^
+//!   with --rtmp: OBS -> RtmpServer "live/stream"
 //!
 //! with --record:  Broadcast "file" -> BroadcastSource -> HlsMuxer (event playlist)
 //! ```
@@ -19,7 +21,7 @@
 //! is left out. Plays of the file without B-frames, as a browser takes
 //! H.264.
 //!
-//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR]
+//!     cargo run -p webrtc_server -- input.mp4 [--udp 127.0.0.1:8189] [--http 127.0.0.1:8080] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS]
 //!
 //! Both addresses default to this machine alone. To serve the network,
 //! give the address the network reaches this machine at to `--udp` — a
@@ -29,7 +31,11 @@
 //! from the one `--udp` names on — it runs its sessions on, two by default.
 //! `--record` also records what `file` plays, as it plays it, into an HLS
 //! event playlist under `DIR` — `index.m3u8` and its fMP4 segments, playable
-//! while it grows and finished as the server stops.
+//! while it grows and finished as the server stops. `--rtmp` also takes an
+//! RTMP publisher at `rtmp://ADDRESS/live` with the stream key `stream` (OBS's
+//! "Custom" service) into `live`: its H.264 plays in a browser where the
+//! encoder sends no B-frames (OBS: x264 or NVENC with B-frames 0), and its
+//! AAC, which WebRTC does not carry, is left out.
 
 fn main() -> Result<(), media_pp::Report> {
     Ok(example::run()?)
@@ -42,11 +48,12 @@ mod example {
     use media_pp::driver::DriverRunner;
     use media_pp::elements::{
         Broadcast, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode, HlsMuxer, HlsOptions,
-        Pacer, TrackFormat, WebRtcPathMode, WebRtcServer, WebRtcServerOptions,
+        Pacer, RtmpServer, RtmpServerOptions, TrackFormat, WebRtcPathMode, WebRtcServer,
+        WebRtcServerOptions,
     };
     use media_pp::pipeline::Pipeline;
 
-    const USAGE: &str = "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--threads N] [--seconds N] [--record DIR]";
+    const USAGE: &str = "usage: webrtc_server <input> [--udp ADDRESS] [--http ADDRESS] [--threads N] [--seconds N] [--record DIR] [--rtmp ADDRESS]";
 
     struct Args {
         input: String,
@@ -55,6 +62,7 @@ mod example {
         seconds: Option<u64>,
         threads: Option<usize>,
         record: Option<String>,
+        rtmp: Option<String>,
     }
 
     fn args() -> Option<Args> {
@@ -64,6 +72,7 @@ mod example {
         let mut seconds = None;
         let mut threads = None;
         let mut record = None;
+        let mut rtmp = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -72,6 +81,7 @@ mod example {
                 "--seconds" => seconds = Some(args.next()?.parse().ok()?),
                 "--threads" => threads = Some(args.next()?.parse().ok().filter(|&n| n > 0)?),
                 "--record" => record = Some(args.next()?),
+                "--rtmp" => rtmp = Some(args.next()?),
                 _ if input.is_none() => input = Some(arg),
                 _ => return None,
             }
@@ -83,6 +93,7 @@ mod example {
             seconds,
             threads,
             record,
+            rtmp,
         })
     }
 
@@ -107,6 +118,19 @@ mod example {
         let live = Broadcast::new("live", BroadcastOptions::default());
         handle.add_path("file", &file, WebRtcPathMode::Play)?;
         handle.add_path("live", &live, WebRtcPathMode::Publish)?;
+        // RTMP publishers into the same broadcast: OBS's server
+        // `rtmp://ADDRESS/live`, its stream key `stream`.
+        let rtmp = match &args.rtmp {
+            Some(address) => {
+                let (rtmp, ingest) =
+                    RtmpServer::bind("rtmp", address, RtmpServerOptions::default())?;
+                ingest.add_path("live/stream", &live)?;
+                let rtmp = DriverRunner::new(rtmp);
+                rtmp.run()?;
+                Some((rtmp, ingest))
+            }
+            None => None,
+        };
 
         // The file as a camera: looped, at its own speed, into its broadcast.
         let (demuxer, streams) = FileDemuxer::open("file", &args.input)?;
@@ -143,6 +167,14 @@ mod example {
             http.whip_url("live"),
             http.local_addr()
         );
+        if let Some((_, ingest)) = &rtmp {
+            println!(
+                "RTMP: {} (server rtmp://{}/live, key stream; then play http://{}/live)",
+                ingest.url("live/stream"),
+                ingest.local_addr(),
+                http.local_addr()
+            );
+        }
         match args.seconds {
             Some(seconds) => println!("serving for {seconds} s"),
             None => println!("press Enter to stop"),
@@ -166,6 +198,12 @@ mod example {
         drop(http);
         server.stop();
         camera.stop();
+        if let Some((rtmp, _)) = &rtmp {
+            rtmp.stop();
+            for event in rtmp.bus().iter() {
+                println!("{event}");
+            }
+        }
         for event in server.bus().iter() {
             println!("{event}");
         }

@@ -8,6 +8,8 @@
 //!                      Broadcast "file" ----\
 //!                                            RtspServer -> players
 //! publisher -> RtspServer -> Broadcast "live" /
+//!                                ^
+//! with --rtmp: OBS -> RtmpServer "live/stream"
 //!
 //! with --record:  Broadcast "file" -> BroadcastSource -> HlsMuxer (event playlist)
 //! ```
@@ -17,7 +19,7 @@
 //! publisher at a time; one that leaves ends its run, and the next one's
 //! players go on.
 //!
-//!     cargo run -p rtsp_server -- input.mp4 [address] [--seconds N] [--threads N] [--record DIR]
+//!     cargo run -p rtsp_server -- input.mp4 [address] [--seconds N] [--threads N] [--record DIR] [--rtmp ADDRESS]
 //!     ffplay rtsp://127.0.0.1:8554/file
 //!     ffmpeg -re -i video.mp4 -c copy -f rtsp rtsp://127.0.0.1:8554/live
 //!     ffplay rtsp://127.0.0.1:8554/live
@@ -28,7 +30,9 @@
 //! connections on, two by default. `--record` also records what `file`
 //! plays, as it plays it, into an HLS event playlist under `DIR` —
 //! `index.m3u8` and its fMP4 segments, playable while it grows and finished
-//! as the server stops.
+//! as the server stops. `--rtmp` also takes an RTMP publisher at
+//! `rtmp://ADDRESS/live` with the stream key `stream` — OBS's "Custom"
+//! service — into `live`, for RTSP players as an RTSP publisher's would be.
 
 fn main() -> Result<(), media_pp::Report> {
     Ok(example::run()?)
@@ -42,12 +46,12 @@ mod example {
     use media_pp::driver::DriverRunner;
     use media_pp::elements::{
         Broadcast, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode, HlsMuxer, HlsOptions,
-        Pacer, RtspPathMode, RtspServer, RtspServerOptions, TrackFormat,
+        Pacer, RtmpServer, RtmpServerOptions, RtspPathMode, RtspServer, RtspServerOptions,
+        TrackFormat,
     };
     use media_pp::pipeline::Pipeline;
 
-    const USAGE: &str =
-        "usage: rtsp_server <input> [address] [--seconds N] [--threads N] [--record DIR]";
+    const USAGE: &str = "usage: rtsp_server <input> [address] [--seconds N] [--threads N] [--record DIR] [--rtmp ADDRESS]";
 
     struct Args {
         input: String,
@@ -55,6 +59,7 @@ mod example {
         seconds: Option<u64>,
         threads: Option<usize>,
         record: Option<String>,
+        rtmp: Option<String>,
     }
 
     fn args() -> Option<Args> {
@@ -63,12 +68,15 @@ mod example {
         let mut seconds = None;
         let mut threads = None;
         let mut record = None;
+        let mut rtmp = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--seconds" {
                 seconds = Some(args.next()?.parse().ok()?);
             } else if arg == "--record" {
                 record = Some(args.next()?);
+            } else if arg == "--rtmp" {
+                rtmp = Some(args.next()?);
             } else if arg == "--threads" {
                 threads = Some(args.next()?.parse().ok().filter(|&n| n > 0)?);
             } else if input.is_none() {
@@ -85,6 +93,7 @@ mod example {
             seconds,
             threads,
             record,
+            rtmp,
         })
     }
 
@@ -109,6 +118,24 @@ mod example {
         let live = Broadcast::new("live", BroadcastOptions::default());
         handle.add_path("file", &file, RtspPathMode::Play)?;
         handle.add_path("live", &live, RtspPathMode::Record)?;
+        // RTMP publishers into the same broadcast: OBS's server
+        // `rtmp://ADDRESS/live`, its stream key `stream`.
+        let rtmp = match &args.rtmp {
+            Some(address) => {
+                let (rtmp, ingest) =
+                    RtmpServer::bind("rtmp", address, RtmpServerOptions::default())?;
+                ingest.add_path("live/stream", &live)?;
+                let rtmp = DriverRunner::new(rtmp);
+                rtmp.run()?;
+                println!(
+                    "an RTMP publisher may push to {} (server rtmp://{}/live, key stream)",
+                    ingest.url("live/stream"),
+                    ingest.local_addr()
+                );
+                Some((rtmp, ingest))
+            }
+            None => None,
+        };
 
         // The file as a camera: looped, at its own speed, into its broadcast.
         let (demuxer, streams) = FileDemuxer::open("file", &args.input)?;
@@ -154,9 +181,10 @@ mod example {
             if Instant::now() >= next_report {
                 next_report += Duration::from_secs(5);
                 println!(
-                    "players: {}, live published: {}",
+                    "players: {}, live published: {}, RTMP publishers: {}",
                     handle.players(),
-                    live.is_live()
+                    live.is_live(),
+                    rtmp.as_ref().map_or(0, |(_, ingest)| ingest.publishers())
                 );
             }
             if let Some(event) = camera.bus().try_recv() {
@@ -170,6 +198,10 @@ mod example {
         }
         server.stop();
         camera.stop();
+        if let Some((rtmp, _)) = &rtmp {
+            rtmp.stop();
+            wait_stopped(rtmp);
+        }
         wait_stopped(&server);
         println!("stopped");
         Ok(())

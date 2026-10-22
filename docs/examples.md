@@ -117,7 +117,7 @@ use `resize` to save a video.
 | [`rtsp_serve_seek`](../examples/rtsp/rtsp_serve_seek) | The same, sought and paused while viewers watch | All |
 | [`rtsp_source`](../examples/rtsp/rtsp_source) | Receiving from an RTSP camera or server | All |
 | [`rtsp_listen`](../examples/rtsp/rtsp_listen) | Receiving an RTSP push — from an encoder, `ffmpeg -f rtsp` or `rtsp_serve` | All |
-| [`rtsp_server`](../examples/rtsp/rtsp_server) | An RTSP server: a file played to players as a camera, and a publisher's push played on; `--record DIR` records it as HLS while it serves | All |
+| [`rtsp_server`](../examples/rtsp/rtsp_server) | An RTSP server: a file played to players as a camera, and a publisher's push played on; `--record DIR` records it as HLS while it serves; `--rtmp ADDRESS` takes OBS's RTMP into the live path | All |
 | [`rtsp_load`](../examples/rtsp/rtsp_load) | Hundreds of RTSP players against a server, each counting what it is sent; [the streaming benchmarks](benchmarks/streaming/) | All |
 | [`broadcast`](../examples/core/broadcast) | One input written once into a `Broadcast`, recorded and read by your code at once, across the input dropping and coming back | All |
 
@@ -162,5 +162,5 @@ The models are not included; each README says which to download.
 | [`webrtc_av_loopback`](../examples/webrtc/webrtc_av_loopback) | Video and sound on one connection | All |
 | [`webrtc_record`](../examples/webrtc/webrtc_record) | A file sent over WebRTC and the received tracks recorded | All |
 | [`webrtc_video_call`](../examples/webrtc/webrtc_video_call) | A two-way video call, each side in a window | All |
-| [`webrtc_server`](../examples/webrtc/webrtc_server) | A WebRTC server a browser plays through WHEP, and a WHIP publisher's path; `--record DIR` records it as HLS while it serves | All |
+| [`webrtc_server`](../examples/webrtc/webrtc_server) | A WebRTC server a browser plays through WHEP, and a WHIP publisher's path; `--record DIR` records it as HLS while it serves; `--rtmp ADDRESS` takes OBS's RTMP into the live path | All |
 | [`webrtc_load`](../examples/webrtc/webrtc_load) | Hundreds of WHEP players against a server, each counting what it is sent; [the streaming benchmarks](benchmarks/streaming/) | All |
