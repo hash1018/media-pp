@@ -51,7 +51,7 @@ fails.
 
 | | |
 |---|---|
-| Files and the network | `FileDemuxer`; `RtspSource`, from a camera or a server, or with a publisher pushing into it (`RtspSource::listen`); `WebRtcTrackSource` |
+| Files and the network | `FileDemuxer`; `RtspSource`, from a camera or a server, or with a publisher pushing into it (`RtspSource::listen`); `WhepSource`, from any WHEP server; `WebRtcTrackSource` |
 | From your code | `AppSource`; `PipelineBridge`, from another pipeline |
 | Synthetic | `TestVideoSource`, `TestAudioSource` |
 
@@ -82,7 +82,7 @@ fails.
 | Files cut by time or size | `SegmentedFileMuxer`, each cut on a keyframe |
 | The last stretch, saved on demand | `ReplayBuffer` |
 | One stream written once, read by many | `Broadcast`: its `BroadcastSink`s take an input's packets, and any number of `BroadcastSource`s (a pipeline each) and `BroadcastReader`s (your code, blocking or as a future) read them — never waiting on one another, each starting at a keyframe — while the input drops and comes back |
-| Streaming | `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink` with `WebRtcPeer` |
+| Streaming | `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `WhipPublisher` (to any WHIP server), `WebRtcTrackSink` with `WebRtcPeer` |
 | Serving | `RtspServer` (`rtsp-server`): each `Broadcast` under a path, to any number of RTSP players over TCP or UDP, and a publisher's push into one; `WebRtcServer` (`webrtc`): the same to WebRTC players — browsers through WHEP — and WHIP publishers, with data channels |
 | A camera other applications open | `MfVirtualCamera` (Windows 11), `V4l2VirtualCamera` (Linux) |
 | Your code | `AppSink` |

@@ -55,6 +55,11 @@ whisper-rs = { version = "0.16", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [
     "rust-crypto",
 ] }
+# The WHIP and WHEP clients' one HTTP exchange each: blocking, as the calls
+# that make it are, and TLS by rustls on ring, needing no system library.
+ureq = { version = "3", optional = true, default-features = false, features = [
+    "rustls",
+] }
 # The RTSP server's sockets and connections, on a runtime it owns inside its
 # own thread; nothing else in the crate runs on tokio, nor needs a runtime of
 # the caller's.
@@ -624,7 +629,7 @@ whisper-cuda = ["whisper", "whisper-rs/cuda", "whisper-rs/raw-api"]
 # `MetalWhisperTranscriber`: the same, on a Mac's GPU. Metal is part of
 # macOS, and needs nothing installed.
 whisper-metal = ["whisper", "whisper-rs/metal", "whisper-rs/raw-api"]
-webrtc = ["dep:socket2", "dep:str0m"]
+webrtc = ["dep:socket2", "dep:str0m", "dep:ureq"]
 # `RtspServer`: serves `Broadcast`s to RTSP players and takes RTSP
 # publishers into them. Pure Rust beyond FFmpeg (tokio), on every platform.
 rtsp-server = ["dep:socket2", "dep:tokio"]

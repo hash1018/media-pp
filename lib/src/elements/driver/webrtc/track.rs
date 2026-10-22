@@ -438,6 +438,9 @@ pub struct WebRtcTrackSink {
     /// Whether a keyframe has been seen to carry its own parameter sets.
     /// Only consulted while this sink has none of its own to prepend.
     parameter_sets_checked: bool,
+    /// What the connection it writes into is kept alive by, where that is
+    /// its sinks — a `WhipPublisher`'s, whose last sink dropped ends it.
+    _keeps: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl WebRtcTrackSink {
@@ -459,12 +462,19 @@ impl WebRtcTrackSink {
             nal_length_size: None,
             bitstream_checked: false,
             parameter_sets_checked: false,
+            _keeps: None,
             pp_log: element_pp_log(
                 ElementType::WebRtcPeer,
                 &format!("webrtc-track-{}", id.0),
                 None,
             ),
         }
+    }
+
+    /// The same, keeping `owner` alive for as long as it lives.
+    pub(super) fn keeping(mut self, owner: Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        self._keeps = Some(owner);
+        self
     }
 
     /// Returns the distinct codec families this track can currently send

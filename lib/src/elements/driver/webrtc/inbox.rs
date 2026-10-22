@@ -21,9 +21,13 @@ pub(super) struct Inbox(Arc<Shared>);
 
 struct Shared {
     state: Mutex<State>,
-    /// Rung at every packet and at the end, for a source waiting on a
-    /// thread of its own. A channel of one: a ring not yet answered is not
-    /// lost.
+    bell: Arc<Bell>,
+}
+
+/// Rung at every packet and at the end, for a source waiting on a thread
+/// of its own — one for all the inboxes a source reads. A channel of one: a
+/// ring not yet answered is not lost.
+struct Bell {
     ringer: Sender<()>,
     bell: Receiver<()>,
 }
@@ -60,7 +64,21 @@ pub(super) enum Taken {
 
 impl Inbox {
     pub(super) fn new(capacity: usize) -> Self {
+        Self::ringing(capacity, &Self::bell_of_its_own())
+    }
+
+    /// `count` inboxes rung by one bell, for a source that reads them all.
+    pub(super) fn group(count: usize, capacity: usize) -> Vec<Self> {
+        let bell = Self::bell_of_its_own();
+        (0..count).map(|_| Self::ringing(capacity, &bell)).collect()
+    }
+
+    fn bell_of_its_own() -> Arc<Bell> {
         let (ringer, bell) = bounded(1);
+        Arc::new(Bell { ringer, bell })
+    }
+
+    fn ringing(capacity: usize, bell: &Arc<Bell>) -> Self {
         Self(Arc::new(Shared {
             state: Mutex::new(State {
                 queue: VecDeque::new(),
@@ -69,8 +87,7 @@ impl Inbox {
                 reader_gone: false,
                 waker: None,
             }),
-            ringer,
-            bell,
+            bell: Arc::clone(bell),
         }))
     }
 
@@ -86,7 +103,7 @@ impl Inbox {
         if let Some(waker) = waker {
             waker.wake();
         }
-        let _ = self.0.ringer.try_send(());
+        let _ = self.0.bell.ringer.try_send(());
     }
 
     pub(super) fn push(&self, buf: MediaBuffer) -> Delivered {
@@ -140,7 +157,7 @@ impl Inbox {
     /// What a source on a thread of its own waits on: rung at every packet
     /// and at the end.
     pub(super) fn bell(&self) -> &Receiver<()> {
-        &self.0.bell
+        &self.0.bell.bell
     }
 
     /// The source has gone: what is held is let go of, and nothing more

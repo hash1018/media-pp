@@ -118,7 +118,7 @@ pub use driver::{
     AttachedTrack, SessionId, SessionRole, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle,
     WebRtcHttpEndpoint, WebRtcPathMode, WebRtcPeer, WebRtcServer, WebRtcServerError,
     WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcStreamInfo, WebRtcTrackSink,
-    WebRtcTrackSource,
+    WebRtcTrackSource, WhepOptions, WhepSource, WhipOptions, WhipPublisher, WhipSinks,
 };
 #[cfg(feature = "rtsp-server")]
 pub use driver::{RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions};

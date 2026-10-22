@@ -23,5 +23,5 @@ pub use webrtc::{
     AttachedTrack, SessionId, SessionRole, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle,
     WebRtcHttpEndpoint, WebRtcPathMode, WebRtcPeer, WebRtcServer, WebRtcServerError,
     WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcStreamInfo, WebRtcTrackSink,
-    WebRtcTrackSource,
+    WebRtcTrackSource, WhepOptions, WhepSource, WhipOptions, WhipPublisher, WhipSinks,
 };

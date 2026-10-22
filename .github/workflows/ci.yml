@@ -247,6 +247,11 @@ jobs:
           cargo test -p media-pp --features webrtc --lib -- webrtc::server
           cargo test -p webrtc_server -p webrtc_load
 
+      # A stream across every pair of protocols: WHIP and WHEP clients,
+      # both servers, and recordings — on the loopback.
+      - name: Test (across protocols)
+        run: cargo test -p media-pp --features webrtc,rtsp-server --test streaming
+
   linux:
     runs-on: ubuntu-26.04
     env:
@@ -425,6 +430,11 @@ jobs:
         run: |
           cargo test -p media-pp --features webrtc --lib -- webrtc::server
           cargo test -p webrtc_server -p webrtc_load
+
+      # A stream across every pair of protocols: WHIP and WHEP clients,
+      # both servers, and recordings — on the loopback.
+      - name: Test (across protocols)
+        run: cargo test -p media-pp --features webrtc,rtsp-server --test streaming
 
       # PipeWire-session-dependent tests skip themselves with a reason
       # (`try_capture_source()`-style helper) when this headless runner has

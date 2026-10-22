@@ -212,6 +212,46 @@ pub enum WebRtcError {
 
     #[error("WebRtcPeer's run() has already ended")]
     Closed,
+
+    /// A WHIP or WHEP URL that is not an `http` or `https` one with a host.
+    #[error("{0:?} is not an http or https URL with a host")]
+    InvalidUrl(String),
+    /// The WHIP or WHEP request could not be made: the server could not be
+    /// reached, the connection failed, or no answer came in time.
+    #[error("the request to {url} failed: {reason}")]
+    Request {
+        /// The URL asked.
+        url: String,
+        /// Why.
+        reason: String,
+    },
+    /// The WHIP or WHEP server refused the offer — 401 or 403 without the
+    /// token it wants, 404 for a path it does not serve, 409 for one already
+    /// published.
+    #[error("{url} answered {status}: {body}")]
+    Refused {
+        /// The URL asked.
+        url: String,
+        /// The HTTP status it answered.
+        status: u16,
+        /// What it said, as it said it.
+        body: String,
+    },
+    /// The offer was answered, and the connection did not come up — ICE
+    /// and DTLS — in the time given.
+    #[error("no connection within {0:?} of the answer")]
+    NotConnected(Duration),
+    /// A WHEP stream connected, and no track of it said what it is — its
+    /// codec, and for H.264 its parameter sets — in the time given.
+    #[error("no track said what it carries within {0:?}")]
+    NothingDescribed(Duration),
+    /// A `WhipPublisher` was opened with no track.
+    #[error("a WHIP publisher needs a track")]
+    NoTracks,
+    /// A `WhipPublisher`'s sinks were asked for a track it does not have, or
+    /// one already taken.
+    #[error("no track {0} to take")]
+    NoSuchTrack(usize),
 }
 
 /// One command sent from a [`super::track::WebRtcHandle`] (any thread) into

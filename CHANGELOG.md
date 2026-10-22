@@ -57,6 +57,19 @@ compile error with no explanation.
 
 ### Added
 
+- **`WhipPublisher` and `WhepSource`: WebRTC to and from any WHIP or WHEP
+  server.** `WhipPublisher` is made, given its tracks and opened as
+  `RtspMuxer` is, handing out a `WebRtcTrackSink` per track; `WhepSource` is
+  opened as `RtspSource` is, answering with its streams, an output each, and
+  can be driven. Each is one HTTP exchange — `Authorization: Bearer` where a
+  token is given — and a `DELETE` as it goes; what the server refuses is an
+  error at open (`WebRtcError::Refused`, `Request`, `NotConnected`,
+  `NothingDescribed`, `NoTracks`, `NoSuchTrack`, `InvalidUrl` are new — a
+  `match` on `WebRtcError` needs an arm for each). `https` comes with the
+  `webrtc` feature through `ureq` and `rustls`. Tried against `WebRtcServer`
+  and MediaMTX; `lib/tests/streaming.rs` carries a stream across WHIP,
+  WHEP, RTSP and a recording each way. See `docs/whip-whep-clients.md`.
+
 - **`WebRtcTrackSink` converts HEVC's `hvcC` as it does H.264's `avcC`.**
   `set_source_parameters` with an MP4 demuxer's HEVC parameters puts the
   record's parameter sets in front of each keyframe and rewrites every
