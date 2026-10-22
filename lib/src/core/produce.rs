@@ -1903,6 +1903,7 @@ mod tests {
             control: Some(&control),
             paused: Duration::ZERO,
             linked: &[],
+            driving: None,
         };
 
         let asked = Instant::now();
