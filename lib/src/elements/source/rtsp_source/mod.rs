@@ -890,7 +890,7 @@ mod tests {
         }
 
         /// Each packet's `pts` and time base, as one output was handed them.
-        type Stamps = Vec<(Option<i64>, ffmpeg::Rational)>;
+        type Stamps = Vec<(Option<i64>, ffmpeg::Rational, i64)>;
 
         /// What each output of a received session was handed.
         #[derive(Default)]
@@ -919,10 +919,11 @@ mod tests {
                             let received = Arc::clone(&received);
                             move |buffer| {
                                 if let MediaBuffer::Packet(packet) = buffer {
-                                    received.packets[output]
-                                        .lock()
-                                        .unwrap()
-                                        .push((packet.pts(), packet.time_base()));
+                                    received.packets[output].lock().unwrap().push((
+                                        packet.pts(),
+                                        packet.time_base(),
+                                        packet.duration(),
+                                    ));
                                 }
                                 Ok(())
                             }
@@ -1041,11 +1042,18 @@ mod tests {
                 assert!(
                     packets
                         .iter()
-                        .all(|&(_, time_base)| time_base == stream.time_base()),
+                        .all(|&(_, time_base, _)| time_base == stream.time_base()),
                     "{:?}'s packets carry its time base",
                     stream.kind()
                 );
-                let pts: Vec<i64> = packets.iter().filter_map(|&(pts, _)| pts).collect();
+                // A muxer cutting segments needs each one's duration, which
+                // RTP does not carry for a picture.
+                assert!(
+                    packets.iter().all(|&(_, _, duration)| duration > 0),
+                    "{:?}'s packets each last a while",
+                    stream.kind()
+                );
+                let pts: Vec<i64> = packets.iter().filter_map(|&(pts, _, _)| pts).collect();
                 let (first, last) = (pts.iter().min(), pts.iter().max());
                 let span = f64::from(stream.time_base())
                     * (last.copied().unwrap_or(0) - first.copied().unwrap_or(0)) as f64;

@@ -76,6 +76,12 @@ impl Dts {
         Some(dts)
     }
 
+    /// The RTP clock's ticks a picture lasts as its parameter sets say: the
+    /// VUI's rate, or a 25th of a second where they say none.
+    pub(crate) fn picture_duration(&self) -> i64 {
+        self.duration
+    }
+
     #[cfg(test)]
     /// How many pictures may be decoded ahead of one shown before them —
     /// FFmpeg's `video_delay` — as the sequence parameter set says.

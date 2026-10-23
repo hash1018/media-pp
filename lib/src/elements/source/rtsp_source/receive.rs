@@ -47,7 +47,10 @@ pub(super) enum Item {
 }
 
 /// One track as it is received: its RTP taken apart into packets, each
-/// given its time base and its decoding time.
+/// given its time base and its decoding time — and its duration, where its
+/// depacketizer gives it none, as RTP does not carry one: the step from the
+/// packet decoded before it, as a muxer cutting segments needs one and a
+/// camera's rate is steady.
 ///
 /// A picture track begins at a keyframe — a server may begin a session
 /// anywhere, and what comes before the first keyframe cannot be decoded —
@@ -62,6 +65,12 @@ pub(super) struct Track {
     begun: Begun,
     /// Whether the last packet was lost to a full channel.
     losing: bool,
+    /// A packet's duration, in the RTP clock's ticks: the last step
+    /// between decoding times, until the first a picture's as its
+    /// parameter sets say, or a 25th of a second.
+    step: i64,
+    /// The decoding time of the packet handed on last.
+    last_dts: Option<i64>,
 }
 
 /// Where a picture track is in beginning.
@@ -82,12 +91,18 @@ impl Track {
         } else {
             Begun::Yes
         };
+        let step = dts.as_ref().map_or_else(
+            || i64::from(announced.clock_rate.max(1)) / 25,
+            Dts::picture_duration,
+        );
         Self {
             depacketizer: Depacketizer::new(announced.payload),
             dts,
             announced,
             begun,
             losing: false,
+            step,
+            last_dts: None,
         }
     }
 
@@ -148,6 +163,7 @@ impl Track {
                 _ => pts,
             };
             packet.set_dts(Some(dts));
+            self.time(&mut packet, dts);
             match tx.items.try_send(Item::Packet(index, packet)) {
                 Ok(()) => {
                     tx.bell.ring();
@@ -171,6 +187,23 @@ impl Track {
             }
         }
         true
+    }
+
+    /// Gives a packet decoded at `dts` its duration, where it has none: the
+    /// step from the one before, where that is one a picture or a sound's
+    /// frame may last, between a 300th of a second and a second — not a gap
+    /// where packets were lost, nor a tick a repeated time was moved on by.
+    fn time(&mut self, packet: &mut ffmpeg::Packet, dts: i64) {
+        let second = i64::from(self.announced.clock_rate.max(1));
+        if let Some(last) = self.last_dts
+            && ((second / 300).max(1)..=second).contains(&(dts - last))
+        {
+            self.step = dts - last;
+        }
+        self.last_dts = Some(dts);
+        if packet.duration() <= 0 {
+            packet.set_duration(self.step);
+        }
     }
 }
 
