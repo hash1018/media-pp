@@ -164,11 +164,13 @@ fn a_reader_joining_starts_at_the_newest_keyframe() {
     );
 }
 
+/// What is kept is the newest `retain` and nothing more, packet by packet:
+/// no group of pictures is held whole for a reader to start at.
 #[test]
-fn what_is_kept_spans_at_least_retain_in_whole_groups() {
+fn what_is_kept_is_the_newest_retain_packet_by_packet() {
     for retain in [
         Duration::from_millis(500),
-        Duration::from_secs(2),
+        Duration::from_secs(1),
         Duration::from_millis(2_500),
     ] {
         let broadcast = Broadcast::new("retain", options(retain));
@@ -176,24 +178,53 @@ fn what_is_kept_spans_at_least_retain_in_whole_groups() {
         write_seconds(&mut sinks, 0, 10);
 
         let state = broadcast.shared.state.lock().unwrap();
-        let first = state.entries.front().unwrap();
-        assert!(first.start, "what is kept begins at a keyframe");
         let newest = state.newest.unwrap();
-        let span = newest - first.at;
+        let span = newest - state.entries.front().unwrap().at;
         assert!(
-            span >= retain.as_secs_f64(),
+            span <= retain.as_secs_f64(),
+            "{retain:?}: what is kept spans {span}s, more than asked"
+        );
+        // A picture's time less than asked: no more could have been kept.
+        assert!(
+            span > retain.as_secs_f64() - 0.05,
             "{retain:?}: what is kept spans {span}s, less than asked"
         );
-        // The group after the first would not span it: nothing more could
-        // have been let go of.
-        if let Some(&second) = state.starts.get(1) {
-            let second_at = state.entries[(second - state.first_seq) as usize].at;
-            assert!(
-                newest - second_at < retain.as_secs_f64(),
-                "{retain:?}: kept a whole group more than needed"
-            );
-        }
     }
+}
+
+/// With no keyframe in what is kept, a reader joining waits for the next
+/// one written, and starts there.
+#[test]
+fn a_reader_joining_with_no_keyframe_held_starts_at_the_next() {
+    // A keyframe a second, and half a second kept.
+    let broadcast = Broadcast::new("join-next", options(Duration::from_millis(500)));
+    let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
+    write_seconds(&mut sinks, 0, 1);
+    for n in 25..45 {
+        sinks[0].consume(picture(n, 25)).unwrap();
+    }
+    {
+        let state = broadcast.shared.state.lock().unwrap();
+        assert!(state.starts.is_empty(), "the keyframe at 25 is let go of");
+    }
+
+    let mut reader = broadcast.subscribe();
+    let items = read_all(&mut reader);
+    assert!(matches!(items.first(), Some(BroadcastItem::Started(_))));
+    assert!(
+        pictures_read(&items).is_empty(),
+        "nothing until a keyframe is written"
+    );
+    for n in 45..55 {
+        sinks[0].consume(picture(n, 25)).unwrap();
+    }
+    let pictures = pictures_read(&read_all(&mut reader));
+    assert_eq!(
+        pictures.first(),
+        Some(&(50 * PICTURE, true)),
+        "{pictures:?}"
+    );
+    assert_eq!(pictures.len(), 5, "and everything after it");
 }
 
 #[test]
@@ -258,7 +289,7 @@ fn sound_before_the_first_keyframe_is_passed_over() {
 /// even where it was written before the keyframe.
 #[test]
 fn another_tracks_packets_written_ahead_of_the_keyframe_are_kept() {
-    let broadcast = Broadcast::new("ahead", BroadcastOptions::default());
+    let broadcast = Broadcast::new("ahead", options(Duration::from_secs(60)));
     let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
     for joining in [true, false] {
         let mut reader = joining.then(|| broadcast.subscribe());
@@ -804,7 +835,7 @@ fn a_broadcast_source_waiting_for_packets_stops_at_once() {
 /// ends a recording as closing the broadcast does.
 #[test]
 fn a_broadcast_source_hands_on_what_is_written_while_it_runs() {
-    let broadcast = Broadcast::new("live", BroadcastOptions::default());
+    let broadcast = Broadcast::new("live", options(Duration::from_secs(5)));
     let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
     let (source, _) = BroadcastSource::new("relay", &broadcast).unwrap();
     let (pictures, pictures_count) = PacketCounter::new("pictures");
@@ -835,7 +866,7 @@ fn a_broadcast_source_hands_on_what_is_written_while_it_runs() {
 fn a_driven_broadcast_source_is_woken_by_writes_and_ends_with_the_broadcast() {
     use crate::pipeline::{Driven, DrivenPipeline};
 
-    let broadcast = Broadcast::new("driven", BroadcastOptions::default());
+    let broadcast = Broadcast::new("driven", options(Duration::from_secs(5)));
     let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
     let (source, _) = BroadcastSource::new("relay", &broadcast).unwrap();
     let (pictures, pictures_count) = PacketCounter::new("pictures");

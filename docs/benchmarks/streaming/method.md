@@ -53,6 +53,12 @@ starts there only while that keyframe is no more than a second behind the
 newest picture, and is sent what came after it at twice its speed;
 otherwise it waits for the next keyframe.
 
+These runs were made with a broadcast that kept at least five seconds, in
+whole groups of pictures. A broadcast now keeps a second by default,
+packet by packet, so a player of any kind starts at a keyframe of the last
+second or waits for the next: there is less for one to catch up on, and a
+slow player has a second, not five, before it is moved on.
+
 ## What is measured
 
 For each number of players, a run of 30 seconds:

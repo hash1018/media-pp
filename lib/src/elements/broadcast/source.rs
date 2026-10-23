@@ -27,8 +27,8 @@ use super::{Broadcast, BroadcastError, BroadcastItem, BroadcastReader};
 /// One output for each of the broadcast's tracks, in their order, each
 /// handing on that track's packets as they were written — shared with
 /// every other reader, nothing decoded. It starts at the newest keyframe
-/// the broadcast holds, every track from there, so the first picture
-/// handed on can be shown.
+/// the broadcast holds, or the next one written, every track from there,
+/// so the first picture handed on can be shown.
 ///
 /// What it hands on is on one timeline of its own, beginning at zero: the
 /// broadcast's runs one after another, each after the last as far as the
@@ -41,8 +41,7 @@ use super::{Broadcast, BroadcastError, BroadcastItem, BroadcastReader};
 /// again with tracks it could not go on with — a different number of them,
 /// or a different codec. A reader that falls behind as far as
 /// [`BroadcastOptions::retain`](super::BroadcastOptions::retain) is moved on
-/// to the newest keyframe, and says so in the log; nothing in between is
-/// handed on.
+/// to a keyframe, and says so in the log; nothing in between is handed on.
 ///
 /// It can be driven — run in a
 /// [`DrivenPipeline`](crate::pipeline::DrivenPipeline), a server's player

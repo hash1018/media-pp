@@ -10,9 +10,11 @@
 //! decoded or encoded again for any of them.
 //!
 //! - The writer never waits. A reader that cannot keep up is the only one
-//!   that loses anything: it is moved on to the newest keyframe, and told.
-//! - A reader starts at a keyframe: the newest one the broadcast holds,
-//!   which it keeps whole groups of pictures of for [`BroadcastOptions::retain`].
+//!   that loses anything: it is moved on to a keyframe, and told.
+//! - A broadcast keeps only the newest [`BroadcastOptions::retain`] of
+//!   what it is written — room for a reader to fall behind, a second by
+//!   default — and no group of pictures for one to start at. A reader starts
+//!   at a keyframe: the newest one held, or the next one written.
 //! - A broadcast outlives what writes into it. An input that drops and is
 //!   opened again publishes again into the same broadcast, and its readers
 //!   go on: they are told that one run ended and another began.
@@ -86,24 +88,25 @@ pub enum BroadcastError {
 /// How a [`Broadcast`] keeps what it is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BroadcastOptions {
-    /// At least how much of the newest stretch to keep, in whole groups of
-    /// pictures: how far a reader may fall behind before it is moved on to
-    /// the newest keyframe. A reader that joins starts at the newest
-    /// keyframe kept, so it shows a picture at once and is as close to live
-    /// as the stream allows.
+    /// How much of the newest stretch to keep, packet by packet: how far a
+    /// reader may fall behind — busy for a moment, its connection slow for
+    /// one — before it is moved on to a keyframe. One second by default.
     ///
-    /// A group of pictures is let go of only when what is left after it
-    /// still spans this long, so what is kept always begins at a keyframe
-    /// and never spans less — a stream whose keyframes are further apart
-    /// than this keeps two groups, up to twice its keyframe interval. Five
-    /// seconds by default.
+    /// Nothing more is kept, keyframe or not, which is what a broadcast
+    /// costs: a second of a 4 Mbit/s camera is half a megabyte. So a reader
+    /// that joins starts at the newest keyframe held where one is, and
+    /// otherwise waits for the next one written — up to a keyframe interval
+    /// before its first picture, as a server that keeps no group of
+    /// pictures has its players wait. A `retain` longer than the keyframe
+    /// interval always holds one, and so starts every reader at once, for
+    /// what it holds.
     pub retain: Duration,
 }
 
 impl Default for BroadcastOptions {
     fn default() -> Self {
         Self {
-            retain: Duration::from_secs(5),
+            retain: Duration::from_secs(1),
         }
     }
 }
@@ -190,9 +193,8 @@ impl Default for BroadcastOptions {
 /// broadcast — begins a run of the same tracks.
 ///
 /// Above [`BroadcastOptions::retain`] there is one more bound: a broadcast
-/// never holds more than 256 MiB, keyframe or not, so a stream that never
-/// sends one cannot fill the memory. Readers then start at the next
-/// keyframe that arrives.
+/// never holds more than 256 MiB, so a `retain` long enough to hold more
+/// cannot fill the memory.
 #[derive(Clone)]
 pub struct Broadcast {
     shared: Arc<Shared>,

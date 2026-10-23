@@ -123,7 +123,7 @@ impl Sink for Writing {
             self.over_said = true;
             pp_warn!(
                 pp_log: &self.pp_log,
-                "the broadcast went over {} MiB without enough keyframes to let go of whole groups; letting go of the oldest packets",
+                "the broadcast went over {} MiB within its retain; letting go of the oldest packets",
                 super::state::MAX_BYTES / (1024 * 1024)
             );
         }

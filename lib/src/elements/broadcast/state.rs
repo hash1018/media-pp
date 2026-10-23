@@ -165,6 +165,15 @@ impl State {
             self.newest.unwrap_or(0.0)
         };
         if track == timeline {
+            if self.newest.is_none() {
+                // What other tracks wrote ahead of the run's first picture
+                // had no time on the timeline yet; it has this one's, so
+                // that it is let go of with what came after it rather than
+                // as soon as anything is.
+                for entry in &mut self.entries {
+                    entry.at = at;
+                }
+            }
             self.newest = Some(self.newest.map_or(at, |newest| newest.max(at)));
         }
         self.bytes += packet.size();
@@ -200,35 +209,20 @@ impl State {
         )
     }
 
-    /// Lets go of whole groups of pictures from the front while what is
-    /// left still spans `retain`.
+    /// Lets go of every packet from the front written longer than `retain`
+    /// before the newest — packet by packet, keyframe or not: what is kept
+    /// is room for a reader to fall behind, not a group of pictures for
+    /// one joining to start at.
     fn let_go(&mut self, retain: Duration) {
         let Some(newest) = self.newest else {
             return;
         };
         let retain = retain.as_secs_f64();
-        loop {
-            // The next place what is kept could begin: past whatever comes
-            // before the first start, or past the oldest group.
-            let boundary = match self.starts.front() {
-                Some(&first) if self.first_seq < first => first,
-                Some(_) => match self.starts.get(1) {
-                    Some(&second) => second,
-                    None => return,
-                },
-                None => return,
-            };
-            let at = self.entries[(boundary - self.first_seq) as usize].at;
-            if newest - at < retain {
-                return;
-            }
-            self.drop_front_until(boundary);
-        }
-    }
-
-    /// Lets go of everything before entry `seq`.
-    fn drop_front_until(&mut self, seq: u64) {
-        while self.first_seq < seq {
+        while self
+            .entries
+            .front()
+            .is_some_and(|entry| newest - entry.at > retain)
+        {
             self.drop_front();
         }
     }

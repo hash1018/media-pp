@@ -33,8 +33,8 @@ pub enum BroadcastItem {
         arrived: Instant,
     },
     /// The reader fell so far behind that what it was to read next has been
-    /// let go of. It goes on from the newest keyframe; what lay between is
-    /// lost to it alone.
+    /// let go of. It goes on from a keyframe — the newest held, or the next
+    /// written; what lay between is lost to it alone.
     Skipped,
     /// The run ended — its input finished, stopped or dropped, or the
     /// broadcast was published again. Another may begin.

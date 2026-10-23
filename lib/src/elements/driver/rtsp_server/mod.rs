@@ -111,8 +111,8 @@ impl Default for RtspServerOptions {
 /// an [`RtspSource`](crate::elements::RtspSource) pulling a camera, an
 /// encoder — and every player reads it: nothing is decoded or encoded for
 /// them, and each is sent only its own copy of the RTP packets. A player
-/// starts at the newest keyframe the broadcast holds, so it shows a picture
-/// at once; one that cannot keep up is moved on to a newer keyframe rather
+/// starts at the newest keyframe the broadcast holds, or waits for the next
+/// one written; one that cannot keep up is moved on to a newer keyframe rather
 /// than slowing the others or the input. An input that drops and comes back
 /// publishes again into the same broadcast, and its players go on.
 ///
@@ -162,9 +162,10 @@ impl Default for RtspServerOptions {
 /// thread, and stops — every connection closed — when its runner is stopped
 /// or dropped.
 ///
-/// A player starts at the newest keyframe, so it is up to a group of
-/// pictures behind the input — as far as the input's keyframes are apart —
-/// and stays so. What came after that keyframe is sent at once to a player
+/// A player starts at the newest keyframe the broadcast holds — within its
+/// [`retain`](crate::elements::BroadcastOptions::retain), a second by
+/// default — or at the next one written, so it is at most that far behind
+/// the input. What came after that keyframe is sent at once to a player
 /// over TCP, whose connection paces it, and at twice the stream's speed to
 /// one over UDP, which nothing paces: sent at once, it overflows the
 /// player's socket. A UDP player whose newest keyframe is more than a second
