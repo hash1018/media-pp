@@ -288,8 +288,23 @@ struct Demuxing {
     /// instead would drop the next lap on top of timestamps a muxer has
     /// already written.
     lap_end: i64,
-    /// How far one lap carries the timeline, in the same units: the
-    /// `lap_end` the last wrap stepped over. Zero until the first wrap.
+    /// How far before the file's own zero a packet read this lap starts
+    /// that ends after it, in the same units — zero, or less: a sound's
+    /// priming, which an edit list puts before the first picture (Opus's
+    /// pre-skip), in a packet that also holds what is heard from zero on. A
+    /// running minimum that only the wrap resets.
+    ///
+    /// Such a packet is read again at the start of every lap, a seek to
+    /// zero landing on it, so a lap reaches back that far as well as
+    /// forward to `lap_end`: one only as long as `lap_end` put the next
+    /// lap's first sound on the very timestamp of the lap before's last —
+    /// a timestamp written twice, which a muxer refuses. A packet wholly
+    /// before zero (AAC's encoder delay) is not read again, and counts for
+    /// nothing.
+    lap_start: i64,
+    /// How far one lap carries the timeline, in the same units: what the
+    /// last wrap stepped over, `lap_end` less `lap_start`. Zero until the
+    /// first wrap.
     ///
     /// What puts a position on the timeline back into its lap — see
     /// [`Demuxing::locate_in_lap`] — and what reading backwards steps the
@@ -490,6 +505,7 @@ impl FileDemuxer {
                     published_lap: Arc::new(AtomicI64::new(0)),
                     loop_offset: 0,
                     lap_end: 0,
+                    lap_start: 0,
                     lap_length: 0,
                 },
             )),
@@ -757,6 +773,9 @@ impl Demuxing {
             // first timestamp past this one's rather than equal to it.
             let end = start.saturating_add(packet.duration().max(1));
             self.lap_end = self.lap_end.max(end.rescale(time_base, microseconds()));
+            if end > 0 {
+                self.lap_start = self.lap_start.min(start.rescale(time_base, microseconds()));
+            }
         }
         self.shift_to_lap(time_base, packet);
     }
@@ -778,6 +797,7 @@ impl Demuxing {
     fn move_to_lap(&mut self, offset: i64) {
         self.loop_offset = offset.max(0);
         self.lap_end = self.lap_length;
+        self.lap_start = 0;
         self.published_offset
             .store(self.loop_offset, Ordering::Relaxed);
     }
@@ -815,12 +835,13 @@ impl Demuxing {
     /// packets `seek` keeps — the new lap's first — are stamped onto the new
     /// timeline like every packet after them.
     fn wrap(&mut self) -> crate::error::Result<()> {
-        self.lap_length = self.lap_end;
+        self.lap_length = self.lap_end.saturating_sub(self.lap_start);
         self.published_lap.store(self.lap_length, Ordering::Relaxed);
-        self.loop_offset = self.loop_offset.saturating_add(self.lap_end);
+        self.loop_offset = self.loop_offset.saturating_add(self.lap_length);
         self.published_offset
             .store(self.loop_offset, Ordering::Relaxed);
         self.lap_end = 0;
+        self.lap_start = 0;
         let landed = self.seek(Duration::ZERO)?;
         pp_debug!(
             self,
@@ -1690,6 +1711,69 @@ mod tests {
         assert!(
             bus_rx.iter().all(|e| !matches!(e, BusEvent::Error { .. })),
             "looping a well-formed file must not report any errors"
+        );
+    }
+
+    /// A sound whose first packet starts before the file's zero and ends
+    /// after it — Opus's pre-skip, put there by an edit list — has that
+    /// packet read again at every lap: the lap reaches back to it, and the
+    /// next lap's first sound comes after the lap before's last.
+    ///
+    /// A lap only as long as its furthest end put that packet on the very
+    /// timestamp of the last sound before the join: a 60 s file of H.264
+    /// and Opus, looped as a camera, had its recordings refused by their
+    /// muxer at every lap. A packet wholly before zero — AAC's encoder
+    /// delay — is not read again, and leaves the lap as long as its end.
+    #[test]
+    fn a_lap_reaches_back_to_a_sound_that_starts_before_zero() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+        for stream in &streams {
+            demuxer.src_pads()[stream.index()].link(Box::new(CountingSink {
+                count: Arc::new(AtomicUsize::new(0)),
+                saw_eos: Arc::new(AtomicBool::new(false)),
+                expected_time_base: stream.time_base(),
+                time_base_matches: Arc::new(AtomicBool::new(true)),
+                pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
+            }));
+        }
+        // Stamped as a 48 kHz sound of 960-sample packets would be: what
+        // this file holds is not what is read here.
+        let sound = 0;
+        let time_base = ffmpeg::Rational::new(1, 48_000);
+        let packet = |pts: i64, duration: i64| {
+            let mut packet = ffmpeg::Packet::empty();
+            packet.set_pts(Some(pts));
+            packet.set_dts(Some(pts));
+            packet.set_duration(duration);
+            packet
+        };
+        let lap_of = |demuxer: &mut FileDemuxer, first: (i64, i64)| {
+            let inner = demuxer.0.inner_mut();
+            let mut first_packet = packet(first.0, first.1);
+            inner.stamp_lap(sound, time_base, &mut first_packet);
+            // The last, trimmed to end on the minute.
+            let mut last = packet(2_879_688, 312);
+            inner.stamp_lap(sound, time_base, &mut last);
+            let last = last.pts().unwrap();
+            inner.wrap().expect("start the file again");
+            let mut again = packet(first.0, first.1);
+            inner.stamp_lap(sound, time_base, &mut again);
+            (last, again.pts().unwrap(), inner.lap_length)
+        };
+
+        let (last, again, lap) = lap_of(&mut demuxer, (-312, 960));
+        assert!(
+            again > last,
+            "the next lap's first sound {again} after {last}"
+        );
+        assert_eq!(lap, 60_006_500, "a minute, and the 6.5 ms before zero");
+
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+        let (_, _, lap) = lap_of(&mut demuxer, (-1024, 1024));
+        assert_eq!(
+            lap, 60_000_000,
+            "a packet wholly before zero counts for nothing"
         );
     }
 
