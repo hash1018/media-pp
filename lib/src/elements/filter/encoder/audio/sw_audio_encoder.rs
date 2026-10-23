@@ -15,6 +15,12 @@ use crate::{
 use crate::elements::AudioFormat;
 use crate::elements::filter::audio::audio_resampler::AudioFrameResampler;
 use crate::elements::filter::is_codec_drain_boundary;
+use ffmpeg::Rescale;
+
+/// How far from where the sound before it leads a frame may say it is
+/// before the encoder's count is put where it says: further is a gap in the
+/// sound or a jump in its timeline, nearer is rounding.
+const DRIFT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Errors specific to `SwAudioEncoder`.
 ///
@@ -213,6 +219,11 @@ struct Encoding {
     /// Cumulative sample count across every frame handed to the encoder —
     /// this element's `pts` unit (see [`SwAudioEncoder::time_base`]).
     samples_emitted: i64,
+    /// Where sample naught of that count is on the input's timeline, in the
+    /// same unit: set from the first input frame that says where it is, and
+    /// again wherever one says it is elsewhere than the samples before it
+    /// lead to — a gap, a `Flush`. Naught where none has said.
+    origin: Option<i64>,
 }
 
 // SAFETY: see `AudioMixer`'s own `unsafe impl Send` docs — same
@@ -326,6 +337,7 @@ impl SwAudioEncoder {
                 }),
                 pending: (0..options.channels).map(|_| VecDeque::new()).collect(),
                 samples_emitted: 0,
+                origin: None,
             },
         )))
     }
@@ -338,9 +350,12 @@ impl SwAudioEncoder {
     }
 
     /// The unit each produced packet's `pts` is expressed in: one sample at
-    /// the output rate. The input's own timestamps are not carried over —
-    /// the encoder counts the samples it has encoded — so nothing here has
-    /// to be told what unit they were in.
+    /// the output rate. The packets are on the input's timeline: the first
+    /// sound in is put where its frame says, rescaled from the frame's own
+    /// unit, and each sample after it follows on — put anew where a frame
+    /// says it is more than a tenth of a second from where the samples
+    /// before it lead: a gap in the sound, a jump in its timeline. Sound
+    /// that says nothing of where it is is counted from naught.
     pub fn time_base(&self) -> ffmpeg::Rational {
         self.0.inner().time_base()
     }
@@ -359,10 +374,30 @@ impl Encoding {
     /// `AudioResampler` and appends every produced frame onto `pending`,
     /// channel-major.
     fn resample(&mut self, frame: &ffmpeg::frame::Audio) -> std::result::Result<(), ffmpeg::Error> {
+        self.place(frame);
         for output in self.resampler.run(frame)? {
             absorb_resampled(&output, self.target_format, &mut self.pending);
         }
         Ok(())
+    }
+
+    /// Puts sample naught where `frame` says it is, if it says: the first
+    /// time, and wherever it says it is more than [`DRIFT`] from where the
+    /// samples before it lead.
+    fn place(&mut self, frame: &ffmpeg::frame::Audio) {
+        let (Some(pts), Some(unit)) = (frame.pts(), crate::buffer::time_base(frame)) else {
+            return;
+        };
+        let at = pts.rescale(unit, self.time_base());
+        let held = self.pending.iter().map(VecDeque::len).min().unwrap_or(0) as i64;
+        let counted = self.samples_emitted + held;
+        let drift = i64::from(self.sample_rate) * DRIFT.as_millis() as i64 / 1000;
+        if self
+            .origin
+            .is_none_or(|origin| (origin + counted - at).abs() > drift)
+        {
+            self.origin = Some(at - counted);
+        }
     }
 
     /// Encodes every full `frame_size`-sample chunk currently sitting in
@@ -390,7 +425,7 @@ impl Encoding {
             let mut frame = ffmpeg::frame::Audio::new(self.target_format, take, self.target_layout);
             frame.set_rate(self.sample_rate);
             write_channels(&mut frame, self.target_format, &mut self.pending, take);
-            frame.set_pts(Some(self.samples_emitted));
+            frame.set_pts(Some(self.origin.unwrap_or(0) + self.samples_emitted));
             self.samples_emitted += take as i64;
 
             self.encoder
@@ -591,10 +626,11 @@ impl Filter for Encoding {
     }
 
     fn reset(&mut self) {
-        // Nothing to reset, for the same reason as `SwEncoder::reset`: a
-        // `Flush` or `Seek` leaves the encoder as it is (delayed packets from
-        // before the seek can still surface later), and `Stop` abandons it
-        // without flushing.
+        // The encoder is left as it is, for the same reason as
+        // `SwEncoder::reset`: a `Flush` or `Seek` leaves delayed packets from
+        // before it to surface later, and `Stop` abandons it without
+        // flushing. What follows a `Flush` is put where it says it is.
+        self.origin = None;
     }
 
     fn attached(&mut self, cx: &Attached<'_>) {
@@ -922,5 +958,60 @@ mod tests {
             result.is_ok(),
             "aac publishes no rate list, so no rate should be rejected here"
         );
+    }
+
+    /// The packets are where the sound was on its own timeline — five
+    /// seconds in, counted in another unit — not counted from naught, so a
+    /// track re-encoded beside one passed on as it was stays in time with
+    /// it; and a gap in the sound is a gap in the packets.
+    #[test]
+    fn packets_are_where_the_sound_was_and_follow_a_gap() {
+        let mut encoder = SwAudioEncoder::new(
+            "encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Aac,
+                sample_rate: 48000,
+                channels: 2,
+                bit_rate: 128_000,
+            },
+        )
+        .expect("aac is FFmpeg's own");
+        let packets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            packets: packets.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        let unit = ffmpeg::Rational::new(1, 90_000);
+        let mut feed = |from_ms: i64, frames: i64| {
+            for index in 0..frames {
+                let mut frame = constant_stereo_frame(0.1, 960, 48000);
+                // 960 samples at 48 kHz: 20 ms, 1800 ticks of 90 kHz.
+                frame.set_pts(Some(from_ms * 90 + index * 1800));
+                crate::buffer::set_time_base(&mut frame, unit);
+                encoder
+                    .consume(MediaBuffer::Audio(Arc::new(frame).into()))
+                    .expect("consume should succeed");
+            }
+        };
+        feed(5_000, 25);
+        feed(6_500, 25);
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos)
+            .expect("the end should drain the encoder");
+
+        let pts: Vec<i64> = packets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|packet| packet.pts())
+            .collect();
+        // One frame of the encoder's own priming either way.
+        let near = |at_ms: i64, pts: i64| (pts - at_ms * 48).abs() <= 2048;
+        assert!(near(5_000, pts[0]), "begins five seconds in: {pts:?}");
+        assert!(pts.windows(2).all(|pair| pair[0] < pair[1]), "{pts:?}");
+        let jump = pts
+            .windows(2)
+            .position(|pair| pair[1] - pair[0] > 48 * 100)
+            .expect("the gap is kept");
+        assert!(near(6_500, pts[jump + 1]), "goes on 6.5 s in: {pts:?}");
     }
 }
