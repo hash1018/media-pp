@@ -385,13 +385,17 @@ fn stamped(data: &[u8], at: i64, key: bool) -> ffmpeg::Packet {
     marked(ffmpeg::Packet::copy(data), at, key)
 }
 
-/// What a payload of `size` bytes is allocated as: the next power of two,
-/// from 4 KiB. The heap hands a freed block of the same size straight back,
+/// What a payload of `size` bytes is allocated as: the next of four sizes
+/// in each power of two, from 4 KiB — at most an eighth more than it
+/// holds. The heap hands a freed block of the same size straight back,
 /// where blocks of every size a camera's pictures come in — each held a
 /// second by a broadcast — had it searching: a hundred cameras' sources
-/// spent a third of a core in the heap.
+/// spent a third of a core in the heap. Powers of two alone did as well
+/// for the processor, at 20 MB more for a hundred cameras.
 fn size_class(size: usize) -> usize {
-    size.max(4096).next_power_of_two()
+    let size = size.max(4096);
+    let step = size.next_power_of_two() / 8;
+    size.div_ceil(step) * step
 }
 
 /// [`stamped`], taking `data` as the packet's payload rather than copying

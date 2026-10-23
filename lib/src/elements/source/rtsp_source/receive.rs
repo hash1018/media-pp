@@ -36,7 +36,7 @@ pub(super) const POLL: Duration = Duration::from_millis(100);
 
 /// How many packets wait for the source at most: some seconds of a
 /// camera's pictures and sound.
-pub(super) const BACKLOG: usize = 2048;
+pub(super) const BACKLOG: usize = 256;
 
 /// What the source is handed.
 pub(super) enum Item {
