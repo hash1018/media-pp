@@ -743,6 +743,8 @@ fn a_udp_player_catches_up_at_twice_the_streams_speed() {
         ffmpeg::Rational(1, 90_000),
     );
     let mut sinks = broadcast.publish(&[video]).unwrap();
+    // Another reader, for which what is written is kept.
+    let _watching = broadcast.subscribe();
     // Just under a second of pictures from one keyframe, written at once —
     // as much as a UDP player joins at a keyframe with (further behind, it
     // waits for the next): all of it is what a player joining now catches

@@ -142,6 +142,8 @@ fn the_tracks_are_what_was_published_each_at_its_place() {
 fn a_reader_joining_starts_at_the_newest_keyframe() {
     let broadcast = Broadcast::new("join", options(Duration::from_secs(10)));
     let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
+    // Another reader, for which what is written is kept.
+    let _watching = broadcast.subscribe();
     write_seconds(&mut sinks, 0, 3);
     // Part of the fourth second, past its keyframe.
     for n in 75..80 {
@@ -164,6 +166,36 @@ fn a_reader_joining_starts_at_the_newest_keyframe() {
     );
 }
 
+/// With nobody reading, nothing is kept: the first reader to come starts
+/// at the next keyframe written, however long `retain` is.
+#[test]
+fn nothing_is_kept_while_nobody_reads() {
+    let broadcast = Broadcast::new("unread", options(Duration::from_secs(10)));
+    let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
+    write_seconds(&mut sinks, 0, 3);
+    {
+        let state = broadcast.shared.state.lock().unwrap();
+        let newest = state.newest.unwrap();
+        assert!(
+            state.entries.iter().all(|entry| entry.at >= newest),
+            "only what was written last is held"
+        );
+    }
+
+    let mut reader = broadcast.subscribe();
+    // Past a keyframe, then the next.
+    for n in 76..80 {
+        sinks[0].consume(picture(n, 25)).unwrap();
+    }
+    write_seconds(&mut sinks, 80, 1);
+    let pictures = pictures_read(&read_all(&mut reader));
+    assert_eq!(
+        pictures.first(),
+        Some(&(100 * PICTURE, true)),
+        "it starts at the next keyframe"
+    );
+}
+
 /// What is kept is the newest `retain` and nothing more, packet by packet:
 /// no group of pictures is held whole for a reader to start at.
 #[test]
@@ -175,6 +207,7 @@ fn what_is_kept_is_the_newest_retain_packet_by_packet() {
     ] {
         let broadcast = Broadcast::new("retain", options(retain));
         let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
+        let _watching = broadcast.subscribe();
         write_seconds(&mut sinks, 0, 10);
 
         let state = broadcast.shared.state.lock().unwrap();
@@ -291,6 +324,7 @@ fn sound_before_the_first_keyframe_is_passed_over() {
 fn another_tracks_packets_written_ahead_of_the_keyframe_are_kept() {
     let broadcast = Broadcast::new("ahead", options(Duration::from_secs(60)));
     let mut sinks = broadcast.publish(&picture_and_sound()).unwrap();
+    let _watching = broadcast.subscribe();
     for joining in [true, false] {
         let mut reader = joining.then(|| broadcast.subscribe());
         let base = if joining { 0 } else { 1_000 };

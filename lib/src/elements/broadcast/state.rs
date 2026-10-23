@@ -191,7 +191,13 @@ impl State {
             arrived: now,
         });
         self.next_seq += 1;
-        self.let_go(retain);
+        // Nobody reading has nothing to fall behind by: a reader that comes
+        // starts at the next keyframe, as one finding none kept does.
+        self.let_go(if self.subscribers == 0 {
+            Duration::ZERO
+        } else {
+            retain
+        });
         Ok(self.bound())
     }
 

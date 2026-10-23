@@ -100,6 +100,12 @@ pub struct BroadcastOptions {
     /// pictures has its players wait. A `retain` longer than the keyframe
     /// interval always holds one, and so starts every reader at once, for
     /// what it holds.
+    ///
+    /// It is kept while the broadcast has a reader. With none — a camera a
+    /// server pulls that nobody plays — what is written is let go of as the
+    /// next is, since nothing can fall behind by it: the first reader to
+    /// come starts at the next keyframe, and what is kept from then on is
+    /// kept for it and those after.
     pub retain: Duration,
 }
 

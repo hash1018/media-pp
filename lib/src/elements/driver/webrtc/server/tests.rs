@@ -674,6 +674,8 @@ fn a_player_catches_up_on_large_pictures_in_time() {
         ffmpeg::Rational(1, 90_000),
     );
     let mut sinks = cam.publish(&[video]).unwrap();
+    // Another reader, for which what is written is kept.
+    let _watching = cam.subscribe();
     // Just under a second of 100 kB pictures from one keyframe, in Annex B,
     // written at once — as much as a player joins at a keyframe with (see
     // `PLAYER_JOIN_WITHIN`): some two thousand RTP packets for it to catch
