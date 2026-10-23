@@ -1136,3 +1136,55 @@ fn a_camera_that_changes_its_picture_size_decodes_on_through_the_server() {
         "the decoder goes on at the new size: {sizes:?}"
     );
 }
+
+/// What FFmpeg's client probes of a stream with B-frames says so: what a
+/// relay serving it to WebRTC players, which cannot take them, goes by.
+#[test]
+fn a_player_is_told_a_stream_reorders_its_pictures() {
+    use crate::elements::{
+        SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource, VideoCodec,
+    };
+    let Ok(encoder) = SwEncoder::new(
+        "encoder",
+        SwEncoderOptions {
+            codec: VideoCodec::H264,
+            width: 320,
+            height: 240,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
+            frame_rate: ffmpeg::Rational::new(25, 1),
+            bit_rate: 300_000,
+            gop_size: 25,
+            max_b_frames: Some(2),
+        },
+    ) else {
+        eprintln!("skipping: no libx264 in this FFmpeg");
+        return;
+    };
+    let (runner, handle, broadcast) = server(false);
+    let sink = broadcast
+        .publish(&[StreamInfo::from(&encoder)])
+        .unwrap()
+        .remove(0);
+    let pictures = TestVideoSource::new(
+        "pictures",
+        TestVideoOptions {
+            width: 320,
+            height: 240,
+            frame_rate: ffmpeg::Rational::new(25, 1),
+        },
+    );
+    let (camera, ()) = Pipeline::new("camera", pictures, |source, ctx| {
+        let branch = ctx.branch().queue("encode", 4).pipe(encoder).to(sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .unwrap();
+    camera.run().unwrap();
+
+    let player = play(&handle.url("cam"), RtspTransport::Tcp);
+    assert!(player.streams[0].reorders(), "probed as reordering");
+    player.wait_for(25);
+    player.pipeline.stop();
+    camera.stop();
+    runner.stop();
+}

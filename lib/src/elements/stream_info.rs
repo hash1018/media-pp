@@ -314,6 +314,17 @@ impl StreamInfo {
         (self.kind() == ffmpeg::media::Type::Video && width > 0 && height > 0)
             .then_some((width as u32, height as u32))
     }
+
+    /// Whether a video stream's pictures come out of the order they are
+    /// shown in — B-frames — as its parameters say: what an encoder said of
+    /// its own output, or what probing the stream found. WebRTC carries no
+    /// such stream to a browser. False for sound, and for a stream described
+    /// by hand, which says nothing of it.
+    pub fn reorders(&self) -> bool {
+        // SAFETY: a plain field of parameters this value owns.
+        let delay = unsafe { (*self.parameters.as_ptr()).video_delay };
+        self.kind() == ffmpeg::media::Type::Video && delay > 0
+    }
 }
 
 /// Why a [`StreamInfo`] could not be described by hand.
@@ -458,5 +469,40 @@ mod tests {
             }
         );
         assert!(StreamInfo::audio(ffmpeg::codec::Id::H264, &[], 8_000, 1, unit).is_err());
+    }
+
+    #[test]
+    fn a_stream_reorders_where_its_encoder_puts_b_frames_in() {
+        use crate::elements::{SwEncoder, SwEncoderOptions, VideoCodec};
+        let encoder = |codec, max_b_frames| {
+            SwEncoder::new(
+                "encoder",
+                SwEncoderOptions {
+                    codec,
+                    width: 320,
+                    height: 240,
+                    pixel_format: ffmpeg::format::Pixel::YUV420P,
+                    frame_rate: ffmpeg::Rational::new(25, 1),
+                    bit_rate: 300_000,
+                    gop_size: 25,
+                    max_b_frames,
+                },
+            )
+        };
+        let plain = encoder(VideoCodec::OpenH264, None).expect("OpenH264 is always there");
+        assert!(!StreamInfo::from(&plain).reorders());
+        let by_hand = StreamInfo::video(
+            ffmpeg::codec::Id::H264,
+            &ANNEX_B_SETS,
+            (320, 240),
+            ffmpeg::Rational::new(1, 90_000),
+        )
+        .unwrap();
+        assert!(!by_hand.reorders(), "nothing said of it");
+        let Ok(b_frames) = encoder(VideoCodec::H264, Some(2)) else {
+            eprintln!("skipping the B-frame half: no libx264 in this FFmpeg");
+            return;
+        };
+        assert!(StreamInfo::from(&b_frames).reorders());
     }
 }
