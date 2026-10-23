@@ -223,6 +223,41 @@ pub(crate) fn target(url: &str) -> Option<Target> {
     })
 }
 
+/// `url` without its query or fragment: what a description's
+/// `Content-Base` is, so that a track's control URL a player makes of it
+/// keeps the track where a parser finds it.
+pub(crate) fn without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+/// The `token` `url`'s query carries, `%XX` escapes and `+` decoded: what
+/// a player that sends no `Authorization` presents — `rtsp://h/cam?token=…`
+/// — as an RTMP publisher does in its stream name.
+pub(crate) fn query_token(url: &str) -> Option<String> {
+    let query = url.split_once('?')?.1.split('#').next()?;
+    let value = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "token")?
+        .1;
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let high = rest.next().and_then(|digit| (digit as char).to_digit(16))?;
+                let low = rest.next().and_then(|digit| (digit as char).to_digit(16))?;
+                bytes.push((high * 16 + low) as u8);
+            }
+            _ => bytes.push(byte),
+        }
+    }
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|token| !token.is_empty())
+}
+
 /// How a track asked to be delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Transport {
@@ -348,6 +383,23 @@ mod tests {
         assert_eq!(target("rtsp://h/cam/streamid=0?x=1"), t("cam", Some(0)));
         assert_eq!(target("rtsp://h:1"), t("", None));
         assert_eq!(target("http://h/cam"), None);
+    }
+
+    #[test]
+    fn a_url_carries_a_token_in_its_query() {
+        assert_eq!(
+            query_token("rtsp://h/cam?token=a.b-c_d"),
+            Some("a.b-c_d".to_owned())
+        );
+        assert_eq!(
+            query_token("rtsp://h/cam?x=1&token=a%2Bb#f"),
+            Some("a+b".to_owned())
+        );
+        assert_eq!(query_token("rtsp://h/cam?tokens=a"), None);
+        assert_eq!(query_token("rtsp://h/cam?token="), None);
+        assert_eq!(query_token("rtsp://h/cam"), None);
+        assert_eq!(without_query("rtsp://h/cam?token=a"), "rtsp://h/cam");
+        assert_eq!(without_query("rtsp://h/cam"), "rtsp://h/cam");
     }
 
     #[test]

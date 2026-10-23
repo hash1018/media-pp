@@ -19,7 +19,8 @@ pub enum Access {
 pub enum Credentials {
     /// Nothing, or a scheme the server does not read.
     None,
-    /// `Bearer <token>` — what a WHIP or WHEP client sends.
+    /// `Bearer <token>` — what a WHIP or WHEP client sends — or the `?token=`
+    /// an RTSP player's URL carries where it sends no `Authorization`.
     Bearer(String),
     /// `Basic` — what an RTSP player that cannot answer a Digest challenge
     /// sends for `rtsp://user:password@…`: the password itself, readable by

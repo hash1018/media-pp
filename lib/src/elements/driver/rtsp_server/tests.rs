@@ -810,6 +810,7 @@ fn server_asking() -> (
         let user = match &request.credentials {
             Credentials::Basic { user, password } if password == "pw" => user.as_str(),
             Credentials::Digest(digest) if digest.verifies("pw") => digest.user(),
+            Credentials::Bearer(token) if *token == long_token() => "viewer",
             _ => return false,
         };
         matches!(
@@ -836,6 +837,12 @@ fn server_asking() -> (
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     (runner, handle, cam, live, asked)
+}
+
+/// A token as long as a signed one is: longer than some players keep of a
+/// URL's user name.
+fn long_token() -> String {
+    format!("{}.signed", "a".repeat(200))
 }
 
 fn with_user(url: &str, user: &str) -> String {
@@ -1216,4 +1223,34 @@ fn what_players_are_sent_is_what_rtp_carries() {
             left_out.parameters().id()
         );
     }
+}
+
+/// A token in the URL's query lets a player in, where it sends no
+/// `Authorization`; the description's base leaves the query out, so each
+/// track it sets up is still named.
+#[test]
+fn a_player_presents_a_token_in_its_urls_query() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, cam, _live, asked) = server_asking();
+    let _camera = feed(&cam, &path);
+    wait_published(&cam);
+    let url = handle.url("cam");
+    let options = || RtspOptions {
+        transport: RtspTransport::Tcp,
+        timeout: Duration::from_secs(5),
+    };
+    assert!(RtspSource::open("player", format!("{url}?token=wrong"), options()).is_err());
+    let player = play(&format!("{url}?token={}", long_token()), RtspTransport::Tcp);
+    player.wait_for(10);
+    check_played(&player);
+    player.pipeline.stop();
+    runner.stop();
+    assert!(
+        asked.lock().unwrap().iter().any(
+            |request| request.credentials == crate::elements::Credentials::Bearer(long_token())
+        ),
+        "presented as a Bearer token"
+    );
 }

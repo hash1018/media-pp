@@ -450,11 +450,19 @@ impl Connection {
     /// — presents nothing.
     fn credentials(&self, request: &Request, path: &str) -> Credentials {
         let header = request.header("Authorization");
-        match header.and_then(|h| h.trim().get(..7)) {
+        let presented = match header.and_then(|h| h.trim().get(..7)) {
             Some(scheme) if scheme.eq_ignore_ascii_case("digest ") => header
                 .and_then(|h| RtspDigest::parse(h, &request.method, &self.nonce, path))
                 .map_or(Credentials::None, Credentials::Digest),
             _ => Credentials::from_header(header),
+        };
+        // A token too long for a URL's user name — some players keep it
+        // in a buffer of 128 bytes — rides in its query instead.
+        match presented {
+            Credentials::None => {
+                message::query_token(&request.url).map_or(Credentials::None, Credentials::Bearer)
+            }
+            presented => presented,
         }
     }
 
@@ -547,7 +555,10 @@ impl Connection {
             Ok(sdp) => Response::new(200)
                 .header(
                     "Content-Base",
-                    format!("{}/", request.url.trim_end_matches('/')),
+                    format!(
+                        "{}/",
+                        message::without_query(&request.url).trim_end_matches('/')
+                    ),
                 )
                 .body("application/sdp", sdp),
             Err(error) => {
