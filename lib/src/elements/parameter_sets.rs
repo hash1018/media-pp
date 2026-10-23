@@ -247,7 +247,7 @@ pub(crate) fn annex_b(data: &[u8]) -> Vec<&[u8]> {
 }
 
 /// A NAL unit's payload with the emulation prevention bytes taken out.
-fn rbsp(payload: &[u8]) -> Vec<u8> {
+pub(crate) fn rbsp(payload: &[u8]) -> Vec<u8> {
     let mut rbsp = Vec::with_capacity(payload.len());
     let mut zeros = 0;
     for &byte in payload {
@@ -277,14 +277,39 @@ fn cropped(
 /// What an H.264 sequence parameter set — the NAL unit, its header byte
 /// first — says the pictures are.
 pub(crate) fn h264_shape(sps: &[u8]) -> Option<Shape> {
+    h264_sequence(sps).map(|sequence| sequence.shape)
+}
+
+/// What an H.264 sequence parameter set says beyond its pictures' shape:
+/// how far its pictures are reordered, and what its VUI says of timing and
+/// colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct H264Sequence {
+    pub(crate) shape: Shape,
+    /// How many pictures may come before one in decoding order and after
+    /// it in output: the VUI's `max_num_reorder_frames`, or what the
+    /// standard infers without it.
+    pub(crate) reorder: u32,
+    /// `num_units_in_tick` and `time_scale`, where the VUI says them and
+    /// they make a frame rate — half a picture a second to three hundred.
+    pub(crate) timing: Option<(u32, u32)>,
+    /// Primaries, transfer and matrix, and whether the range is full,
+    /// where the VUI says them.
+    pub(crate) colour: Option<(u8, u8, u8, bool)>,
+}
+
+/// An H.264 sequence parameter set read whole, its VUI included where it
+/// can be — a VUI that cannot be read leaves what it would have said to
+/// what the standard infers.
+pub(crate) fn h264_sequence(sps: &[u8]) -> Option<H264Sequence> {
     if sps.len() < 4 || sps[0] & 0x1f != 7 {
         return None;
     }
     let rbsp = rbsp(&sps[1..]);
     let mut bits = BitReader::new(&rbsp);
     let profile = bits.read_bits(8)? as u8;
-    bits.read_bits(8)?;
-    bits.read_bits(8)?;
+    let constraints = bits.read_bits(8)?;
+    let level = bits.read_bits(8)?;
     bits.read_ue()?;
 
     let mut chroma_format = 1;
@@ -349,6 +374,10 @@ pub(crate) fn h264_shape(sps: &[u8]) -> Option<Shape> {
     } else {
         (0, 0, 0, 0)
     };
+    let vui = match bits.read_bit() {
+        Some(true) => h264_vui(&mut bits),
+        _ => None,
+    };
 
     let frame_factor = if frame_mbs_only { 1 } else { 2 };
     let chroma_array_type = if separate_colour_plane {
@@ -374,18 +403,160 @@ pub(crate) fn h264_shape(sps: &[u8]) -> Option<Shape> {
             .checked_mul(frame_factor)?,
     );
     let (width, height) = cropped(coded, crop, unit)?;
-    Some(Shape {
-        width,
-        height,
-        profile,
-        chroma_format,
-        bit_depth,
+    // Without the VUI's own count, the standard's inference: none for the
+    // intra profiles that say so, as many as the level's picture buffer
+    // holds for the rest — but none for Baseline, which has no B slices to
+    // reorder.
+    let intra = matches!(profile, 44 | 86 | 100 | 110 | 122 | 244) && constraints & 0x10 != 0;
+    let inferred = if profile == 66 || intra {
+        0
+    } else {
+        max_dpb_frames(level, width_in_mbs * height_in_map_units * frame_factor)
+    };
+    Some(H264Sequence {
+        shape: Shape {
+            width,
+            height,
+            profile,
+            chroma_format,
+            bit_depth,
+        },
+        reorder: vui.and_then(|vui| vui.reorder).unwrap_or(inferred),
+        timing: vui.and_then(|vui| vui.timing),
+        colour: vui.and_then(|vui| vui.colour),
     })
+}
+
+/// What an H.264 VUI says that a receiver uses.
+#[derive(Clone, Copy)]
+struct H264Vui {
+    reorder: Option<u32>,
+    timing: Option<(u32, u32)>,
+    colour: Option<(u8, u8, u8, bool)>,
+}
+
+fn h264_vui(bits: &mut BitReader<'_>) -> Option<H264Vui> {
+    if bits.read_bit()? && bits.read_bits(8)? == 255 {
+        bits.skip(32)?;
+    }
+    if bits.read_bit()? {
+        bits.read_bit()?;
+    }
+    let mut colour = None;
+    if bits.read_bit()? {
+        bits.skip(3)?;
+        let full = bits.read_bit()?;
+        if bits.read_bit()? {
+            let primaries = bits.read_bits(8)? as u8;
+            let transfer = bits.read_bits(8)? as u8;
+            let matrix = bits.read_bits(8)? as u8;
+            colour = Some((primaries, transfer, matrix, full));
+        }
+    }
+    if bits.read_bit()? {
+        bits.read_ue()?;
+        bits.read_ue()?;
+    }
+    let mut timing = None;
+    if bits.read_bit()? {
+        let units = bits.read_bits(32)?;
+        let scale = bits.read_bits(32)?;
+        bits.read_bit()?;
+        // A rate, where it reads as one: an encoder that counts in its
+        // time base's own ticks — x264 behind FFmpeg, at 1/90000 — says
+        // nothing of how long a picture lasts.
+        let rate = f64::from(scale) / (2.0 * f64::from(units));
+        timing = (units > 0 && (0.5..=300.0).contains(&rate)).then_some((units, scale));
+    }
+    let nal_hrd = bits.read_bit()?;
+    if nal_hrd {
+        skip_h264_hrd(bits)?;
+    }
+    let vcl_hrd = bits.read_bit()?;
+    if vcl_hrd {
+        skip_h264_hrd(bits)?;
+    }
+    if nal_hrd || vcl_hrd {
+        bits.read_bit()?;
+    }
+    bits.read_bit()?;
+    // What comes after the timing and colour is read on its own: a VUI cut
+    // short there still says them.
+    let reorder = (|| {
+        if !bits.read_bit()? {
+            return None;
+        }
+        bits.read_bit()?;
+        for _ in 0..4 {
+            bits.read_ue()?;
+        }
+        let reorder = bits.read_ue()?;
+        bits.read_ue()?;
+        Some(reorder)
+    })();
+    Some(H264Vui {
+        reorder,
+        timing,
+        colour,
+    })
+}
+
+fn skip_h264_hrd(bits: &mut BitReader<'_>) -> Option<()> {
+    let count = bits.read_ue()?.checked_add(1)?;
+    if count > 32 {
+        return None;
+    }
+    bits.skip(8)?;
+    for _ in 0..count {
+        bits.read_ue()?;
+        bits.read_ue()?;
+        bits.read_bit()?;
+    }
+    bits.skip(20)
+}
+
+/// How many frames an H.264 level's decoded picture buffer holds of
+/// pictures of `frame_mbs` macroblocks: its `MaxDpbMbs` over that, at most
+/// sixteen.
+fn max_dpb_frames(level: u32, frame_mbs: u32) -> u32 {
+    let max_dpb_mbs = match level {
+        0..=10 => 396,
+        11 => 900,
+        12 | 13 | 20 => 2376,
+        21 => 4752,
+        22 | 30 => 8100,
+        31 => 18_000,
+        32 => 20_480,
+        40 | 41 => 32_768,
+        42 => 34_816,
+        50 => 110_400,
+        51 | 52 => 184_320,
+        _ => 696_320,
+    };
+    (max_dpb_mbs / frame_mbs.max(1)).min(16)
 }
 
 /// What an H.265 sequence parameter set — the NAL unit, its two header
 /// bytes first — says the pictures are.
 pub(crate) fn hevc_shape(sps: &[u8]) -> Option<Shape> {
+    hevc_sequence(sps).map(|sequence| sequence.shape)
+}
+
+/// What an H.265 sequence parameter set says beyond its pictures' shape:
+/// how far its pictures are reordered, and how many its decoder holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HevcSequence {
+    pub(crate) shape: Shape,
+    /// `sps_max_num_reorder_pics` of the highest sub-layer.
+    pub(crate) reorder: u32,
+    /// `sps_max_dec_pic_buffering_minus1` of the highest sub-layer, plus
+    /// one: how many pictures its decoder holds.
+    pub(crate) buffer: u32,
+}
+
+/// An H.265 sequence parameter set read as far as its reordering; `None`
+/// where it cannot be read that far.
+pub(crate) fn hevc_sequence(sps: &[u8]) -> Option<HevcSequence> {
     if sps.len() < 4 || (sps[0] >> 1) & 0x3f != 33 {
         return None;
     }
@@ -440,12 +611,30 @@ pub(crate) fn hevc_shape(sps: &[u8]) -> Option<Shape> {
         _ => (1, 1),
     };
     let (width, height) = cropped(coded, crop, unit)?;
-    Some(Shape {
+    let shape = Shape {
         width,
         height,
         profile,
         chroma_format,
         bit_depth,
+    };
+    bits.read_ue()?;
+    bits.read_ue()?;
+    let first = if bits.read_bit()? {
+        0
+    } else {
+        max_sub_layers_minus1
+    };
+    let (mut reorder, mut buffer) = (0, 1);
+    for _ in first..=max_sub_layers_minus1 {
+        buffer = bits.read_ue()?.checked_add(1)?;
+        reorder = bits.read_ue()?;
+        bits.read_ue()?;
+    }
+    Some(HevcSequence {
+        shape,
+        reorder,
+        buffer,
     })
 }
 
@@ -463,26 +652,26 @@ fn skip_scaling_list(bits: &mut BitReader<'_>, size: usize) -> Option<()> {
     Some(())
 }
 
-struct BitReader<'a> {
+pub(crate) struct BitReader<'a> {
     data: &'a [u8],
     bit: usize,
 }
 
 impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self { data, bit: 0 }
     }
 
-    fn skip(&mut self, count: usize) -> Option<()> {
+    pub(crate) fn skip(&mut self, count: usize) -> Option<()> {
         let to = self.bit.checked_add(count)?;
         (to <= self.data.len().checked_mul(8)?).then(|| self.bit = to)
     }
 
-    fn read_bit(&mut self) -> Option<bool> {
+    pub(crate) fn read_bit(&mut self) -> Option<bool> {
         Some(self.read_bits(1)? != 0)
     }
 
-    fn read_bits(&mut self, count: usize) -> Option<u32> {
+    pub(crate) fn read_bits(&mut self, count: usize) -> Option<u32> {
         if count > 32 || self.bit.checked_add(count)? > self.data.len().checked_mul(8)? {
             return None;
         }
@@ -495,7 +684,7 @@ impl<'a> BitReader<'a> {
         Some(value)
     }
 
-    fn read_ue(&mut self) -> Option<u32> {
+    pub(crate) fn read_ue(&mut self) -> Option<u32> {
         let mut leading_zeroes = 0usize;
         while !self.read_bit()? {
             leading_zeroes += 1;
@@ -507,7 +696,7 @@ impl<'a> BitReader<'a> {
         ((1u32 << leading_zeroes) - 1).checked_add(suffix)
     }
 
-    fn read_se(&mut self) -> Option<i32> {
+    pub(crate) fn read_se(&mut self) -> Option<i32> {
         let code_num = self.read_ue()?;
         let magnitude = i32::try_from(code_num.checked_add(1)? / 2).ok()?;
         Some(if code_num % 2 == 0 {

@@ -25,6 +25,7 @@ pub mod broadcast;
 pub mod driver;
 pub mod filter;
 pub(crate) mod parameter_sets;
+pub(crate) mod parameters;
 pub(crate) mod rtsp;
 pub mod sink;
 pub mod source;

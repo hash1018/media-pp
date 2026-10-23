@@ -1,34 +1,84 @@
-use std::{
-    cell::Cell,
-    ffi::{CString, c_int, c_void},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+//! [`RtspSource`]: an RTSP client, and a receiver of one publisher's push —
+//! this crate's own, over std's sockets, with no FFmpeg between it and the
+//! network.
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
-use ffmpeg_next::{self as ffmpeg, ffi};
+mod pull;
+mod push;
+mod receive;
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
+use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     contract::{MediaKind, OutputContract, PortContract},
     element::{Attached, ElementType, Identity, Produced, Source, SourceStage, Wait},
-    elements::{RtspOptions, rtsp::redact},
+    elements::{
+        RtspOptions,
+        parameter_sets::{annex_b, h264_sequence, hevc_sequence},
+        rtsp::{message::Malformed, redact, sdp::Announced},
+    },
     error::Result,
     pad::SrcPad,
-    produce::source_stage,
+    produce::{Received, source_stage},
 };
 
 use crate::elements::StreamInfo;
+
+use receive::{BACKLOG, Item, Reader, Session, Silence};
 
 /// Why an [`RtspSource`] could not connect or read.
 ///
 /// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum RtspSourceError {
-    /// FFmpeg rejected connection setup, stream reading, or shutdown.
-    #[error("ffmpeg error: {0}")]
-    Ffmpeg(#[from] ffmpeg::Error),
+    /// [`RtspSource::open`] was given something other than an
+    /// `rtsp://[user:password@]host[:port]/path` URL. `rtsps://` is not
+    /// taken.
+    #[error("RtspSource::open needs an rtsp://host[:port]/path URL")]
+    InvalidUrl,
+    /// The server could not be reached at `address`: refused, unreachable,
+    /// or no answer to the connection within [`RtspOptions::timeout`].
+    #[error("cannot connect to {address}: {error}")]
+    Connect {
+        address: String,
+        #[source]
+        error: std::io::Error,
+    },
+    /// The server did not answer a request within
+    /// [`RtspOptions::timeout`].
+    #[error("the server did not answer within {0:?}")]
+    NoAnswer(std::time::Duration),
+    /// The server answered `method` with `status`: a path it does not
+    /// have (404), a transport it will not deliver (461), and the like.
+    #[error("the server answered {method} with {status}")]
+    Refused { method: &'static str, status: u16 },
+    /// The server asked for credentials, and the URL carried none, or none
+    /// it took.
+    #[error("the server refused the credentials, or asked for some the URL did not carry")]
+    Unauthorized,
+    /// What the other end sent is not RTSP, or not a description this
+    /// reads; this names what.
+    #[error("the other end sent a malformed {0}")]
+    Malformed(&'static str),
+    /// Nothing in the session can be received: no track in a codec this
+    /// takes apart — H.264, H.265, AAC, Opus, G.711 — or a delivery it
+    /// does not take; this names what was refused.
+    #[error("nothing in the session can be received: {0}")]
+    Unsupported(String),
+    /// The connection failed while the session was set up or read.
+    #[error("the connection failed: {0}")]
+    Io(#[from] std::io::Error),
+    /// A server whose session was playing sent no media for
+    /// [`RtspOptions::timeout`], which this names: a camera unplugged, a
+    /// network gone, with nothing to close the connection.
+    #[error("the server sent nothing for {0:?}")]
+    ServerSilent(std::time::Duration),
     /// The session has no stream of the kind asked for — see
     /// [`RtspSource::best`].
     #[error("the RTSP session has no {0:?} stream")]
@@ -37,6 +87,10 @@ pub enum RtspSourceError {
     /// `rtsp://host:port/path` URL, or one holding a NUL byte.
     #[error("RtspSource::listen needs an rtsp://host:port/path URL")]
     InvalidListenUrl,
+    /// A port could not be bound: the URL's, for [`RtspSource::listen`], or
+    /// a UDP pair for a track's RTP.
+    #[error("cannot bind a port: {0}")]
+    Bind(#[source] std::io::Error),
     /// No publisher connected and announced its streams within
     /// [`RtspListenOptions::wait`], which this names. The port is closed
     /// again by the time this is returned.
@@ -49,16 +103,18 @@ pub enum RtspSourceError {
     PublisherSilent(Duration),
 }
 
+impl From<Malformed> for RtspSourceError {
+    fn from(Malformed(what): Malformed) -> Self {
+        Self::Malformed(what)
+    }
+}
+
 /// How [`RtspSource::listen`] waits for a publisher, and how long one may
 /// then go silent.
 ///
 /// Not [`RtspOptions`]: there is no transport to choose, since the
 /// publisher's `SETUP` picks one — RTP interleaved in the RTSP connection
-/// (TCP) or RTP over UDP — and FFmpeg's listener takes either. Both bounds
-/// are kept by this crate rather than by FFmpeg's own `listen_timeout` and
-/// `timeout`: those cover only the accept and, for TCP, not the reads at
-/// all, so a publisher that connected and then stopped sending would hold
-/// the source for good.
+/// (TCP) or RTP over UDP — and the listener takes either.
 #[derive(Debug, Clone, Copy)]
 pub struct RtspListenOptions {
     /// How long [`RtspSource::listen`] waits for a publisher to connect and
@@ -67,14 +123,11 @@ pub struct RtspListenOptions {
     /// A duration too long for the clock to add (`Duration::MAX`) waits
     /// without end, as asked.
     pub wait: Duration,
-    /// How long a publisher may send nothing — between any two packets,
-    /// and beyond the five seconds of its stream FFmpeg may read inside
-    /// `listen` to probe it — before the session is given up as
-    /// [`RtspSourceError::PublisherSilent`]:
-    /// a pulled cable or a vanished host closes no connection, and without
-    /// this a TCP read would wait on it for ever. It is also how long a
-    /// `Stop` can take to reach a source whose publisher has gone quiet,
-    /// since the source takes it between reads.
+    /// How long a publisher may send nothing — between any two packets —
+    /// before the session is given up as
+    /// [`RtspSourceError::PublisherSilent`]: a pulled cable or a vanished
+    /// host closes no connection, and without this a read would wait on it
+    /// for ever.
     pub timeout: Duration,
 }
 
@@ -123,16 +176,60 @@ impl Default for RtspListenOptions {
 /// # }
 /// ```
 ///
+/// # What it receives
+///
+/// RTSP 1.0, as cameras and servers speak it, by this crate's own client:
+///
+/// - **Codecs:** H.264 and H.265, AAC (`mpeg4-generic`), Opus, and G.711
+///   (µ-law and A-law). A described track in any other codec — MJPEG,
+///   MPEG-4 Part 2, a camera's ONVIF metadata — is left out, and the
+///   streams are those it can take, numbered in the order described; a
+///   session with none is [`RtspSourceError::Unsupported`].
+/// - **Delivery:** RTP interleaved in the RTSP connection
+///   ([`RtspTransport::Tcp`](crate::elements::RtspTransport::Tcp)), or
+///   over a pair of UDP ports per track, put back in order as it arrives.
+///   No multicast, no RTSP over HTTP, no `rtsps://`.
+/// - **Credentials** in the URL — `rtsp://user:password@host/path`, `%`
+///   escapes decoded — answer a server's Digest or Basic challenge, and
+///   never go into a request's URL.
+/// - **The session is kept** with `GET_PARAMETER` where the server takes
+///   it, `OPTIONS` otherwise, every half of the timeout its `Session`
+///   says, and torn down when the source stops.
+///
+/// H.264 and H.265 come as Annex B access units, a picture to a packet,
+/// keyframes flagged. RTP gives each picture only the time it is shown at
+/// (its `pts`); for a stream that reorders its pictures — B-frames — the
+/// time each is decoded at is worked out from the stream's own picture
+/// order counts and its sequence parameter set, so a muxer downstream is
+/// handed times that never go back, and [`StreamInfo::reorders`] says
+/// so before the pipeline runs. A stream that does not reorder is decoded
+/// when it is shown.
+///
+/// What the description leaves out — a picture's size, where the
+/// parameter sets come only in band — is read from the first keyframe
+/// before [`RtspSource::open`] returns, for up to five seconds and the
+/// timeout beyond them; [`StreamInfo::frame_rate`] is what an H.264
+/// stream's VUI says, and `None` where nothing does.
+///
 /// # Errors and reconnecting
 ///
 /// Deliberately does **not** retry or reconnect internally: a read failure
-/// (dropped connection, camera reboot, ...) ends this source's thread with
-/// the error on the bus, the same way any other fatal source failure does,
-/// instead of looping forever. Reconnecting means building a fresh
+/// (dropped connection, camera reboot, a server silent for
+/// [`RtspOptions::timeout`]) ends this source with the error on the bus,
+/// the same way any other fatal source failure does, instead of looping
+/// forever. Reconnecting means building a fresh
 /// `RtspSource`/[`crate::pipeline::Pipeline`] — mirrors `Pipeline` itself
 /// not being reusable once it ends: watch
 /// [`crate::pipeline::Pipeline::bus`], and on error, call
-/// [`RtspSource::open`] again.
+/// [`RtspSource::open`] again. A server that closes the connection ends
+/// the stream, each output after what came before.
+///
+/// The session is read on threads of its own — one for the connection,
+/// and one for each track's UDP socket — and handed to the source through
+/// a buffer of some seconds of packets: a pause or a stop reaches the
+/// source at once, whatever the network does. A source not reading for
+/// longer than that loses what comes past it, and a picture stream goes on
+/// from its next keyframe.
 ///
 /// # Receiving a push
 ///
@@ -142,225 +239,100 @@ impl Default for RtspListenOptions {
 /// [`RtspMuxer`](crate::elements::RtspMuxer), `ffmpeg -f rtsp` — to
 /// `ANNOUNCE` its streams and `RECORD` into it. What it hands on after that
 /// is the same as from [`RtspSource::open`]: one output per stream the
-/// publisher announced, [`RtspSource::best`] to pick one, no pacer needed.
+/// publisher announced and set up, [`RtspSource::best`] to pick one, no
+/// pacer needed.
 ///
-/// It is FFmpeg's own RTSP listener (`rtsp_flags=listen`), which is a
-/// receiver for one publisher and not an RTSP server:
+/// It is a receiver for one publisher, not an RTSP server — an
+/// `RtspServer`, with the `rtsp-server` feature, is:
 ///
-/// - **One publisher, once.** It waits for a single connection, and FFmpeg
-///   closes the listening socket as soon as that one is accepted, so a
-///   second publisher is refused while the first is received. When the
-///   publisher is gone the source ends; to take the next one, call
-///   `listen` again — the port is closed until then.
-/// - **One port each.** Two listening on different ports are independent.
-///   Two on the same port are a mistake: on Linux and macOS the second
-///   cannot bind it, but on Windows FFmpeg's `SO_REUSEADDR` lets both bind,
-///   and which one a publisher reaches is the OS's choice.
+/// - **One publisher, once.** It waits for a single connection, and closes
+///   the listening socket as soon as that one is accepted, so a second
+///   publisher is refused while the first is received. When the publisher
+///   is gone the source ends; to take the next one, call `listen` again —
+///   the port is closed until then.
+/// - **One port each.** Two listening on the same port are a mistake: the
+///   second cannot bind it.
 /// - **No authentication**, and the URL's path is not enforced: any
 ///   publisher that reaches the port is received.
-/// - **No viewers.** It answers `ANNOUNCE`, `SETUP`, `RECORD`, `OPTIONS`
-///   and `TEARDOWN`, never `DESCRIBE` or `PLAY`; to serve what it receives,
-///   publish it on with an `RtspMuxer` to a server such as MediaMTX.
+/// - **No viewers.** It answers `OPTIONS`, `ANNOUNCE`, `SETUP`, `RECORD`,
+///   `GET_PARAMETER`, `SET_PARAMETER` and `TEARDOWN`, never `DESCRIBE` or
+///   `PLAY`.
+/// - **The codecs it receives**, all of them: an announcement of any other
+///   is refused (`415`), as [`RtspSourceError::Unsupported`].
 ///
 /// # How a received session ends
 ///
-/// The publisher closing its connection ends the stream: each output ends
-/// after what was read before it, as for a clean end of
-/// [`RtspSource::open`]'s session. That holds whether it sent a `TEARDOWN`
-/// first or not, and when the close arrives as a reset — FFmpeg's listener
-/// does not tell these apart, and its reply to a `TEARDOWN` reaches a
-/// publisher that has already closed, which then resets the connection
-/// (measured on Windows over TCP, from FFmpeg's own publisher: every clean
-/// finish read as `WSAECONNABORTED`). A publisher process killed outright
-/// ends it the same way, since its OS closes the connection for it.
-///
-/// A publisher that stops sending without closing — a pulled cable, a host
-/// gone — is [`RtspSourceError::PublisherSilent`] on the bus after
-/// [`RtspListenOptions::timeout`], and anything else that fails a read is
-/// an error as it is for `open`. As with `open`, nothing reconnects: a new
-/// session is a new `listen`.
-///
-/// Uses `Packet::read` directly instead of `Input::packets()` — the
-/// latter silently retries forever inside its own `next()` on any non-EOF
-/// error (network timeout, connection reset, ...), which would make a
-/// stuck connection un-`Stop`-able (the pipeline's requests never get a
-/// turn) and this element's "fail fast, don't retry" contract impossible to
-/// keep.
+/// The publisher's `TEARDOWN`, or its closing the connection, ends the
+/// stream: each output ends after what was read before it. That holds
+/// when the close arrives as a reset, as a publisher's that has gone
+/// before the answer to its `TEARDOWN` reached it does. A publisher that
+/// stops sending without closing — a pulled cable, a host gone — is
+/// [`RtspSourceError::PublisherSilent`] on the bus after
+/// [`RtspListenOptions::timeout`]. As with `open`, nothing reconnects: a
+/// new session is a new `listen`.
 pub struct RtspSource(SourceStage<Reading>);
 
 source_stage!(RtspSource);
+
+/// How long the parameters a description leaves out are waited for, beyond
+/// the timeout: a stream that begins between keyframes is read until its
+/// first.
+const PROBE_SPAN: Duration = Duration::from_secs(5);
 
 /// What an [`RtspSource`] hands on, a packet at a time as the session
 /// delivers it: all of its work, which the framework makes the source.
 struct Reading {
     pp_log: PpLog,
-    input: ffmpeg::format::context::Input,
     /// What each stream's output declares, by stream index.
     contracts: Vec<OutputContract>,
-    /// For a session [`RtspSource::listen`] received, what bounds each
-    /// read. Declared after `input` on purpose: FFmpeg holds a pointer to
-    /// its interrupt until the input is closed, and fields drop in the
-    /// order they are declared.
-    listening: Option<Listening>,
-}
-
-/// The bound on a received session's reads: the interrupt FFmpeg asks,
-/// armed with `timeout` before each one.
-struct Listening {
-    /// Boxed so that its address, which FFmpeg holds, stays put when the
-    /// source moves to its thread.
-    interrupt: Box<Interrupt>,
-    timeout: Duration,
-}
-
-/// What a listening input's interrupt callback answers from: whether the
-/// time given for the call under way has run out.
-///
-/// FFmpeg asks it from inside the blocking calls — every 100 ms while it
-/// waits to accept, and while a read waits on the socket — on whichever
-/// thread made the call, which is the one thread that owns the input at a
-/// time. So a `Cell` is enough, and nothing here can panic across the FFI.
-#[derive(Default)]
-struct Interrupt {
-    deadline: Cell<Option<Instant>>,
-    /// Set once the callback has answered "stop": what tells a call cut
-    /// short apart from one that failed by itself, and — since FFmpeg
-    /// cannot resume a read cut off mid-packet — that the session is over.
-    fired: Cell<bool>,
-}
-
-impl Interrupt {
-    /// Gives the next call `within`; `None` from a duration the clock
-    /// cannot add means no limit.
-    fn arm(&self, within: Duration) {
-        self.deadline.set(Instant::now().checked_add(within));
-        self.fired.set(false);
-    }
-
-    fn fired(&self) -> bool {
-        self.fired.get()
-    }
-}
-
-/// How much of a received stream FFmpeg reads at most to probe it — its
-/// default analyze duration, which nothing here changes. Live media takes
-/// as long to arrive as it lasts, so `listen` gives the probe this long
-/// before [`RtspListenOptions::timeout`] starts to count: a stream that
-/// waits seconds for its first keyframe is not a silent one.
-const PROBE_SPAN: Duration = Duration::from_secs(5);
-
-/// FFmpeg's `AVIOInterruptCB::callback` for a listening input.
-extern "C" fn interrupted(opaque: *mut c_void) -> c_int {
-    // SAFETY: `opaque` is the `Box<Interrupt>` this was registered with in
-    // `open_listening`, which outlives the input FFmpeg calls this for (see
-    // `Reading::listening`), and only shared references are made to it.
-    let interrupt = unsafe { &*(opaque as *const Interrupt) };
-    let expired = interrupt
-        .deadline
-        .get()
-        .is_some_and(|deadline| Instant::now() >= deadline);
-    if expired {
-        interrupt.fired.set(true);
-    }
-    c_int::from(expired)
-}
-
-/// Binds `url`'s port as FFmpeg's RTSP listener and returns once a
-/// publisher has sent `RECORD` — or once `interrupt` gives up on it.
-///
-/// Written out rather than taken from `ffmpeg::format`, whose
-/// `input_with_interrupt` takes no options, and leaks its callback's state.
-fn open_listening(
-    url: &CString,
-    interrupt: &Interrupt,
-) -> std::result::Result<ffmpeg::format::context::Input, ffmpeg::Error> {
-    let mut options = ffmpeg::Dictionary::new();
-    options.set("rtsp_flags", "listen");
-    // Nothing else: FFmpeg's `listen_timeout` (whole seconds) and `timeout`
-    // are left to `interrupt`, which bounds the handshake and every read as
-    // well. And no `rtsp_transport`, so that the publisher's choice is
-    // taken — and so that the client's fallback from a silent UDP session
-    // to TCP, which would send `PAUSE` to a publisher, can never run.
-
-    // SAFETY: a plain allocation, checked before use.
-    let mut context = unsafe { ffi::avformat_alloc_context() };
-    if context.is_null() {
-        return Err(ffmpeg::Error::Other {
-            errno: ffmpeg::util::error::ENOMEM,
-        });
-    }
-    // SAFETY: `context` is the live context just allocated. The opaque
-    // pointer is `interrupt`, which the caller keeps alive and in place for
-    // as long as the input it gets back — see `Reading::listening`.
-    unsafe {
-        (*context).interrupt_callback = ffi::AVIOInterruptCB {
-            callback: Some(interrupted),
-            opaque: interrupt as *const Interrupt as *mut c_void,
-        };
-    }
-    // SAFETY: `disown` hands over the dictionary's own pointer, which
-    // `avformat_open_input` takes and the free below reclaims.
-    let mut options = unsafe { options.disown() };
-    // SAFETY: `c"rtsp"` names FFmpeg's demuxer, whose static descriptor
-    // this returns — forced rather than probed, so that the options above
-    // reach the RTSP demuxer whatever the URL looks like to a prober.
-    let demuxer = unsafe { ffi::av_find_input_format(c"rtsp".as_ptr()) };
-    // SAFETY: `context` is the context allocated above, which FFmpeg frees
-    // on failure; `url` lives for the whole call; `options` is the
-    // dictionary freed below either way.
-    let code =
-        unsafe { ffi::avformat_open_input(&mut context, url.as_ptr(), demuxer, &mut options) };
-    // SAFETY: what the call left of the dictionary, or the whole of it.
-    unsafe { ffi::av_dict_free(&mut options) };
-    if code < 0 {
-        return Err(ffmpeg::Error::from(code));
-    }
-    // SAFETY: the call above opened `context`; this hands it to the wrapper
-    // that closes it on drop.
-    Ok(unsafe { ffmpeg::format::context::Input::wrap(context) })
-}
-
-/// `error` as the OS's own, where it is a received session's connection
-/// closing under it — the reset a publisher's close can arrive as. See
-/// [`RtspSource`]'s "How a received session ends" on why that is an end
-/// and not a failure.
-fn connection_closed(error: ffmpeg::Error) -> Option<std::io::Error> {
-    match error {
-        // FFmpeg's network errors are the OS's own codes, Winsock's on
-        // Windows, which FFmpeg's own message does not name — so the OS is
-        // what reads them.
-        ffmpeg::Error::Other { errno } => {
-            Some(std::io::Error::from_raw_os_error(errno)).filter(|os| {
-                matches!(
-                    os.kind(),
-                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
-                )
-            })
-        }
-        _ => None,
-    }
+    streams: Vec<StreamInfo>,
+    rx: crossbeam_channel::Receiver<Item>,
+    /// What came while the streams were probed, handed on first.
+    held: VecDeque<Item>,
+    reader: Reader,
 }
 
 impl RtspSource {
-    /// Connects to `url` (e.g. `rtsp://host:port/path`) and returns the
-    /// element alongside every stream the server advertised, so the
-    /// caller can inspect them before deciding which of `src_pads()` to
-    /// link — same pattern as `FileDemuxer::open`.
+    /// Connects to `url` (e.g. `rtsp://host:port/path`, with
+    /// `user:password@` before the host where the server asks for
+    /// credentials) and returns the element alongside every stream the
+    /// server advertised that it can receive, so the caller can inspect
+    /// them before deciding which of `src_pads()` to link — same pattern as
+    /// `FileDemuxer::open`.
+    ///
+    /// Blocks while the session is set up — each request given
+    /// [`RtspOptions::timeout`] for its answer — and while what the
+    /// description leaves out is read from the media (see "What it
+    /// receives").
     pub fn open(
         name: impl Into<String>,
         url: impl AsRef<str>,
         options: RtspOptions,
     ) -> std::result::Result<(Self, Vec<StreamInfo>), RtspSourceError> {
         crate::ensure_ffmpeg();
-        let input = ffmpeg::format::input_with_dictionary(url.as_ref(), options.to_dictionary())?;
+        let url = url.as_ref();
         let identity = Identity::new(ElementType::RtspSource, name);
         let pp_log = identity.pp_log().clone();
-        let (source, streams) = Self::reading(identity, input, None);
+        let (session, refused) = pull::connect(url, options, &pp_log).inspect_err(|error| {
+            pp_error!(pp_log: &pp_log, "opening {} failed: {error}", redact(url));
+        })?;
+        for what in &refused {
+            pp_warn!(pp_log: &pp_log, "left out a track in {what}");
+        }
+        let (source, streams) = Self::reading(
+            identity,
+            session,
+            Silence {
+                after: options.timeout,
+                error: RtspSourceError::ServerSilent,
+            },
+            PROBE_SPAN.saturating_add(options.timeout),
+        )?;
         pp_info!(
             pp_log: &pp_log,
             "opened: url={}, transport={:?}, {} stream(s)",
             // A camera's address often carries its password.
-            redact(url.as_ref()),
+            redact(url),
             options.transport,
             streams.len()
         );
@@ -370,32 +342,21 @@ impl RtspSource {
     /// Listens at `url` — `rtsp://host:port/path`, where `host` is the
     /// address to bind (`0.0.0.0` for every interface, `127.0.0.1` for this
     /// machine alone) — for one publisher to push a stream into, and
-    /// returns the element alongside every stream that publisher announced,
-    /// as [`RtspSource::open`] does for a server's.
+    /// returns the element alongside every stream that publisher announced
+    /// and set up, as [`RtspSource::open`] does for a server's.
     ///
     /// Blocks until the publisher has connected, announced its streams and
-    /// started recording, and its first packets have been probed — which
-    /// is when its streams are known — or until
-    /// [`RtspListenOptions::wait`] runs out, which is
-    /// [`RtspSourceError::NoPublisher`]. Either way nothing is left
-    /// listening once it returns an error: the port can be listened on
-    /// again at once. The probe reads up to five seconds of the stream —
-    /// usually far less, but a stream that begins between keyframes is
-    /// probed until its first — and is given that long and
-    /// [`RtspListenOptions::timeout`] beyond it (see
-    /// [`RtspSourceError::PublisherSilent`]). Run it on a thread of its
-    /// own, or with a short `wait` in a loop, where the caller has other
-    /// things to answer meanwhile.
+    /// started recording, and what its announcement leaves out has been
+    /// read from its first keyframes — or until [`RtspListenOptions::wait`]
+    /// runs out, which is [`RtspSourceError::NoPublisher`]. Either way
+    /// nothing is left listening once it returns an error: the port can be
+    /// listened on again at once. Run it on a thread of its own, or with a
+    /// short `wait` in a loop, where the caller has other things to answer
+    /// meanwhile.
     ///
     /// The publisher picks the transport in its `SETUP`, and either works:
-    /// RTP interleaved in the RTSP connection (TCP), or RTP over UDP, for
-    /// which the listener opens a pair of ports per stream from 5000
-    /// upwards. For UDP, `host` must be an address the publisher reaches
-    /// this machine at, not `0.0.0.0`: FFmpeg's listener tells the
-    /// publisher to send its RTP to the address it was bound to, and one
-    /// told `0.0.0.0` cannot — measured on Windows, an FFmpeg publisher's
-    /// writes failed (`WSAEADDRNOTAVAIL`) and the session ended with nothing
-    /// received. TCP takes `0.0.0.0` as well as any. See [`RtspSource`]'s
+    /// RTP interleaved in the RTSP connection (TCP), or RTP over UDP, to a
+    /// pair of ports opened for each stream. See [`RtspSource`]'s
     /// "Receiving a push" for what this listener is not, and "How a
     /// received session ends".
     pub fn listen(
@@ -408,7 +369,6 @@ impl RtspSource {
         if !url.starts_with("rtsp://") {
             return Err(RtspSourceError::InvalidListenUrl);
         }
-        let c_url = CString::new(url).map_err(|_| RtspSourceError::InvalidListenUrl)?;
         let identity = Identity::new(ElementType::RtspSource, name);
         let pp_log = identity.pp_log().clone();
         pp_info!(
@@ -417,53 +377,18 @@ impl RtspSource {
             redact(url),
             options.wait
         );
-
-        // Declared before the input, so that it is dropped after it.
-        let interrupt = Box::new(Interrupt::default());
-        interrupt.arm(options.wait);
-        let mut input = match open_listening(&c_url, &interrupt) {
-            Ok(input) => input,
-            Err(_) if interrupt.fired() => {
-                pp_error!(pp_log: &pp_log, "no publisher within {:?}", options.wait);
-                return Err(RtspSourceError::NoPublisher(options.wait));
-            }
-            Err(error) => {
-                pp_error!(pp_log: &pp_log, "listening failed: {error}");
-                return Err(error.into());
-            }
-        };
-
-        // What the publisher's SDP leaves out — a picture's size, which
-        // its first packets say — is probed from them, as `open`'s input
-        // is. FFmpeg reads at most `PROBE_SPAN` of the stream for it, which
-        // a live publisher sends in that much time: given `timeout` beyond
-        // that, a probe still unfinished is a publisher not sending.
-        interrupt.arm(PROBE_SPAN.saturating_add(options.timeout));
-        // SAFETY: `input` owns the opened context this probes.
-        let code =
-            unsafe { ffi::avformat_find_stream_info(input.as_mut_ptr(), std::ptr::null_mut()) };
-        if interrupt.fired() {
-            pp_error!(
-                pp_log: &pp_log,
-                "the publisher sent nothing to probe for {:?}",
-                options.timeout
-            );
-            return Err(RtspSourceError::PublisherSilent(options.timeout));
-        }
-        if code < 0 {
-            let error = ffmpeg::Error::from(code);
-            pp_error!(pp_log: &pp_log, "probing the publisher's streams failed: {error}");
-            return Err(error.into());
-        }
-
+        let session = push::accept(url, options, &pp_log).inspect_err(|error| {
+            pp_error!(pp_log: &pp_log, "no publisher received: {error}");
+        })?;
         let (source, streams) = Self::reading(
             identity,
-            input,
-            Some(Listening {
-                interrupt,
-                timeout: options.timeout,
-            }),
-        );
+            session,
+            Silence {
+                after: options.timeout,
+                error: RtspSourceError::PublisherSilent,
+            },
+            PROBE_SPAN.saturating_add(options.timeout),
+        )?;
         pp_info!(
             pp_log: &pp_log,
             "publisher received: url={}, {} stream(s)",
@@ -473,18 +398,63 @@ impl RtspSource {
         Ok((source, streams))
     }
 
-    /// The element over an opened `input`, and the streams it has.
+    /// The element reading `session`, and its streams: described from
+    /// what the description says, and what it leaves out read from the
+    /// media within `probe`.
     fn reading(
         identity: Identity,
-        input: ffmpeg::format::context::Input,
-        listening: Option<Listening>,
-    ) -> (Self, Vec<StreamInfo>) {
-        let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
+        session: Session,
+        silence: Silence,
+        probe: Duration,
+    ) -> std::result::Result<(Self, Vec<StreamInfo>), RtspSourceError> {
+        let pp_log = identity.pp_log().clone();
+        let mut described: Vec<Described> = session.tracks.iter().map(Described::new).collect();
+        let (tx, rx) = crossbeam_channel::bounded(BACKLOG);
+        let reader = Reader::start(session, tx, silence, &pp_log)?;
 
+        // What the description leaves out, read from the first keyframes.
+        let mut held = VecDeque::new();
+        let deadline = Instant::now().checked_add(probe);
+        while !described.iter().all(|track| track.complete) {
+            let left = deadline.map_or(Duration::MAX, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            });
+            let item = match rx.recv_timeout(left) {
+                Ok(item) => item,
+                Err(_) => {
+                    pp_warn!(
+                        pp_log: &pp_log,
+                        "no keyframe said every picture's size within {probe:?}"
+                    );
+                    break;
+                }
+            };
+            match item {
+                Item::Packet(index, ref packet) => {
+                    if let Some(track) = described.get_mut(index)
+                        && !track.complete
+                        && packet.is_key()
+                    {
+                        track.complete_from(packet);
+                    }
+                    held.push_back(item);
+                }
+                Item::End => {
+                    held.push_back(item);
+                    break;
+                }
+                Item::Failed(error) => return Err(error),
+            }
+        }
+
+        let streams: Vec<StreamInfo> = described
+            .into_iter()
+            .enumerate()
+            .map(|(index, track)| track.stream().with_index(index))
+            .collect();
         // Per stream, from the medium the session announced: every output
         // hands on `MediaBuffer::Packet`, so only this tells an audio
-        // stream apart from a video one. A medium this crate does not model
-        // declares nothing and is left to the runtime check.
+        // stream apart from a video one.
         let contracts = streams
             .iter()
             .map(|s| match MediaKind::packet_for(s.kind()) {
@@ -492,25 +462,25 @@ impl RtspSource {
                 None => OutputContract::Unknown,
             })
             .collect();
-
-        let pp_log = identity.pp_log().clone();
-        (
+        Ok((
             Self(SourceStage::new(
                 identity,
                 Reading {
                     pp_log,
-                    input,
                     contracts,
-                    listening,
+                    streams: streams.clone(),
+                    rx,
+                    held,
+                    reader,
                 },
             )),
             streams,
-        )
+        ))
     }
 
-    /// The stream of `kind` FFmpeg judges the one to play, as everything a
-    /// branch for it is built from — or a [`RtspSourceError::NoStream`]
-    /// naming the kind the session lacks. See
+    /// The first stream of `kind`, as everything a branch for it is built
+    /// from — or a [`RtspSourceError::NoStream`] naming the kind the
+    /// session lacks. See
     /// [`FileDemuxer::best`](crate::elements::FileDemuxer::best).
     pub fn best(
         &self,
@@ -518,18 +488,177 @@ impl RtspSource {
     ) -> std::result::Result<StreamInfo, RtspSourceError> {
         self.0
             .inner()
-            .input
-            .streams()
-            .best(kind)
-            .map(|stream| StreamInfo::of(&stream))
+            .streams
+            .iter()
+            .find(|stream| stream.kind() == kind)
+            .cloned()
             .ok_or(RtspSourceError::NoStream(kind))
     }
 }
 
-impl Reading {
-    fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
-        self.input.streams().find(|s| s.index() == index)
+/// A track's description as it is completed: what the session said of it,
+/// and what its parameter sets say — in the description, or else in band
+/// at its first keyframe.
+struct Described {
+    announced: Announced,
+    parameters: ffmpeg::codec::Parameters,
+    frame_rate: Option<ffmpeg::Rational>,
+    complete: bool,
+}
+
+impl Described {
+    fn new(track: &receive::Track) -> Self {
+        let announced = track.announced.clone();
+        let mut parameters = announced.parameters();
+        let video = announced.medium == ffmpeg::media::Type::Video;
+        let mut described = Self {
+            frame_rate: None,
+            complete: !video,
+            announced,
+            parameters: ffmpeg::codec::Parameters::new(),
+        };
+        if video {
+            let sets = described.announced.extradata.clone();
+            described.complete = described.read_sets(&mut parameters, &sets);
+        }
+        described.parameters = parameters;
+        described
     }
+
+    /// What a keyframe of the track says, where the description said too
+    /// little: its parameter sets, its size.
+    fn complete_from(&mut self, key: &ffmpeg::Packet) {
+        let mut parameters = self.parameters.clone();
+        if !self.announced.complete(&mut parameters, key) {
+            return;
+        }
+        if let Some(unit) = key.data() {
+            let unit = unit.to_vec();
+            self.read_sets(&mut parameters, &unit);
+        }
+        self.parameters = parameters;
+        self.complete = true;
+    }
+
+    /// Puts what the sequence parameter set in `sets` — Annex B — says into
+    /// `parameters`: the size, how far pictures are reordered, the colour
+    /// and the rate where it says them. Whether it said the size.
+    fn read_sets(&mut self, parameters: &mut ffmpeg::codec::Parameters, sets: &[u8]) -> bool {
+        // SAFETY: plain fields of parameters this owns alone.
+        let raw = unsafe { &mut *parameters.as_mut_ptr() };
+        for nal in annex_b(sets) {
+            match self.announced.codec {
+                ffmpeg::codec::Id::H264 if nal.first().map(|b| b & 0x1f) == Some(7) => {
+                    let Some(sequence) = h264_sequence(nal) else {
+                        continue;
+                    };
+                    raw.width = sequence.shape.width as i32;
+                    raw.height = sequence.shape.height as i32;
+                    raw.video_delay = sequence.reorder as i32;
+                    if let Some((primaries, transfer, matrix, full)) = sequence.colour {
+                        colour(raw, primaries, transfer, matrix, full);
+                    }
+                    if let Some((units, scale)) = sequence.timing {
+                        self.frame_rate = Some(ffmpeg::Rational::new(
+                            i32::try_from(scale).unwrap_or(i32::MAX),
+                            i32::try_from(2 * u64::from(units)).unwrap_or(i32::MAX),
+                        ));
+                    }
+                    return true;
+                }
+                ffmpeg::codec::Id::HEVC if nal.first().map(|b| (b >> 1) & 0x3f) == Some(33) => {
+                    let Some(sequence) = hevc_sequence(nal) else {
+                        continue;
+                    };
+                    raw.width = sequence.shape.width as i32;
+                    raw.height = sequence.shape.height as i32;
+                    raw.video_delay = sequence.reorder as i32;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn stream(self) -> StreamInfo {
+        let stream = StreamInfo::new(self.parameters, self.announced.time_base());
+        match self.frame_rate {
+            Some(rate) => stream.with_frame_rate(rate),
+            None => stream,
+        }
+    }
+}
+
+/// Puts an H.264 VUI's colour description into `raw`, as far as FFmpeg
+/// names its values.
+fn colour(
+    raw: &mut ffmpeg::ffi::AVCodecParameters,
+    primaries: u8,
+    transfer: u8,
+    matrix: u8,
+    full: bool,
+) {
+    use ffmpeg::color::{Primaries, Range, Space, TransferCharacteristic};
+    let primaries = match primaries {
+        1 => Some(Primaries::BT709),
+        4 => Some(Primaries::BT470M),
+        5 => Some(Primaries::BT470BG),
+        6 => Some(Primaries::SMPTE170M),
+        7 => Some(Primaries::SMPTE240M),
+        8 => Some(Primaries::Film),
+        9 => Some(Primaries::BT2020),
+        10 => Some(Primaries::SMPTE428),
+        11 => Some(Primaries::SMPTE431),
+        12 => Some(Primaries::SMPTE432),
+        22 => Some(Primaries::JEDEC_P22),
+        _ => None,
+    };
+    let transfer = match transfer {
+        1 => Some(TransferCharacteristic::BT709),
+        4 => Some(TransferCharacteristic::GAMMA22),
+        5 => Some(TransferCharacteristic::GAMMA28),
+        6 => Some(TransferCharacteristic::SMPTE170M),
+        7 => Some(TransferCharacteristic::SMPTE240M),
+        8 => Some(TransferCharacteristic::Linear),
+        9 => Some(TransferCharacteristic::Log),
+        10 => Some(TransferCharacteristic::LogSqrt),
+        11 => Some(TransferCharacteristic::IEC61966_2_4),
+        12 => Some(TransferCharacteristic::BT1361_ECG),
+        13 => Some(TransferCharacteristic::IEC61966_2_1),
+        14 => Some(TransferCharacteristic::BT2020_10),
+        15 => Some(TransferCharacteristic::BT2020_12),
+        16 => Some(TransferCharacteristic::SMPTE2084),
+        17 => Some(TransferCharacteristic::SMPTE428),
+        18 => Some(TransferCharacteristic::ARIB_STD_B67),
+        _ => None,
+    };
+    let space = match matrix {
+        0 => Some(Space::RGB),
+        1 => Some(Space::BT709),
+        4 => Some(Space::FCC),
+        5 => Some(Space::BT470BG),
+        6 => Some(Space::SMPTE170M),
+        7 => Some(Space::SMPTE240M),
+        8 => Some(Space::YCGCO),
+        9 => Some(Space::BT2020NCL),
+        10 => Some(Space::BT2020CL),
+        11 => Some(Space::SMPTE2085),
+        12 => Some(Space::ChromaDerivedNCL),
+        13 => Some(Space::ChromaDerivedCL),
+        14 => Some(Space::ICTCP),
+        _ => None,
+    };
+    if let Some(primaries) = primaries {
+        raw.color_primaries = primaries.into();
+    }
+    if let Some(transfer) = transfer {
+        raw.color_trc = transfer.into();
+    }
+    if let Some(space) = space {
+        raw.color_space = space.into();
+    }
+    raw.color_range = if full { Range::JPEG } else { Range::MPEG }.into();
 }
 
 impl Source for Reading {
@@ -537,7 +666,7 @@ impl Source for Reading {
         true
     }
 
-    /// One per stream the server advertised, at the stream's own index.
+    /// One per stream the session delivers, at the stream's own index.
     fn outputs(&self) -> Option<Vec<SrcPad>> {
         Some(
             self.contracts
@@ -548,79 +677,42 @@ impl Source for Reading {
         )
     }
 
-    /// The next packet the session delivers, on its stream's output, or
-    /// nothing for a stream it has no output for.
+    /// The next packet the session delivers, on its stream's output — what
+    /// came while the streams were probed first.
     ///
-    /// Waits inside the read, which the connection's own timeout bounds —
-    /// see [`RtspOptions::timeout`], and [`RtspListenOptions::timeout`] for
-    /// a received session — rather than through `wait`: a `Stop` reaches
-    /// this source between reads, at most that long after it is sent.
-    fn produce(&mut self, _wait: &mut Wait<'_>) -> Result<Produced> {
-        if let Some(listening) = &self.listening {
-            listening.interrupt.arm(listening.timeout);
-        }
-        let mut packet = ffmpeg::Packet::empty();
-        match packet.read(&mut self.input) {
-            Ok(()) => {
-                let index = packet.stream();
-                // A stream the session started after it was opened has no
-                // output to go on — `FileDemuxer` passes such a one over
-                // the same way.
-                if index >= self.contracts.len() {
-                    return Ok(Produced::Nothing);
-                }
-                // FFmpeg does not guarantee a demuxer fills
-                // `AVPacket::time_base`, and the packet contract is that
-                // one carries it — what a decoder downstream hands on to
-                // its frames, and a `Pacer` paces by. Same as
-                // `FileDemuxer`'s.
-                if let Some(time_base) = self.stream(index).map(|stream| stream.time_base()) {
-                    packet.set_time_base(time_base);
-                }
-                Ok(Produced::On(
-                    index,
-                    MediaBuffer::Packet(Arc::new(packet).into()),
-                ))
-            }
-            // A real on-demand RTSP stream can send a clean EOF; a
-            // live camera essentially never will, but treat it the
-            // same way `FileDemuxer` treats running out of packets.
-            Err(ffmpeg::Error::Eof) => Ok(Produced::End),
-            // Anything else (connection reset, socket timeout, ...) is
-            // fatal — reported and this thread ends, rather than
-            // retried. See this type's own docs on why: retrying
-            // belongs to whoever's watching the bus, building a fresh
-            // `RtspSource` to reconnect with.
-            //
-            // Except in a received session, where a read the interrupt
-            // cut short is the publisher gone silent, and a reset
-            // connection the publisher's close — see this type's "How a
-            // received session ends".
-            Err(error) => match &self.listening {
-                Some(listening) if listening.interrupt.fired() => {
-                    pp_error!(
-                        self,
-                        "the publisher sent nothing for {:?}",
-                        listening.timeout
-                    );
-                    Err(RtspSourceError::PublisherSilent(listening.timeout).into())
-                }
-                Some(_) => match connection_closed(error) {
-                    Some(closed) => {
-                        pp_info!(self, "the publisher closed its connection: {closed}");
-                        Ok(Produced::End)
-                    }
-                    None => {
-                        pp_error!(self, "read failed: {error}");
-                        Err(RtspSourceError::Ffmpeg(error).into())
-                    }
-                },
-                None => {
-                    pp_error!(self, "read failed: {error}");
-                    Err(RtspSourceError::Ffmpeg(error).into())
-                }
+    /// Waits through `wait`, so a pause or a stop is answered at once; how
+    /// long the session may deliver nothing is the reading threads' to
+    /// tell, as [`RtspSourceError::ServerSilent`] or
+    /// [`RtspSourceError::PublisherSilent`].
+    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
+        let item = match self.held.pop_front() {
+            Some(item) => item,
+            None => match wait.recv(&self.rx) {
+                Received::Got(item) => item,
+                Received::LetGo => return Ok(Produced::Nothing),
+                Received::Gone => return Ok(Produced::End),
             },
+        };
+        match item {
+            Item::Packet(index, packet) => Ok(Produced::On(
+                index,
+                MediaBuffer::Packet(Arc::new(packet).into()),
+            )),
+            Item::End => {
+                pp_info!(self, "the session ended");
+                Ok(Produced::End)
+            }
+            Item::Failed(error) => {
+                pp_error!(self, "the session failed: {error}");
+                Err(error.into())
+            }
         }
+    }
+
+    /// Tears the session down where this source asked for it, and waits for
+    /// its threads.
+    fn stopping(&mut self) {
+        self.reader.stop();
     }
 
     fn attached(&mut self, cx: &Attached<'_>) {
@@ -635,8 +727,8 @@ mod tests {
     use super::*;
 
     /// `RtspOptions::timeout`'s whole reason for existing: without it
-    /// ffmpeg applies *no* timeout at all and `open` blocks forever against
-    /// a server that never answers. `192.0.2.1` is RFC 5737 TEST-NET-1,
+    /// a connection to a server that never answers waits for the OS's own
+    /// connect timeout, far longer. `192.0.2.1` is RFC 5737 TEST-NET-1,
     /// reserved for documentation and guaranteed not to be routed, so this
     /// exercises the "no answer" path rather than a fast connection refusal.
     ///
@@ -662,80 +754,13 @@ mod tests {
         );
         assert!(
             elapsed < Duration::from_secs(10),
-            "open took {elapsed:?} — the configured timeout is not reaching ffmpeg"
+            "open took {elapsed:?} — the configured timeout is not bounding the connection"
         );
-    }
-
-    /// Each stream's packets go out on that stream's own output, carrying
-    /// its time base, and a clean end of the session ends every output.
-    /// Read from a file, which FFmpeg opens as it would a session: no
-    /// server is needed to see how the source hands on what it reads.
-    #[test]
-    fn each_stream_goes_out_on_its_own_output_and_the_end_ends_them_all() {
-        use std::sync::{Mutex, atomic::AtomicUsize, atomic::Ordering};
-
-        use crate::{elements::AppSink, pipeline::Pipeline, stream::StreamEvent};
-
-        let Some(path) = crate::test_support::try_test_video() else {
-            return;
-        };
-        let (source, streams) =
-            RtspSource::open("rtsp", &path, RtspOptions::default()).expect("open the fixture");
-        let kinds: Vec<_> = streams.iter().map(|stream| stream.kind()).collect();
-        let seen: Arc<Vec<Mutex<Vec<ffmpeg::Rational>>>> =
-            Arc::new(streams.iter().map(|_| Mutex::default()).collect());
-        let ends = Arc::new(AtomicUsize::new(0));
-        let (pipeline, ()) = Pipeline::new("rtsp", source, |source, ctx| {
-            for output in 0..kinds.len() {
-                let sink = AppSink::with_events(
-                    format!("stream-{output}"),
-                    {
-                        let seen = Arc::clone(&seen);
-                        move |buffer| {
-                            if let MediaBuffer::Packet(packet) = buffer {
-                                seen[output].lock().unwrap().push(packet.time_base());
-                            }
-                            Ok(())
-                        }
-                    },
-                    {
-                        let ends = Arc::clone(&ends);
-                        move |event: &StreamEvent| {
-                            if let StreamEvent::Eos = event {
-                                ends.fetch_add(1, Ordering::SeqCst);
-                            }
-                            Ok(())
-                        }
-                    },
-                );
-                let branch = ctx.branch().to(sink)?;
-                ctx.attach(source, output, branch)?;
-            }
-            Ok(())
-        })
-        .expect("wire every stream");
-        pipeline.run().expect("run");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while ends.load(Ordering::SeqCst) < kinds.len() {
-            assert!(Instant::now() < deadline, "not every output ended");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        pipeline.stop();
-
-        for (output, stream) in streams.iter().enumerate() {
-            let seen = seen[output].lock().unwrap();
-            assert!(!seen.is_empty(), "stream {output} handed nothing on");
-            assert!(
-                seen.iter()
-                    .all(|&time_base| time_base == stream.time_base()),
-                "stream {output}'s packets carry its time base"
-            );
-        }
     }
 
     /// A caller that never touches `RtspOptions` still has to get a bounded
     /// `open`, since the default this type supplies is the only thing
-    /// standing between them and ffmpeg's unbounded one.
+    /// standing between them and the OS's own.
     #[test]
     fn the_default_options_still_bound_the_connection() {
         let options = RtspOptions::default();
@@ -743,7 +768,7 @@ mod tests {
         assert_eq!(options.transport, crate::elements::RtspTransport::Tcp);
         assert!(
             options.timeout > Duration::ZERO,
-            "the default timeout must not be ffmpeg's unbounded one"
+            "the default timeout must not be unbounded"
         );
     }
 

@@ -1,5 +1,6 @@
-//! The server against FFmpeg's own RTSP client — `RtspSource::open` — and
-//! against requests written by hand, on this machine's loopback alone.
+//! The server against this crate's own RTSP client — `RtspSource::open` —
+//! FFmpeg's RTSP muxer, and requests written by hand, on this machine's
+//! loopback alone.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -283,7 +284,7 @@ fn players_go_on_when_the_input_is_published_again() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    // FFmpeg's RTSP client hands its first packet on unstamped.
+    // A packet with no time is passed over, wherever a client gives one.
     let packets: Vec<(i64, bool)> = player
         .packets(video)
         .into_iter()
@@ -897,7 +898,8 @@ fn a_server_that_authorizes_asks_for_credentials_first() {
     runner.stop();
 }
 
-/// FFmpeg's RTSP client and muxer, given `rtsp://user:password@…`, answer
+/// This crate's RTSP client and FFmpeg's muxer, given
+/// `rtsp://user:password@…`, answer
 /// the 401 with them, and play and publish as anyone would; without, or
 /// as the wrong user, they are refused.
 #[test]
@@ -975,9 +977,12 @@ fn a_digest_response_answers_this_connections_challenge_alone() {
             .to_owned()
     };
     let answer = |nonce: &str| {
-        let ha1 = super::digest::md5_hex(format!("viewer:{}:pw", super::digest::REALM).as_bytes());
-        let ha2 = super::digest::md5_hex(format!("DESCRIBE:{url}").as_bytes());
-        let response = super::digest::md5_hex(format!("{ha1}:{nonce}:{ha2}").as_bytes());
+        let ha1 = crate::elements::rtsp::digest::md5_hex(
+            format!("viewer:{}:pw", super::digest::REALM).as_bytes(),
+        );
+        let ha2 = crate::elements::rtsp::digest::md5_hex(format!("DESCRIBE:{url}").as_bytes());
+        let response =
+            crate::elements::rtsp::digest::md5_hex(format!("{ha1}:{nonce}:{ha2}").as_bytes());
         format!(
             "DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\nAuthorization: Digest username=\"viewer\", realm=\"{}\", nonce=\"{nonce}\", uri=\"{url}\", response=\"{response}\"\r\n\r\n",
             super::digest::REALM
@@ -1146,15 +1151,29 @@ fn a_camera_that_changes_its_picture_size_decodes_on_through_the_server() {
 
 /// What FFmpeg's client probes of a stream with B-frames says so: what a
 /// relay serving it to WebRTC players, which cannot take them, goes by.
+/// A stream with B-frames, played: probed as one that reorders, and every
+/// picture handed on with a decoding time no later than its showing and
+/// later than the last — what RTP does not carry, read from the stream.
+/// For each encoder of B-frames this FFmpeg has: x264, kvazaar, x265.
 #[test]
 fn a_player_is_told_a_stream_reorders_its_pictures() {
-    use crate::elements::{
-        SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource, VideoCodec,
-    };
+    use crate::elements::VideoCodec;
+    let mut played = 0;
+    for codec in [VideoCodec::H264, VideoCodec::Kvazaar, VideoCodec::H265] {
+        played += usize::from(plays_reordered(codec));
+    }
+    if played == 0 {
+        eprintln!("skipping: no encoder of B-frames in this FFmpeg");
+    }
+}
+
+/// Whether `codec`'s encoder opened, and its stream played as it should.
+fn plays_reordered(codec: crate::elements::VideoCodec) -> bool {
+    use crate::elements::{SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource};
     let Ok(encoder) = SwEncoder::new(
         "encoder",
         SwEncoderOptions {
-            codec: VideoCodec::H264,
+            codec,
             width: 320,
             height: 240,
             pixel_format: ffmpeg::format::Pixel::YUV420P,
@@ -1164,8 +1183,7 @@ fn a_player_is_told_a_stream_reorders_its_pictures() {
             max_b_frames: Some(2),
         },
     ) else {
-        eprintln!("skipping: no libx264 in this FFmpeg");
-        return;
+        return false;
     };
     let (runner, handle, broadcast) = server(false);
     let sink = broadcast
@@ -1189,11 +1207,46 @@ fn a_player_is_told_a_stream_reorders_its_pictures() {
     camera.run().unwrap();
 
     let player = play(&handle.url("cam"), RtspTransport::Tcp);
-    assert!(player.streams[0].reorders(), "probed as reordering");
-    player.wait_for(25);
+    assert!(
+        player.streams[0].reorders(),
+        "{codec:?}: probed as reordering"
+    );
+    player.wait_for(60);
     player.pipeline.stop();
     camera.stop();
     runner.stop();
+
+    let times: Vec<(i64, i64)> = player.received[0]
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|buf| match buf {
+            MediaBuffer::Packet(packet) => (packet.pts().unwrap(), packet.dts().unwrap()),
+            _ => panic!("an RTSP player is handed packets"),
+        })
+        .collect();
+    assert!(
+        times.windows(2).any(|w| w[1].0 < w[0].0),
+        "{codec:?}: pictures come out of the order they are shown: {times:?}"
+    );
+    for (n, window) in times.windows(2).enumerate() {
+        assert!(
+            window[1].1 > window[0].1,
+            "{codec:?}: decoded in order at {n}: {times:?}"
+        );
+    }
+    assert!(
+        times.iter().all(|(pts, dts)| dts <= pts),
+        "{codec:?}: none decoded after it is shown: {times:?}"
+    );
+    // Evenly spaced, as the pictures are, once the first has shown how far
+    // apart they are.
+    let frame = 90_000 / 25;
+    assert!(
+        times[2..].windows(2).all(|w| w[1].1 - w[0].1 == frame),
+        "{codec:?}: decoded a picture apart: {times:?}"
+    );
+    true
 }
 
 /// What a player is sent is what RTP carries here: a camera's codecs, and

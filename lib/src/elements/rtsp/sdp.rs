@@ -1,9 +1,12 @@
-//! What a publisher announces: its SDP read into tracks this server can
-//! take.
+//! A session description — what a publisher announces, what a server
+//! describes — read into the tracks this crate can take apart.
 
 use std::collections::HashMap;
 
 use ffmpeg_next::{self as ffmpeg, ffi};
+
+use super::depacketize::{key_unit, nal_units};
+use crate::elements::parameters::{picture_size, set_extradata};
 
 /// What a track's payloads are, as far as taking them apart goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +80,57 @@ impl Announced {
     pub(crate) fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational(1, i32::try_from(self.clock_rate).unwrap_or(90_000).max(1))
     }
+
+    /// Completes a picture track's `parameters` from its first keyframe:
+    /// its size, read by FFmpeg's parser, and its parameter sets where the
+    /// description gave none. Whether the size was found.
+    pub(crate) fn complete(
+        &self,
+        parameters: &mut ffmpeg::codec::Parameters,
+        key: &ffmpeg::Packet,
+    ) -> bool {
+        let Some(unit) = key.data() else {
+            return false;
+        };
+        let h265 = self.payload == Payload::H265;
+        if !matches!(self.payload, Payload::H264 | Payload::H265) || !key_unit(unit, h265) {
+            return false;
+        }
+        let mut extradata = self.extradata.clone();
+        if extradata.is_empty() {
+            // Parameter sets sent only in band: kept from the keyframe.
+            for nal in nal_units(unit) {
+                let kind = if h265 {
+                    (nal[0] >> 1) & 0x3f
+                } else {
+                    nal[0] & 0x1f
+                };
+                let parameter_set = if h265 {
+                    (32..=34).contains(&kind)
+                } else {
+                    kind == 7 || kind == 8
+                };
+                if parameter_set {
+                    extradata.extend_from_slice(&[0, 0, 0, 1]);
+                    extradata.extend_from_slice(nal);
+                }
+            }
+            if !extradata.is_empty() {
+                set_extradata(parameters, &extradata);
+            }
+        }
+        let mut stream = extradata;
+        stream.extend_from_slice(unit);
+        let Some((width, height)) = picture_size(self.codec, &[], &stream) else {
+            return false;
+        };
+        // SAFETY: parameters this recording owns alone; plain fields.
+        unsafe {
+            (*parameters.as_mut_ptr()).width = width;
+            (*parameters.as_mut_ptr()).height = height;
+        }
+        true
+    }
 }
 
 /// Why an announcement cannot be taken.
@@ -88,28 +142,66 @@ pub(crate) enum Refused {
     Unsupported(String),
 }
 
-/// The tracks `sdp` announces, in its order.
+/// The tracks `sdp` announces, in its order — refused whole where one of
+/// them cannot be taken, as a server refuses a publisher that would send
+/// what it cannot keep.
 pub(crate) fn parse(sdp: &str) -> Result<Vec<Announced>, Refused> {
+    describe(sdp)?.tracks.into_iter().collect()
+}
+
+/// A description as a client reads it: every media section, each taken or
+/// refused on its own — a camera's metadata track beside its pictures is
+/// left out, not a reason to play nothing — and the session's own control
+/// URL, where it gives one.
+pub(crate) struct Description {
+    pub(crate) control: Option<String>,
+    pub(crate) tracks: Vec<Result<Announced, Refused>>,
+}
+
+/// `sdp` read section by section; [`Refused::Malformed`] only where it
+/// has no media section at all.
+pub(crate) fn describe(sdp: &str) -> Result<Description, Refused> {
+    let mut control = None;
     let mut tracks = Vec::new();
-    let mut current: Option<Section> = None;
+    let mut current: Option<Result<Section, Refused>> = None;
     for line in sdp.lines().map(str::trim) {
         if let Some(media) = line.strip_prefix("m=") {
             if let Some(section) = current.take() {
-                tracks.push(section.finish()?);
+                tracks.push(section.and_then(Section::finish));
             }
-            current = Some(Section::new(media)?);
-        } else if let (Some(section), Some(attribute)) = (current.as_mut(), line.strip_prefix("a="))
-        {
-            section.attribute(attribute);
+            current = Some(Section::new(media));
+        } else if let Some(attribute) = line.strip_prefix("a=") {
+            match current.as_mut() {
+                Some(Ok(section)) => section.attribute(attribute),
+                Some(Err(_)) => {}
+                None => {
+                    if let Some(session) = attribute.strip_prefix("control:") {
+                        control = Some(session.trim().to_owned());
+                    }
+                }
+            }
         }
     }
     if let Some(section) = current.take() {
-        tracks.push(section.finish()?);
+        tracks.push(section.and_then(Section::finish));
     }
     if tracks.is_empty() {
         return Err(Refused::Malformed);
     }
-    Ok(tracks)
+    Ok(Description { control, tracks })
+}
+
+/// Which announced track a publisher's `SETUP` URL names, by its control
+/// URL — the only one there is where it names none.
+pub(crate) fn track_named(url: &str, tracks: &[Announced]) -> Option<usize> {
+    let url = url.trim_end_matches('/');
+    tracks
+        .iter()
+        .position(|track| {
+            let control = track.control.trim_end_matches('/');
+            !control.is_empty() && (url == control || url.ends_with(&format!("/{control}")))
+        })
+        .or_else(|| (tracks.len() == 1).then_some(0))
 }
 
 /// A media section as it is read.
@@ -348,6 +440,31 @@ mod tests {
         assert_eq!(parse("v=0\r\ns=x\r\n").unwrap_err(), Refused::Malformed);
         let g711 = parse("v=0\r\nm=audio 0 RTP/AVP 0\r\n").unwrap();
         assert_eq!(g711[0].codec, ffmpeg::codec::Id::PCM_MULAW);
+    }
+
+    /// A camera's description as a client reads it: the session's control,
+    /// and a metadata track refused beside the pictures it can take.
+    #[test]
+    fn a_client_takes_what_it_can_of_a_description() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=cam\r\na=control:rtsp://10.0.0.1/live/\r\n\
+                   m=video 0 RTP/AVP 96\r\na=rtpmap:96 H265/90000\r\na=control:trackID=1\r\n\
+                   m=application 0 RTP/AVP 107\r\na=rtpmap:107 vnd.onvif.metadata/90000\r\na=control:trackID=3\r\n";
+        let description = describe(sdp).unwrap();
+        assert_eq!(
+            description.control.as_deref(),
+            Some("rtsp://10.0.0.1/live/")
+        );
+        assert_eq!(description.tracks.len(), 2);
+        let video = description.tracks[0].as_ref().unwrap();
+        assert_eq!(
+            (video.codec, video.control.as_str()),
+            (ffmpeg::codec::Id::HEVC, "trackID=1")
+        );
+        assert!(matches!(
+            description.tracks[1],
+            Err(Refused::Unsupported(_))
+        ));
+        assert!(parse(sdp).is_err(), "a server refuses the whole of it");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use ffmpeg_next as ffmpeg;
 
-use super::announce::Payload;
+use super::sdp::Payload;
 
 /// One RTP packet's header, read.
 struct Header {

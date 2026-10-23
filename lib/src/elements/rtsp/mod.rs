@@ -1,3 +1,13 @@
+//! RTSP as this crate speaks it: the options a connection is made with,
+//! and what both ends of one share — messages on the wire, descriptions,
+//! RTP taken apart, authentication.
+
+pub(crate) mod depacketize;
+pub(crate) mod digest;
+pub(crate) mod dts;
+pub(crate) mod message;
+pub(crate) mod sdp;
+
 use std::time::Duration;
 
 /// Lower transport used for RTP packets negotiated through RTSP.
@@ -31,14 +41,19 @@ impl RtspTransport {
 pub struct RtspOptions {
     /// Transport used for RTSP media delivery.
     pub transport: RtspTransport,
-    /// Socket I/O timeout — ffmpeg's own `timeout` RTSP option, which
-    /// covers the connect and the handshake too, not just steady-state
-    /// reads and writes. Without it ffmpeg waits *without limit*: an open
-    /// against a server that never answers never returns.
+    /// How long the connection may take to answer — the connect, each
+    /// request of the handshake — and, once [`RtspSource`] reads a
+    /// session, how long the server may send no media before the session is
+    /// given up as [`RtspSourceError::ServerSilent`]. For an
+    /// [`RtspMuxer`](crate::elements::RtspMuxer) it is FFmpeg's own
+    /// `timeout` option, which covers its connect, its handshake and every
+    /// write.
     ///
     /// A connection the server refuses can take this long to report as
-    /// well, and reads as `timed out` rather than as refused on some
-    /// systems — Windows among them; ffmpeg's log names the refusal.
+    /// well on some systems — Windows among them.
+    ///
+    /// [`RtspSource`]: crate::elements::RtspSource
+    /// [`RtspSourceError::ServerSilent`]: crate::elements::RtspSourceError::ServerSilent
     pub timeout: Duration,
 }
 
@@ -52,7 +67,7 @@ impl Default for RtspOptions {
 }
 
 impl RtspOptions {
-    /// These options as ffmpeg's RTSP options.
+    /// These options as FFmpeg's RTSP muxer takes them.
     pub(crate) fn to_dictionary(self) -> ffmpeg_next::Dictionary<'static> {
         let mut dict = ffmpeg_next::Dictionary::new();
         dict.set("rtsp_transport", self.transport.as_ffmpeg_option());

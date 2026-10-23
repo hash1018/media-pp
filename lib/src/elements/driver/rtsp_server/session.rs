@@ -29,12 +29,12 @@ use crate::pipeline::{DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
 use super::Shared;
-use super::announce::{self, Announced};
 use super::digest::{self, RtspDigest};
-use super::message::{self, Incoming, Request, Response, Transport};
 use super::record::{Recording, Stopped};
 use super::rtp::{self, Packetizer};
 use super::track::{Delivery, Outbox, Outgoing, RtspTrackSink};
+use crate::elements::rtsp::message::{self, Incoming, Request, Response, Transport};
+use crate::elements::rtsp::sdp::{self as announce, Announced};
 
 /// How long a session lasts without a request, as the server tells its
 /// client — a session lasts as long as its connection here, so this only
@@ -293,6 +293,8 @@ pub(super) async fn serve(
                             }
                             continue;
                         }
+                        // An answer to nothing this server asked.
+                        Incoming::Reply(_) => continue,
                     };
                     let (response, after) = connection.answer(&request, &mut playing);
                     pp_debug!(
@@ -736,7 +738,7 @@ impl Connection {
         else {
             return Response::new(500);
         };
-        let Some(track) = announced_track(&request.url, tracks) else {
+        let Some(track) = announce::track_named(&request.url, tracks) else {
             return Response::new(404);
         };
         let answer = match transport {
@@ -966,18 +968,6 @@ impl Connection {
 fn default_channels(index: usize) -> (u8, u8) {
     let channel = u8::try_from(index * 2).unwrap_or(254);
     (channel, channel.saturating_add(1))
-}
-
-/// Which announced track a `SETUP` URL names, by its control URL.
-fn announced_track(url: &str, tracks: &[Announced]) -> Option<usize> {
-    let url = url.trim_end_matches('/');
-    tracks
-        .iter()
-        .position(|track| {
-            let control = track.control.trim_end_matches('/');
-            !control.is_empty() && (url == control || url.ends_with(&format!("/{control}")))
-        })
-        .or_else(|| (tracks.len() == 1).then_some(0))
 }
 
 /// What a path's broadcast describes now: its tracks, and which of them the

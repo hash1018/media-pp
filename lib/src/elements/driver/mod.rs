@@ -11,8 +11,6 @@
 
 #[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
 mod access;
-#[cfg(any(feature = "rtsp-server", feature = "rtmp-server"))]
-mod parameters;
 #[cfg(feature = "rtmp-server")]
 mod rtmp_server;
 #[cfg(feature = "rtsp-server")]

@@ -9,9 +9,8 @@ use crate::element::RawSink;
 use crate::elements::{Broadcast, BroadcastError, BroadcastSink, StreamInfo};
 use crate::error::Error;
 
-use super::announce::{Announced, Payload};
-use super::depacketize::{Depacketizer, key_unit, nal_units};
-use crate::elements::driver::parameters::{picture_size, set_extradata};
+use crate::elements::rtsp::depacketize::Depacketizer;
+use crate::elements::rtsp::sdp::Announced;
 
 /// How long a recording holds what it is sent while it waits for every
 /// picture's size, and how much — past either, it publishes without.
@@ -81,7 +80,7 @@ impl Recording {
             }
             if !self.complete[track] && packet.is_key() {
                 self.complete[track] =
-                    complete(&self.tracks[track], &mut self.parameters[track], &packet);
+                    self.tracks[track].complete(&mut self.parameters[track], &packet);
             }
             self.held.push((track, packet));
             let all = self.complete.iter().all(|complete| *complete);
@@ -125,55 +124,4 @@ impl Recording {
     pub(crate) fn published(&self) -> bool {
         self.sinks.is_some()
     }
-}
-
-/// Completes a picture track's `parameters` from its first keyframe:
-/// its size, read by FFmpeg's parser, and its parameter sets where the
-/// description gave none. Whether the size was found.
-fn complete(
-    track: &Announced,
-    parameters: &mut ffmpeg::codec::Parameters,
-    key: &ffmpeg::Packet,
-) -> bool {
-    let Some(unit) = key.data() else {
-        return false;
-    };
-    let h265 = track.payload == Payload::H265;
-    if !matches!(track.payload, Payload::H264 | Payload::H265) || !key_unit(unit, h265) {
-        return false;
-    }
-    let mut extradata = track.extradata.clone();
-    if extradata.is_empty() {
-        // Parameter sets sent only in band: kept from the keyframe.
-        for nal in nal_units(unit) {
-            let kind = if h265 {
-                (nal[0] >> 1) & 0x3f
-            } else {
-                nal[0] & 0x1f
-            };
-            let parameter_set = if h265 {
-                (32..=34).contains(&kind)
-            } else {
-                kind == 7 || kind == 8
-            };
-            if parameter_set {
-                extradata.extend_from_slice(&[0, 0, 0, 1]);
-                extradata.extend_from_slice(nal);
-            }
-        }
-        if !extradata.is_empty() {
-            set_extradata(parameters, &extradata);
-        }
-    }
-    let mut stream = extradata;
-    stream.extend_from_slice(unit);
-    let Some((width, height)) = picture_size(track.codec, &[], &stream) else {
-        return false;
-    };
-    // SAFETY: parameters this recording owns alone; plain fields.
-    unsafe {
-        (*parameters.as_mut_ptr()).width = width;
-        (*parameters.as_mut_ptr()).height = height;
-    }
-    true
 }

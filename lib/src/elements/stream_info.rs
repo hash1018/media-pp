@@ -56,7 +56,7 @@ impl StreamInfo {
     /// A picture stream received from outside FFmpeg — an RTSP or RTP
     /// client of the application's own, say — described by its codec, its
     /// configuration (`extradata`: Annex B parameter sets for H.264 and
-    /// H.265, as FFmpeg's own RTSP client gives them), its size, and the unit
+    /// H.265, as [`RtspSource`](crate::elements::RtspSource) gives them), its size, and the unit
     /// its timestamps count in.
     ///
     /// Its packets are then what this crate's sources hand on for the same
@@ -82,7 +82,7 @@ impl StreamInfo {
     /// its configuration (`extradata`: AAC's AudioSpecificConfig, nothing
     /// for G.711), its rate and channels, and the unit its timestamps count
     /// in — see [`StreamInfo::video`]. AAC's packets are raw, without ADTS
-    /// headers, as FFmpeg's own RTSP client hands them on.
+    /// headers, as [`RtspSource`](crate::elements::RtspSource) hands them on.
     pub fn audio(
         codec: ffmpeg::codec::Id,
         extradata: &[u8],

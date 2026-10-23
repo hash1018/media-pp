@@ -1,8 +1,8 @@
-//! RTSP Digest authentication (RFC 2617, as RTSP 1.0 uses it):
-//! [`RtspDigest`], and the MD5 it is computed with.
+//! RTSP Digest authentication (RFC 2617, as RTSP 1.0 uses it), as this
+//! server checks it: [`RtspDigest`].
 
-use std::collections::hash_map::RandomState;
-use std::hash::BuildHasher;
+pub(crate) use crate::elements::rtsp::digest::nonce;
+use crate::elements::rtsp::digest::{md5_hex, parameters, same};
 
 /// The realm every challenge names; a password stored as its Digest hash
 /// is hashed with it.
@@ -93,7 +93,8 @@ impl RtspDigest {
         // The URL the hash was made over names the path asked for — a
         // player's track URLs, a trailing `/`, an absolute URL or a bare path
         // alike — so that a response cannot be carried to another path.
-        if super::message::target(&uri).map(|target| target.path) != Some(path.to_owned())
+        if crate::elements::rtsp::message::target(&uri).map(|target| target.path)
+            != Some(path.to_owned())
             && uri.trim_matches('/') != path
         {
             return None;
@@ -121,118 +122,9 @@ impl std::fmt::Debug for RtspDigest {
     }
 }
 
-/// A connection's own challenge value: never the same twice, and not to be
-/// guessed from another.
-pub(crate) fn nonce() -> String {
-    let state = RandomState::new();
-    format!(
-        "{:016x}{:016x}",
-        state.hash_one(1u8),
-        state.hash_one(std::time::Instant::now())
-    )
-}
-
-/// `name=value` and `name="value"` pairs, comma-separated; a quoted value
-/// may hold a comma.
-fn parameters(text: &str) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    let mut rest = text;
-    loop {
-        rest = rest.trim_start_matches([' ', ',', '\t']);
-        let Some((name, after)) = rest.split_once('=') else {
-            return pairs;
-        };
-        let after = after.trim_start();
-        let (value, next) = if let Some(quoted) = after.strip_prefix('"') {
-            match quoted.find('"') {
-                Some(end) => (&quoted[..end], &quoted[end + 1..]),
-                None => return pairs,
-            }
-        } else {
-            let end = after.find(',').unwrap_or(after.len());
-            (after[..end].trim(), &after[end..])
-        };
-        pairs.push((name.trim().to_owned(), value.to_owned()));
-        rest = next;
-    }
-}
-
-/// Whether two strings are the same, taking as long whichever byte differs.
-fn same(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
-}
-
-pub(super) fn md5_hex(data: &[u8]) -> String {
-    md5(data).iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// MD5 (RFC 1321) — what RTSP Digest is computed with, and nothing else
-/// here: it is not used to keep anything secret on its own.
-fn md5(data: &[u8]) -> [u8; 16] {
-    const SHIFTS: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-    let constants: [u32; 64] =
-        std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32);
-    let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
-    let mut message = data.to_vec();
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&((data.len() as u64).wrapping_mul(8)).to_le_bytes());
-    for block in message.as_chunks::<64>().0 {
-        let words: [u32; 16] =
-            std::array::from_fn(|i| u32::from_le_bytes(block.as_chunks::<4>().0[i]));
-        let [mut a, mut b, mut c, mut d] = state;
-        for i in 0..64 {
-            let (f, g) = match i / 16 {
-                0 => ((b & c) | (!b & d), i),
-                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
-                2 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | !d), (7 * i) % 16),
-            };
-            let rotated = a
-                .wrapping_add(f)
-                .wrapping_add(constants[i])
-                .wrapping_add(words[g])
-                .rotate_left(SHIFTS[i]);
-            a = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(rotated);
-        }
-        for (word, add) in state.iter_mut().zip([a, b, c, d]) {
-            *word = word.wrapping_add(add);
-        }
-    }
-    let mut out = [0u8; 16];
-    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(state) {
-        *chunk = word.to_le_bytes();
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn md5_is_rfc_1321s() {
-        for (input, digest) in [
-            ("", "d41d8cd98f00b204e9800998ecf8427e"),
-            ("abc", "900150983cd24fb0d6963f7d28e17f72"),
-            ("message digest", "f96b697d7cb7938d525a2f31aaf161d0"),
-            (
-                "12345678901234567890123456789012345678901234567890123456789012345678901234567890",
-                "57edf4a22be3c955ac49da2e2107b67a",
-            ),
-        ] {
-            assert_eq!(md5_hex(input.as_bytes()), digest, "{input:?}");
-        }
-    }
 
     /// RFC 2617's own example, but in this server's realm and over RTSP:
     /// computed here as a player would, with and without `qop`.
@@ -300,11 +192,5 @@ mod tests {
             RtspDigest::parse(&header("abc123", REALM, url), "PLAY", "abc123", "live").is_none()
         );
         assert!(RtspDigest::parse("Basic dTpw", "PLAY", "abc123", "cam").is_none());
-    }
-
-    #[test]
-    fn nonces_differ() {
-        assert_ne!(nonce(), nonce());
-        assert_eq!(nonce().len(), 32);
     }
 }

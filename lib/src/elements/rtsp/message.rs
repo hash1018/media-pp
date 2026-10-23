@@ -26,17 +26,47 @@ impl Request {
     }
 
     /// The session it names, without the parameters after it.
+    #[cfg(feature = "rtsp-server")]
     pub(crate) fn session(&self) -> Option<&str> {
         self.header("Session")
             .map(|value| value.split(';').next().unwrap_or("").trim())
     }
 }
 
-/// What a connection reads: a request, or a packet sent interleaved on the
-/// connection — RTCP from a player, RTP from a publisher.
+/// One response, as a client reads it.
+#[derive(Debug)]
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
+}
+
+impl Reply {
+    /// The value of header `name`, matched without regard to case.
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every value of header `name` — a `401` may offer several schemes,
+    /// each in a `WWW-Authenticate` of its own.
+    pub(crate) fn all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.headers
+            .iter()
+            .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// What a connection reads: a request, a response, or a packet sent
+/// interleaved on the connection — RTCP from a player, RTP from a
+/// publisher or a server.
 #[derive(Debug)]
 pub(crate) enum Incoming {
     Request(Request),
+    Reply(Reply),
     Interleaved { channel: u8, data: Vec<u8> },
 }
 
@@ -77,14 +107,7 @@ pub(crate) fn parse(buf: &[u8]) -> Result<Option<(Incoming, usize)>, Malformed> 
     };
     let head = std::str::from_utf8(&buf[..end]).map_err(|_| Malformed("headers are not UTF-8"))?;
     let mut lines = head.split("\r\n");
-    let mut first = lines.next().unwrap_or("").split(' ');
-    let (Some(method), Some(url), Some(version)) = (first.next(), first.next(), first.next())
-    else {
-        return Err(Malformed("request line"));
-    };
-    if !version.starts_with("RTSP/1.") || method.is_empty() {
-        return Err(Malformed("not an RTSP/1.x request"));
-    }
+    let first = lines.next().unwrap_or("");
     let mut headers = Vec::new();
     for line in lines {
         let Some((key, value)) = line.split_once(':') else {
@@ -92,14 +115,11 @@ pub(crate) fn parse(buf: &[u8]) -> Result<Option<(Incoming, usize)>, Malformed> 
         };
         headers.push((key.trim().to_owned(), value.trim().to_owned()));
     }
-    let mut request = Request {
-        method: method.to_owned(),
-        url: url.to_owned(),
-        headers,
-        body: Vec::new(),
-    };
-    let length = match request.header("Content-Length") {
-        Some(length) => length
+    let length = match headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Content-Length"))
+    {
+        Some((_, length)) => length
             .parse::<usize>()
             .map_err(|_| Malformed("Content-Length"))?,
         None => 0,
@@ -111,8 +131,196 @@ pub(crate) fn parse(buf: &[u8]) -> Result<Option<(Incoming, usize)>, Malformed> 
     if buf.len() < start + length {
         return Ok(None);
     }
-    request.body = buf[start..start + length].to_vec();
-    Ok(Some((Incoming::Request(request), skipped + start + length)))
+    let body = buf[start..start + length].to_vec();
+    let taken = skipped + start + length;
+
+    // `RTSP/1.0 200 OK`: a response.
+    if let Some(rest) = first.strip_prefix("RTSP/1.") {
+        let status = rest
+            .split(' ')
+            .nth(1)
+            .and_then(|status| status.parse().ok())
+            .ok_or(Malformed("status line"))?;
+        return Ok(Some((
+            Incoming::Reply(Reply {
+                status,
+                headers,
+                body,
+            }),
+            taken,
+        )));
+    }
+    let mut first = first.split(' ');
+    let (Some(method), Some(url), Some(version)) = (first.next(), first.next(), first.next())
+    else {
+        return Err(Malformed("request line"));
+    };
+    if !version.starts_with("RTSP/1.") || method.is_empty() {
+        return Err(Malformed("not an RTSP/1.x request"));
+    }
+    let request = Request {
+        method: method.to_owned(),
+        url: url.to_owned(),
+        headers,
+        body,
+    };
+    Ok(Some((Incoming::Request(request), taken)))
+}
+
+/// A request to send: `method` on `url`, the `cseq`-th of its connection,
+/// with `headers` and `body`.
+pub(crate) fn request(
+    method: &str,
+    url: &str,
+    cseq: u32,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Vec<u8> {
+    let mut head = format!("{method} {url} RTSP/1.0\r\nCSeq: {cseq}\r\nUser-Agent: media-pp\r\n");
+    for (name, value) in headers {
+        let _ = write!(head, "{name}: {value}\r\n");
+    }
+    if !body.is_empty() {
+        let _ = write!(head, "Content-Length: {}\r\n", body.len());
+    }
+    head.push_str("\r\n");
+    let mut bytes = head.into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+/// An `rtsp://` URL taken apart for a client: where to connect, the URL to
+/// ask for — its credentials taken out, which go in an `Authorization`
+/// instead — and the credentials.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Address {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) url: String,
+    pub(crate) credentials: Option<(String, String)>,
+}
+
+/// `url` as a client connects to it — `rtsp://[user:password@]host[:port]/…`,
+/// port 554 by default, `%XX` escapes in the credentials decoded; `None`
+/// for what is not such a URL.
+pub(crate) fn address(url: &str) -> Option<Address> {
+    let rest = url
+        .strip_prefix("rtsp://")
+        .or_else(|| url.strip_prefix("RTSP://"))?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    let (credentials, host_port) = match authority.rfind('@') {
+        Some(at) => {
+            let (user, password) = authority[..at]
+                .split_once(':')
+                .unwrap_or((&authority[..at], ""));
+            (
+                Some((decode(user)?, decode(password)?)),
+                &authority[at + 1..],
+            )
+        }
+        None => (None, authority),
+    };
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (host, after) = bracketed.split_once(']')?;
+        let port = match after.strip_prefix(':') {
+            Some(port) => port.parse().ok()?,
+            None if after.is_empty() => 554,
+            None => return None,
+        };
+        (host.to_owned(), port)
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((host, port)) => (host.to_owned(), port.parse().ok()?),
+            None => (host_port.to_owned(), 554),
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(Address {
+        url: format!("rtsp://{host_port}{path}"),
+        host,
+        port,
+        credentials,
+    })
+}
+
+/// `text` with its `%XX` escapes decoded.
+fn decode(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut rest = text.bytes();
+    while let Some(byte) = rest.next() {
+        if byte == b'%' {
+            let high = rest.next().and_then(|digit| (digit as char).to_digit(16))?;
+            let low = rest.next().and_then(|digit| (digit as char).to_digit(16))?;
+            bytes.push((high * 16 + low) as u8);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// A track's or a session's control URL — what a description's
+/// `a=control` says — made whole against the description's base: an
+/// absolute URL as it is, `*` the base itself, anything else after it.
+pub(crate) fn resolve(base: &str, control: &str) -> String {
+    let control = control.trim();
+    if control.is_empty() || control == "*" {
+        return base.to_owned();
+    }
+    if control.contains("://") {
+        return control.to_owned();
+    }
+    let base = without_query(base);
+    if base.ends_with('/') {
+        format!("{base}{control}")
+    } else {
+        format!("{base}/{control}")
+    }
+}
+
+/// What a server's `SETUP` response says it delivers a track by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Delivery {
+    /// The channels it interleaves the track's RTP and RTCP on.
+    pub(crate) interleaved: Option<(u8, u8)>,
+    /// The ports it sends the track's RTP and RTCP from.
+    pub(crate) server_ports: Option<(u16, u16)>,
+}
+
+/// A server's `Transport` response header read.
+pub(crate) fn delivery(header: &str) -> Delivery {
+    let mut delivery = Delivery::default();
+    let spec = header.split(',').next().unwrap_or("");
+    for part in spec.split(';').map(str::trim) {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        match key.to_ascii_lowercase().as_str() {
+            "interleaved" => {
+                delivery.interleaved = pair(value)
+                    .and_then(|(a, b)| Some((u8::try_from(a).ok()?, u8::try_from(b).ok()?)));
+            }
+            "server_port" => delivery.server_ports = pair(value),
+            _ => {}
+        }
+    }
+    delivery
+}
+
+/// A `Session` response header read: the session's id, and how long the
+/// server keeps it without a request — sixty seconds where it does not
+/// say, as the standard has it.
+pub(crate) fn session(header: &str) -> (String, u64) {
+    let mut parts = header.split(';').map(str::trim);
+    let id = parts.next().unwrap_or("").to_owned();
+    let timeout = parts
+        .filter_map(|part| part.split_once('='))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("timeout"))
+        .and_then(|(_, value)| value.trim().parse().ok())
+        .filter(|timeout| *timeout > 0)
+        .unwrap_or(60);
+    (id, timeout)
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -137,6 +345,7 @@ impl Response {
         }
     }
 
+    #[cfg(feature = "rtsp-server")]
     pub(crate) fn status(&self) -> u16 {
         self.status
     }
@@ -146,6 +355,7 @@ impl Response {
         self
     }
 
+    #[cfg(feature = "rtsp-server")]
     pub(crate) fn body(mut self, content_type: &'static str, body: impl Into<Vec<u8>>) -> Self {
         self.body = body.into();
         self.header("Content-Type", content_type)
@@ -194,6 +404,7 @@ fn reason(status: u16) -> &'static str {
 
 /// A request URL taken apart: the path it names, and the track where it
 /// names one by the control URL a description gave it.
+#[cfg(feature = "rtsp-server")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Target {
     pub(crate) path: String,
@@ -202,6 +413,7 @@ pub(crate) struct Target {
 
 /// What `url` names: `rtsp://host:port/<path>[/streamid=<n>][?query]`.
 /// `None` for one that is not an `rtsp://` URL with a path.
+#[cfg(feature = "rtsp-server")]
 pub(crate) fn target(url: &str) -> Option<Target> {
     let rest = url
         .strip_prefix("rtsp://")
@@ -233,6 +445,7 @@ pub(crate) fn without_query(url: &str) -> &str {
 /// The `token` `url`'s query carries, `%XX` escapes and `+` decoded: what
 /// a player that sends no `Authorization` presents — `rtsp://h/cam?token=…`
 /// — as an RTMP publisher does in its stream name.
+#[cfg(feature = "rtsp-server")]
 pub(crate) fn query_token(url: &str) -> Option<String> {
     let query = url.split_once('?')?.1.split('#').next()?;
     let value = query
@@ -369,6 +582,7 @@ mod tests {
         assert!(parse(&vec![b'a'; MAX_HEADERS + 1]).is_err());
     }
 
+    #[cfg(feature = "rtsp-server")]
     #[test]
     fn a_url_names_its_path_and_track() {
         let t = |path: &str, track| {
@@ -385,6 +599,7 @@ mod tests {
         assert_eq!(target("http://h/cam"), None);
     }
 
+    #[cfg(feature = "rtsp-server")]
     #[test]
     fn a_url_carries_a_token_in_its_query() {
         assert_eq!(
@@ -435,6 +650,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_response_is_read_with_every_header_it_repeats() {
+        let text =
+            b"RTSP/1.0 401 Unauthorized\r\nCSeq: 3\r\nWWW-Authenticate: Digest realm=\"a\"\r\n\
+                     WWW-Authenticate: Basic realm=\"a\"\r\nContent-Length: 2\r\n\r\nhi$";
+        let (Incoming::Reply(reply), taken) = parse(text).unwrap().unwrap() else {
+            panic!("a reply");
+        };
+        assert_eq!(reply.status, 401);
+        assert_eq!(reply.header("cseq"), Some("3"));
+        assert_eq!(reply.all("www-authenticate").count(), 2);
+        assert_eq!(reply.body, b"hi");
+        assert_eq!(&text[taken..], b"$");
+    }
+
+    #[test]
+    fn a_request_is_written_with_its_sequence_and_length() {
+        let bytes = request(
+            "SETUP",
+            "rtsp://h/cam/streamid=0",
+            4,
+            &[("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")],
+            b"",
+        );
+        let (Incoming::Request(parsed), _) = parse(&bytes).unwrap().unwrap() else {
+            panic!("a request");
+        };
+        assert_eq!(parsed.method, "SETUP");
+        assert_eq!(parsed.header("CSeq"), Some("4"));
+        assert_eq!(
+            parsed.header("Transport"),
+            Some("RTP/AVP/TCP;unicast;interleaved=0-1")
+        );
+    }
+
+    #[test]
+    fn an_address_takes_its_credentials_out() {
+        assert_eq!(
+            address("rtsp://admin:p%40ss@10.0.0.1:8554/live?x=1"),
+            Some(Address {
+                host: "10.0.0.1".into(),
+                port: 8554,
+                url: "rtsp://10.0.0.1:8554/live?x=1".into(),
+                credentials: Some(("admin".into(), "p@ss".into())),
+            })
+        );
+        let plain = address("rtsp://cam.local/stream1").unwrap();
+        assert_eq!((plain.host.as_str(), plain.port), ("cam.local", 554));
+        assert_eq!(plain.credentials, None);
+        let v6 = address("rtsp://[::1]:9000/a").unwrap();
+        assert_eq!((v6.host.as_str(), v6.port), ("::1", 9000));
+        assert_eq!(address("http://h/a"), None);
+        assert_eq!(address("rtsp://h:notaport/a"), None);
+        assert_eq!(address("rtsp:///a"), None);
+    }
+
+    #[test]
+    fn a_control_url_is_made_whole_against_its_base() {
+        let base = "rtsp://h/cam/";
+        assert_eq!(resolve(base, "trackID=1"), "rtsp://h/cam/trackID=1");
+        assert_eq!(
+            resolve("rtsp://h/cam", "streamid=0"),
+            "rtsp://h/cam/streamid=0"
+        );
+        assert_eq!(resolve(base, "*"), base);
+        assert_eq!(resolve(base, "rtsp://other/t"), "rtsp://other/t");
+        assert_eq!(
+            resolve("rtsp://h/cam?token=a", "streamid=0"),
+            "rtsp://h/cam/streamid=0"
+        );
+    }
+
+    #[test]
+    fn a_delivery_and_a_session_are_read() {
+        assert_eq!(
+            delivery("RTP/AVP/TCP;unicast;interleaved=2-3;ssrc=1234"),
+            Delivery {
+                interleaved: Some((2, 3)),
+                server_ports: None
+            }
+        );
+        assert_eq!(
+            delivery("RTP/AVP;unicast;client_port=5000-5001;server_port=6970-6971"),
+            Delivery {
+                interleaved: None,
+                server_ports: Some((6970, 6971))
+            }
+        );
+        assert_eq!(session("12345678;timeout=30"), ("12345678".into(), 30));
+        assert_eq!(session("abc"), ("abc".into(), 60));
+    }
+
+    #[cfg(feature = "rtsp-server")]
     #[test]
     fn a_response_says_its_length_and_sequence() {
         let bytes = Response::new(200)

@@ -7,7 +7,7 @@ use ffmpeg_next::{self as ffmpeg, codec::Id, ffi};
 
 use crate::buffer::MediaBuffer;
 use crate::element::RawSink;
-use crate::elements::driver::parameters::{picture_size, set_extradata};
+use crate::elements::parameters::{picture_size, set_extradata};
 use crate::elements::{Broadcast, BroadcastError, BroadcastSink, StreamInfo};
 use crate::error::Error;
 
