@@ -315,7 +315,7 @@ pub(crate) fn produce_offline<C: OfflineCompositor>(
     if !settled || (end.is_none() && !fed) {
         // Asked again once anything it waits for changes, or once the
         // pipeline has something for this thread.
-        let _ = wait.recv(compositor.arrived().rings());
+        let _ = wait.rung(compositor.arrived().parks());
         return Ok(Produced::Nothing);
     }
 

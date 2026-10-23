@@ -1039,7 +1039,7 @@ impl Mixing {
         if !settled || (total.is_none() && !fed) {
             // Asked again once anything it waits for changes, or once the
             // pipeline has something for this thread.
-            let _ = wait.recv(self.shared.arrived.rings());
+            let _ = wait.rung(self.shared.arrived.parks());
             return Produced::Nothing;
         }
 

@@ -7,9 +7,8 @@ use std::{
     task::Waker,
 };
 
-use crossbeam_channel::{Receiver, Sender, bounded};
-
 use crate::buffer::MediaBuffer;
+use crate::core::bell::Bell;
 
 /// Packets one track of a connection has received, from the thread that
 /// drives the connection to the source that hands them on — on a thread of
@@ -21,15 +20,9 @@ pub(super) struct Inbox(Arc<Shared>);
 
 struct Shared {
     state: Mutex<State>,
-    bell: Arc<Bell>,
-}
-
-/// Rung at every packet and at the end, for a source waiting on a thread
-/// of its own — one for all the inboxes a source reads. A channel of one: a
-/// ring not yet answered is not lost.
-struct Bell {
-    ringer: Sender<()>,
-    bell: Receiver<()>,
+    /// Rung at every packet and at the end, for a source waiting on a
+    /// thread of its own — one for all the inboxes a source reads.
+    bell: Bell,
 }
 
 struct State {
@@ -64,21 +57,16 @@ pub(super) enum Taken {
 
 impl Inbox {
     pub(super) fn new(capacity: usize) -> Self {
-        Self::ringing(capacity, &Self::bell_of_its_own())
+        Self::ringing(capacity, &Bell::new())
     }
 
     /// `count` inboxes rung by one bell, for a source that reads them all.
     pub(super) fn group(count: usize, capacity: usize) -> Vec<Self> {
-        let bell = Self::bell_of_its_own();
+        let bell = Bell::new();
         (0..count).map(|_| Self::ringing(capacity, &bell)).collect()
     }
 
-    fn bell_of_its_own() -> Arc<Bell> {
-        let (ringer, bell) = bounded(1);
-        Arc::new(Bell { ringer, bell })
-    }
-
-    fn ringing(capacity: usize, bell: &Arc<Bell>) -> Self {
+    fn ringing(capacity: usize, bell: &Bell) -> Self {
         Self(Arc::new(Shared {
             state: Mutex::new(State {
                 queue: VecDeque::new(),
@@ -87,7 +75,7 @@ impl Inbox {
                 reader_gone: false,
                 waker: None,
             }),
-            bell: Arc::clone(bell),
+            bell: bell.clone(),
         }))
     }
 
@@ -103,7 +91,7 @@ impl Inbox {
         if let Some(waker) = waker {
             waker.wake();
         }
-        let _ = self.0.bell.ringer.try_send(());
+        self.0.bell.ring();
     }
 
     pub(super) fn push(&self, buf: MediaBuffer) -> Delivered {
@@ -156,8 +144,8 @@ impl Inbox {
 
     /// What a source on a thread of its own waits on: rung at every packet
     /// and at the end.
-    pub(super) fn bell(&self) -> &Receiver<()> {
-        &self.0.bell.bell
+    pub(crate) fn bell(&self) -> &Bell {
+        &self.0.bell
     }
 
     /// The source has gone: what is held is let go of, and nothing more
@@ -198,7 +186,7 @@ mod tests {
         assert!(matches!(inbox.take(Some(&waker)), Taken::Empty));
         assert_eq!(inbox.push(packet()), Delivered::Taken);
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
-        assert!(inbox.bell().try_recv().is_ok(), "and rings the bell");
+        assert!(inbox.bell().take(), "and rings the bell");
         assert!(matches!(inbox.take(Some(&waker)), Taken::Packet(_)));
         assert!(matches!(inbox.take(Some(&waker)), Taken::Empty));
         assert_eq!(inbox.push(packet()), Delivered::Taken);

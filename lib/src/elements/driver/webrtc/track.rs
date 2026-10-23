@@ -1058,7 +1058,7 @@ impl Source for Receiving {
                     return Ok(Produced::End);
                 }
                 Taken::Empty if waker.is_some() => return Ok(Produced::Nothing),
-                Taken::Empty => match wait.recv(self.inbox.bell()) {
+                Taken::Empty => match wait.rung(self.inbox.bell()) {
                     Received::Got(()) => {}
                     Received::LetGo | Received::Gone => return Ok(Produced::Nothing),
                 },

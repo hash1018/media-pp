@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use crate::core::bell::{Bell, Ringing, ringing};
 use crate::pp_log::{PpLog, pp_info};
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
+use crossbeam_channel::{Receiver, TrySendError};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -91,6 +92,8 @@ pub(crate) struct Receiving {
     live: bool,
     /// What the application hands over: a buffer, or `None` for the end.
     data_rx: Receiver<Option<MediaBuffer>>,
+    /// Rung by every handle as it pushes, and as it goes.
+    bell: Bell,
 }
 
 /// Pushes buffers into an [`AppSource`], and ends its stream, from any thread.
@@ -100,7 +103,7 @@ pub(crate) struct Receiving {
 #[derive(Clone)]
 pub struct AppSourceHandle {
     name: Arc<str>,
-    data_tx: Sender<Option<MediaBuffer>>,
+    data_tx: Ringing<Option<MediaBuffer>>,
 }
 
 impl AppSource {
@@ -134,7 +137,7 @@ impl AppSource {
         let name = identity.name();
         let pp_log = identity.pp_log().clone();
         pp_info!(pp_log: &pp_log, "created: capacity={capacity}");
-        let (data_tx, data_rx) = bounded(capacity);
+        let (data_tx, data_rx, bell) = ringing(capacity);
         (
             SourceStage::new(
                 identity,
@@ -143,6 +146,7 @@ impl AppSource {
                     contract,
                     live,
                     data_rx,
+                    bell,
                 },
             ),
             AppSourceHandle { name, data_tx },
@@ -199,7 +203,7 @@ impl Source for Receiving {
     /// The application's next buffer: the end of the stream where it
     /// pushed one, or where every [`AppSourceHandle`] is gone.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        Ok(match wait.recv(&self.data_rx) {
+        Ok(match wait.recv(&self.data_rx, &self.bell) {
             Received::Got(None) => {
                 pp_info!(self, "event=eos phase=source_received");
                 Produced::End

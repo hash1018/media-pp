@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use crate::core::bell::{Bell, ringing};
 use crossbeam_channel::{Receiver, bounded};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
@@ -665,7 +666,11 @@ impl Source for Capturing {
             return Err(WgcCaptureSourceError::TargetGone.into());
         }
         // A slice at a time, so a rate set while it waits is kept from then.
-        match wait.recv_until(&runtime.frame_rx, tick.until(POLL_GRANULARITY)) {
+        match wait.recv_until(
+            &runtime.frame_rx,
+            &runtime.frame_bell,
+            tick.until(POLL_GRANULARITY),
+        ) {
             Some(Received::Got(())) => {
                 // `Closed` shares this bounded wake-up channel with
                 // `FrameArrived`. Do not touch the frame pool after the
@@ -1177,6 +1182,8 @@ struct WgcRuntime {
     frame_token: Option<i64>,
     closed_token: Option<i64>,
     frame_rx: Receiver<()>,
+    /// Rung with every frame that arrives, and as the window closes.
+    frame_bell: Bell,
     closed: Arc<AtomicBool>,
     size: std::cell::Cell<SizeInt32>,
 }
@@ -1232,7 +1239,7 @@ impl WgcRuntime {
             session.SetIsCursorCaptureEnabled(false)?;
         }
 
-        let (frame_tx, frame_rx) = bounded(1);
+        let (frame_tx, frame_rx, frame_bell) = ringing(1);
         let closed = Arc::new(AtomicBool::new(false));
         let mut runtime = Self {
             target,
@@ -1245,6 +1252,7 @@ impl WgcRuntime {
             frame_token: None,
             closed_token: None,
             frame_rx,
+            frame_bell,
             closed,
             size: std::cell::Cell::new(size),
         };

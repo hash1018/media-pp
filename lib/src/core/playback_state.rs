@@ -130,26 +130,41 @@ impl Phase {
 /// yet is not lost, since the waiter finds it the next time it waits and
 /// looks again. A ring that has already been answered costs one look that
 /// finds nothing new.
+///
+/// A source waits on it parked, through [`Self::parks`]: the same ring
+/// wakes it — see [`crate::core::bell`] on why a source does not wait in a
+/// `select!`.
 #[derive(Clone)]
 pub(crate) struct Bell {
     ringer: Sender<()>,
     rings: Receiver<()>,
+    parks: crate::core::bell::Bell,
 }
 
 impl Bell {
     pub(crate) fn new() -> Self {
         let (ringer, rings) = bounded(1);
-        Self { ringer, rings }
+        Self {
+            ringer,
+            rings,
+            parks: crate::core::bell::Bell::new(),
+        }
     }
 
     /// Wakes whatever is waiting on this, or the next thing to.
     pub(crate) fn ring(&self) {
         let _ = self.ringer.try_send(());
+        self.parks.ring();
     }
 
     /// What a waiter selects on.
     pub(crate) fn rings(&self) -> &Receiver<()> {
         &self.rings
+    }
+
+    /// What a source waits on, parked: [`Wait::rung`](crate::produce::Wait).
+    pub(crate) fn parks(&self) -> &crate::core::bell::Bell {
+        &self.parks
     }
 }
 

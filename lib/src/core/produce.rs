@@ -375,10 +375,17 @@ impl Wait<'_> {
     /// [`Received::LetGo`] where the pipeline has something for this thread
     /// first, [`Received::Gone`] once every sender has been dropped.
     ///
-    /// The pipeline's request is only looked at, never taken: taking it is
-    /// the framework's, once this has let go.
-    pub(crate) fn recv<T>(&mut self, rx: &crossbeam_channel::Receiver<T>) -> Received<T> {
-        match self.receive(rx, None) {
+    /// `rx`'s senders ring `bell` with each message and as each goes: the
+    /// thread parks until one does, or the pipeline has something — see
+    /// [`crate::core::bell`] on why it does not wait in a crossbeam
+    /// `Select`. The pipeline's request is only looked at, never taken:
+    /// taking it is the framework's, once this has let go.
+    pub(crate) fn recv<T>(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<T>,
+        bell: &Bell,
+    ) -> Received<T> {
+        match self.receive(rx, bell, None) {
             Some(received) => received,
             None => unreachable!("a receive with no deadline ends only with an answer"),
         }
@@ -387,57 +394,62 @@ impl Wait<'_> {
     /// The same, giving up at `at` on [`Self::now`]'s clock: `None` once
     /// it is there with nothing received. A message already waiting when
     /// it comes is still received.
+    #[cfg(any(
+        test,
+        all(target_os = "windows", feature = "wgc-capture"),
+        all(target_os = "macos", feature = "avfoundation-capture")
+    ))]
     pub(crate) fn recv_until<T>(
         &mut self,
         rx: &crossbeam_channel::Receiver<T>,
+        bell: &Bell,
         at: Instant,
     ) -> Option<Received<T>> {
-        self.receive(rx, Some(at))
-    }
-
-    /// [`Self::recv`] of a channel whose senders ring `bell` with each
-    /// message, and when they go: parked until one does, or the pipeline
-    /// has something — see [`crate::core::bell`] on why not in a crossbeam
-    /// `Select`.
-    pub(crate) fn recv_rung<T>(
-        &mut self,
-        rx: &crossbeam_channel::Receiver<T>,
-        bell: &Bell,
-    ) -> Received<T> {
-        match self.receive_rung(rx, bell, None) {
-            Some(received) => received,
-            None => unreachable!("a receive with no deadline ends only with an answer"),
-        }
+        self.receive(rx, bell, Some(at))
     }
 
     /// Waits for `bell` to be rung, or the pipeline to have something:
     /// [`Received::Got`] for a ring — which may have nothing behind it, so
     /// the caller looks again at what rang it — and [`Received::LetGo`]
     /// for the pipeline. For a source whose input has no channel of its
-    /// own: a broadcast's reader.
+    /// own: a broadcast's reader, an inbox, what arrives at a mixer.
+    ///
+    /// Driven, it lets go at once: a source waiting so hands the poll's
+    /// waker to what it waits on.
     pub(crate) fn rung(&mut self, bell: &Bell) -> Received<()> {
-        if self.driving.is_some() {
-            return Received::LetGo;
-        }
-        let Some(control) = self.control else {
-            bell.listen();
-            std::thread::park();
-            return Received::Got(());
-        };
-        control.bell().listen();
-        bell.listen();
-        if control.has_something() {
-            return Received::LetGo;
-        }
-        std::thread::park();
-        if control.has_something() {
-            Received::LetGo
-        } else {
-            Received::Got(())
+        match self.ringing(bell, None) {
+            Some(received) => received,
+            None => unreachable!("a wait with no deadline ends only with an answer"),
         }
     }
 
-    fn receive_rung<T>(
+    /// The same, giving up at `at` on [`Self::now`]'s clock: `None` once it
+    /// is there unrung.
+    pub(crate) fn rung_until(&mut self, bell: &Bell, at: Instant) -> Option<Received<()>> {
+        self.ringing(bell, Some(at))
+    }
+
+    fn ringing(&mut self, bell: &Bell, at: Option<Instant>) -> Option<Received<()>> {
+        if self.driven(at)? {
+            return Some(Received::LetGo);
+        }
+        let control = self.control;
+        if let Some(control) = control {
+            control.bell().listen();
+        }
+        bell.listen();
+        loop {
+            if control.is_some_and(ControlReceiver::has_something) {
+                return Some(Received::LetGo);
+            }
+            if bell.take() {
+                return Some(Received::Got(()));
+            }
+            self.park(at)?;
+        }
+    }
+
+    fn receive<T>(
         &mut self,
         rx: &crossbeam_channel::Receiver<T>,
         bell: &Bell,
@@ -445,94 +457,73 @@ impl Wait<'_> {
     ) -> Option<Received<T>> {
         use crossbeam_channel::TryRecvError;
 
-        if self.driving.is_some() || self.control.is_none() {
-            return self.receive(rx, at);
+        let take = || match rx.try_recv() {
+            Ok(got) => Some(Received::Got(got)),
+            Err(TryRecvError::Disconnected) => Some(Received::Gone),
+            Err(TryRecvError::Empty) => None,
+        };
+        // Driven, what is there now, or let go: a channel cannot wake the
+        // poll, so a source waiting on one is not drivable — see
+        // `Source::drivable` — and this only keeps it from blocking.
+        if self.driving.is_some() {
+            if let Some(received) = take() {
+                return Some(received);
+            }
+            self.driven(at)?;
+            return Some(Received::LetGo);
         }
-        let control = self.control?;
-        control.bell().listen();
+        let control = self.control;
+        if let Some(control) = control {
+            control.bell().listen();
+        }
         bell.listen();
         loop {
-            if control.has_something() {
+            if control.is_some_and(ControlReceiver::has_something) {
                 return Some(Received::LetGo);
             }
-            match rx.try_recv() {
-                Ok(got) => return Some(Received::Got(got)),
-                Err(TryRecvError::Disconnected) => return Some(Received::Gone),
-                Err(TryRecvError::Empty) => {}
+            if let Some(received) = take() {
+                return Some(received);
             }
-            match at {
-                None => std::thread::park(),
-                Some(at) => {
-                    let left = at.saturating_duration_since(self.now());
-                    if left.is_zero() {
-                        return None;
-                    }
-                    std::thread::park_timeout(left);
-                }
+            // A ring since the look is something sent since it: looked at
+            // again before parking.
+            if !bell.take() {
+                self.park(at)?;
             }
         }
     }
 
-    fn receive<T>(
-        &mut self,
-        rx: &crossbeam_channel::Receiver<T>,
-        at: Option<Instant>,
-    ) -> Option<Received<T>> {
-        use crossbeam_channel::{RecvTimeoutError, TryRecvError};
-
-        // Driven, what is there now, or let go: a channel cannot wake the
-        // poll, so a source waiting on one is not drivable — see
-        // `Source::drivable` — and this only keeps it from blocking.
+    /// Driven, whether to let go — asking again by `at` where it is not
+    /// here yet — or `None` where it is; on a thread of its own, `false`.
+    fn driven(&mut self, at: Option<Instant>) -> Option<bool> {
         let now = self.now();
         let paused = self.paused;
-        if let Some(driving) = self.driving.as_deref_mut() {
-            return match rx.try_recv() {
-                Ok(got) => Some(Received::Got(got)),
-                Err(TryRecvError::Disconnected) => Some(Received::Gone),
-                Err(TryRecvError::Empty) => match at {
-                    Some(at) if now >= at => None,
-                    Some(at) => {
-                        driving.by(at + paused);
-                        Some(Received::LetGo)
-                    }
-                    None => Some(Received::LetGo),
-                },
-            };
-        }
-        let Some(requests) = self.control else {
-            let got = match at {
-                None => rx.recv().ok(),
-                Some(at) => match rx.recv_timeout(at.saturating_duration_since(self.now())) {
-                    Ok(got) => Some(got),
-                    Err(RecvTimeoutError::Timeout) => return None,
-                    Err(RecvTimeoutError::Disconnected) => None,
-                },
-            };
-            return Some(got.map_or(Received::Gone, Received::Got));
+        let Some(driving) = self.driving.as_deref_mut() else {
+            return Some(false);
         };
-        let mut ready = crossbeam_channel::Select::new();
-        let control = ready.recv(&requests.rx);
-        ready.recv(rx);
-        loop {
-            let index = match at {
-                None => ready.ready(),
-                Some(at) => match ready.ready_timeout(at.saturating_duration_since(self.now())) {
-                    Ok(index) => index,
-                    Err(_) if self.now() >= at => return None,
-                    Err(_) => continue,
-                },
-            };
-            if index == control {
-                return Some(Received::LetGo);
+        match at {
+            Some(at) if now >= at => None,
+            Some(at) => {
+                driving.by(at + paused);
+                Some(true)
             }
-            match rx.try_recv() {
-                Ok(got) => return Some(Received::Got(got)),
-                Err(TryRecvError::Disconnected) => return Some(Received::Gone),
-                // Taken by another receiver in between, or woken for
-                // nothing: look again.
-                Err(TryRecvError::Empty) => {}
+            None => Some(true),
+        }
+    }
+
+    /// Parks this thread until something unparks it, or until `at` on
+    /// [`Self::now`]'s clock: `None` once that has come.
+    fn park(&self, at: Option<Instant>) -> Option<()> {
+        match at {
+            None => std::thread::park(),
+            Some(at) => {
+                let left = at.saturating_duration_since(self.now());
+                if left.is_zero() {
+                    return None;
+                }
+                std::thread::park_timeout(left);
             }
         }
+        Some(())
     }
 }
 
@@ -1976,10 +1967,9 @@ mod tests {
     /// waiting even once the deadline has come, and lets go for a request
     /// the pipeline sends before either.
     #[test]
-    #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
     fn a_receive_gives_up_at_its_deadline_and_lets_go_for_a_request() {
         let (control_tx, control) = crate::control::channel();
-        let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+        let (tx, rx, bell) = crate::core::bell::ringing::<u8>(16);
         let mut wait = Wait {
             control: Some(&control),
             paused: Duration::ZERO,
@@ -1989,19 +1979,64 @@ mod tests {
 
         let asked = Instant::now();
         assert!(
-            wait.recv_until(&rx, wait.now() + Duration::from_millis(30))
+            wait.recv_until(&rx, &bell, wait.now() + Duration::from_millis(30))
                 .is_none()
         );
         assert!(asked.elapsed() >= Duration::from_millis(25));
 
         tx.send(7).unwrap();
         let past = wait.now();
-        assert!(matches!(wait.recv_until(&rx, past), Some(Received::Got(7))));
+        assert!(matches!(
+            wait.recv_until(&rx, &bell, past),
+            Some(Received::Got(7))
+        ));
 
         let _acknowledged = control_tx.enqueue(crate::control::ControlMsg::Pause);
         assert!(matches!(
-            wait.recv_until(&rx, wait.now() + Duration::from_secs(60)),
+            wait.recv_until(&rx, &bell, wait.now() + Duration::from_secs(60)),
             Some(Received::LetGo)
         ));
+    }
+
+    /// A message sent while the source is parked wakes it at once, and so
+    /// does its sender going; a bell rung by nothing else lets it wait out
+    /// its deadline.
+    #[test]
+    fn a_parked_receive_wakes_for_a_message_and_for_its_senders_going() {
+        let (_control_tx, control) = crate::control::channel();
+        let (tx, rx, bell) = crate::core::bell::ringing::<u8>(16);
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            tx.send(9).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            drop(tx);
+        });
+        let mut wait = Wait {
+            control: Some(&control),
+            paused: Duration::ZERO,
+            linked: &[],
+            driving: None,
+        };
+        let asked = Instant::now();
+        assert!(matches!(wait.recv(&rx, &bell), Received::Got(9)));
+        assert!(matches!(wait.recv(&rx, &bell), Received::Gone));
+        assert!(
+            asked.elapsed() < Duration::from_secs(5),
+            "woken, not timed out"
+        );
+        sender.join().unwrap();
+
+        let quiet = crate::core::bell::Bell::new();
+        let asked = Instant::now();
+        assert!(
+            wait.rung_until(&quiet, wait.now() + Duration::from_millis(30))
+                .is_none()
+        );
+        assert!(asked.elapsed() >= Duration::from_millis(25));
+        quiet.ring();
+        assert!(
+            matches!(wait.rung(&quiet), Received::Got(())),
+            "a ring kept for the look"
+        );
     }
 }

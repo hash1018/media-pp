@@ -13,7 +13,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crate::core::bell::{Bell, Ringing, ringing};
+use crossbeam_channel::{Receiver, TrySendError};
 use ffmpeg_next as ffmpeg;
 use objc2::{
     AnyThread, DefinedClass, define_class, msg_send,
@@ -234,7 +235,7 @@ struct Captured {
 
 /// What the capture delegate holds.
 struct DelegateIvars {
-    pictures: Sender<Captured>,
+    pictures: Ringing<Captured>,
     dropped: Arc<AtomicU64>,
 }
 
@@ -315,6 +316,8 @@ struct Capturing {
     mode: AvFoundationCaptureFormat,
     device_name: String,
     pictures: Receiver<Captured>,
+    /// Rung by the capture delegate with each picture, and as it goes.
+    bell: Bell,
     dropped: Arc<AtomicU64>,
     output: Output,
     format: VideoFormat,
@@ -427,7 +430,7 @@ impl AvFoundationCaptureSource {
             session.addInput(&input);
             session
         };
-        let (pictures_tx, pictures) = crossbeam_channel::bounded(QUEUED);
+        let (pictures_tx, pictures, bell) = ringing(QUEUED);
         let dropped = Arc::new(AtomicU64::new(0));
         let delegate = Delegate::new(DelegateIvars {
             pictures: pictures_tx,
@@ -507,6 +510,7 @@ impl AvFoundationCaptureSource {
                     mode,
                     device_name: camera.name,
                     pictures,
+                    bell,
                     dropped,
                     output,
                     format,
@@ -724,7 +728,7 @@ impl Source for Capturing {
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         self.report_dropped();
         let deadline = wait.now() + SILENT_DEVICE_CHECK;
-        match wait.recv_until(&self.pictures, deadline) {
+        match wait.recv_until(&self.pictures, &self.bell, deadline) {
             Some(Received::Got(captured)) => {
                 self.heard_from = Some(Instant::now());
                 Ok(Produced::Buffer(self.frame(captured)?))

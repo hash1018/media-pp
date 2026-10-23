@@ -7,8 +7,8 @@ use std::{
     time::Duration,
 };
 
+use crate::core::bell::Bell;
 use crate::pp_log::{PpLog, pp_info};
-use crossbeam_channel::{Receiver, Sender, bounded};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -227,7 +227,7 @@ struct Bridging {
     shared: Arc<BridgeShared>,
     /// Rung by the feeding side as it hands something over — see
     /// [`BridgeShared::wake`].
-    bell: Receiver<()>,
+    bell: Bell,
     /// Its pipeline's, for saying how many buffers were dropped.
     bus: Option<Bus>,
     /// How many drops the bus has been told of.
@@ -254,7 +254,7 @@ struct BridgeShared {
     changed: std::sync::Condvar,
     /// The bridge's own bell, rung with `changed` by what the feeding side
     /// does — see [`BridgeShared::wake`].
-    bell: Sender<()>,
+    bell: Bell,
     /// Issues a distinct identity for every `connect`, including one
     /// replacing another.
     next_connection: AtomicU64,
@@ -304,7 +304,8 @@ impl PipelineBridge {
         );
         // One ring is enough: the bridge looks at everything there is each
         // time it is woken.
-        let (bell, rung) = bounded(1);
+        let bell = Bell::new();
+        let rung = bell.clone();
         let shared = Arc::new(BridgeShared {
             state: Mutex::new(BridgeState {
                 buffers: std::collections::VecDeque::new(),
@@ -347,7 +348,7 @@ impl BridgeShared {
     /// side did, and a feeding side waiting for room.
     fn wake(&self) {
         self.changed.notify_all();
-        let _ = self.bell.try_send(());
+        self.bell.ring();
     }
 }
 
@@ -643,7 +644,7 @@ impl Source for Bridging {
         // Nothing handed over is this element's ordinary state, and the
         // pipeline has to be able to reach it in it: let go as soon as it
         // asks.
-        wait.recv(&self.bell);
+        wait.rung(&self.bell);
         Ok(Produced::Nothing)
     }
 

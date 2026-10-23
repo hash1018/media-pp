@@ -696,7 +696,7 @@ impl Source for Reading {
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         let item = match self.held.pop_front() {
             Some(item) => item,
-            None => match wait.recv_rung(&self.rx, &self.bell) {
+            None => match wait.recv(&self.rx, &self.bell) {
                 Received::Got(item) => item,
                 Received::LetGo => return Ok(Produced::Nothing),
                 Received::Gone => return Ok(Produced::End),

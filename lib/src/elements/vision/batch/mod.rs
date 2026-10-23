@@ -415,7 +415,7 @@ impl Source for Muxing {
                     true
                 } else {
                     drop(inputs);
-                    let _ = wait.recv_until(self.shared.arrived.rings(), deadline);
+                    let _ = wait.rung_until(self.shared.arrived.parks(), deadline);
                     return Ok(Produced::Nothing);
                 }
             }
@@ -433,7 +433,7 @@ impl Source for Muxing {
         };
         if !ready {
             drop(inputs);
-            let _ = wait.recv(self.shared.arrived.rings());
+            let _ = wait.rung(self.shared.arrived.parks());
             return Ok(Produced::Nothing);
         }
         let room = self.take_batch(&mut inputs);

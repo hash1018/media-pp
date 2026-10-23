@@ -10,7 +10,8 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crate::core::bell::{Bell, Ringing, ringing};
+use crossbeam_channel::{Receiver, TrySendError};
 use ffmpeg_next as ffmpeg;
 use pipewire as pw;
 use pw::{properties::properties, spa};
@@ -297,6 +298,8 @@ struct Capturing {
     /// driven by hand.
     bus: Option<Bus>,
     packets: Receiver<Packet>,
+    /// Rung by the PipeWire thread with each packet, and as it ends.
+    bell: Bell,
     /// Frames the PipeWire thread had to discard because `packets` was full.
     /// Reporting is independent of timestamps: each packet already carries
     /// its capture position, including gaps left by these discarded frames.
@@ -395,7 +398,7 @@ impl PipeWireAudioCaptureSource {
         let identity = Identity::new(ElementType::PipeWireAudioCaptureSource, &*name);
         let pp_log = identity.pp_log().clone();
 
-        let (packet_tx, packet_rx) = crossbeam_channel::bounded(PACKET_QUEUE_CAPACITY);
+        let (packet_tx, packet_rx, bell) = ringing(PACKET_QUEUE_CAPACITY);
         let dropped_frames = Arc::new(AtomicU64::new(0));
         let (startup_tx, startup_rx) = mpsc::channel::<Startup>();
         let (command_tx, command_rx) = pw::channel::channel::<Command>();
@@ -458,6 +461,7 @@ impl PipeWireAudioCaptureSource {
                     format,
                     bus: None,
                     packets: packet_rx,
+                    bell,
                     dropped_frames,
                     commands: Some(command_tx),
                     worker: Some(worker),
@@ -589,7 +593,7 @@ impl Source for Capturing {
     /// The next packet the PipeWire thread captured, as a frame stamped with
     /// where the device captured it.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        let packet = match wait.recv(&self.packets) {
+        let packet = match wait.recv(&self.packets, &self.bell) {
             Received::Got(packet) => packet,
             Received::LetGo => return Ok(Produced::Nothing),
             Received::Gone => {
@@ -657,7 +661,7 @@ fn ffmpeg_sample_format(format: spa::param::audio::AudioFormat) -> Option<ffmpeg
 /// here rather than handed across from `open`.
 fn run_pipewire(
     target: Target,
-    packets: Sender<Packet>,
+    packets: Ringing<Packet>,
     dropped_frames: Arc<AtomicU64>,
     startup: &mpsc::Sender<Startup>,
     commands: pw::channel::Receiver<Command>,

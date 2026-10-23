@@ -287,7 +287,7 @@ impl Source for Watching {
             if waker.is_some() {
                 return Ok(Produced::Nothing);
             }
-            match wait.recv(self.inboxes[0].bell()) {
+            match wait.rung(self.inboxes[0].bell()) {
                 Received::Got(()) => {}
                 Received::LetGo | Received::Gone => return Ok(Produced::Nothing),
             }
