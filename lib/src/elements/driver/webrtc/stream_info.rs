@@ -87,7 +87,10 @@ impl WebRtcStreamInfo {
             }
             Codec::Opus => {
                 let channels = audio_channels(self.codec_spec)?;
-                set_extradata(&mut parameters, &opus_head(channels))?;
+                set_extradata(
+                    &mut parameters,
+                    &crate::elements::rtsp::sdp::opus_head(channels),
+                )?;
             }
             _ => {}
         }
@@ -270,18 +273,6 @@ fn annex_b_h264_extradata(sps: &[u8], pps: &[u8]) -> Result<Vec<u8>> {
     result.extend_from_slice(&[0, 0, 0, 1]);
     result.extend_from_slice(pps);
     Ok(result)
-}
-
-fn opus_head(channels: u8) -> Vec<u8> {
-    let mut result = Vec::with_capacity(19);
-    result.extend_from_slice(b"OpusHead");
-    result.push(1);
-    result.push(channels);
-    result.extend_from_slice(&0u16.to_le_bytes());
-    result.extend_from_slice(&48_000u32.to_le_bytes());
-    result.extend_from_slice(&0i16.to_le_bytes());
-    result.push(0);
-    result
 }
 
 fn clock_rate_i32(codec_spec: CodecSpec) -> std::result::Result<i32, WebRtcError> {

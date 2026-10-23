@@ -346,7 +346,13 @@ impl Section {
             }
             "VP8" => (ffmpeg::codec::Id::VP8, Payload::Vp8, Vec::new()),
             "VP9" => (ffmpeg::codec::Id::VP9, Payload::Vp9, Vec::new()),
-            "OPUS" => (ffmpeg::codec::Id::OPUS, Payload::Whole, Vec::new()),
+            // RTP carries no Opus header; an MP4 of the track needs one, and
+            // RTP's Opus is always 48 kHz, mono or stereo (RFC 7587).
+            "OPUS" => (
+                ffmpeg::codec::Id::OPUS,
+                Payload::Whole,
+                opus_head(channels.clamp(1, 2) as u8),
+            ),
             "PCMU" => (ffmpeg::codec::Id::PCM_MULAW, Payload::Whole, Vec::new()),
             "PCMA" => (ffmpeg::codec::Id::PCM_ALAW, Payload::Whole, Vec::new()),
             other => return Err(Refused::Unsupported(other.to_owned())),
@@ -361,6 +367,21 @@ impl Section {
             extradata,
         })
     }
+}
+
+/// The Opus identification header (RFC 7845) a decoder or a container
+/// takes as Opus's configuration: `channels` channels in mapping family 0,
+/// at 48 kHz, nothing to skip and no gain.
+pub(crate) fn opus_head(channels: u8) -> Vec<u8> {
+    let mut head = Vec::with_capacity(19);
+    head.extend_from_slice(b"OpusHead");
+    head.push(1);
+    head.push(channels);
+    head.extend_from_slice(&0u16.to_le_bytes());
+    head.extend_from_slice(&48_000u32.to_le_bytes());
+    head.extend_from_slice(&0i16.to_le_bytes());
+    head.push(0);
+    head
 }
 
 /// Base64 parameter sets as Annex B: each behind a start code.
@@ -462,6 +483,13 @@ mod tests {
         assert_eq!(parse("v=0\r\ns=x\r\n").unwrap_err(), Refused::Malformed);
         let g711 = parse("v=0\r\nm=audio 0 RTP/AVP 0\r\n").unwrap();
         assert_eq!(g711[0].codec, ffmpeg::codec::Id::PCM_MULAW);
+        let opus = parse("v=0\r\nm=audio 0 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\n").unwrap();
+        assert_eq!(
+            &opus[0].extradata[..8],
+            b"OpusHead",
+            "what an MP4 of it needs"
+        );
+        assert_eq!(opus[0].extradata[9], 2);
     }
 
     /// A camera's description as a client reads it: the session's control,
