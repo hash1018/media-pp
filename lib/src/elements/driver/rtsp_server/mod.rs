@@ -244,6 +244,15 @@ impl Shared {
 }
 
 impl RtspServer {
+    /// Whether a player is sent `track`: one in a codec RTP carries here —
+    /// H.264, H.265, VP8, VP9, MJPEG, MPEG-4 and -2, AAC, Opus, MP3,
+    /// G.711, G.722 and the rest of FFmpeg's packetizers. A broadcast's track
+    /// in any other is left out of what its players are described; an
+    /// application that wants it sent converts it first.
+    pub fn carries(track: &crate::elements::StreamInfo) -> bool {
+        rtp::carries(track)
+    }
+
     /// A server listening on `addr` — `"0.0.0.0:8554"` for every interface
     /// on RTSP's own port, `"127.0.0.1:0"` for a port of the system's choice
     /// on this machine alone — and the handle that says what it serves.

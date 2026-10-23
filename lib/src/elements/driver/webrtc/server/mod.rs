@@ -465,6 +465,15 @@ impl SessionId {
 }
 
 impl WebRtcServer {
+    /// Whether a player is sent `track`: one in a codec WebRTC carries —
+    /// H.264, H.265, H.266, VP8, VP9 and AV1 pictures, Opus and G.711 sound.
+    /// A broadcast's track in any other is left out of what its players are
+    /// sent. Which of these a browser plays is the browser's: most play no
+    /// H.265, and none pictures that come out of order (B-frames).
+    pub fn carries(track: &crate::elements::StreamInfo) -> bool {
+        super::stream_info::str0m_codec(track.parameters().id()).is_some()
+    }
+
     /// A server on UDP sockets bound to `addr` — `"192.168.0.5:8189"`, or
     /// `"127.0.0.1:0"` for ports of the system's choice on this machine
     /// alone — and the handle that says what it serves.

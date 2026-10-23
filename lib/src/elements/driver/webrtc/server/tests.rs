@@ -1259,3 +1259,32 @@ fn a_whip_publisher_that_changes_its_picture_size_plays_on_through_the_server() 
         "the decoder goes on at the new size: {sizes:?}"
     );
 }
+
+/// What a player is sent is what WebRTC carries: not a camera's AAC.
+#[test]
+fn what_players_are_sent_is_what_webrtc_carries() {
+    use crate::elements::StreamInfo;
+    use ffmpeg::codec::Id;
+    let unit = ffmpeg::Rational::new(1, 90_000);
+    let video = |codec| StreamInfo::video(codec, &[], (320, 240), unit).unwrap();
+    let audio = |codec| StreamInfo::audio(codec, &[], 48_000, 2, unit).unwrap();
+    for carried in [
+        video(Id::H264),
+        video(Id::AV1),
+        audio(Id::OPUS),
+        audio(Id::PCM_MULAW),
+    ] {
+        assert!(
+            WebRtcServer::carries(&carried),
+            "{:?}",
+            carried.parameters().id()
+        );
+    }
+    for left_out in [audio(Id::AAC), video(Id::MJPEG)] {
+        assert!(
+            !WebRtcServer::carries(&left_out),
+            "{:?}",
+            left_out.parameters().id()
+        );
+    }
+}

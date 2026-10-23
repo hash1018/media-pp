@@ -392,6 +392,46 @@ pub struct HlsMuxer {
 }
 
 impl HlsMuxer {
+    /// Whether segments in `format` hold `track`: in fMP4, what FFmpeg's MP4
+    /// muxer says it writes, which [`Self::add_stream`] of anything else is
+    /// refused by when the muxer opens; in TS, the codecs FFmpeg's MPEG-TS
+    /// muxer gives a stream type of their own — H.264, H.265, MPEG-1, -2
+    /// and -4 pictures, AAC, MP2, MP3, AC-3, E-AC-3 and Opus sound — since
+    /// it writes anything else as data no player reads. Which of them an
+    /// HLS player plays is the player's: AAC is the sound every one does.
+    pub fn carries(track: &StreamInfo, format: HlsSegmentFormat) -> bool {
+        use ffmpeg::codec::Id;
+        if format == HlsSegmentFormat::MpegTs {
+            return matches!(
+                track.parameters().id(),
+                Id::H264
+                    | Id::HEVC
+                    | Id::MPEG1VIDEO
+                    | Id::MPEG2VIDEO
+                    | Id::MPEG4
+                    | Id::AAC
+                    | Id::MP2
+                    | Id::MP3
+                    | Id::AC3
+                    | Id::EAC3
+                    | Id::OPUS
+            );
+        }
+        crate::ensure_ffmpeg();
+        // SAFETY: a lookup by name, and a query of the format it found —
+        // both FFmpeg's own static data; a null format is not queried.
+        unsafe {
+            let muxer =
+                ffmpeg::ffi::av_guess_format(c"mp4".as_ptr(), std::ptr::null(), std::ptr::null());
+            !muxer.is_null()
+                && ffmpeg::ffi::avformat_query_codec(
+                    muxer,
+                    track.parameters().id().into(),
+                    ffmpeg::ffi::FF_COMPLIANCE_NORMAL,
+                ) == 1
+        }
+    }
+
     /// Allocates FFmpeg's HLS output context. Parent directories for the
     /// playlist, segment pattern, and fMP4 init file must already exist.
     pub fn create(options: HlsOptions) -> Result<Self> {
@@ -816,5 +856,38 @@ mod tests {
         drop(encoder_a);
         drop(encoder_b);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Each container's own say: fMP4 holds Opus and not G.711, TS holds
+    /// AAC and not VP8.
+    #[test]
+    fn what_a_segment_holds_is_its_containers_say() {
+        use ffmpeg::codec::Id;
+        let unit = ffmpeg::Rational::new(1, 90_000);
+        let video = |codec| StreamInfo::video(codec, &[], (320, 240), unit).unwrap();
+        let audio = |codec| StreamInfo::audio(codec, &[], 48_000, 2, unit).unwrap();
+        let fmp4 = HlsSegmentFormat::Fmp4;
+        let ts = HlsSegmentFormat::MpegTs;
+        for (track, format) in [
+            (video(Id::H264), fmp4),
+            (video(Id::HEVC), fmp4),
+            (audio(Id::AAC), fmp4),
+            (audio(Id::OPUS), fmp4),
+            (video(Id::H264), ts),
+            (audio(Id::AAC), ts),
+        ] {
+            assert!(
+                HlsMuxer::carries(&track, format),
+                "{:?} in {format:?}",
+                track.parameters().id()
+            );
+        }
+        for (track, format) in [(audio(Id::PCM_MULAW), fmp4), (video(Id::VP8), ts)] {
+            assert!(
+                !HlsMuxer::carries(&track, format),
+                "{:?} in {format:?}",
+                track.parameters().id()
+            );
+        }
     }
 }

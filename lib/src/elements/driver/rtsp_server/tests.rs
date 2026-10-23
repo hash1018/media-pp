@@ -1188,3 +1188,32 @@ fn a_player_is_told_a_stream_reorders_its_pictures() {
     camera.stop();
     runner.stop();
 }
+
+/// What a player is sent is what RTP carries here: a camera's codecs, and
+/// not AV1 or AC-3, which a WebRTC or a file input may bring.
+#[test]
+fn what_players_are_sent_is_what_rtp_carries() {
+    let unit = ffmpeg::Rational::new(1, 90_000);
+    let video = |codec| StreamInfo::video(codec, &[], (320, 240), unit).unwrap();
+    let audio = |codec| StreamInfo::audio(codec, &[], 48_000, 2, unit).unwrap();
+    use ffmpeg::codec::Id;
+    for carried in [
+        video(Id::H264),
+        video(Id::HEVC),
+        audio(Id::AAC),
+        audio(Id::OPUS),
+    ] {
+        assert!(
+            RtspServer::carries(&carried),
+            "{:?}",
+            carried.parameters().id()
+        );
+    }
+    for left_out in [video(Id::AV1), audio(Id::AC3)] {
+        assert!(
+            !RtspServer::carries(&left_out),
+            "{:?}",
+            left_out.parameters().id()
+        );
+    }
+}
