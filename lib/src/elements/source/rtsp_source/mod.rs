@@ -30,7 +30,8 @@ use crate::{
 
 use crate::elements::StreamInfo;
 
-use receive::{BACKLOG, Item, Reader, Session, Silence};
+use crate::core::bell::Bell;
+use receive::{BACKLOG, Item, Outbox, Reader, Session, Silence};
 
 /// Why an [`RtspSource`] could not connect or read.
 ///
@@ -287,6 +288,8 @@ struct Reading {
     contracts: Vec<OutputContract>,
     streams: Vec<StreamInfo>,
     rx: crossbeam_channel::Receiver<Item>,
+    /// What the session's threads ring with each item they hand on.
+    bell: Bell,
     /// What came while the streams were probed, handed on first.
     held: VecDeque<Item>,
     reader: Reader,
@@ -409,8 +412,13 @@ impl RtspSource {
     ) -> std::result::Result<(Self, Vec<StreamInfo>), RtspSourceError> {
         let pp_log = identity.pp_log().clone();
         let mut described: Vec<Described> = session.tracks.iter().map(Described::new).collect();
-        let (tx, rx) = crossbeam_channel::bounded(BACKLOG);
-        let reader = Reader::start(session, tx, silence, &pp_log)?;
+        let (items, rx) = crossbeam_channel::bounded(BACKLOG);
+        let bell = Bell::new();
+        let outbox = Outbox {
+            items,
+            bell: bell.clone(),
+        };
+        let reader = Reader::start(session, outbox, silence, &pp_log)?;
 
         // What the description leaves out, read from the first keyframes.
         let mut held = VecDeque::new();
@@ -470,6 +478,7 @@ impl RtspSource {
                     contracts,
                     streams: streams.clone(),
                     rx,
+                    bell,
                     held,
                     reader,
                 },
@@ -687,7 +696,7 @@ impl Source for Reading {
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         let item = match self.held.pop_front() {
             Some(item) => item,
-            None => match wait.recv(&self.rx) {
+            None => match wait.recv_rung(&self.rx, &self.bell) {
                 Received::Got(item) => item,
                 Received::LetGo => return Ok(Produced::Nothing),
                 Received::Gone => return Ok(Produced::End),

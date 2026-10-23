@@ -31,6 +31,9 @@ use thiserror::Error;
 
 use crate::pp_log::pp_trace;
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::core::bell::Bell;
 
 use crate::{
     bus::{Bus, BusEvent},
@@ -548,7 +551,6 @@ impl Drop for Registration {
 /// Sync`. [`crate::pipeline::Pipeline`] holds one to reach its source;
 /// [`crate::queue::Queue`] holds one internally to reach its worker
 /// thread across the thread boundary it owns.
-#[derive(Clone)]
 pub struct ControlSender {
     tx: Sender<Request>,
     /// The playback state the receiving end reads, which this moves on
@@ -556,6 +558,33 @@ pub struct ControlSender {
     /// [`channel`].
     state: Arc<PlaybackState>,
     writes_state: bool,
+    /// Rung with every request, and when a sender goes: what a source
+    /// waiting on the channel beside its own input parks on.
+    bell: Bell,
+    /// How many senders there are: none is a channel gone, which the
+    /// receiving end tells without taking anything from it.
+    senders: Arc<AtomicUsize>,
+}
+
+impl Clone for ControlSender {
+    fn clone(&self) -> Self {
+        self.senders.fetch_add(1, Ordering::AcqRel);
+        Self {
+            tx: self.tx.clone(),
+            state: Arc::clone(&self.state),
+            writes_state: self.writes_state,
+            bell: self.bell.clone(),
+            senders: Arc::clone(&self.senders),
+        }
+    }
+}
+
+impl Drop for ControlSender {
+    /// The last sender gone is something for the receiving end to see.
+    fn drop(&mut self) {
+        self.senders.fetch_sub(1, Ordering::AcqRel);
+        self.bell.ring();
+    }
 }
 
 /// The receiving half — not `Clone` in spirit (only one thing should be
@@ -567,6 +596,8 @@ pub struct ControlSender {
 pub struct ControlReceiver {
     pub(crate) rx: Receiver<Request>,
     state: Arc<PlaybackState>,
+    bell: Bell,
+    senders: Arc<AtomicUsize>,
 }
 
 /// Creates a control channel.
@@ -596,13 +627,22 @@ fn channel_sharing(
     writes_state: bool,
 ) -> (ControlSender, ControlReceiver) {
     let (tx, rx) = unbounded();
+    let bell = Bell::new();
+    let senders = Arc::new(AtomicUsize::new(1));
     (
         ControlSender {
             tx,
             state: Arc::clone(&state),
             writes_state,
+            bell: bell.clone(),
+            senders: Arc::clone(&senders),
         },
-        ControlReceiver { rx, state },
+        ControlReceiver {
+            rx,
+            state,
+            bell,
+            senders,
+        },
     )
 }
 
@@ -642,6 +682,7 @@ impl ControlSender {
                 direct: true,
             })
             .ok()?;
+        self.bell.ring();
         Some(ack_rx)
     }
 
@@ -657,6 +698,7 @@ impl ControlSender {
                 direct: true,
             })
             .ok()?;
+        self.bell.ring();
         Some(ack_rx)
     }
 
@@ -670,6 +712,7 @@ impl ControlSender {
             direct: reached_directly(),
         };
         if self.tx.send(request).is_ok() {
+            self.bell.ring();
             let _ = ack_rx.recv();
         }
     }
@@ -707,6 +750,18 @@ impl ControlReceiver {
     /// own; see [`channel`].
     pub(crate) fn state(&self) -> &Arc<PlaybackState> {
         &self.state
+    }
+
+    /// What every request, and every sender going, rings — see
+    /// [`crate::core::bell`].
+    pub(crate) fn bell(&self) -> &Bell {
+        &self.bell
+    }
+
+    /// Whether there is something for the thread receiving: a request
+    /// waiting, or every sender gone. Looks without taking.
+    pub(crate) fn has_something(&self) -> bool {
+        !self.rx.is_empty() || self.senders.load(Ordering::Acquire) == 0
     }
 }
 

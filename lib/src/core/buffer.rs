@@ -453,6 +453,54 @@ pub(crate) fn shared_packet(packet: &ffmpeg::Packet) -> ffmpeg::Packet {
     shared
 }
 
+/// A packet whose payload is `data`, taken as it is rather than copied: its
+/// buffer is `data`'s own memory, let go of with the packet's last
+/// reference.
+///
+/// For whoever builds a packet's payload itself — RTP put back together
+/// into a picture — so that the payload is made once, not made and then
+/// copied into a buffer of FFmpeg's.
+pub(crate) fn packet_from_vec(mut data: Vec<u8>) -> ffmpeg::Packet {
+    use ffmpeg::packet::Mut;
+
+    unsafe extern "C" fn free(opaque: *mut std::ffi::c_void, _data: *mut u8) {
+        // SAFETY: `opaque` is the box `packet_from_vec` leaked for this
+        // buffer, freed here once, when FFmpeg lets go of the buffer.
+        drop(unsafe { Box::from_raw(opaque.cast::<Vec<u8>>()) });
+    }
+
+    let size = data.len();
+    let Ok(length) = i32::try_from(size) else {
+        return ffmpeg::Packet::copy(&data);
+    };
+    // A decoder reads past the end, into what FFmpeg pads every payload
+    // with: zeros.
+    data.resize(size + ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize, 0);
+    let mut owned = Box::new(data);
+    let pointer = owned.as_mut_ptr();
+    let capacity = owned.len();
+    let opaque = Box::into_raw(owned);
+    // SAFETY: `pointer` is `capacity` bytes the box holds, which stays where
+    // it is until `free` drops it; FFmpeg calls `free` once, when the
+    // buffer's last reference goes.
+    let buffer = unsafe { ffi::av_buffer_create(pointer, capacity, Some(free), opaque.cast(), 0) };
+    if buffer.is_null() {
+        // SAFETY: not handed to FFmpeg: still this function's to free.
+        let data = unsafe { Box::from_raw(opaque) };
+        return ffmpeg::Packet::copy(&data[..size]);
+    }
+    let mut packet = ffmpeg::Packet::empty();
+    // SAFETY: an empty packet of this function's own takes the buffer's one
+    // reference, and its data and size are within it.
+    unsafe {
+        let raw = packet.as_mut_ptr();
+        (*raw).buf = buffer;
+        (*raw).data = pointer;
+        (*raw).size = length;
+    }
+    packet
+}
+
 /// Hands `source`'s timing to `destination`: its PTS, and the unit it is in
 /// — and which way up it is shown, the display matrix a phone's portrait
 /// recording carries ([`crate::orientation::Orientation::of`]), so that a

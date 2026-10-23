@@ -1,10 +1,9 @@
 //! Reading a broadcast into a pipeline of its own: [`BroadcastSource`].
 
+use crate::core::bell::Bell;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
-
-use crossbeam_channel::Receiver;
 
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 use crate::{
@@ -55,7 +54,7 @@ source_stage!(BroadcastSource);
 /// timeline of its own.
 pub(crate) struct Relaying {
     reader: BroadcastReader,
-    bell: Receiver<()>,
+    bell: Bell,
     broadcast: Arc<str>,
     tracks: Vec<StreamInfo>,
     timeline: Timeline,
@@ -221,7 +220,7 @@ impl Source for Relaying {
             } else if let Some(item) = self.reader.try_next() {
                 item
             } else {
-                match wait.recv(&self.bell) {
+                match wait.rung(&self.bell) {
                     Received::Got(()) => continue,
                     Received::LetGo | Received::Gone => return Ok(Produced::Nothing),
                 }

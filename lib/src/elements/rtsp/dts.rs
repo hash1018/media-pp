@@ -84,10 +84,14 @@ impl Dts {
     }
 
     /// The decoding time of the picture `unit` — one access unit, Annex B —
-    /// shown at `pts`, in the order pictures are decoded.
-    pub(crate) fn stamp(&mut self, unit: &[u8], pts: i64, clock_rate: u32) -> i64 {
-        for nal in annex_b(unit) {
-            self.parameter_set(nal, clock_rate);
+    /// shown at `pts`, in the order pictures are decoded. A keyframe's
+    /// parameter sets, where it carries them, are read for what they say
+    /// of reordering; another picture is not looked into.
+    pub(crate) fn stamp(&mut self, unit: &[u8], key: bool, pts: i64, clock_rate: u32) -> i64 {
+        if key {
+            for nal in annex_b(unit) {
+                self.parameter_set(nal, clock_rate);
+            }
         }
         if self.wait == 0 {
             self.waiting.clear();
@@ -277,7 +281,7 @@ mod tests {
             .iter()
             .map(|&shown| {
                 let pts = 1000 + shown * frame;
-                let got = dts.stamp(&picture(), pts, 90_000);
+                let got = dts.stamp(&picture(), false, pts, 90_000);
                 assert!(got <= pts, "decoded at {got}, shown at {pts}");
                 got
             })

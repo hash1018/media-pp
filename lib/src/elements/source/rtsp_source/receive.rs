@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{SendTimeoutError, Sender, TrySendError};
 use ffmpeg_next as ffmpeg;
 
+use crate::core::bell::Bell;
 use crate::elements::rtsp::depacketize::{Depacketizer, nal_units};
 use crate::elements::rtsp::dts::Dts;
 use crate::elements::rtsp::message::{self, Incoming, Request, Response};
@@ -133,7 +134,7 @@ impl Track {
         &mut self,
         index: usize,
         packets: Vec<ffmpeg::Packet>,
-        tx: &Sender<Item>,
+        tx: &Outbox,
         pp_log: &PpLog,
     ) -> bool {
         for mut packet in packets {
@@ -141,13 +142,17 @@ impl Track {
                 continue;
             }
             let pts = packet.pts().unwrap_or(0);
+            let key = packet.is_key();
             let dts = match (self.dts.as_mut(), packet.data()) {
-                (Some(dts), Some(unit)) => dts.stamp(unit, pts, self.announced.clock_rate),
+                (Some(dts), Some(unit)) => dts.stamp(unit, key, pts, self.announced.clock_rate),
                 _ => pts,
             };
             packet.set_dts(Some(dts));
-            match tx.try_send(Item::Packet(index, packet)) {
-                Ok(()) => self.losing = false,
+            match tx.items.try_send(Item::Packet(index, packet)) {
+                Ok(()) => {
+                    tx.bell.ring();
+                    self.losing = false;
+                }
                 Err(TrySendError::Full(_)) => {
                     if !self.losing {
                         pp_warn!(
@@ -176,39 +181,101 @@ fn hevc_picture(unit: &[u8]) -> Option<u8> {
         .find(|kind| *kind <= 31)
 }
 
+/// Where a session's threads hand the source what they read: the channel,
+/// and the bell its thread parks on — rung with each item, and as each
+/// thread ends, so that the source sees the channel gone.
+#[derive(Clone)]
+pub(super) struct Outbox {
+    pub(super) items: Sender<Item>,
+    pub(super) bell: Bell,
+}
+
+impl Drop for Outbox {
+    fn drop(&mut self) {
+        self.bell.ring();
+    }
+}
+
+/// How much of a connection is read at once.
+const READ_AHEAD: usize = 64 * 1024;
+
 /// A session's RTSP connection: what has been read of it, and what is
 /// taken off that a message at a time.
+///
+/// What is read goes into one buffer for the whole connection, taken from
+/// the front as each message is: nothing is cleared or moved for a packet,
+/// only what is left of a message read in part, to the front, when the
+/// buffer's end is near. A camera's RTP is most of what comes, and its
+/// packets are handed on from where they lie (`take_interleaved`).
 pub(super) struct Connection {
     pub(super) stream: TcpStream,
     buffer: Vec<u8>,
+    /// What of `buffer` has been read and not yet taken.
+    start: usize,
+    end: usize,
 }
 
 impl Connection {
     pub(super) fn new(stream: TcpStream) -> Self {
         Self {
             stream,
-            buffer: Vec::new(),
+            buffer: vec![0; READ_AHEAD],
+            start: 0,
+            end: 0,
         }
     }
 
     /// Reads what the socket has, waiting as long as its read timeout:
     /// `Ok(false)` once the peer has closed it.
     pub(super) fn fill(&mut self) -> io::Result<bool> {
-        let mut chunk = [0u8; 16 * 1024];
-        let read = self.stream.read(&mut chunk)?;
-        self.buffer.extend_from_slice(&chunk[..read]);
+        if self.start == self.end {
+            (self.start, self.end) = (0, 0);
+        } else if self.buffer.len() - self.end < READ_AHEAD / 4 {
+            // What is left of a message read in part, to the front — and
+            // room for a message larger than the buffer, where it is one.
+            self.buffer.copy_within(self.start..self.end, 0);
+            (self.start, self.end) = (0, self.end - self.start);
+            if self.buffer.len() - self.end < READ_AHEAD / 4 {
+                self.buffer.resize(self.buffer.len() * 2, 0);
+            }
+        }
+        let read = self.stream.read(&mut self.buffer[self.end..])?;
+        self.end += read;
         Ok(read > 0)
     }
 
     /// The next whole message read, if there is one.
     pub(super) fn next(&mut self) -> Result<Option<Incoming>, message::Malformed> {
-        match message::parse(&self.buffer)? {
+        match message::parse(&self.buffer[self.start..self.end])? {
             Some((incoming, taken)) => {
-                self.buffer.drain(..taken);
+                self.start += taken;
                 Ok(Some(incoming))
             }
             None => Ok(None),
         }
+    }
+
+    /// The next whole message where it is an interleaved packet: its
+    /// channel, and where its payload lies in [`Self::read`] — taken, not
+    /// copied out.
+    fn take_interleaved(&mut self) -> Option<(u8, std::ops::Range<usize>)> {
+        let read = &self.buffer[self.start..self.end];
+        if read.len() < 4 || read[0] != b'$' {
+            return None;
+        }
+        let length = usize::from(u16::from_be_bytes([read[2], read[3]]));
+        if read.len() < 4 + length {
+            return None;
+        }
+        let channel = read[1];
+        let payload = self.start + 4..self.start + 4 + length;
+        self.start += 4 + length;
+        Some((channel, payload))
+    }
+
+    /// What was read, where [`Self::take_interleaved`] says.
+    fn read(&self, at: std::ops::Range<usize>) -> &[u8] {
+        &self.buffer[at]
     }
 
     pub(super) fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -278,7 +345,7 @@ impl Reader {
     /// Starts reading `session` into `tx`.
     pub(super) fn start(
         session: Session,
-        tx: Sender<Item>,
+        tx: Outbox,
         silence: Silence,
         pp_log: &PpLog,
     ) -> io::Result<Self> {
@@ -382,7 +449,7 @@ struct Control {
     /// over UDP, none — their threads have them.
     tracks: Vec<Track>,
     channels: Vec<u8>,
-    tx: Sender<Item>,
+    tx: Outbox,
     stop: Arc<AtomicBool>,
     heard: Heard,
     silence: Silence,
@@ -392,7 +459,13 @@ struct Control {
 impl Control {
     fn run(mut self, early: Vec<(u8, Vec<u8>)>) {
         for (channel, data) in early {
-            if !self.interleaved(channel, &data) {
+            if !interleaved(
+                &mut self.tracks,
+                &self.channels,
+                (&self.tx, &self.heard, &self.pp_log),
+                channel,
+                &data,
+            ) {
                 return;
             }
         }
@@ -444,13 +517,23 @@ impl Control {
                 Err(error) => return Some(Item::Failed(RtspSourceError::Io(error))),
             }
             loop {
+                if let Some((channel, at)) = self.connection.take_interleaved() {
+                    let data = self.connection.read(at);
+                    if !interleaved(
+                        &mut self.tracks,
+                        &self.channels,
+                        (&self.tx, &self.heard, &self.pp_log),
+                        channel,
+                        data,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
                 match self.connection.next() {
                     Ok(None) => break,
-                    Ok(Some(Incoming::Interleaved { channel, data })) => {
-                        if !self.interleaved(channel, &data) {
-                            return None;
-                        }
-                    }
+                    // Read whole by `take_interleaved`, first.
+                    Ok(Some(Incoming::Interleaved { .. })) => {}
                     // A keepalive's answer: nothing waits for it.
                     Ok(Some(Incoming::Reply(reply))) => {
                         if !(200..300).contains(&reply.status) {
@@ -468,18 +551,6 @@ impl Control {
                 }
             }
         }
-    }
-
-    /// Takes one interleaved packet; `false` once the source is gone.
-    fn interleaved(&mut self, channel: u8, data: &[u8]) -> bool {
-        let Some(index) = self.channels.iter().position(|&rtp| rtp == channel) else {
-            // RTCP, or a channel no track was set up on.
-            return true;
-        };
-        self.heard.now();
-        let track = &mut self.tracks[index];
-        let packets = track.take(data);
-        track.deliver(index, packets, &self.tx, &self.pp_log)
     }
 
     /// Answers a request the peer sent; what the session ends with where
@@ -515,12 +586,31 @@ impl Control {
     }
 }
 
+/// Takes one interleaved packet into the track whose RTP comes on
+/// `channel`; `false` once the source is gone.
+fn interleaved(
+    tracks: &mut [Track],
+    channels: &[u8],
+    (tx, heard, pp_log): (&Outbox, &Heard, &PpLog),
+    channel: u8,
+    data: &[u8],
+) -> bool {
+    let Some(index) = channels.iter().position(|&rtp| rtp == channel) else {
+        // RTCP, or a channel no track was set up on.
+        return true;
+    };
+    heard.now();
+    let track = &mut tracks[index];
+    let packets = track.take(data);
+    track.deliver(index, packets, tx, pp_log)
+}
+
 /// A track's UDP thread: its RTP put back in order and taken apart.
 fn udp(
     index: usize,
     mut track: Track,
     socket: &UdpSocket,
-    tx: &Sender<Item>,
+    tx: &Outbox,
     stop: &AtomicBool,
     heard: &Heard,
     pp_log: &PpLog,
@@ -615,10 +705,14 @@ impl Reorder {
 
 /// Hands the source what the session ended with, waiting for room —
 /// but not past a stop, nor for a source that is gone.
-fn finish(tx: &Sender<Item>, mut item: Item, stop: &AtomicBool) {
+fn finish(tx: &Outbox, mut item: Item, stop: &AtomicBool) {
     loop {
-        match tx.send_timeout(item, POLL) {
-            Ok(()) | Err(SendTimeoutError::Disconnected(_)) => return,
+        match tx.items.send_timeout(item, POLL) {
+            Ok(()) => {
+                tx.bell.ring();
+                return;
+            }
+            Err(SendTimeoutError::Disconnected(_)) => return,
             Err(SendTimeoutError::Timeout(back)) => {
                 if stop.load(Ordering::Acquire) {
                     return;

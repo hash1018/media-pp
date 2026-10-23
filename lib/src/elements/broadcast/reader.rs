@@ -1,13 +1,12 @@
 //! Reading a broadcast from code of one's own: [`BroadcastReader`].
 
+use crate::core::bell::Bell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
-
-use crossbeam_channel::{Receiver, bounded};
 
 use crate::buffer::PacketBuffer;
 use crate::elements::StreamInfo;
@@ -216,13 +215,13 @@ impl BroadcastReader {
         Recv(self)
     }
 
-    /// A channel rung whenever something is written, for a reader that waits
+    /// A bell rung whenever something is written, for a reader that waits
     /// alongside other things — a [`super::BroadcastSource`] waits on it and
     /// on its pipeline together.
-    pub(super) fn bell(&mut self) -> Receiver<()> {
-        let (tx, rx) = bounded(1);
-        self.lock().add_bell(tx);
-        rx
+    pub(super) fn bell(&mut self) -> Bell {
+        let bell = Bell::new();
+        self.lock().add_bell(bell.clone());
+        bell
     }
 
     /// The next item from `state`, moving this reader on.

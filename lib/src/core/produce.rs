@@ -7,6 +7,7 @@
 //! docs/stream-events.md lists what that cost. A [`Source`] makes the next
 //! thing when asked; the framework runs the loop.
 
+use crate::core::bell::Bell;
 use std::{
     sync::Arc,
     task::Waker,
@@ -341,16 +342,18 @@ impl Wait<'_> {
             std::thread::sleep(at.saturating_duration_since(self.now()));
             return true;
         };
-        let mut ready = crossbeam_channel::Select::new();
-        ready.recv(&control.rx);
+        // Parked, and woken by the pipeline's bell: see `crate::core::bell`
+        // on why not in a crossbeam `Select`.
+        control.bell().listen();
         loop {
+            if control.has_something() {
+                return false;
+            }
             let left = at.saturating_duration_since(self.now());
             if left.is_zero() {
                 return true;
             }
-            if ready.ready_timeout(left).is_ok() {
-                return false;
-            }
+            std::thread::park_timeout(left);
         }
     }
 
@@ -390,6 +393,84 @@ impl Wait<'_> {
         at: Instant,
     ) -> Option<Received<T>> {
         self.receive(rx, Some(at))
+    }
+
+    /// [`Self::recv`] of a channel whose senders ring `bell` with each
+    /// message, and when they go: parked until one does, or the pipeline
+    /// has something — see [`crate::core::bell`] on why not in a crossbeam
+    /// `Select`.
+    pub(crate) fn recv_rung<T>(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<T>,
+        bell: &Bell,
+    ) -> Received<T> {
+        match self.receive_rung(rx, bell, None) {
+            Some(received) => received,
+            None => unreachable!("a receive with no deadline ends only with an answer"),
+        }
+    }
+
+    /// Waits for `bell` to be rung, or the pipeline to have something:
+    /// [`Received::Got`] for a ring — which may have nothing behind it, so
+    /// the caller looks again at what rang it — and [`Received::LetGo`]
+    /// for the pipeline. For a source whose input has no channel of its
+    /// own: a broadcast's reader.
+    pub(crate) fn rung(&mut self, bell: &Bell) -> Received<()> {
+        if self.driving.is_some() {
+            return Received::LetGo;
+        }
+        let Some(control) = self.control else {
+            bell.listen();
+            std::thread::park();
+            return Received::Got(());
+        };
+        control.bell().listen();
+        bell.listen();
+        if control.has_something() {
+            return Received::LetGo;
+        }
+        std::thread::park();
+        if control.has_something() {
+            Received::LetGo
+        } else {
+            Received::Got(())
+        }
+    }
+
+    fn receive_rung<T>(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<T>,
+        bell: &Bell,
+        at: Option<Instant>,
+    ) -> Option<Received<T>> {
+        use crossbeam_channel::TryRecvError;
+
+        if self.driving.is_some() || self.control.is_none() {
+            return self.receive(rx, at);
+        }
+        let control = self.control?;
+        control.bell().listen();
+        bell.listen();
+        loop {
+            if control.has_something() {
+                return Some(Received::LetGo);
+            }
+            match rx.try_recv() {
+                Ok(got) => return Some(Received::Got(got)),
+                Err(TryRecvError::Disconnected) => return Some(Received::Gone),
+                Err(TryRecvError::Empty) => {}
+            }
+            match at {
+                None => std::thread::park(),
+                Some(at) => {
+                    let left = at.saturating_duration_since(self.now());
+                    if left.is_zero() {
+                        return None;
+                    }
+                    std::thread::park_timeout(left);
+                }
+            }
+        }
     }
 
     fn receive<T>(

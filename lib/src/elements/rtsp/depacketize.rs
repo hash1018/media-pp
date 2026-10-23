@@ -55,6 +55,9 @@ pub(crate) struct Depacketizer {
     /// The access unit being gathered, in Annex B, and its timestamp.
     unit: Vec<u8>,
     unit_at: i64,
+    /// Whether the unit gathered holds a picture a decoder can start at,
+    /// as its NAL units' headers say as each is put in.
+    unit_key: bool,
     /// A NAL unit or AAC frame arriving in fragments: what has come of it.
     fragment: Option<Vec<u8>>,
     /// An AAC frame in fragments: how long it is.
@@ -71,6 +74,7 @@ impl Depacketizer {
             expected: None,
             unit: Vec::new(),
             unit_at: 0,
+            unit_key: false,
             fragment: None,
             fragment_size: 0,
             broken: false,
@@ -152,7 +156,7 @@ impl Depacketizer {
             Payload::Vp8 => frame[0] & 1 == 0,
             _ => vp9_key(&frame),
         };
-        Some(stamped(&frame, self.unit_at, key))
+        Some(stamped_owned(frame, self.unit_at, key))
     }
 
     fn unwrap(&mut self, timestamp: u32) -> i64 {
@@ -168,14 +172,22 @@ impl Depacketizer {
         if self.unit.is_empty() {
             return None;
         }
-        let key = key_unit(&self.unit, self.payload == Payload::H265);
-        let packet = stamped(&self.unit, self.unit_at, key);
+        // Copied out at its own size, padding and all, so that a packet kept
+        // a while holds no more than it carries; the unit's buffer is
+        // gathered into again.
+        let mut payload = Vec::with_capacity(size_class(
+            self.unit.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize,
+        ));
+        payload.extend_from_slice(&self.unit);
         self.unit.clear();
+        let packet = stamped_owned(payload, self.unit_at, self.unit_key);
+        self.unit_key = false;
         Some(packet)
     }
 
     fn push_nal(&mut self, nal: &[u8]) {
         if !nal.is_empty() {
+            self.unit_key |= key_nal(nal[0], self.payload == Payload::H265);
             self.unit.extend_from_slice(&[0, 0, 0, 1]);
             self.unit.extend_from_slice(nal);
         }
@@ -370,7 +382,25 @@ fn read_bits(bytes: &[u8], from: usize, count: usize) -> usize {
 }
 
 fn stamped(data: &[u8], at: i64, key: bool) -> ffmpeg::Packet {
-    let mut packet = ffmpeg::Packet::copy(data);
+    marked(ffmpeg::Packet::copy(data), at, key)
+}
+
+/// What a payload of `size` bytes is allocated as: the next power of two,
+/// from 4 KiB. The heap hands a freed block of the same size straight back,
+/// where blocks of every size a camera's pictures come in — each held a
+/// second by a broadcast — had it searching: a hundred cameras' sources
+/// spent a third of a core in the heap.
+fn size_class(size: usize) -> usize {
+    size.max(4096).next_power_of_two()
+}
+
+/// [`stamped`], taking `data` as the packet's payload rather than copying
+/// it.
+fn stamped_owned(data: Vec<u8>, at: i64, key: bool) -> ffmpeg::Packet {
+    marked(crate::buffer::packet_from_vec(data), at, key)
+}
+
+fn marked(mut packet: ffmpeg::Packet, at: i64, key: bool) -> ffmpeg::Packet {
     packet.set_pts(Some(at));
     if key {
         packet.set_flags(ffmpeg::packet::Flags::KEY);
@@ -380,11 +410,17 @@ fn stamped(data: &[u8], at: i64, key: bool) -> ffmpeg::Packet {
 
 /// Whether an Annex B access unit holds a picture a decoder can start at.
 pub(crate) fn key_unit(unit: &[u8], h265: bool) -> bool {
-    nal_units(unit).any(|nal| match (h265, nal.first()) {
-        (false, Some(&byte)) => byte & 0x1f == 5,
-        (true, Some(&byte)) => (16..=21).contains(&((byte >> 1) & 0x3f)),
-        _ => false,
-    })
+    nal_units(unit).any(|nal| nal.first().is_some_and(|&byte| key_nal(byte, h265)))
+}
+
+/// Whether a NAL unit whose first header byte is `byte` is a picture a
+/// decoder can start at: an IDR, or for H.265 any IRAP.
+fn key_nal(byte: u8, h265: bool) -> bool {
+    if h265 {
+        (16..=21).contains(&((byte >> 1) & 0x3f))
+    } else {
+        byte & 0x1f == 5
+    }
 }
 
 /// The NAL units of an Annex B stream, start codes left out.

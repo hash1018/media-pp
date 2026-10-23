@@ -3,11 +3,10 @@
 //! Kept apart from the handles so that the rules — which packets are kept,
 //! where a reader starts, when a run ends — are one place, under one lock.
 
+use crate::core::bell::Bell;
 use std::collections::VecDeque;
 use std::task::Waker;
 use std::time::{Duration, Instant};
-
-use crossbeam_channel::{Sender, TrySendError};
 
 use crate::buffer::PacketBuffer;
 use crate::elements::StreamInfo;
@@ -100,7 +99,7 @@ pub(crate) struct State {
     /// How many times [`Self::wake`] has woken them: a reader whose waker
     /// went in since the last time is still waiting in `wakers`.
     pub(crate) wakes: u64,
-    bells: Vec<Sender<()>>,
+    bells: Vec<Bell>,
 }
 
 impl State {
@@ -333,7 +332,7 @@ impl State {
         self.wakers.push(waker.clone());
     }
 
-    pub(crate) fn add_bell(&mut self, bell: Sender<()>) {
+    pub(crate) fn add_bell(&mut self, bell: Bell) {
         self.bells.push(bell);
     }
 
@@ -343,8 +342,11 @@ impl State {
         for waker in self.wakers.drain(..) {
             waker.wake();
         }
-        self.bells
-            .retain(|bell| !matches!(bell.try_send(()), Err(TrySendError::Disconnected(_))));
+        // A bell nothing else holds is a reader gone.
+        self.bells.retain(|bell| {
+            bell.ring();
+            bell.is_shared()
+        });
     }
 }
 

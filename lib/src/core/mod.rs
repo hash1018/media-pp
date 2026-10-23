@@ -19,6 +19,7 @@
 //! deliberately its own top-level module, not part of this one — those
 //! are built *on* this framework, not part of it.
 
+pub(crate) mod bell;
 pub mod buffer;
 pub mod bus;
 pub mod color;
