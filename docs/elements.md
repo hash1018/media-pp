@@ -52,7 +52,7 @@ fails.
 | | |
 |---|---|
 | Files and the network | `FileDemuxer`; `RtspSource`, from a camera or a server, or with a publisher pushing into it (`RtspSource::listen`); `WhepSource`, from any WHEP server; `WebRtcTrackSource` |
-| From your code | `AppSource`; `PipelineBridge`, from another pipeline |
+| From your code | `AppSource`; `PipelineBridge`, from another pipeline; packets of a client of your own — an RTSP client, say — described with `StreamInfo::video` or `StreamInfo::audio` and written into a `BroadcastSink` or an `AppSource` |
 | Synthetic | `TestVideoSource`, `TestAudioSource` |
 
 | | Windows | Linux | macOS |

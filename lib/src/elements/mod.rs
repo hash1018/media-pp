@@ -39,7 +39,7 @@ pub use broadcast::{
     BroadcastSource, BroadcastStats,
 };
 pub use rtsp::{RtspOptions, RtspTransport};
-pub use stream_info::StreamInfo;
+pub use stream_info::{StreamInfo, StreamInfoError};
 pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]

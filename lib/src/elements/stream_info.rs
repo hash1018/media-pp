@@ -53,6 +53,57 @@ impl StreamInfo {
         }
     }
 
+    /// A picture stream received from outside FFmpeg — an RTSP or RTP
+    /// client of the application's own, say — described by its codec, its
+    /// configuration (`extradata`: Annex B parameter sets for H.264 and
+    /// H.265, as FFmpeg's own RTSP client gives them), its size, and the unit
+    /// its timestamps count in.
+    ///
+    /// Its packets are then what this crate's sources hand on for the same
+    /// codec: H.264 and H.265 in Annex B, keyframes carrying their parameter
+    /// sets where a picture is to be joined at them.
+    pub fn video(
+        codec: ffmpeg::codec::Id,
+        extradata: &[u8],
+        (width, height): (u32, u32),
+        time_base: ffmpeg::Rational,
+    ) -> Result<Self, StreamInfoError> {
+        let mut parameters = described(codec, ffmpeg::media::Type::Video, extradata)?;
+        // SAFETY: parameters made here and owned alone; plain fields.
+        unsafe {
+            let par = parameters.as_mut_ptr();
+            (*par).width = width as i32;
+            (*par).height = height as i32;
+        }
+        Ok(Self::new(parameters, time_base))
+    }
+
+    /// A sound stream received from outside FFmpeg, described by its codec,
+    /// its configuration (`extradata`: AAC's AudioSpecificConfig, nothing
+    /// for G.711), its rate and channels, and the unit its timestamps count
+    /// in — see [`StreamInfo::video`]. AAC's packets are raw, without ADTS
+    /// headers, as FFmpeg's own RTSP client hands them on.
+    pub fn audio(
+        codec: ffmpeg::codec::Id,
+        extradata: &[u8],
+        sample_rate: u32,
+        channels: u16,
+        time_base: ffmpeg::Rational,
+    ) -> Result<Self, StreamInfoError> {
+        let mut parameters = described(codec, ffmpeg::media::Type::Audio, extradata)?;
+        // SAFETY: parameters made here and owned alone; plain fields, and
+        // the channel layout FFmpeg fills in itself.
+        unsafe {
+            let par = parameters.as_mut_ptr();
+            (*par).sample_rate = sample_rate as i32;
+            ffmpeg::ffi::av_channel_layout_default(&mut (*par).ch_layout, i32::from(channels));
+            if codec == ffmpeg::codec::Id::AAC {
+                (*par).frame_size = 1024;
+            }
+        }
+        Ok(Self::new(parameters, time_base))
+    }
+
     /// What one of a container's streams says about itself.
     pub(crate) fn of(stream: &ffmpeg::format::stream::Stream<'_>) -> Self {
         // A copy of its own. What a stream hands out shares the whole
@@ -265,6 +316,53 @@ impl StreamInfo {
     }
 }
 
+/// Why a [`StreamInfo`] could not be described by hand.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StreamInfoError {
+    /// The codec is not one of the medium asked for: sound described as a
+    /// picture, or a picture as sound.
+    #[error("{codec:?} is not a {expected:?} codec")]
+    WrongMedium {
+        /// The codec given.
+        codec: ffmpeg::codec::Id,
+        /// What it was to be.
+        expected: ffmpeg::media::Type,
+    },
+}
+
+/// Codec parameters of `codec`, a codec of `medium`, carrying `extradata`.
+fn described(
+    codec: ffmpeg::codec::Id,
+    medium: ffmpeg::media::Type,
+    extradata: &[u8],
+) -> Result<ffmpeg::codec::Parameters, StreamInfoError> {
+    if codec.medium() != medium {
+        return Err(StreamInfoError::WrongMedium {
+            codec,
+            expected: medium,
+        });
+    }
+    let mut parameters = ffmpeg::codec::Parameters::new();
+    // SAFETY: parameters made here and owned alone; plain fields, and an
+    // extradata buffer from FFmpeg's allocator with its padding, which
+    // FFmpeg frees with the parameters.
+    unsafe {
+        let par = parameters.as_mut_ptr();
+        (*par).codec_type = medium.into();
+        (*par).codec_id = codec.into();
+        if !extradata.is_empty() {
+            let size = extradata.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+            let data = ffmpeg::ffi::av_mallocz(size).cast::<u8>();
+            if !data.is_null() {
+                std::ptr::copy_nonoverlapping(extradata.as_ptr(), data, extradata.len());
+                (*par).extradata = data;
+                (*par).extradata_size = extradata.len() as i32;
+            }
+        }
+    }
+    Ok(parameters)
+}
+
 /// A copy, for whatever takes one by value: a muxer's `add_stream` given
 /// `&stream` of a demuxed stream copied through unchanged.
 impl From<&StreamInfo> for StreamInfo {
@@ -285,5 +383,80 @@ impl std::fmt::Debug for StreamInfo {
             .field("frame_rate", &self.frame_rate)
             .field("size", &self.size())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ANNEX_B_SETS: [u8; 12] = [0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1e, 0, 0, 0, 1];
+
+    #[test]
+    fn a_picture_stream_described_by_hand_is_what_was_said() {
+        let info = StreamInfo::video(
+            ffmpeg::codec::Id::H264,
+            &ANNEX_B_SETS,
+            (1920, 1080),
+            ffmpeg::Rational::new(1, 90_000),
+        )
+        .unwrap();
+        assert_eq!(info.kind(), ffmpeg::media::Type::Video);
+        assert_eq!(info.parameters().id(), ffmpeg::codec::Id::H264);
+        assert_eq!(info.size(), Some((1920, 1080)));
+        assert_eq!(info.time_base(), ffmpeg::Rational::new(1, 90_000));
+        // SAFETY: reading the parameters' own extradata, as long as it says.
+        let extradata = unsafe {
+            let par = info.parameters().as_ptr();
+            std::slice::from_raw_parts((*par).extradata, (*par).extradata_size as usize)
+        };
+        assert_eq!(extradata, ANNEX_B_SETS);
+    }
+
+    #[test]
+    fn a_sound_stream_described_by_hand_is_what_was_said() {
+        // AudioSpecificConfig: AAC LC, 48 kHz, one channel.
+        let config = [0x11, 0x88];
+        let info = StreamInfo::audio(
+            ffmpeg::codec::Id::AAC,
+            &config,
+            48_000,
+            1,
+            ffmpeg::Rational::new(1, 48_000),
+        )
+        .unwrap();
+        assert_eq!(info.kind(), ffmpeg::media::Type::Audio);
+        // SAFETY: plain fields of parameters this test owns.
+        let (rate, channels, frame_size) = unsafe {
+            let par = info.parameters().as_ptr();
+            (
+                (*par).sample_rate,
+                (*par).ch_layout.nb_channels,
+                (*par).frame_size,
+            )
+        };
+        assert_eq!((rate, channels, frame_size), (48_000, 1, 1024));
+        let g711 = StreamInfo::audio(
+            ffmpeg::codec::Id::PCM_MULAW,
+            &[],
+            8_000,
+            1,
+            ffmpeg::Rational::new(1, 8_000),
+        )
+        .unwrap();
+        assert_eq!(g711.parameters().id(), ffmpeg::codec::Id::PCM_MULAW);
+    }
+
+    #[test]
+    fn a_codec_of_the_other_medium_is_refused() {
+        let unit = ffmpeg::Rational::new(1, 90_000);
+        assert_eq!(
+            StreamInfo::video(ffmpeg::codec::Id::AAC, &[], (1, 1), unit).unwrap_err(),
+            StreamInfoError::WrongMedium {
+                codec: ffmpeg::codec::Id::AAC,
+                expected: ffmpeg::media::Type::Video,
+            }
+        );
+        assert!(StreamInfo::audio(ffmpeg::codec::Id::H264, &[], 8_000, 1, unit).is_err());
     }
 }
