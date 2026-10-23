@@ -68,7 +68,7 @@ impl Default for WhepOptions {
 /// use media_pp::pipeline::Pipeline;
 ///
 /// let (source, streams) = WhepSource::open("relay", "https://example.com/cam1/whep", WhepOptions::default())?;
-/// let video = streams.iter().find(|s| s.kind == media_pp::ffmpeg::media::Type::Video).unwrap();
+/// let video = streams.iter().find(|s| s.kind() == media_pp::ffmpeg::media::Type::Video).unwrap();
 /// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// let (counter, _pictures) = FrameCounter::new("pictures");
 /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| {
