@@ -3,6 +3,7 @@
 use ffmpeg_next as ffmpeg;
 
 use super::sdp::Payload;
+use crate::elements::parameter_sets::vp9_key;
 
 /// One RTP packet's header, read.
 struct Header {
@@ -58,6 +59,8 @@ pub(crate) struct Depacketizer {
     fragment: Option<Vec<u8>>,
     /// An AAC frame in fragments: how long it is.
     fragment_size: usize,
+    /// A VP8 or VP9 frame lost a piece: dropped at its end.
+    broken: bool,
 }
 
 impl Depacketizer {
@@ -70,6 +73,7 @@ impl Depacketizer {
             unit_at: 0,
             fragment: None,
             fragment_size: 0,
+            broken: false,
         }
     }
 
@@ -82,8 +86,11 @@ impl Depacketizer {
         if let Some(expected) = self.expected
             && expected != header.sequence
         {
-            // Something was lost: a fragment in hand can no longer be whole.
+            // Something was lost: a fragment in hand can no longer be whole,
+            // nor a VP8 or VP9 frame being gathered.
             self.fragment = None;
+            self.broken =
+                !self.unit.is_empty() && matches!(self.payload, Payload::Vp8 | Payload::Vp9);
         }
         self.expected = Some(header.sequence.wrapping_add(1));
         let at = self.unwrap(header.timestamp);
@@ -108,8 +115,44 @@ impl Depacketizer {
                     done.push(stamped(payload, at, true));
                 }
             }
+            Payload::Vp8 | Payload::Vp9 => {
+                if !self.unit.is_empty() && at != self.unit_at {
+                    done.extend(self.finish_frame());
+                }
+                self.unit_at = at;
+                let described = match self.payload {
+                    Payload::Vp8 => vp8_descriptor(payload),
+                    _ => vp9_descriptor(payload),
+                };
+                if let Some((begins, data)) = described {
+                    if begins {
+                        self.unit.clear();
+                        self.broken = false;
+                    }
+                    if !self.broken {
+                        self.unit.extend_from_slice(data);
+                    }
+                }
+                if header.marker {
+                    done.extend(self.finish_frame());
+                }
+            }
         }
         done
+    }
+
+    /// The frame gathered, where none of it was lost.
+    fn finish_frame(&mut self) -> Option<ffmpeg::Packet> {
+        let frame = std::mem::take(&mut self.unit);
+        if frame.is_empty() || self.broken {
+            self.broken = false;
+            return None;
+        }
+        let key = match self.payload {
+            Payload::Vp8 => frame[0] & 1 == 0,
+            _ => vp9_key(&frame),
+        };
+        Some(stamped(&frame, self.unit_at, key))
     }
 
     fn unwrap(&mut self, timestamp: u32) -> i64 {
@@ -246,6 +289,76 @@ impl Depacketizer {
     }
 }
 
+/// A VP8 payload's descriptor read (RFC 7741): whether the payload begins
+/// a frame, and what follows the descriptor.
+fn vp8_descriptor(payload: &[u8]) -> Option<(bool, &[u8])> {
+    let first = *payload.first()?;
+    let mut at = 1;
+    if first & 0x80 != 0 {
+        let extension = *payload.get(1)?;
+        at = 2;
+        if extension & 0x80 != 0 {
+            at += if *payload.get(at)? & 0x80 != 0 { 2 } else { 1 };
+        }
+        if extension & 0x40 != 0 {
+            at += 1;
+        }
+        if extension & 0x30 != 0 {
+            at += 1;
+        }
+    }
+    // The start of a partition, and of the first.
+    let begins = first & 0x10 != 0 && first & 0x07 == 0;
+    Some((begins, payload.get(at..)?))
+}
+
+/// A VP9 payload's descriptor read (RFC 9628): whether the payload begins
+/// a frame, and what follows the descriptor.
+fn vp9_descriptor(payload: &[u8]) -> Option<(bool, &[u8])> {
+    let first = *payload.first()?;
+    let flag = |bit: u8| first & bit != 0;
+    let (picture_id, predicted, layers, flexible, begins, structure) = (
+        flag(0x80),
+        flag(0x40),
+        flag(0x20),
+        flag(0x10),
+        flag(0x08),
+        flag(0x02),
+    );
+    let mut at = 1;
+    if picture_id {
+        at += if *payload.get(at)? & 0x80 != 0 { 2 } else { 1 };
+    }
+    if layers {
+        at += if flexible { 1 } else { 2 };
+    }
+    if flexible && predicted {
+        for _ in 0..3 {
+            let reference = *payload.get(at)?;
+            at += 1;
+            if reference & 1 == 0 {
+                break;
+            }
+        }
+    }
+    if structure {
+        let header = *payload.get(at)?;
+        at += 1;
+        if header & 0x10 != 0 {
+            at += 4 * (usize::from(header >> 5) + 1);
+        }
+        if header & 0x08 != 0 {
+            let groups = *payload.get(at)?;
+            at += 1;
+            for _ in 0..groups {
+                let group = *payload.get(at)?;
+                at += 1 + usize::from((group >> 2) & 3);
+            }
+        }
+    }
+    Some((begins, payload.get(at..)?))
+}
+
 /// `count` bits of `bytes` from bit `from`, most significant first.
 fn read_bits(bytes: &[u8], from: usize, count: usize) -> usize {
     (from..from + count).fold(0, |value, bit| {
@@ -380,6 +493,59 @@ mod tests {
         assert_eq!(done[0].data().unwrap(), &[1, 2, 3]);
         assert_eq!(done[1].data().unwrap(), &[4, 5]);
         assert_eq!(done[1].pts(), Some(1024));
+    }
+
+    /// A VP8 keyframe in two pieces, the first behind a descriptor with a
+    /// two-byte picture id; a piece of the next frame lost drops it alone.
+    #[test]
+    fn vp8_frames_come_back_whole_and_a_broken_one_is_dropped() {
+        let mut d = Depacketizer::new(Payload::Vp8);
+        // X, S, PID 0; I with a 15-bit picture id.
+        let mut first = vec![0x90, 0x80, 0x80, 0x01];
+        let key = [0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00];
+        first.extend_from_slice(&key[..6]);
+        assert!(d.push(&rtp(1, 0, false, &first)).is_empty());
+        let mut last = vec![0x00];
+        last.extend_from_slice(&key[6..]);
+        let done = d.push(&rtp(2, 0, true, &last));
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].data().unwrap(), &key);
+        assert!(done[0].is_key());
+        assert_eq!(
+            crate::elements::parameter_sets::vp8_size(&key),
+            Some((320, 240))
+        );
+
+        // The next frame's second piece is lost.
+        assert!(d.push(&rtp(3, 3000, false, &[0x10, 0x01, 2])).is_empty());
+        assert!(
+            d.push(&rtp(5, 3000, true, &[0x00, 3])).is_empty(),
+            "dropped"
+        );
+        let done = d.push(&rtp(6, 6000, true, &[0x10, 0x01, 4]));
+        assert_eq!(done.len(), 1);
+        assert!(!done[0].is_key(), "an inter frame");
+    }
+
+    /// A VP9 keyframe with its scalability structure in front.
+    #[test]
+    fn vp9_frames_come_back_whole() {
+        let mut d = Depacketizer::new(Payload::Vp9);
+        // A keyframe's uncompressed header, profile 0: marker 2, profile 0,
+        // shown, key, sync code, 4:2:0 BT.601, 320x240.
+        let mut frame = vec![0x82, 0x49, 0x83, 0x42, 0x00];
+        frame.extend_from_slice(&[0x13, 0xf0, 0x0e, 0xf0, 0x00]);
+        // I, B, E, V; a 7-bit picture id; one spatial layer with its size.
+        let mut payload = vec![0x8e, 0x05, 0x10, 0x01, 0x40, 0x00, 0xf0];
+        payload.extend_from_slice(&frame);
+        let done = d.push(&rtp(1, 0, true, &payload));
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].data().unwrap(), &frame);
+        assert!(done[0].is_key());
+        assert_eq!(
+            crate::elements::parameter_sets::vp9_size(&frame),
+            Some((320, 240))
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use ffmpeg_next::{self as ffmpeg, ffi};
 
 use super::depacketize::{key_unit, nal_units};
+use crate::elements::parameter_sets::{vp8_size, vp9_size};
 use crate::elements::parameters::{picture_size, set_extradata};
 
 /// What a track's payloads are, as far as taking them apart goes.
@@ -21,6 +22,10 @@ pub(crate) enum Payload {
     },
     /// One packet a payload: Opus, G.711, and the like.
     Whole,
+    /// VP8 (RFC 7741) and VP9 (RFC 9628): a frame in pieces, each behind
+    /// a descriptor of its own.
+    Vp8,
+    Vp9,
 }
 
 /// One announced track.
@@ -92,6 +97,21 @@ impl Announced {
         let Some(unit) = key.data() else {
             return false;
         };
+        if matches!(self.payload, Payload::Vp8 | Payload::Vp9) {
+            let size = match self.payload {
+                Payload::Vp8 => vp8_size(unit),
+                _ => vp9_size(unit),
+            };
+            let Some((width, height)) = size else {
+                return false;
+            };
+            // SAFETY: parameters the caller owns alone; plain fields.
+            unsafe {
+                (*parameters.as_mut_ptr()).width = width as i32;
+                (*parameters.as_mut_ptr()).height = height as i32;
+            }
+            return true;
+        }
         let h265 = self.payload == Payload::H265;
         if !matches!(self.payload, Payload::H264 | Payload::H265) || !key_unit(unit, h265) {
             return false;
@@ -324,6 +344,8 @@ impl Section {
                     config,
                 )
             }
+            "VP8" => (ffmpeg::codec::Id::VP8, Payload::Vp8, Vec::new()),
+            "VP9" => (ffmpeg::codec::Id::VP9, Payload::Vp9, Vec::new()),
             "OPUS" => (ffmpeg::codec::Id::OPUS, Payload::Whole, Vec::new()),
             "PCMU" => (ffmpeg::codec::Id::PCM_MULAW, Payload::Whole, Vec::new()),
             "PCMA" => (ffmpeg::codec::Id::PCM_ALAW, Payload::Whole, Vec::new()),

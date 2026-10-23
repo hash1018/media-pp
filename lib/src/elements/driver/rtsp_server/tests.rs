@@ -1249,6 +1249,102 @@ fn plays_reordered(codec: crate::elements::VideoCodec) -> bool {
     true
 }
 
+/// VP8 and VP9 — what a WebRTC publisher may bring — played over RTSP: each
+/// frame whole, its keyframes flagged, its size read from its first, and
+/// every frame decoded.
+#[test]
+fn a_player_takes_vp8_and_vp9() {
+    use crate::elements::{
+        SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource, VideoCodec,
+    };
+    let mut played = 0;
+    for codec in [VideoCodec::Vp8, VideoCodec::Vp9] {
+        let Ok(encoder) = SwEncoder::new(
+            "encoder",
+            SwEncoderOptions {
+                codec,
+                width: 320,
+                height: 240,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
+                frame_rate: ffmpeg::Rational::new(25, 1),
+                bit_rate: 300_000,
+                gop_size: 25,
+                max_b_frames: None,
+            },
+        ) else {
+            continue;
+        };
+        played += 1;
+        let (runner, handle, broadcast) = server(false);
+        let sink = broadcast
+            .publish(&[StreamInfo::from(&encoder)])
+            .unwrap()
+            .remove(0);
+        let pictures = TestVideoSource::new(
+            "pictures",
+            TestVideoOptions {
+                width: 320,
+                height: 240,
+                frame_rate: ffmpeg::Rational::new(25, 1),
+            },
+        );
+        let (camera, ()) = Pipeline::new("camera", pictures, |source, ctx| {
+            let branch = ctx.branch().queue("encode", 4).pipe(encoder).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .unwrap();
+        camera.run().unwrap();
+
+        let player = play(&handle.url("cam"), RtspTransport::Tcp);
+        // SAFETY: plain fields of parameters the stream owns.
+        let size = unsafe {
+            let raw = player.streams[0].parameters().as_ptr();
+            ((*raw).width, (*raw).height)
+        };
+        assert_eq!(size, (320, 240), "{codec:?}: the size, from a keyframe");
+        player.wait_for(40);
+        player.pipeline.stop();
+        camera.stop();
+        runner.stop();
+
+        let packets = player.received[0].lock().unwrap();
+        let mut decoder = ffmpeg::codec::context::Context::from_parameters(
+            player.streams[0].parameters().clone(),
+        )
+        .unwrap()
+        .decoder()
+        .video()
+        .unwrap();
+        let mut decoded = 0;
+        let mut keys = 0;
+        for buf in packets.iter() {
+            let MediaBuffer::Packet(packet) = buf else {
+                panic!("an RTSP player is handed packets");
+            };
+            keys += usize::from(packet.is_key());
+            decoder.send_packet(&***packet).unwrap();
+            let mut frame = ffmpeg::frame::Video::empty();
+            while decoder.receive_frame(&mut frame).is_ok() {
+                decoded += 1;
+            }
+        }
+        assert!(packets.len() >= 40, "{codec:?}");
+        assert!(
+            keys >= 1 && keys < packets.len(),
+            "{codec:?}: {keys} keyframes"
+        );
+        assert!(
+            decoded + 2 >= packets.len(),
+            "{codec:?}: {decoded} of {} decoded",
+            packets.len()
+        );
+    }
+    if played == 0 {
+        eprintln!("skipping: no libvpx in this FFmpeg");
+    }
+}
+
 /// What a player is sent is what RTP carries here: a camera's codecs, and
 /// not AV1 or AC-3, which a WebRTC or a file input may bring.
 #[test]

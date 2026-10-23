@@ -67,7 +67,7 @@ pub enum RtspSourceError {
     #[error("the other end sent a malformed {0}")]
     Malformed(&'static str),
     /// Nothing in the session can be received: no track in a codec this
-    /// takes apart — H.264, H.265, AAC, Opus, G.711 — or a delivery it
+    /// takes apart — H.264, H.265, VP8, VP9, AAC, Opus, G.711 — or a delivery it
     /// does not take; this names what was refused.
     #[error("nothing in the session can be received: {0}")]
     Unsupported(String),
@@ -180,7 +180,7 @@ impl Default for RtspListenOptions {
 ///
 /// RTSP 1.0, as cameras and servers speak it, by this crate's own client:
 ///
-/// - **Codecs:** H.264 and H.265, AAC (`mpeg4-generic`), Opus, and G.711
+/// - **Codecs:** H.264, H.265, VP8 and VP9, AAC (`mpeg4-generic`), Opus, and G.711
 ///   (µ-law and A-law). A described track in any other codec — MJPEG,
 ///   MPEG-4 Part 2, a camera's ONVIF metadata — is left out, and the
 ///   streams are those it can take, numbered in the order described; a

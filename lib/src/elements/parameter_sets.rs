@@ -638,6 +638,71 @@ pub(crate) fn hevc_sequence(sps: &[u8]) -> Option<HevcSequence> {
     })
 }
 
+/// A VP8 keyframe's size, as its frame header says it; `None` for a
+/// frame that is not a keyframe.
+pub(crate) fn vp8_size(frame: &[u8]) -> Option<(u32, u32)> {
+    if frame.len() < 10 || frame[0] & 1 != 0 || frame[3..6] != [0x9d, 0x01, 0x2a] {
+        return None;
+    }
+    let width = u32::from(u16::from_le_bytes([frame[6], frame[7]]) & 0x3fff);
+    let height = u32::from(u16::from_le_bytes([frame[8], frame[9]]) & 0x3fff);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Whether a VP9 frame is a keyframe, as its uncompressed header says.
+pub(crate) fn vp9_key(frame: &[u8]) -> bool {
+    vp9_header(frame).is_some_and(|(key, _)| key)
+}
+
+/// A VP9 keyframe's size, as its uncompressed header says it; `None` for a
+/// frame that is not a keyframe.
+pub(crate) fn vp9_size(frame: &[u8]) -> Option<(u32, u32)> {
+    match vp9_header(frame)? {
+        (true, size) => size,
+        (false, _) => None,
+    }
+}
+
+/// Whether a VP9 frame is a keyframe, and a keyframe's size.
+fn vp9_header(frame: &[u8]) -> Option<(bool, Option<(u32, u32)>)> {
+    let mut bits = BitReader::new(frame);
+    if bits.read_bits(2)? != 2 {
+        return None;
+    }
+    let low = bits.read_bits(1)?;
+    let profile = (bits.read_bits(1)? << 1) | low;
+    if profile == 3 {
+        bits.read_bit()?;
+    }
+    if bits.read_bit()? {
+        // A frame shown again: no picture of its own.
+        return Some((false, None));
+    }
+    let key = !bits.read_bit()?;
+    if !key {
+        return Some((false, None));
+    }
+    bits.skip(2)?;
+    if bits.read_bits(24)? != 0x49_83_42 {
+        return None;
+    }
+    if profile >= 2 {
+        bits.read_bit()?;
+    }
+    let colour_space = bits.read_bits(3)?;
+    if colour_space != 7 {
+        bits.read_bit()?;
+        if profile == 1 || profile == 3 {
+            bits.skip(3)?;
+        }
+    } else if profile == 1 || profile == 3 {
+        bits.read_bit()?;
+    }
+    let width = bits.read_bits(16)? + 1;
+    let height = bits.read_bits(16)? + 1;
+    Some((true, Some((width, height))))
+}
+
 fn skip_scaling_list(bits: &mut BitReader<'_>, size: usize) -> Option<()> {
     let mut last_scale = 8i32;
     let mut next_scale = 8i32;

@@ -92,6 +92,9 @@ unsafe fn context(
             return Err(ffmpeg::Error::from(ret));
         }
         (*stream).time_base = track.time_base().into();
+        // FFmpeg calls its VP9 packetizer experimental and refuses it
+        // otherwise, though it writes the payload format players take.
+        (*ctx).strict_std_compliance = ffi::FF_COMPLIANCE_EXPERIMENTAL;
         // Read both by the muxer as it writes and by `av_sdp_create`, so
         // what is described is what is sent.
         let ret = ffi::av_opt_set_int(
