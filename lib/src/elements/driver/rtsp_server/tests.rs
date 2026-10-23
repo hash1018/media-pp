@@ -1254,3 +1254,47 @@ fn a_player_presents_a_token_in_its_urls_query() {
         "presented as a Bearer token"
     );
 }
+
+/// A publisher of a path given a publish target is published into it,
+/// while the path's players read what the path was added with: the one
+/// URL pushed to and played, two broadcasts apart.
+#[test]
+fn a_publisher_goes_into_its_target_and_players_read_the_path() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, cam) = server(false);
+    let camera = feed(&cam, &path);
+    wait_published(&cam);
+    let into = Broadcast::new("into", BroadcastOptions::default());
+    handle.add_publish_path("cam", &into).unwrap();
+    assert!(
+        matches!(
+            handle.add_publish_path("cam", &into),
+            Err(RtspServerError::PathTaken(_))
+        ),
+        "one target a path"
+    );
+
+    let publisher =
+        publish(&handle.url("cam"), &path, RtspTransport::Tcp).expect("the server takes it");
+    wait_published(&into);
+    assert_eq!(
+        cam.stats().publications,
+        1,
+        "what players read is untouched"
+    );
+    let player = play(&handle.url("cam"), RtspTransport::Tcp);
+    check_played(&player);
+    player.pipeline.stop();
+    publisher.stop();
+
+    assert!(handle.remove_publish_path("cam"));
+    assert!(!handle.remove_publish_path("cam"));
+    assert!(
+        publish(&handle.url("cam"), &path, RtspTransport::Tcp).is_err(),
+        "a path players alone use takes no publisher"
+    );
+    camera.stop();
+    runner.stop();
+}

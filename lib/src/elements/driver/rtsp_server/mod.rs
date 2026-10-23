@@ -221,6 +221,9 @@ pub(crate) struct Shared {
     pub(crate) playing: AtomicUsize,
     /// The paths a publisher holds.
     pub(crate) publishing: Mutex<HashSet<String>>,
+    /// Where a publisher of a path is published into, apart from what its
+    /// players read — see [`RtspServerHandle::add_publish_path`].
+    publish_into: Mutex<HashMap<String, Broadcast>>,
     /// Where a publisher's RTP over UDP comes from, and which of its tracks
     /// and connection it goes to.
     pub(crate) routes:
@@ -240,6 +243,27 @@ impl Shared {
             .unwrap_or_else(|p| p.into_inner())
             .get(name)
             .cloned()
+    }
+
+    /// What a publisher of `name` is published into: what
+    /// [`RtspServerHandle::add_publish_path`] gave, or else the broadcast of
+    /// a path added in [`RtspPathMode::Record`]. `Err` with the status to
+    /// answer where there is none: 404 for no path, 403 for one players
+    /// alone may use.
+    pub(crate) fn publish_target(&self, name: &str) -> std::result::Result<Broadcast, u16> {
+        if let Some(broadcast) = self
+            .publish_into
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(name)
+        {
+            return Ok(broadcast.clone());
+        }
+        match self.path(name) {
+            Some(path) if path.mode == RtspPathMode::Record => Ok(path.broadcast),
+            Some(_) => Err(403),
+            None => Err(404),
+        }
     }
 }
 
@@ -315,6 +339,7 @@ impl RtspServer {
             authorize: options.authorize,
             playing: AtomicUsize::new(0),
             publishing: Mutex::new(HashSet::new()),
+            publish_into: Mutex::default(),
             routes: Mutex::new(HashMap::new()),
         });
         Ok((
@@ -382,6 +407,64 @@ impl RtspServerHandle {
             .is_some();
         if removed {
             pp_info!(pp_log: &self.shared.pp_log, "path removed: {path}");
+        }
+        removed
+    }
+
+    /// Has a publisher of `path` — `ANNOUNCE` and `RECORD` — published into
+    /// `broadcast`, whatever its players read: what [`Self::add_path`] gave
+    /// for `path`, or nothing yet. For an application that makes what its
+    /// players read of what is published — converts it, say — at the one
+    /// URL a publisher pushes to and a player plays. One publisher at a time.
+    ///
+    /// # Errors
+    ///
+    /// [`RtspServerError::InvalidPath`] for a path no URL can carry, and
+    /// [`RtspServerError::PathTaken`] where `path` already has one, by this
+    /// or by a path added in [`RtspPathMode::Record`].
+    pub fn add_publish_path(
+        &self,
+        path: &str,
+        broadcast: &Broadcast,
+    ) -> std::result::Result<(), RtspServerError> {
+        if !valid_path(path) {
+            return Err(RtspServerError::InvalidPath(path.to_owned()));
+        }
+        let recorded = self
+            .shared
+            .path(path)
+            .is_some_and(|added| added.mode == RtspPathMode::Record);
+        let mut into = self
+            .shared
+            .publish_into
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if recorded || into.contains_key(path) {
+            return Err(RtspServerError::PathTaken(path.to_owned()));
+        }
+        into.insert(path.to_owned(), broadcast.clone());
+        drop(into);
+        pp_info!(
+            pp_log: &self.shared.pp_log,
+            "publish path added: {path} into broadcast={}",
+            broadcast.name()
+        );
+        Ok(())
+    }
+
+    /// Takes away what [`Self::add_publish_path`] gave `path`: no publisher
+    /// begins on it from here, and one under way goes on until it ends.
+    /// Whether there was one.
+    pub fn remove_publish_path(&self, path: &str) -> bool {
+        let removed = self
+            .shared
+            .publish_into
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(path)
+            .is_some();
+        if removed {
+            pp_info!(pp_log: &self.shared.pp_log, "publish path removed: {path}");
         }
         removed
     }

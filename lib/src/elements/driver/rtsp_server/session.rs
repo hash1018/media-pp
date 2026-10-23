@@ -28,13 +28,13 @@ use crate::elements::{Broadcast, BroadcastSource, StreamInfo};
 use crate::pipeline::{DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
+use super::Shared;
 use super::announce::{self, Announced};
 use super::digest::{self, RtspDigest};
 use super::message::{self, Incoming, Request, Response, Transport};
 use super::record::{Recording, Stopped};
 use super::rtp::{self, Packetizer};
 use super::track::{Delivery, Outbox, Outgoing, RtspTrackSink};
-use super::{RtspPathMode, Shared};
 
 /// How long a session lasts without a request, as the server tells its
 /// client — a session lasts as long as its connection here, so this only
@@ -583,12 +583,10 @@ impl Connection {
         if !self.allows(request, &target.path, Access::Publish) {
             return self.unauthorized();
         }
-        let Some(path) = self.shared.path(&target.path) else {
-            return Response::new(404);
+        let broadcast = match self.shared.publish_target(&target.path) {
+            Ok(broadcast) => broadcast,
+            Err(status) => return Response::new(status),
         };
-        if path.mode != RtspPathMode::Record {
-            return Response::new(403);
-        }
         let tracks = match std::str::from_utf8(&request.body)
             .map_err(|_| announce::Refused::Malformed)
             .and_then(announce::parse)
@@ -617,7 +615,7 @@ impl Connection {
         self.session = Some(Session {
             id: session_id(),
             path: target.path,
-            broadcast: path.broadcast,
+            broadcast,
             role: Role::Record {
                 channels: vec![None; tracks.len()],
                 tracks,
