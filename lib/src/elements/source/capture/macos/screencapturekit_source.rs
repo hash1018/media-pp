@@ -850,13 +850,16 @@ mod tests {
     }
 
     /// A display delivers full-range RGB BGRA of the size it was opened at,
-    /// a frame a tick counted from zero, and never faster than the rate asked
-    /// for — whether anything on it changes or not.
+    /// each frame stamped at the tick it was made on, and never faster than
+    /// the rate asked for — whether anything on it changes or not.
     ///
     /// Not how many in a given time: a hosted Mac's timers fire late, and
     /// its stream is slow to start, so a count per second is the machine's.
     /// Late ticks only make fewer frames, so the rate still bounds them from
-    /// above.
+    /// above. Nor a tick for every frame: a tick a slow start overran is
+    /// time gone by, and the next frame is stamped after it (2d7a2e0d), so
+    /// the stamps rise, perhaps by more than one, and never run ahead of
+    /// the time that passed.
     #[test]
     fn a_display_delivers_bgra_a_frame_a_tick() {
         let Some(display) = try_main_display() else {
@@ -910,14 +913,25 @@ mod tests {
             "{} frames in {took:.1} s is faster than 20 a second",
             frames.len()
         );
-        for (index, &(pixel, space, range, width, height, pts)) in frames.iter().enumerate() {
+        let mut last = None;
+        for &(pixel, space, range, width, height, pts) in frames.iter() {
             assert_eq!(pixel, ffmpeg::format::Pixel::BGRA);
             assert_eq!(
                 (space, range),
                 (ffmpeg::color::Space::RGB, ffmpeg::color::Range::JPEG)
             );
             assert_eq!((width, height), (format.width, format.height));
-            assert_eq!(pts, Some(index as i64), "a tick each");
+            let pts = pts.expect("every frame is stamped");
+            assert!(
+                last.is_none_or(|last| pts > last),
+                "a tick each, rising: {pts} after {last:?}"
+            );
+            last = Some(pts);
         }
+        let last = last.expect("frames were counted above");
+        assert!(
+            last as f64 <= 20.0 * took + 1.0,
+            "stamped up to tick {last} in {took:.1} s, ahead of the clock"
+        );
     }
 }
