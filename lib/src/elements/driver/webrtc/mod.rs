@@ -16,6 +16,7 @@ pub use peer::WebRtcPeer;
 pub use server::{
     IceServer, SessionId, SessionRole, SessionStats, WebRtcHttpEndpoint, WebRtcServer,
     WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions,
+    WebRtcServerPath,
 };
 pub use track::WebRtcHandle;
 pub use whep::WebRtcSource;

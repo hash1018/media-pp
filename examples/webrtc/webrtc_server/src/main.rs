@@ -3,11 +3,11 @@
 //! into, which players play too.
 //!
 //! ```text
-//! FileDemuxer -> Pacer -> BroadcastSink    (the file, looped, at its own speed)
-//!                              |
-//!                      Broadcast "file" ----\
-//!                                            WebRtcServer -> players (WHEP)
+//! FileDemuxer -> Pacer -> BroadcastSink -> Broadcast "file"    (the file, looped, at its own speed)
 //! publisher (WHIP) -> WebRtcServer -> WebRtcSource -> BroadcastSink -> Broadcast "live"
+//!
+//! Broadcast "file" -> BroadcastSource -> WebRtcMuxer (path "file") -> WebRtcServer -> players (WHEP)
+//! Broadcast "live" -> BroadcastSource -> WebRtcMuxer (path "live") -> WebRtcServer -> players (WHEP)
 //!
 //! with --rtmp:  OBS -> RtmpServer "live/stream" -> RtmpSource -> BroadcastSink -> Broadcast "live"
 //!
@@ -15,8 +15,9 @@
 //! ```
 //!
 //! The server hands each publisher out as a source of what it sends, and a
-//! pipeline of the example's own writes it into the broadcast `live`'s
-//! players play.
+//! pipeline of the example's own writes it into the broadcast `live`. Each
+//! broadcast is the example's own: the server's path of the same name reads
+//! it, through the `WebRtcMuxer` its path makes, as a recording would.
 //!
 //! Open `http://127.0.0.1:8080/file` in a browser: the page offers to play
 //! the path through WHEP, and the server answers. Each player is sent the
@@ -56,11 +57,11 @@ mod example {
 
     use media_pp::bus::BusEvent;
     use media_pp::driver::DriverRunner;
-    use media_pp::element::IntoSource;
+    use media_pp::element::{BoxSink, IntoSource};
     use media_pp::elements::{
-        Broadcast, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode, HlsMuxer, HlsOptions,
-        Pacer, Publishers, RtmpServer, RtmpServerOptions, StreamInfo, WebRtcServer,
-        WebRtcServerOptions,
+        Broadcast, BroadcastError, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode,
+        HlsMuxer, HlsOptions, Pacer, Publishers, RtmpServer, RtmpServerOptions, StreamInfo,
+        WebRtcMuxer, WebRtcServer, WebRtcServerOptions,
     };
     use media_pp::pipeline::Pipeline;
 
@@ -140,8 +141,16 @@ mod example {
         let (server, handle) = WebRtcServer::bind("server", &args.udp, options)?;
         let file = Broadcast::new("file", BroadcastOptions::default());
         let live = Broadcast::new("live", BroadcastOptions::default());
-        handle.add_path("file", &file)?;
-        handle.add_path("live", &live)?;
+        // What each broadcast carries, written into the server's path its
+        // players play.
+        let file_path = handle.path("file")?;
+        let live_path = handle.path("live")?;
+        forward(file.clone(), move |streams| {
+            muxed(file_path.muxer(), streams)
+        });
+        forward(live.clone(), move |streams| {
+            muxed(live_path.muxer(), streams)
+        });
         // A WHIP publisher of `live`, into what its players play.
         relay(handle.take_publishers("live")?, live.clone());
         // RTMP publishers into the same broadcast: OBS's server
@@ -222,6 +231,9 @@ mod example {
             recorder.finish();
         }
         drop(http);
+        // The paths' forwarders end with what they read.
+        file.close();
+        live.close();
         server.stop();
         camera.stop();
         if let Some((rtmp, _)) = &rtmp {
@@ -235,6 +247,74 @@ mod example {
         }
         println!("stopped");
         Ok(())
+    }
+
+    /// Writes what `broadcast` carries into the runs `open` begins — a
+    /// server path's muxer's — on a thread of its own: a run each time the
+    /// broadcast begins with tracks the last could not go on with, until it
+    /// is closed. `open` answers each output to write and its sink.
+    fn forward<F>(broadcast: Broadcast, open: F)
+    where
+        F: Fn(&[StreamInfo]) -> media_pp::Result<Vec<(usize, BoxSink)>> + Send + 'static,
+    {
+        std::thread::spawn(move || {
+            loop {
+                let (source, streams) =
+                    match BroadcastSource::new(broadcast.name().to_string(), &broadcast) {
+                        Ok(opened) => opened,
+                        Err(BroadcastError::NotPublished(_)) => {
+                            std::thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                        Err(_) => return,
+                    };
+                let Ok(sinks) = open(&streams) else {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                };
+                let wired = Pipeline::new(broadcast.name().to_string(), source, |source, ctx| {
+                    for (index, sink) in sinks {
+                        ctx.attach(source, index, ctx.branch().to(sink)?)?;
+                    }
+                    Ok(())
+                });
+                let Ok((pipeline, ())) = wired else {
+                    return;
+                };
+                if pipeline.run().is_err() {
+                    return;
+                }
+                for event in pipeline.bus().iter() {
+                    if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                        break;
+                    }
+                }
+                pipeline.stop();
+            }
+        });
+    }
+
+    /// Opens `muxer` with the tracks WebRTC carries of `streams`, and answers each one's output and
+    /// sink.
+    fn muxed(
+        mut muxer: WebRtcMuxer,
+        streams: &[StreamInfo],
+    ) -> media_pp::Result<Vec<(usize, BoxSink)>> {
+        let tracks = streams
+            .iter()
+            .filter(|stream| WebRtcServer::carries(stream))
+            .map(|stream| {
+                Ok((
+                    stream.index(),
+                    muxer.add_stream(format!("track-{}", stream.index()), stream)?,
+                ))
+            })
+            .collect::<media_pp::Result<Vec<_>>>()?;
+        let mut sinks = muxer.open()?;
+        tracks
+            .into_iter()
+            .map(|(index, track)| Ok((index, sinks.take(track)?)))
+            .collect()
     }
 
     /// Writes each publisher `publishers` hands out into `broadcast`, a

@@ -3,9 +3,10 @@ use std::{process::Command, sync::Arc, time::Duration};
 use media_pp::{
     buffer::{MediaBuffer, set_time_base},
     driver::DriverRunner,
+    element::BoxSink,
     elements::{
-        AppSource, Broadcast, BroadcastOptions, Pacer, RtspServer, RtspServerOptions, StreamInfo,
-        SwEncoder, SwEncoderOptions, VideoCodec,
+        AppSource, Pacer, RtspServer, RtspServerOptions, StreamInfo, SwEncoder, SwEncoderOptions,
+        VideoCodec,
     },
     ffmpeg::{self, format::Pixel},
     pipeline::Pipeline,
@@ -28,11 +29,15 @@ fn missing_arguments_fail_with_usage() {
 fn players_play_and_are_summed_up() {
     let (server, handle) =
         RtspServer::bind("server", "127.0.0.1:0", RtspServerOptions::default()).unwrap();
-    let broadcast = Broadcast::new("camera", BroadcastOptions::default());
-    handle.add_path("cam", &broadcast).unwrap();
+    let cam = handle.path("cam").unwrap();
     let server = DriverRunner::new(server);
     server.run().unwrap();
-    let camera = camera(&broadcast).unwrap();
+    let camera = camera(|stream| {
+        let mut muxer = cam.muxer();
+        let track = muxer.add_stream("pictures", stream)?;
+        muxer.open()?.take(track)
+    })
+    .unwrap();
 
     for udp in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -63,7 +68,9 @@ fn players_play_and_are_summed_up() {
 
 /// A live camera — pictures encoded as they are due — written into
 /// `broadcast` until stopped.
-fn camera(broadcast: &Broadcast) -> media_pp::Result<Arc<Pipeline>> {
+fn camera(
+    open: impl FnOnce(StreamInfo) -> media_pp::Result<BoxSink>,
+) -> media_pp::Result<Arc<Pipeline>> {
     const FRAMES: i64 = 30 * 20;
     let (source, handle) = AppSource::new("pictures", FRAMES as usize + 1);
     for index in 0..FRAMES {
@@ -89,7 +96,7 @@ fn camera(broadcast: &Broadcast) -> media_pp::Result<Arc<Pipeline>> {
             max_b_frames: None,
         },
     )?;
-    let sink = broadcast.publish(&[StreamInfo::from(&encoder)])?.remove(0);
+    let sink = open(StreamInfo::from(&encoder))?;
     let (pipeline, ()) = Pipeline::new("camera", source, |source, ctx| {
         let branch = ctx
             .branch()

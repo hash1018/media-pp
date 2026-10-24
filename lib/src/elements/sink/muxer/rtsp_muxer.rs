@@ -115,12 +115,36 @@ pub enum RtspMuxerError {
 /// down either way.
 ///
 /// [MediaMTX]: https://github.com/bluenviron/mediamtx
+///
+/// # Serving, rather than publishing
+///
+/// An `RtspServerPath`'s `muxer` — with the `rtsp-server` feature — is
+/// one of these, made,
+/// given its tracks and opened the same way, whose packets go to that
+/// path's players on this process's own `RtspServer` rather than to a
+/// server over the network: there is no session, and its open begins a run
+/// of the path's stream.
 pub struct RtspMuxer {
     id: MuxerId,
-    output: ffmpeg::format::context::Output,
-    streams: Vec<PendingStream>,
-    options: RtspOptions,
-    redacted_url: Arc<str>,
+    target: Target,
+}
+
+/// Where an [`RtspMuxer`]'s tracks go.
+enum Target {
+    /// A session of its own with the server at a URL.
+    Session {
+        output: ffmpeg::format::context::Output,
+        streams: Vec<PendingStream>,
+        options: RtspOptions,
+        redacted_url: Arc<str>,
+    },
+    /// A path an `RtspServer` of this process serves: what its players read.
+    #[cfg(feature = "rtsp-server")]
+    Served {
+        path: Arc<str>,
+        broadcast: crate::elements::Broadcast,
+        streams: Vec<StreamInfo>,
+    },
 }
 
 impl RtspMuxer {
@@ -139,11 +163,27 @@ impl RtspMuxer {
         let output = alloc_output(url)?;
         Ok(Self {
             id: MuxerId::next(),
-            output,
-            streams: Vec::new(),
-            options,
-            redacted_url: redact(url).into(),
+            target: Target::Session {
+                output,
+                streams: Vec::new(),
+                options,
+                redacted_url: redact(url).into(),
+            },
         })
+    }
+
+    /// A muxer of a run of `path`'s stream, whose players read `broadcast`
+    /// — see [`RtspServerPath::muxer`](crate::elements::RtspServerPath::muxer).
+    #[cfg(feature = "rtsp-server")]
+    pub(crate) fn serving(path: &Arc<str>, broadcast: crate::elements::Broadcast) -> Self {
+        Self {
+            id: MuxerId::next(),
+            target: Target::Served {
+                path: Arc::clone(path),
+                broadcast,
+                streams: Vec::new(),
+            },
+        }
     }
 
     /// Registers one more track this session will publish. `format` (see
@@ -161,11 +201,21 @@ impl RtspMuxer {
         format: impl Into<StreamInfo>,
     ) -> Result<MuxerTrack> {
         let format = format.into();
+        let (output, streams) = match &mut self.target {
+            Target::Session {
+                output, streams, ..
+            } => (output, streams),
+            #[cfg(feature = "rtsp-server")]
+            Target::Served { streams, .. } => {
+                let track = self.id.track(streams.len());
+                streams.push(format.with_index(streams.len()));
+                return Ok(track);
+            }
+        };
         let time_base = format.time_base();
         let parameters = format.into_parameters();
         let pending = PendingStream::new(name, &parameters, time_base);
-        let mut stream = self
-            .output
+        let mut stream = output
             .add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::None))
             .map_err(RtspMuxerError::from)?;
         stream.set_parameters(parameters);
@@ -179,8 +229,8 @@ impl RtspMuxer {
         }
         stream.set_time_base(time_base);
 
-        let track = self.id.track(self.streams.len());
-        self.streams.push(pending);
+        let track = self.id.track(streams.len());
+        streams.push(pending);
         Ok(track)
     }
 
@@ -196,20 +246,43 @@ impl RtspMuxer {
     /// to call from two threads against one output at once. They also share
     /// one trailer, written once every track has reported `Eos` — not on
     /// whichever finishes first, which would cut the others off mid-stream.
-    pub fn open(mut self) -> Result<MuxerSinks> {
+    ///
+    /// A served path's muxer begins a run of the path's stream instead,
+    /// which ends as its sinks are all let go of.
+    pub fn open(self) -> Result<MuxerSinks> {
         crate::ensure_ffmpeg();
-        self.output
-            .write_header_with(self.options.to_dictionary())
+        let (mut output, streams, options, redacted_url) = match self.target {
+            Target::Session {
+                output,
+                streams,
+                options,
+                redacted_url,
+            } => (output, streams, options, redacted_url),
+            #[cfg(feature = "rtsp-server")]
+            Target::Served {
+                broadcast, streams, ..
+            } => {
+                let sinks = broadcast.publish(&streams)?;
+                return Ok(self.id.sinks(
+                    sinks
+                        .into_iter()
+                        .map(|sink| Box::new(sink) as Box<dyn crate::element::RawSink>)
+                        .collect(),
+                ));
+            }
+        };
+        output
+            .write_header_with(options.to_dictionary())
             .map_err(RtspMuxerError::from)?;
         Ok(open_tracks::<Self>(
             self.id,
-            self.output,
-            self.streams,
+            output,
+            streams,
             TrackOptions {
                 // Deliberately not finalizing on `Stop` — see this type's own
                 // docs on why a live publish differs from a file here.
                 finish_on_stop: false,
-                destination: Some(self.redacted_url),
+                destination: Some(redacted_url),
                 // Each track rebases onto its own last output, not onto a
                 // shared one.
                 timeline: Some(|| Box::new(Timeline::default())),
@@ -220,9 +293,14 @@ impl RtspMuxer {
     }
 
     /// The publish address with any credentials removed — what to log, and
-    /// what to show a user. See this type's own docs.
+    /// what to show a user. See this type's own docs. A served path's
+    /// muxer answers the path.
     pub fn redacted_url(&self) -> &str {
-        &self.redacted_url
+        match &self.target {
+            Target::Session { redacted_url, .. } => redacted_url,
+            #[cfg(feature = "rtsp-server")]
+            Target::Served { path, .. } => path,
+        }
     }
 }
 

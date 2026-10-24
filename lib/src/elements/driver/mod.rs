@@ -17,6 +17,8 @@ pub(crate) mod publishers;
 mod rtmp_server;
 #[cfg(feature = "rtsp-server")]
 mod rtsp_server;
+#[cfg(any(feature = "rtsp-server", feature = "webrtc"))]
+mod served;
 #[cfg(feature = "webrtc")]
 mod webrtc;
 
@@ -30,11 +32,12 @@ pub use rtmp_server::{
 };
 #[cfg(feature = "rtsp-server")]
 pub use rtsp_server::{
-    RtspDigest, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions, RtspSessionStats,
+    RtspDigest, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions, RtspServerPath,
+    RtspSessionStats,
 };
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
     IceServer, SessionId, SessionRole, SessionStats, TrackId, WebRtcError, WebRtcHandle,
     WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPeer, WebRtcServer, WebRtcServerError,
-    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
+    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcServerPath, WebRtcSource,
 };

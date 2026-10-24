@@ -104,6 +104,39 @@ compile error with no explanation.
   arm for it. The `rtsp_server` and `webrtc_server` examples relay their
   publishers this way.
 
+- **What a server plays is written through a muxer of its path.**
+  `RtspServerHandle::path(name)` and `WebRtcServerHandle::path(name)`
+  answer an `RtspServerPath` or a `WebRtcServerPath`, served for as long as
+  it lives — dropped, its players' sessions end — whose `muxer()` is an
+  `RtspMuxer` or a `WebRtcMuxer`, made, given its tracks and opened as one
+  to a remote server is: each opened begins a run of the path's stream,
+  which its players go on across. `add_path` and `remove_path` are gone,
+  and a `Broadcast` is no longer handed to a server. Instead of
+
+  ```rust
+  let camera = Broadcast::new("camera", BroadcastOptions::default());
+  handle.add_path("cam1", &camera)?;
+  let sinks = camera.publish(&streams)?;
+  ```
+
+  write
+
+  ```rust
+  let cam1 = handle.path("cam1")?; // kept for as long as it is served
+  let mut muxer = cam1.muxer();
+  let tracks = streams
+      .iter()
+      .map(|stream| muxer.add_stream(format!("track-{}", stream.index()), stream))
+      .collect::<media_pp::Result<Vec<_>>>()?;
+  let mut sinks = muxer.open()?; // `sinks.take(track)` for each
+  ```
+
+  A `WebRtcServerPath`'s muxer refuses a track WebRTC does not carry, as
+  any `WebRtcMuxer` does; check `WebRtcServer::carries` first. A
+  `Broadcast` of the application's own, read by several outputs, is
+  written into a path by a `BroadcastSource` of it into the path's muxer,
+  as the `rtsp_server` and `webrtc_server` examples do.
+
 ### Changed
 
 - **A muxer of MP4 refuses a track whose pictures change partway.** An

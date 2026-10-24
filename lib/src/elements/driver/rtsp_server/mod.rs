@@ -24,7 +24,8 @@ use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
 use crate::elements::driver::publishers::{self, Arrivals, OnDrop, Publishers};
-use crate::elements::{Access, Authorize, Broadcast, RtspSource};
+use crate::elements::driver::served::Served;
+use crate::elements::{Access, Authorize, Broadcast, BroadcastOptions, RtspMuxer, RtspSource};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
@@ -91,51 +92,52 @@ impl Default for RtspServerOptions {
     }
 }
 
-/// An RTSP server: plays [`Broadcast`]s to RTSP players, each under a path
-/// of its own, and takes RTSP publishers — `ANNOUNCE` and `RECORD` — on the
+/// An RTSP server: plays what is written through each of its paths' muxers
+/// to RTSP players ([`RtspServerHandle::path`]), and takes RTSP publishers — `ANNOUNCE` and `RECORD` — on the
 /// paths that take them, each handed out as an [`RtspSource`] of what it
 /// sends ([`RtspServerHandle::take_publishers`]). Needs the `rtsp-server`
 /// feature.
 ///
-/// A broadcast is written once, by whatever pipeline the application has —
-/// an [`RtspSource`](crate::elements::RtspSource) pulling a camera, an
+/// A path's stream is written once, through an [`RtspMuxer`] its
+/// [`RtspServerPath`] makes, by whatever pipeline the application has — an
+/// [`RtspSource`](crate::elements::RtspSource) pulling a camera, an
 /// encoder — and every player reads it: nothing is decoded or encoded for
 /// them, and each is sent only its own copy of the RTP packets. A player
-/// starts at the newest keyframe the broadcast holds, or waits for the next
-/// one written; one that cannot keep up is moved on to a newer keyframe rather
-/// than slowing the others or the input. An input that drops and comes back
-/// publishes again into the same broadcast, and its players go on.
+/// starts at the newest keyframe the path holds, or waits for the next one
+/// written; one that cannot keep up is moved on to a newer keyframe rather
+/// than slowing the others or the input. Each muxer opened is a run of the
+/// path's stream: an input that drops and comes back opens another, and
+/// its players go on.
 ///
 /// It is not a pipeline element: run it with a
-/// [`DriverRunner`](crate::driver::DriverRunner), and add paths through its
-/// [`RtspServerHandle`] before or while it runs.
+/// [`DriverRunner`](crate::driver::DriverRunner), and take paths through
+/// its [`RtspServerHandle`] before or while it runs.
 ///
 /// # Example
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
 /// use media_pp::driver::DriverRunner;
-/// use media_pp::elements::{
-///     Broadcast, BroadcastOptions, RtspOptions, RtspServer, RtspServerOptions, RtspSource,
-///     StreamInfo,
-/// };
+/// use media_pp::elements::{RtspOptions, RtspServer, RtspServerOptions, RtspSource};
 /// use media_pp::pipeline::Pipeline;
 ///
 /// let (server, handle) = RtspServer::bind("server", "0.0.0.0:8554", RtspServerOptions::default())?;
-/// let camera = Broadcast::new("camera", BroadcastOptions::default());
-/// handle.add_path("cam1", &camera)?;
+/// let cam1 = handle.path("cam1")?;
 /// let server = DriverRunner::new(server);
 /// server.run()?;
 ///
-/// // The camera, pulled once, written into the broadcast; players open
-/// // rtsp://<this machine>:8554/cam1.
+/// // The camera, pulled once, written through the path's muxer; players
+/// // open rtsp://<this machine>:8554/cam1.
 /// let (source, streams) = RtspSource::open("camera", "rtsp://192.168.0.10/stream", RtspOptions::default())?;
-/// let tracks: Vec<StreamInfo> = streams.iter().map(StreamInfo::from).collect();
-/// let sinks = camera.publish(&tracks)?;
+/// let mut muxer = cam1.muxer();
+/// let tracks = streams
+///     .iter()
+///     .map(|stream| muxer.add_stream(format!("track-{}", stream.index()), stream))
+///     .collect::<media_pp::Result<Vec<_>>>()?;
+/// let mut sinks = muxer.open()?;
 /// let (input, ()) = Pipeline::new("camera", source, |source, ctx| {
-///     for (stream, sink) in streams.iter().zip(sinks) {
-///         let branch = ctx.branch().queue("packets", 64).to(sink)?;
-///         ctx.attach(source, stream.index(), branch)?;
+///     for (stream, track) in streams.iter().zip(tracks) {
+///         ctx.attach(source, stream.index(), ctx.branch().to(sinks.take(track)?)?)?;
 ///     }
 ///     Ok(())
 /// })?;
@@ -152,9 +154,8 @@ impl Default for RtspServerOptions {
 /// thread, and stops — every connection closed — when its runner is stopped
 /// or dropped.
 ///
-/// A player starts at the newest keyframe the broadcast holds — within its
-/// [`retain`](crate::elements::BroadcastOptions::retain), a second by
-/// default — or at the next one written, so it is at most that far behind
+/// A player starts at the newest keyframe the path holds — within a
+/// second — or at the next one written, so it is at most that far behind
 /// the input. What came after that keyframe is sent at once to a player
 /// over TCP, whose connection paces it, and at twice the stream's speed to
 /// one over UDP, which nothing paces: sent at once, it overflows the
@@ -193,10 +194,9 @@ pub struct RtspServer {
 
 /// A handle to an [`RtspServer`], to say what it serves while it runs.
 ///
-/// Cheap to clone; every clone is the same server's. It keeps the paths'
-/// broadcasts it was given — so a broadcast served stays open while its
-/// path is — and nothing else of the server: once the server has stopped,
-/// adding a path still succeeds and nobody connects to it, and the paths'
+/// Cheap to clone; every clone is the same server's, and keeps nothing of
+/// it but what it shares with its paths: once the server has stopped,
+/// taking a path still succeeds and nobody connects to it, and the paths'
 /// [`Publishers`] answer `None`.
 #[derive(Clone)]
 pub struct RtspServerHandle {
@@ -234,6 +234,9 @@ pub(crate) struct Shared {
 #[derive(Clone)]
 pub(crate) struct Path {
     pub(crate) broadcast: Broadcast,
+    /// The number of the registration, so that an `RtspServerPath` gone
+    /// takes away only its own.
+    registration: u64,
 }
 
 impl Shared {
@@ -359,19 +362,16 @@ impl RtspServer {
 }
 
 impl RtspServerHandle {
-    /// Serves `broadcast` under `path` — at `rtsp://<address>/<path>` — to
-    /// players, from now on.
+    /// Serves `path` — `rtsp://<address>/<path>` — to players, for as long
+    /// as the [`RtspServerPath`] returned lives: what is written through
+    /// its muxers is what they play.
     ///
     /// # Errors
     ///
     /// [`RtspServerError::InvalidPath`] for a path a URL could not name as it
     /// is, and [`RtspServerError::PathTaken`] for one already served; what
     /// was served under it goes on unchanged.
-    pub fn add_path(
-        &self,
-        path: &str,
-        broadcast: &Broadcast,
-    ) -> std::result::Result<(), RtspServerError> {
+    pub fn path(&self, path: &str) -> std::result::Result<RtspServerPath, RtspServerError> {
         if !valid_path(path) {
             return Err(RtspServerError::InvalidPath(path.to_owned()));
         }
@@ -379,36 +379,29 @@ impl RtspServerHandle {
         if paths.contains_key(path) {
             return Err(RtspServerError::PathTaken(path.to_owned()));
         }
+        let registration = self
+            .shared
+            .next_registration
+            .fetch_add(1, Ordering::Relaxed);
+        let broadcast = Broadcast::new(path, BroadcastOptions::default());
         paths.insert(
             path.to_owned(),
             Path {
                 broadcast: broadcast.clone(),
+                registration,
             },
         );
         drop(paths);
-        pp_info!(
-            pp_log: &self.shared.pp_log,
-            "path added: {path} broadcast={}",
-            broadcast.name()
-        );
-        Ok(())
-    }
-
-    /// Stops serving `path`: nobody new opens it. Whether it was served.
-    /// Players already playing it go on until its broadcast closes or they
-    /// leave.
-    pub fn remove_path(&self, path: &str) -> bool {
-        let removed = self
-            .shared
-            .paths
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(path)
-            .is_some();
-        if removed {
-            pp_info!(pp_log: &self.shared.pp_log, "path removed: {path}");
-        }
-        removed
+        pp_info!(pp_log: &self.shared.pp_log, "path served: {path}");
+        let shared = Arc::downgrade(&self.shared);
+        let name = path.to_owned();
+        Ok(RtspServerPath {
+            path: path.into(),
+            served: Served::new(
+                broadcast,
+                OnDrop::new(move || unserve(&shared, &name, registration)),
+            ),
+        })
     }
 
     /// Takes publishers on `path` — `ANNOUNCE` and `RECORD` to
@@ -496,6 +489,66 @@ impl RtspServerHandle {
                 bytes_received: session.received.load(Ordering::Relaxed),
             })
             .collect()
+    }
+}
+
+/// A path an [`RtspServer`] serves to players, from
+/// [`RtspServerHandle::path`], for as long as it lives: dropped, nobody new
+/// plays it, and its players' sessions end.
+///
+/// What its players play is what is written through its muxers — each
+/// [`Self::muxer`] opened a run of its stream, which they go on across, as
+/// they would across a camera's reconnections. One muxer at a time: one
+/// opened while another's run goes on ends that run. Holds nothing of the
+/// server.
+#[derive(Debug)]
+pub struct RtspServerPath {
+    path: Arc<str>,
+    served: Served,
+}
+
+impl RtspServerPath {
+    /// The path it serves.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// A muxer of a run of the path's stream: given its tracks with
+    /// `add_stream` and opened as one to an RTSP server is, a sink per
+    /// track. Opening it begins a run; its sinks all let go of end it. A
+    /// track in a codec RTP does not carry here is left out of what
+    /// players are described — see [`RtspServer::carries`].
+    pub fn muxer(&self) -> RtspMuxer {
+        RtspMuxer::serving(&self.path, self.served.broadcast.clone())
+    }
+
+    /// How many players play it now: the RTSP sessions reading what its
+    /// muxers write.
+    pub fn players(&self) -> usize {
+        self.served.broadcast.stats().readers
+    }
+
+    /// What its players read, for this crate's own tests.
+    #[cfg(test)]
+    pub(crate) fn broadcast(&self) -> &Broadcast {
+        &self.served.broadcast
+    }
+}
+
+/// Takes away the path [`RtspServerHandle::path`] registered as
+/// `registration`: nobody new plays it.
+fn unserve(shared: &Weak<Shared>, path: &str, registration: u64) {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    let mut paths = shared.paths.lock().unwrap_or_else(|p| p.into_inner());
+    if paths
+        .get(path)
+        .is_some_and(|served| served.registration == registration)
+    {
+        paths.remove(path);
+        drop(paths);
+        pp_info!(pp_log: &shared.pp_log, "path no longer served: {path}");
     }
 }
 

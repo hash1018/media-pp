@@ -14,8 +14,8 @@ use super::*;
 use crate::buffer::MediaBuffer;
 use crate::driver::DriverRunner;
 use crate::elements::{
-    AccessRequest, Authorize, BroadcastOptions, FileDemuxer, Pacer, RtspOptions, RtspSource,
-    RtspTransport, StreamInfo,
+    AccessRequest, Authorize, FileDemuxer, Pacer, RtspOptions, RtspSource, RtspTransport,
+    StreamInfo,
 };
 use crate::pipeline::Pipeline;
 use crate::test_support::CapturingSink;
@@ -33,11 +33,21 @@ fn server(udp: bool) -> (Arc<DriverRunner>, RtspServerHandle, Broadcast) {
         },
     )
     .expect("a loopback port is free");
-    let broadcast = Broadcast::new("cam", BroadcastOptions::default());
-    handle.add_path("cam", &broadcast).unwrap();
+    let broadcast = serve(&handle, "cam");
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     (runner, handle, broadcast)
+}
+
+/// Serves `name` on `handle`'s server for the rest of the test, and
+/// answers the broadcast its players read — what a path's muxers write
+/// into, and what a test writes into or looks at directly.
+fn serve(handle: &RtspServerHandle, name: &str) -> Broadcast {
+    let path = handle.path(name).unwrap();
+    let broadcast = path.broadcast().clone();
+    // Dropped, the path would end its players: kept as long as the test.
+    std::mem::forget(path);
+    broadcast
 }
 
 /// Plays the fixture into `broadcast` at its own speed, over and over, as a
@@ -267,8 +277,9 @@ fn each_session_says_its_path_and_what_it_was_sent() {
         return;
     };
     let (runner, handle, broadcast) = server(true);
-    handle.add_path("door", &broadcast).unwrap();
+    let door = serve(&handle, "door");
     let camera = feed(&broadcast, &path);
+    let _door_camera = feed(&door, &path);
     let players = [
         play(&handle.url("cam"), RtspTransport::Tcp),
         play(&handle.url("cam"), RtspTransport::Tcp),
@@ -380,10 +391,10 @@ fn stopping_the_server_ends_its_players() {
 }
 
 #[test]
-fn paths_are_checked_as_they_are_added() {
-    let (_runner, handle, broadcast) = server(false);
+fn paths_are_checked_as_they_are_taken() {
+    let (_runner, handle, _broadcast) = server(false);
     assert!(matches!(
-        handle.add_path("cam", &broadcast),
+        handle.path("cam"),
         Err(RtspServerError::PathTaken(_))
     ));
     for bad in [
@@ -396,16 +407,104 @@ fn paths_are_checked_as_they_are_added() {
         "cam?x",
     ] {
         assert!(
-            matches!(
-                handle.add_path(bad, &broadcast),
-                Err(RtspServerError::InvalidPath(_))
-            ),
+            matches!(handle.path(bad), Err(RtspServerError::InvalidPath(_))),
             "{bad:?}"
         );
     }
-    handle.add_path("site/door-1", &broadcast).unwrap();
-    assert!(handle.remove_path("site/door-1"));
-    assert!(!handle.remove_path("site/door-1"));
+    let door = handle.path("site/door-1").unwrap();
+    assert_eq!(door.path(), "site/door-1");
+    drop(door);
+    handle
+        .path("site/door-1")
+        .expect("served again once let go of");
+}
+
+/// What a path's muxer writes is what its players play, a run each muxer
+/// opened, which they go on across; the path let go of ends them, and
+/// nobody new plays it.
+#[test]
+fn a_path_plays_what_its_muxers_write_and_ends_its_players_as_it_goes() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, _cam) = server(false);
+    let door = handle.path("door").unwrap();
+    let write = |round: &str| {
+        let (demuxer, streams) = FileDemuxer::open(round, &path).unwrap();
+        demuxer.looping_handle().set_looping(true);
+        let mut muxer = door.muxer();
+        let tracks: Vec<_> = streams
+            .iter()
+            .map(|stream| {
+                muxer
+                    .add_stream(format!("track-{}", stream.index()), stream)
+                    .unwrap()
+            })
+            .collect();
+        let mut sinks = muxer.open().unwrap();
+        let (pipeline, ()) = Pipeline::new(round, demuxer, |source, ctx| {
+            for (stream, track) in streams.iter().zip(tracks) {
+                let branch = ctx
+                    .branch()
+                    .queue(format!("packets-{}", stream.index()), 64)
+                    .pipe(Pacer::new(format!("pacer-{}", stream.index())))
+                    .to(sinks.take(track)?)?;
+                ctx.attach(source, stream.index(), branch)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        pipeline
+    };
+    let first = write("first");
+    assert_eq!(door.players(), 0);
+    let player = play(&handle.url("door"), RtspTransport::Tcp);
+    player.wait_for(10);
+    assert_eq!(door.players(), 1, "the player reads the path");
+    // The input drops and comes back: another run, which the player goes on
+    // across.
+    first.stop();
+    drop(first);
+    let second = write("second");
+    let had = player.packets(0).len();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while player.packets(0).len() < had + 10 {
+        assert!(
+            Instant::now() < deadline,
+            "the player went on across the runs"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(door);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while handle
+        .session_stats()
+        .iter()
+        .any(|session| session.role == Access::Play)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the path let go of ends its players"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        RtspSource::open(
+            "late",
+            handle.url("door"),
+            RtspOptions {
+                transport: RtspTransport::Tcp,
+                timeout: Duration::from_secs(2),
+            }
+        )
+        .is_err(),
+        "nobody new plays it"
+    );
+    player.pipeline.stop();
+    second.stop();
+    runner.stop();
 }
 
 #[test]
@@ -575,8 +674,7 @@ type Relayed = thread::JoinHandle<Vec<Vec<StreamInfo>>>;
 /// its players play under the same name, besides `cam`.
 fn server_for_publishers(udp: bool) -> (Arc<DriverRunner>, RtspServerHandle, Broadcast, Relayed) {
     let (runner, handle, _cam) = server(udp);
-    let live = Broadcast::new("live", BroadcastOptions::default());
-    handle.add_path("live", &live).unwrap();
+    let live = serve(&handle, "live");
     let relayed = crate::test_support::relay(handle.take_publishers("live").unwrap(), live.clone());
     (runner, handle, live, relayed)
 }
@@ -894,10 +992,8 @@ fn server_asking() -> (
         },
     )
     .expect("a loopback port is free");
-    let cam = Broadcast::new("cam", BroadcastOptions::default());
-    let live = Broadcast::new("live", BroadcastOptions::default());
-    handle.add_path("cam", &cam).unwrap();
-    handle.add_path("live", &live).unwrap();
+    let cam = serve(&handle, "cam");
+    let live = serve(&handle, "live");
     // Left to run until the server stops.
     drop(crate::test_support::relay(
         handle.take_publishers("live").unwrap(),

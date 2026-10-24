@@ -24,7 +24,8 @@ use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
 use crate::elements::driver::publishers::{self, Arrivals, OnDrop, Publishers};
-use crate::elements::{Authorize, Broadcast, WebRtcSource};
+use crate::elements::driver::served::Served;
+use crate::elements::{Authorize, Broadcast, BroadcastOptions, WebRtcMuxer, WebRtcSource};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
@@ -296,15 +297,16 @@ impl Default for WebRtcServerOptions {
     }
 }
 
-/// A WebRTC server: plays [`Broadcast`]s to WebRTC players — browsers among
-/// them — each under a path of its own, and takes WebRTC publishers on the
+/// A WebRTC server: plays what is written through each of its paths'
+/// muxers to WebRTC players — browsers among them —
+/// ([`WebRtcServerHandle::path`]), and takes WebRTC publishers on the
 /// paths that take them, each handed out as a [`WebRtcSource`] of what it
 /// sends ([`WebRtcServerHandle::take_publishers`]). Needs the `webrtc`
 /// feature.
 ///
 /// A few UDP sockets serve every session — one for each of its threads (see
 /// [`WebRtcServerOptions::threads`]). A player is sent its path's
-/// broadcast as it is — nothing decoded or encoded — from the newest
+/// stream as it is — nothing decoded or encoded — from the newest
 /// keyframe on, in the codecs WebRTC carries: H.264, H.265, VP8, VP9 and AV1
 /// pictures, Opus and G.711 sound. A track in any other codec — AAC, say,
 /// from a camera — is left out, so a camera's AAC sound reaches a browser
@@ -328,15 +330,15 @@ impl Default for WebRtcServerOptions {
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
 /// use media_pp::driver::DriverRunner;
-/// use media_pp::elements::{Broadcast, BroadcastOptions, WebRtcServer, WebRtcServerOptions};
+/// use media_pp::elements::{WebRtcServer, WebRtcServerOptions};
 ///
 /// let (server, handle) = WebRtcServer::bind("server", "192.168.0.5:8189", WebRtcServerOptions::default())?;
-/// let camera = Broadcast::new("camera", BroadcastOptions::default());
-/// handle.add_path("cam1", &camera)?;
+/// let cam1 = handle.path("cam1")?;
 /// DriverRunner::new(server).run()?;
 /// // Browsers play http://192.168.0.5:8080/cam1/whep.
 /// let _http = handle.serve_http("0.0.0.0:8080")?;
-/// // ... a pipeline writes the camera into `camera`.
+/// // ... a pipeline writes the camera through `cam1.muxer()`, a run each
+/// // time it connects.
 /// # Ok(())
 /// # }
 /// ```
@@ -390,9 +392,8 @@ struct Shard {
 /// A handle to a [`WebRtcServer`], to say what it serves and to answer
 /// offers while it runs.
 ///
-/// Cheap to clone; every clone is the same server's. It keeps the paths'
-/// broadcasts it was given — so a broadcast served stays open while its
-/// path is. What it asks of the server waits for the server's loop to
+/// Cheap to clone; every clone is the same server's, and keeps nothing of
+/// it but what it shares with its paths. What it asks of the server waits for the server's loop to
 /// answer, up to five seconds, and fails with
 /// [`WebRtcServerError::NotRunning`] when the server is not running. Once
 /// the server has stopped, the paths' [`Publishers`] answer `None`.
@@ -406,7 +407,10 @@ pub struct WebRtcServerHandle {
 /// What a server and its handles share.
 pub(crate) struct Shared {
     pub(crate) pp_log: PpLog,
-    paths: Mutex<HashMap<String, Broadcast>>,
+    /// What each path's players read, under the number of the path's
+    /// registration, so that a `WebRtcServerPath` gone takes away only its
+    /// own.
+    paths: Mutex<HashMap<String, (u64, Broadcast)>>,
     /// Where a publisher of each path that takes them is handed out, apart
     /// from what its players play, under the number of the registration,
     /// so that a `Publishers` gone takes away only its own.
@@ -605,18 +609,16 @@ fn udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
 }
 
 impl WebRtcServerHandle {
-    /// Serves `broadcast` under `path` to players, from now on.
+    /// Serves `path` to players — [`Self::play`], WHEP from `/<path>/whep`
+    /// — for as long as the [`WebRtcServerPath`] returned lives: what is
+    /// written through its muxers is what they play.
     ///
     /// # Errors
     ///
     /// [`WebRtcServerError::InvalidPath`] for a path a URL could not name
     /// as it is, and [`WebRtcServerError::PathTaken`] for one already
     /// served; what was served under it goes on unchanged.
-    pub fn add_path(
-        &self,
-        path: &str,
-        broadcast: &Broadcast,
-    ) -> std::result::Result<(), WebRtcServerError> {
+    pub fn path(&self, path: &str) -> std::result::Result<WebRtcServerPath, WebRtcServerError> {
         if !valid_path(path) {
             return Err(WebRtcServerError::InvalidPath(path.to_owned()));
         }
@@ -624,14 +626,23 @@ impl WebRtcServerHandle {
         if paths.contains_key(path) {
             return Err(WebRtcServerError::PathTaken(path.to_owned()));
         }
-        paths.insert(path.to_owned(), broadcast.clone());
+        let registration = self
+            .shared
+            .next_registration
+            .fetch_add(1, Ordering::Relaxed);
+        let broadcast = Broadcast::new(path, BroadcastOptions::default());
+        paths.insert(path.to_owned(), (registration, broadcast.clone()));
         drop(paths);
-        pp_info!(
-            pp_log: &self.shared.pp_log,
-            "path added: {path} broadcast={}",
-            broadcast.name()
-        );
-        Ok(())
+        pp_info!(pp_log: &self.shared.pp_log, "path served: {path}");
+        let shared = Arc::downgrade(&self.shared);
+        let name = path.to_owned();
+        Ok(WebRtcServerPath {
+            path: path.into(),
+            served: Served::new(
+                broadcast,
+                OnDrop::new(move || unserve(&shared, &name, registration)),
+            ),
+        })
     }
 
     /// Takes publishers on `path` — [`Self::publish`], WHIP to
@@ -674,22 +685,6 @@ impl WebRtcServerHandle {
         drop(taken);
         pp_info!(pp_log: &self.shared.pp_log, "publishers taken on {path}");
         Ok(publishers)
-    }
-
-    /// Stops serving `path`: nobody new opens it. Whether it was served.
-    /// Sessions already open go on.
-    pub fn remove_path(&self, path: &str) -> bool {
-        let removed = self
-            .shared
-            .paths
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(path)
-            .is_some();
-        if removed {
-            pp_info!(pp_log: &self.shared.pp_log, "path removed: {path}");
-        }
-        removed
     }
 
     /// Answers `offer` — SDP from a player — with a session playing `path`:
@@ -853,7 +848,7 @@ impl Shared {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(name)
-            .cloned()
+            .map(|(_, broadcast)| broadcast.clone())
     }
 
     /// Where a publisher of `name` is handed out, where it takes any.
@@ -863,6 +858,62 @@ impl Shared {
             .unwrap_or_else(|p| p.into_inner())
             .get(name)
             .map(|(_, arrivals)| arrivals.clone())
+    }
+}
+
+/// A path a [`WebRtcServer`] serves to players, from
+/// [`WebRtcServerHandle::path`], for as long as it lives: dropped, nobody
+/// new plays it, and its players' sessions end.
+///
+/// What its players play is what is written through its muxers — each
+/// [`Self::muxer`] opened a run of its stream, which they go on across, as
+/// they would across a camera's reconnections. One muxer at a time: one
+/// opened while another's run goes on ends that run. Holds nothing of the
+/// server.
+#[derive(Debug)]
+pub struct WebRtcServerPath {
+    path: Arc<str>,
+    served: Served,
+}
+
+impl WebRtcServerPath {
+    /// The path it serves.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// A muxer of a run of the path's stream: given its tracks with
+    /// `add_stream` — in codecs WebRTC carries, which it refuses others
+    /// in — and opened as one to a WHIP server is, a sink per track.
+    /// Opening it begins a run; its sinks all let go of end it.
+    pub fn muxer(&self) -> WebRtcMuxer {
+        WebRtcMuxer::serving(&self.path, self.served.broadcast.clone())
+    }
+
+    /// How many players play it now: the WebRTC sessions reading what its
+    /// muxers write.
+    pub fn players(&self) -> usize {
+        self.served.broadcast.stats().readers
+    }
+
+    /// What its players read, for this crate's own tests.
+    #[cfg(test)]
+    pub(crate) fn broadcast(&self) -> &Broadcast {
+        &self.served.broadcast
+    }
+}
+
+/// Takes away the path [`WebRtcServerHandle::path`] registered as
+/// `registration`: nobody new plays it.
+fn unserve(shared: &Weak<Shared>, path: &str, registration: u64) {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    let mut paths = shared.paths.lock().unwrap_or_else(|p| p.into_inner());
+    if paths.get(path).is_some_and(|(id, _)| *id == registration) {
+        paths.remove(path);
+        drop(paths);
+        pp_info!(pp_log: &shared.pp_log, "path no longer served: {path}");
     }
 }
 

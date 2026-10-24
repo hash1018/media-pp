@@ -4,16 +4,19 @@ An RTSP server: plays a file to any number of RTSP players as a camera would,
 and takes a publisher's push on a second path, which players play too.
 
 ```text
-FileDemuxer -> Pacer -> BroadcastSink    (the file, looped, at its own speed)
-                             |
-                     Broadcast "file" ----\
-                                           RtspServer -> players
+FileDemuxer -> Pacer -> BroadcastSink -> Broadcast "file"    (the file, looped, at its own speed)
 publisher -> RtspServer -> RtspSource -> BroadcastSink -> Broadcast "live"
+
+Broadcast "file" -> BroadcastSource -> RtspMuxer (path "file") -> RtspServer -> players
+Broadcast "live" -> BroadcastSource -> RtspMuxer (path "live") -> RtspServer -> players
 ```
 
 The server hands each publisher out as an `RtspSource` of what it sends
 (`RtspServerHandle::take_publishers`), and a pipeline of the example's own
-writes it into the broadcast `live`'s players play.
+writes it into the broadcast `live`. Each broadcast is the example's own: what
+reads it — the server's path of the same name, through the `RtspMuxer` its
+`RtspServerPath` makes, and with `--record` a recording — reads it from its
+newest keyframe.
 
 Each player is sent the broadcast's packets as they are — nothing is decoded
 or encoded for it — from the newest keyframe on. `live` takes one publisher at

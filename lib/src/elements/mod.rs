@@ -123,13 +123,14 @@ pub use driver::{Access, AccessRequest, Authorize, Credentials, Publishers};
 pub use driver::{
     IceServer, SessionId, SessionRole, SessionStats, TrackId, WebRtcError, WebRtcHandle,
     WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPeer, WebRtcServer, WebRtcServerError,
-    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
+    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcServerPath, WebRtcSource,
 };
 #[cfg(feature = "rtmp-server")]
 pub use driver::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions, RtmpSource};
 #[cfg(feature = "rtsp-server")]
 pub use driver::{
-    RtspDigest, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions, RtspSessionStats,
+    RtspDigest, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions, RtspServerPath,
+    RtspSessionStats,
 };
 pub use filter::{
     AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,

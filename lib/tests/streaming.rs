@@ -9,6 +9,7 @@
 #![cfg(all(feature = "webrtc", feature = "rtsp-server"))]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use media_pp::bus::BusEvent;
@@ -157,21 +158,96 @@ where
     });
 }
 
-/// Both servers on the loopback, serving `broadcast` under `path`, and the
-/// one `takes` says taking a publisher of the path into it.
+/// Writes what `broadcast` carries into the runs `open` begins, on a thread
+/// of its own — as an application writes its stream into a server's path —
+/// until `stop` is set: a run each time the broadcast begins with tracks
+/// the last could not go on with. `open` answers each output to write and
+/// the sink it goes to.
+fn forward<F>(
+    name: &'static str,
+    broadcast: Broadcast,
+    open: F,
+    stop: Arc<AtomicBool>,
+    runs: Arc<AtomicUsize>,
+) where
+    F: Fn(&[StreamInfo]) -> media_pp::Result<Vec<(usize, BoxSink)>> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            let opened = BroadcastSource::new(name, &broadcast)
+                .map_err(media_pp::Error::from)
+                .and_then(|(source, streams)| Ok((source, open(&streams)?)));
+            let Ok((source, sinks)) = opened else {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let (pipeline, ()) = Pipeline::new(name, source, |source, ctx| {
+                for (index, sink) in sinks {
+                    ctx.attach(source, index, ctx.branch().to(sink)?)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            pipeline.run().unwrap();
+            runs.fetch_add(1, Ordering::AcqRel);
+            while !stop.load(Ordering::Acquire) {
+                if let Ok(BusEvent::Finished | BusEvent::Error { .. }) =
+                    pipeline.bus().recv_timeout(Duration::from_millis(50))
+                {
+                    break;
+                }
+            }
+            pipeline.stop();
+        }
+    });
+}
+
+/// Both servers on the loopback, serving what `broadcast` carries under
+/// `path` — written into each one's path — and the one `takes` says taking
+/// a publisher of the path into it.
 struct Servers {
     webrtc: Arc<DriverRunner>,
     _webrtc_handle: WebRtcServerHandle,
     http: WebRtcHttpEndpoint,
     rtsp: Arc<DriverRunner>,
     rtsp_handle: RtspServerHandle,
+    stop: Arc<AtomicBool>,
+    /// How many runs the two have begun of what they are written.
+    runs: Arc<AtomicUsize>,
 }
 
 impl Servers {
     fn serving(path: &str, broadcast: &Broadcast, takes: Takes) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let runs = Arc::new(AtomicUsize::new(0));
         let (server, webrtc_handle) =
             WebRtcServer::bind("webrtc", "127.0.0.1:0", WebRtcServerOptions::default()).unwrap();
-        webrtc_handle.add_path(path, broadcast).unwrap();
+        let served = webrtc_handle.path(path).unwrap();
+        // What WebRTC carries of it.
+        forward(
+            "to-webrtc",
+            broadcast.clone(),
+            move |streams| {
+                let mut muxer = served.muxer();
+                let mut tracks = Vec::new();
+                for stream in streams
+                    .iter()
+                    .filter(|stream| WebRtcServer::carries(stream))
+                {
+                    tracks.push((
+                        stream.index(),
+                        muxer.add_stream(format!("track-{}", stream.index()), stream)?,
+                    ));
+                }
+                let mut sinks = muxer.open()?;
+                tracks
+                    .into_iter()
+                    .map(|(index, track)| Ok((index, sinks.take(track)?)))
+                    .collect()
+            },
+            Arc::clone(&stop),
+            Arc::clone(&runs),
+        );
         if let Takes::Whip = takes {
             relay(
                 webrtc_handle.take_publishers(path).unwrap(),
@@ -183,7 +259,28 @@ impl Servers {
         let http = webrtc_handle.serve_http("127.0.0.1:0").unwrap();
         let (server, rtsp_handle) =
             RtspServer::bind("rtsp", "127.0.0.1:0", RtspServerOptions::default()).unwrap();
-        rtsp_handle.add_path(path, broadcast).unwrap();
+        let served = rtsp_handle.path(path).unwrap();
+        forward(
+            "to-rtsp",
+            broadcast.clone(),
+            move |streams| {
+                let mut muxer = served.muxer();
+                let mut tracks = Vec::new();
+                for stream in streams {
+                    tracks.push((
+                        stream.index(),
+                        muxer.add_stream(format!("track-{}", stream.index()), stream)?,
+                    ));
+                }
+                let mut sinks = muxer.open()?;
+                tracks
+                    .into_iter()
+                    .map(|(index, track)| Ok((index, sinks.take(track)?)))
+                    .collect()
+            },
+            Arc::clone(&stop),
+            Arc::clone(&runs),
+        );
         if let Takes::Rtsp = takes {
             relay(
                 rtsp_handle.take_publishers(path).unwrap(),
@@ -198,10 +295,22 @@ impl Servers {
             http,
             rtsp: rtsp_runner,
             rtsp_handle,
+            stop,
+            runs,
         }
     }
 
+    /// Waits until `broadcast` is live and both servers' paths have begun
+    /// a run of it: until their players can play it.
+    fn until_live(&self, broadcast: &Broadcast) {
+        until_live(broadcast);
+        wait_for("both servers' paths began a run of it", || {
+            self.runs.load(Ordering::Acquire) >= 2
+        });
+    }
+
     fn stop(self) {
+        self.stop.store(true, Ordering::Release);
         drop(self.http);
         self.webrtc.stop();
         self.rtsp.stop();
@@ -443,7 +552,7 @@ fn whip_in_whep_out() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
     let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
 
     let (source, streams) = WebRtcSource::open(
         "player",
@@ -471,7 +580,7 @@ fn whip_in_rtsp_out() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
     let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
 
     let (source, streams) = RtspSource::open(
         "player",
@@ -499,7 +608,7 @@ fn rtsp_in_whep_out() {
         let camera = Broadcast::new("camera", BroadcastOptions::default());
         let servers = Servers::serving("cam", &camera, Takes::Rtsp);
         let input = publish_rtsp(&servers.rtsp_handle.url("cam"), encoders);
-        until_live(&camera);
+        servers.until_live(&camera);
 
         let (source, streams) = WebRtcSource::open(
             "player",
@@ -536,7 +645,7 @@ fn whip_in_recorded() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
     let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
 
     let scratch = Scratch::new("whip.mp4");
     let file = scratch.0.clone();
@@ -556,7 +665,7 @@ fn rtsp_in_recorded() {
     let camera = Broadcast::new("camera", BroadcastOptions::default());
     let servers = Servers::serving("cam", &camera, Takes::Rtsp);
     let input = publish_rtsp(&servers.rtsp_handle.url("cam"), encoders);
-    until_live(&camera);
+    servers.until_live(&camera);
 
     let scratch = Scratch::new("rtsp.mp4");
     let file = scratch.0.clone();
@@ -578,7 +687,7 @@ fn whep_out_recorded() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
     let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
 
     let scratch = Scratch::new("whep.mp4");
     let file = scratch.0.clone();
@@ -604,7 +713,7 @@ fn a_player_goes_on_across_a_publisher_coming_back() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
     let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
     let (source, streams) = WebRtcSource::open(
         "player",
         &servers.http.whep_url("live"),
@@ -622,7 +731,7 @@ fn a_player_goes_on_across_a_publisher_coming_back() {
     let before = played.pictures.get();
 
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
     wait_for("pictures of the second run", || {
         played.pictures.get() >= before + PICTURES
     });
@@ -653,7 +762,7 @@ fn what_a_server_refuses_is_an_error_at_open() {
 
     // A second publisher while the first publishes.
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
     let mut second = WebRtcMuxer::create(
         "second",
         &servers.http.whip_url("live"),
@@ -744,7 +853,7 @@ fn whep_out_driven() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
     let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
 
     let (source, streams) = WebRtcSource::open(
         "player",
@@ -788,7 +897,7 @@ fn recorded_while_played_both_ways() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
     let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
-    until_live(&live_stream);
+    servers.until_live(&live_stream);
 
     let scratch = Scratch::new("both-ways-hls");
     let (source, streams) = BroadcastSource::new("recorder", &live_stream).unwrap();
@@ -874,7 +983,7 @@ mod rtmp {
         let servers = Servers::serving("live/studio", &studio, Takes::Nothing);
         let (rtmp, ingest) = rtmp_server("live/studio", &studio);
         let input = publish_rtmp(&ingest.url("live/studio"), encoders);
-        until_live(&studio);
+        servers.until_live(&studio);
 
         let (source, streams) = RtspSource::open(
             "rtsp-player",

@@ -12,7 +12,7 @@ use str0m::media::{Direction, MediaKind};
 
 use crate::element::{ElementType, RawSink, element_pp_log};
 use crate::elements::sink::MuxerId;
-use crate::elements::{MuxerSinks, MuxerTrack, StreamInfo};
+use crate::elements::{Broadcast, MuxerSinks, MuxerTrack, StreamInfo};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info};
 
@@ -69,8 +69,8 @@ const OUTBOX: usize = 512;
 pub struct WebRtcMuxer {
     name: Arc<str>,
     via: Via,
-    /// Each track: its name, what it carries, and its parameters.
-    tracks: Vec<(Arc<str>, MediaKind, ffmpeg::codec::Parameters)>,
+    /// Each track: its name, what it carries, and its stream.
+    tracks: Vec<(Arc<str>, MediaKind, StreamInfo)>,
     id: MuxerId,
     pp_log: PpLog,
 }
@@ -81,6 +81,9 @@ enum Via {
     Whip { url: Url, options: WebRtcOptions },
     /// A peer's, which it adds its tracks to as it opens.
     Peer(WebRtcHandle),
+    /// A path a `WebRtcServer` of this process serves: what its players
+    /// read.
+    Served(Broadcast),
 }
 
 // SAFETY: the codec parameters are this value's own copies, not shared with
@@ -122,6 +125,19 @@ impl WebRtcMuxer {
         }
     }
 
+    /// A muxer of a run of `path`'s stream, whose players read `broadcast`
+    /// — see [`WebRtcServerPath::muxer`](crate::elements::WebRtcServerPath::muxer).
+    pub(super) fn serving(path: &str, broadcast: Broadcast) -> Self {
+        let pp_log = element_pp_log(ElementType::WebRtcMuxer, path, None);
+        Self {
+            name: path.into(),
+            via: Via::Served(broadcast),
+            tracks: Vec::new(),
+            id: MuxerId::next(),
+            pp_log,
+        }
+    }
+
     /// Adds a track called `name` of what `format` describes — an
     /// encoder's stream, or a demuxer's — and answers what its sink is
     /// taken out of [`Self::open`]'s answer with.
@@ -135,16 +151,17 @@ impl WebRtcMuxer {
         name: impl Into<String>,
         format: impl Into<StreamInfo>,
     ) -> Result<MuxerTrack> {
-        let parameters = format.into().into_parameters();
-        let id = parameters.id();
-        let kind = match (str0m_codec(id), parameters.medium()) {
+        let stream = format.into();
+        let id = stream.parameters().id();
+        let kind = match (str0m_codec(id), stream.kind()) {
             (Some(_), ffmpeg::media::Type::Video) => MediaKind::Video,
             (Some(_), ffmpeg::media::Type::Audio) => MediaKind::Audio,
             _ => return Err(WebRtcError::SourceCodecUnsupported(id).into()),
         };
-        let track = self.id.track(self.tracks.len());
-        self.tracks.push((name.into().into(), kind, parameters));
-        Ok(track)
+        let index = self.tracks.len();
+        self.tracks
+            .push((name.into().into(), kind, stream.with_index(index)));
+        Ok(self.id.track(index))
     }
 
     /// Posts the offer, takes the answer, and waits for the connection:
@@ -161,6 +178,9 @@ impl WebRtcMuxer {
     /// [`WebRtcOptions::connect_within`]; and
     /// [`WebRtcError::OutboundCodecNotNegotiated`] for a track whose codec
     /// the server's answer did not take. Nothing is left open on an error.
+    ///
+    /// A served path's muxer begins a run of the path's stream instead,
+    /// which ends as its sinks are all let go of.
     pub fn open(self) -> Result<MuxerSinks> {
         if self.tracks.is_empty() {
             return Err(WebRtcError::NoTracks.into());
@@ -168,6 +188,26 @@ impl WebRtcMuxer {
         let (url, options) = match &self.via {
             Via::Whip { url, options } => (url, options),
             Via::Peer(handle) => return self.open_over_peer(handle),
+            Via::Served(broadcast) => {
+                let streams: Vec<StreamInfo> = self
+                    .tracks
+                    .iter()
+                    .map(|(_, _, stream)| stream.clone())
+                    .collect();
+                let sinks = broadcast.publish(&streams)?;
+                pp_info!(
+                    pp_log: &self.pp_log,
+                    "a run of {} tracks begun for {}'s players",
+                    streams.len(),
+                    self.name
+                );
+                return Ok(self.id.sinks(
+                    sinks
+                        .into_iter()
+                        .map(|sink| Box::new(sink) as Box<dyn RawSink>)
+                        .collect(),
+                ));
+            }
         };
         let (socket, local) = client::socket_toward(url)?;
         let mut rtc = Rtc::builder().build(Instant::now());
@@ -240,9 +280,7 @@ impl WebRtcMuxer {
         );
         let keeps: Arc<dyn std::any::Any + Send + Sync> = client;
         let mut sinks: Vec<Box<dyn RawSink>> = Vec::with_capacity(self.tracks.len());
-        for (index, ((name, kind, parameters), codecs)) in
-            self.tracks.iter().zip(codecs).enumerate()
-        {
+        for (index, ((name, kind, stream), codecs)) in self.tracks.iter().zip(codecs).enumerate() {
             let mut sink = WebRtcTrackSink::new(
                 TrackId(index as u64),
                 *kind,
@@ -252,7 +290,7 @@ impl WebRtcMuxer {
             )
             .keeping(Arc::clone(&keeps))
             .named(ElementType::WebRtcMuxer, Arc::clone(name));
-            sink.set_source_parameters(parameters)?;
+            sink.set_source_parameters(stream.parameters())?;
             sinks.push(Box::new(sink));
         }
         Ok(self.id.sinks(sinks))
@@ -264,9 +302,9 @@ impl WebRtcMuxer {
         let tracks = self
             .tracks
             .iter()
-            .map(|(name, kind, parameters)| {
-                let codec = str0m_codec(parameters.id())
-                    .ok_or(WebRtcError::SourceCodecUnsupported(parameters.id()))?;
+            .map(|(name, kind, stream)| {
+                let id = stream.parameters().id();
+                let codec = str0m_codec(id).ok_or(WebRtcError::SourceCodecUnsupported(id))?;
                 Ok(OpenTrack {
                     id: handle.track_id(),
                     kind: *kind,
@@ -282,9 +320,9 @@ impl WebRtcMuxer {
             self.tracks.len()
         );
         let mut sinks: Vec<Box<dyn RawSink>> = Vec::with_capacity(opened.len());
-        for (sink, (name, _, parameters)) in opened.into_iter().zip(&self.tracks) {
+        for (sink, (name, _, stream)) in opened.into_iter().zip(&self.tracks) {
             let mut sink = sink.named(ElementType::WebRtcMuxer, Arc::clone(name));
-            sink.set_source_parameters(parameters)?;
+            sink.set_source_parameters(stream.parameters())?;
             sinks.push(Box::new(sink));
         }
         Ok(self.id.sinks(sinks))

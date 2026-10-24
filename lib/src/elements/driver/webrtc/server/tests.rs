@@ -17,7 +17,7 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use super::*;
 use crate::driver::DriverRunner;
-use crate::elements::{BroadcastOptions, FileDemuxer, Pacer, StreamInfo};
+use crate::elements::{FileDemuxer, Pacer, StreamInfo};
 use crate::pipeline::Pipeline;
 
 /// A server on the loopback serving `cam` for players, and taking a
@@ -26,10 +26,8 @@ fn server() -> (Arc<DriverRunner>, WebRtcServerHandle, Broadcast, Broadcast) {
     let (server, handle) =
         WebRtcServer::bind("server", "127.0.0.1:0", WebRtcServerOptions::default())
             .expect("a loopback port is free");
-    let cam = Broadcast::new("cam", BroadcastOptions::default());
-    let live = Broadcast::new("live", BroadcastOptions::default());
-    handle.add_path("cam", &cam).unwrap();
-    handle.add_path("live", &live).unwrap();
+    let cam = serve(&handle, "cam");
+    let live = serve(&handle, "live");
     // Left to run until the server stops.
     drop(crate::test_support::relay(
         handle.take_publishers("live").unwrap(),
@@ -38,6 +36,17 @@ fn server() -> (Arc<DriverRunner>, WebRtcServerHandle, Broadcast, Broadcast) {
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     (runner, handle, cam, live)
+}
+
+/// Serves `name` on `handle`'s server for the rest of the test, and
+/// answers the broadcast its players read — what a path's muxers write
+/// into, and what a test writes into or looks at directly.
+fn serve(handle: &WebRtcServerHandle, name: &str) -> Broadcast {
+    let path = handle.path(name).unwrap();
+    let broadcast = path.broadcast().clone();
+    // Dropped, the path would end its players: kept as long as the test.
+    std::mem::forget(path);
+    broadcast
 }
 
 /// Plays the fixture into `broadcast` at its own speed, over and over.
@@ -324,6 +333,91 @@ fn publishers_are_taken_apart_from_what_players_play() {
         .expect("taken again once let go of");
     runner.stop();
     assert!(studio.next().is_none(), "the server stopped");
+}
+
+/// What a path's muxer writes is what its players are sent; a codec WebRTC
+/// does not carry is refused at the muxer; and the path let go of ends its
+/// players, and nobody new plays it.
+#[test]
+fn a_path_plays_what_its_muxer_writes_and_ends_its_players_as_it_goes() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, _cam, _live) = server();
+    let door = handle.path("door").unwrap();
+    assert_eq!(door.path(), "door");
+    assert!(matches!(
+        handle.path("door"),
+        Err(WebRtcServerError::PathTaken(_))
+    ));
+    let (demuxer, streams) = FileDemuxer::open("door-camera", &path).unwrap();
+    demuxer.looping_handle().set_looping(true);
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
+        .unwrap()
+        .clone();
+    let audio = streams
+        .iter()
+        .find(|stream| stream.kind() == ffmpeg::media::Type::Audio)
+        .unwrap();
+    let mut muxer = door.muxer();
+    assert!(
+        muxer.add_stream("sound", audio).is_err(),
+        "the fixture's AAC is not what WebRTC carries"
+    );
+    let track = muxer.add_stream("pictures", &video).unwrap();
+    let mut sinks = muxer.open().unwrap();
+    let sink = sinks.take(track).unwrap();
+    let (camera, ()) = Pipeline::new("door-camera", demuxer, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .queue("packets", 64)
+            .pipe(Pacer::new("pacer"))
+            .to(sink)?;
+        ctx.attach(source, video.index(), branch)?;
+        Ok(())
+    })
+    .unwrap();
+    camera.run().unwrap();
+
+    let mut client = Client::new();
+    let (offer, pending, mids, _) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let answer = loop {
+        match handle.play("door", &offer) {
+            Ok((_, answer)) => break answer,
+            Err(WebRtcServerError::NothingToPlay(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("door plays: {error}"),
+        }
+    };
+    client.accept(pending, &answer);
+    assert!(
+        client.run_until(Duration::from_secs(10), |client| client
+            .received(mids[0])
+            .len()
+            >= 5),
+        "a player of the path is sent what its muxer writes"
+    );
+    assert_eq!(door.players(), 1, "the player reads the path");
+
+    drop(door);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while handle.sessions() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the path let go of ends its players"
+        );
+        client.run_until(Duration::from_millis(20), |_| false);
+    }
+    assert!(matches!(
+        handle.play("door", &offer),
+        Err(WebRtcServerError::NoSuchPath(_))
+    ));
+    camera.stop();
+    runner.stop();
 }
 
 #[test]
@@ -795,8 +889,7 @@ fn offers_over_http_are_authorized_and_session_urls_cannot_be_guessed() {
         },
     )
     .expect("a loopback port is free");
-    let cam = Broadcast::new("cam", BroadcastOptions::default());
-    handle.add_path("cam", &cam).unwrap();
+    let cam = serve(&handle, "cam");
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     let camera = feed(&cam, &path);
@@ -1001,8 +1094,7 @@ fn ice_servers_are_told_to_clients_let_in_and_no_one_else() {
         },
     )
     .unwrap();
-    let cam = Broadcast::new("cam", BroadcastOptions::default());
-    handle.add_path("cam", &cam).unwrap();
+    let cam = serve(&handle, "cam");
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     let camera = feed(&cam, &path);

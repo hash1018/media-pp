@@ -5,16 +5,19 @@ players as a camera would, and a second path a WHIP publisher pushes into,
 which players play too.
 
 ```text
-FileDemuxer -> Pacer -> BroadcastSink    (the file, looped, at its own speed)
-                             |
-                     Broadcast "file" ----\
-                                           WebRtcServer -> players (WHEP)
+FileDemuxer -> Pacer -> BroadcastSink -> Broadcast "file"    (the file, looped, at its own speed)
 publisher (WHIP) -> WebRtcServer -> WebRtcSource -> BroadcastSink -> Broadcast "live"
+
+Broadcast "file" -> BroadcastSource -> WebRtcMuxer (path "file") -> WebRtcServer -> players (WHEP)
+Broadcast "live" -> BroadcastSource -> WebRtcMuxer (path "live") -> WebRtcServer -> players (WHEP)
 ```
 
 The server hands each publisher out as a `WebRtcSource` of what it sends
 (`WebRtcServerHandle::take_publishers`), and a pipeline of the example's own
-writes it into the broadcast `live`'s players play.
+writes it into the broadcast `live`. Each broadcast is the example's own: what
+reads it — the server's path of the same name, through the `WebRtcMuxer` its
+`WebRtcServerPath` makes, with the tracks WebRTC carries, and with `--record` a
+recording — reads it from its newest keyframe.
 
 Open `http://127.0.0.1:8080/file` in a browser: the page offers to play the
 path through WHEP, and the server answers. Each player is sent the broadcast's

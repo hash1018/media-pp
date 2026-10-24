@@ -109,29 +109,31 @@ impl Default for RtmpServerOptions {
 /// # #[cfg(feature = "rtsp-server")]
 /// # fn main() -> media_pp::Result<()> {
 /// use media_pp::driver::DriverRunner;
-/// use media_pp::elements::{
-///     Broadcast, BroadcastOptions, RtmpServer, RtmpServerOptions, RtspServer, RtspServerOptions,
-/// };
+/// use media_pp::elements::{RtmpServer, RtmpServerOptions, RtspServer, RtspServerOptions};
 /// use media_pp::pipeline::Pipeline;
 ///
 /// // OBS publishes to rtmp://<this machine>/live with the stream key
 /// // `studio`; RTSP players play rtsp://<this machine>:8554/live/studio.
-/// let studio = Broadcast::new("studio", BroadcastOptions::default());
 /// let (rtmp, ingest) = RtmpServer::bind("rtmp", "0.0.0.0:1935", RtmpServerOptions::default())?;
 /// let publishers = ingest.take_publishers("live/studio")?;
 /// let (rtsp, players) = RtspServer::bind("rtsp", "0.0.0.0:8554", RtspServerOptions::default())?;
-/// players.add_path("live/studio", &studio)?;
+/// let studio = players.path("live/studio")?;
 /// let rtmp = DriverRunner::new(rtmp);
 /// rtmp.run()?;
 /// let rtsp = DriverRunner::new(rtsp);
 /// rtsp.run()?;
 ///
-/// // Each publisher, as it comes, into the broadcast the players read.
+/// // Each publisher, as it comes, a run of what the players play.
 /// while let Some((source, streams)) = publishers.next() {
-///     let sinks = studio.publish(&streams)?;
+///     let mut muxer = studio.muxer();
+///     let tracks = streams
+///         .iter()
+///         .map(|stream| muxer.add_stream(format!("track-{}", stream.index()), stream))
+///         .collect::<media_pp::Result<Vec<_>>>()?;
+///     let mut sinks = muxer.open()?;
 ///     let (pipeline, ()) = Pipeline::new("studio", source, |source, ctx| {
-///         for (stream, sink) in streams.iter().zip(sinks) {
-///             ctx.attach(source, stream.index(), ctx.branch().to(sink)?)?;
+///         for (stream, track) in streams.iter().zip(tracks) {
+///             ctx.attach(source, stream.index(), ctx.branch().to(sinks.take(track)?)?)?;
 ///         }
 ///         Ok(())
 ///     })?;
