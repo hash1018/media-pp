@@ -10,6 +10,7 @@ mod track;
 mod whep;
 mod whip;
 
+pub use client::WebRtcOptions;
 pub use command::{TrackId, WebRtcError};
 pub use peer::WebRtcPeer;
 pub use server::{
@@ -18,8 +19,8 @@ pub use server::{
 };
 pub use stream_info::WebRtcStreamInfo;
 pub use track::{AttachedTrack, TrackEndpoints, WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource};
-pub use whep::{WhepOptions, WhepSource};
-pub use whip::{WhipOptions, WhipPublisher, WhipSinks};
+pub use whep::WebRtcSource;
+pub use whip::WebRtcMuxer;
 
 #[cfg(test)]
 mod tests;

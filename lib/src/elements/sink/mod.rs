@@ -26,6 +26,8 @@ mod virtual_camera;
 pub use app_sink::AppSink;
 pub use counter::CounterHandle;
 pub use frame_counter::FrameCounter;
+#[cfg(feature = "webrtc")]
+pub(crate) use muxer::MuxerId;
 pub use muxer::{DashMode, DashMuxer, DashMuxerError, DashOptions};
 pub use muxer::{FileMuxer, FileMuxerError, Mp4Layout, SegmentPolicy, SegmentedFileMuxer};
 pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};

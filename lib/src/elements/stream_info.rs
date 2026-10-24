@@ -11,7 +11,7 @@ use ffmpeg_next as ffmpeg;
 /// A source reports one for each stream before the pipeline runs —
 /// [`FileDemuxer::open`](crate::elements::FileDemuxer::open),
 /// [`RtspSource::open`](crate::elements::RtspSource::open),
-/// `WhepSource::open` (with `webrtc`), a
+/// `WebRtcSource::open` (with `webrtc`), a
 /// [`Broadcast`](crate::elements::Broadcast)'s tracks — so that what is
 /// built downstream is built from what the stream is, without asking again
 /// by index. A muxer's `add_stream` and [`Broadcast::publish`] take one,

@@ -16,4 +16,6 @@ pub use replay_buffer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use rtmp_muxer::{RtmpMuxer, RtmpMuxerError};
 pub use rtsp_muxer::{RtspMuxer, RtspMuxerError};
 pub use segmented_file_muxer::{SegmentPolicy, SegmentedFileMuxer};
+#[cfg(feature = "webrtc")]
+pub(crate) use tracks::MuxerId;
 pub use tracks::{MuxerSinks, MuxerTrack, MuxerTrackError};

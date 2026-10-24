@@ -1101,14 +1101,14 @@ fn a_player_far_behind_the_newest_keyframe_starts_at_the_next() {
 
 /// A camera that changes its picture size partway, played over WHEP: the
 /// server carries it on in the same track, and a software decoder after
-/// the player's `WhepSource` goes on with the new size.
+/// the player's `WebRtcSource` goes on with the new size.
 #[test]
 fn a_camera_that_changes_its_picture_size_decodes_on_through_the_server() {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::buffer::MediaBuffer;
-    use crate::elements::{AppSink, SwDecoder, WhepOptions, WhepSource};
+    use crate::elements::{AppSink, SwDecoder, WebRtcOptions, WebRtcSource};
 
     let (parameters, small) = crate::test_support::h264_configured((320, 240));
     let (_, large) = crate::test_support::h264_configured((640, 360));
@@ -1131,7 +1131,7 @@ fn a_camera_that_changes_its_picture_size_decodes_on_through_the_server() {
     );
 
     let (source, streams) =
-        WhepSource::open("player", &http.whep_url("cam"), WhepOptions::default()).unwrap();
+        WebRtcSource::open("player", &http.whep_url("cam"), WebRtcOptions::default()).unwrap();
     let sizes = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&sizes);
     let decoder = SwDecoder::new("decoder", streams[0].parameters().clone()).unwrap();
@@ -1185,16 +1185,25 @@ fn a_whip_publisher_that_changes_its_picture_size_plays_on_through_the_server() 
 
     use crate::buffer::MediaBuffer;
     use crate::elements::{
-        AppSink, SwDecoder, WhepOptions, WhepSource, WhipOptions, WhipPublisher,
+        AppSink, StreamInfo, SwDecoder, WebRtcMuxer, WebRtcOptions, WebRtcSource,
     };
 
     let (parameters, small) = crate::test_support::h264_configured((320, 240));
     let (_, large) = crate::test_support::h264_configured((640, 360));
     let (runner, handle, _cam, live) = server();
     let http = handle.serve_http("127.0.0.1:0").unwrap();
-    let mut publisher =
-        WhipPublisher::create("publisher", &http.whip_url("live"), WhipOptions::default()).unwrap();
-    let track = publisher.add_track(&parameters).unwrap();
+    let mut publisher = WebRtcMuxer::create(
+        "publisher",
+        &http.whip_url("live"),
+        WebRtcOptions::default(),
+    )
+    .unwrap();
+    let track = publisher
+        .add_stream(
+            "video",
+            StreamInfo::new(parameters, ffmpeg::Rational::new(1, 90_000)),
+        )
+        .unwrap();
     let sink = publisher
         .open()
         .expect("the server takes the publisher")
@@ -1205,7 +1214,7 @@ fn a_whip_publisher_that_changes_its_picture_size_plays_on_through_the_server() 
         Arc::new(AtomicBool::new(false)),
     );
     let camera = crate::test_support::changing_camera(
-        sink,
+        sink.into_raw(),
         small,
         large,
         Arc::clone(&switch),
@@ -1218,7 +1227,7 @@ fn a_whip_publisher_that_changes_its_picture_size_plays_on_through_the_server() 
     }
 
     let (source, streams) =
-        WhepSource::open("player", &http.whep_url("live"), WhepOptions::default()).unwrap();
+        WebRtcSource::open("player", &http.whep_url("live"), WebRtcOptions::default()).unwrap();
     let sizes = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&sizes);
     let decoder = SwDecoder::new("decoder", streams[0].parameters().clone()).unwrap();

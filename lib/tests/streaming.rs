@@ -20,8 +20,8 @@ use media_pp::elements::{
     RtspOptions, RtspPathMode, RtspServer, RtspServerHandle, RtspServerOptions, RtspSource,
     StreamInfo, SwAudioEncoder, SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions,
     TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, VideoCodec, WebRtcError,
-    WebRtcHttpEndpoint, WebRtcPathMode, WebRtcServer, WebRtcServerHandle, WebRtcServerOptions,
-    WhepOptions, WhepSource, WhipOptions, WhipPublisher,
+    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPathMode, WebRtcServer,
+    WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
 };
 use media_pp::ffmpeg::{self, media};
 use media_pp::pipeline::{Pipeline, PipelineBuilder};
@@ -225,15 +225,18 @@ fn plays(played: &Played, sound_expected: bool) {
 
 /// A WHIP publisher of `encoders` to `url`, and the input feeding it.
 fn publish_whip(url: &str, encoders: Encoders) -> Arc<Pipeline> {
-    let mut publisher = WhipPublisher::create("publisher", url, WhipOptions::default()).unwrap();
-    let video = publisher.add_track(&encoders.video.parameters()).unwrap();
-    let audio = encoders
-        .audio
-        .as_ref()
-        .map(|encoder| publisher.add_track(&encoder.parameters()).unwrap());
-    let mut sinks = publisher.open().expect("the server takes the publisher");
-    let video = BoxSink::new(sinks.take(video).unwrap());
-    let audio = audio.map(|track| BoxSink::new(sinks.take(track).unwrap()));
+    let mut muxer = WebRtcMuxer::create("publisher", url, WebRtcOptions::default()).unwrap();
+    let video = muxer
+        .add_stream("video", StreamInfo::from(&encoders.video))
+        .unwrap();
+    let audio = encoders.audio.as_ref().map(|encoder| {
+        muxer
+            .add_stream("audio", StreamInfo::from(encoder))
+            .unwrap()
+    });
+    let mut sinks = muxer.open().expect("the server takes the publisher");
+    let video = sinks.take(video).unwrap();
+    let audio = audio.map(|track| sinks.take(track).unwrap());
     live(encoders, video, audio)
 }
 
@@ -404,10 +407,10 @@ fn whip_in_whep_out() {
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
     until_live(&live_stream);
 
-    let (source, streams) = WhepSource::open(
+    let (source, streams) = WebRtcSource::open(
         "player",
         &servers.http.whep_url("live"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
     assert_eq!(
@@ -465,10 +468,10 @@ fn rtsp_in_whep_out() {
         let input = publish_rtsp(&servers.rtsp_handle.url("cam"), encoders);
         until_live(&camera);
 
-        let (source, streams) = WhepSource::open(
+        let (source, streams) = WebRtcSource::open(
             "player",
             &servers.http.whep_url("cam"),
-            WhepOptions::default(),
+            WebRtcOptions::default(),
         )
         .unwrap();
         let carried = audio == AudioCodec::Opus;
@@ -539,7 +542,7 @@ fn rtsp_in_recorded() {
     servers.stop();
 }
 
-/// A remote WebRTC stream recorded straight from a `WhepSource`.
+/// A remote WebRTC stream recorded straight from a `WebRtcSource`.
 #[test]
 fn whep_out_recorded() {
     let encoders = encoders(AudioCodec::Opus);
@@ -556,10 +559,10 @@ fn whep_out_recorded() {
 
     let scratch = Scratch::new("whep.mp4");
     let file = scratch.0.clone();
-    let (source, streams) = WhepSource::open(
+    let (source, streams) = WebRtcSource::open(
         "recorder",
         &servers.http.whep_url("live"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
     let recorder = record(source, &streams, &file);
@@ -584,10 +587,10 @@ fn a_player_goes_on_across_a_publisher_coming_back() {
     );
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
     until_live(&live_stream);
-    let (source, streams) = WhepSource::open(
+    let (source, streams) = WebRtcSource::open(
         "player",
         &servers.http.whep_url("live"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
     let played = play(source, &streams);
@@ -626,10 +629,10 @@ fn what_a_server_refuses_is_an_error_at_open() {
         other => panic!("refused with {other}"),
     };
     // A path the server does not serve.
-    let error = WhepSource::open(
+    let error = WebRtcSource::open(
         "player",
         &servers.http.whep_url("nowhere"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .err()
     .unwrap();
@@ -638,29 +641,29 @@ fn what_a_server_refuses_is_an_error_at_open() {
     // A second publisher while the first publishes.
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
     until_live(&live_stream);
-    let mut second = WhipPublisher::create(
+    let mut second = WebRtcMuxer::create(
         "second",
         &servers.http.whip_url("live"),
-        WhipOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
-    second
-        .add_track(&encoders(AudioCodec::Opus).video.parameters())
+    let _video = second
+        .add_stream("video", StreamInfo::from(&encoders(AudioCodec::Opus).video))
         .unwrap();
     assert_eq!(refused(second.open().err().unwrap()), 409);
 
     // A codec WebRTC does not carry, refused before anything is sent.
-    let mut aac = WhipPublisher::create(
+    let mut aac = WebRtcMuxer::create(
         "aac",
         &servers.http.whip_url("live"),
-        WhipOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
     let encoder = encoders(AudioCodec::Aac)
         .audio
         .expect("AAC is always there");
     assert!(matches!(
-        aac.add_track(&encoder.parameters()),
+        aac.add_stream("audio", StreamInfo::from(&encoder)),
         Err(media_pp::Error::WebRtcError(
             WebRtcError::SourceCodecUnsupported(_)
         ))
@@ -673,10 +676,10 @@ fn what_a_server_refuses_is_an_error_at_open() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let error = WhepSource::open(
+    let error = WebRtcSource::open(
         "player",
         &format!("http://127.0.0.1:{port}/live/whep"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .err()
     .unwrap();
@@ -705,10 +708,10 @@ fn against_a_whip_server_of_another_make() {
     let sound = encoders.audio.is_some();
     let input = publish_whip(&format!("{base}/{path}/whip"), encoders);
 
-    let (source, streams) = WhepSource::open(
+    let (source, streams) = WebRtcSource::open(
         "player",
         &format!("{base}/{path}/whep"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
     let played = play(source, &streams);
@@ -718,7 +721,7 @@ fn against_a_whip_server_of_another_make() {
     input.stop();
 }
 
-/// A `WhepSource` played in a driven pipeline — a relay's, polled on a
+/// A `WebRtcSource` played in a driven pipeline — a relay's, polled on a
 /// runner's thread — as on a thread of its own: what its connection receives
 /// wakes the poll.
 #[test]
@@ -735,10 +738,10 @@ fn whep_out_driven() {
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
     until_live(&live_stream);
 
-    let (source, streams) = WhepSource::open(
+    let (source, streams) = WebRtcSource::open(
         "player",
         &servers.http.whep_url("live"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
     let video = streams
@@ -787,10 +790,10 @@ fn recorded_while_played_both_ways() {
     let scratch = Scratch::new("both-ways-hls");
     let (source, streams) = BroadcastSource::new("recorder", &live_stream).unwrap();
     let recorder = record_hls(source, &streams, &scratch.0);
-    let (source, streams) = WhepSource::open(
+    let (source, streams) = WebRtcSource::open(
         "webrtc-player",
         &servers.http.whep_url("live"),
-        WhepOptions::default(),
+        WebRtcOptions::default(),
     )
     .unwrap();
     let webrtc_player = play(source, &streams);
@@ -882,10 +885,10 @@ mod rtmp {
         )
         .unwrap();
         let rtsp_player = play(source, &streams);
-        let (source, streams) = WhepSource::open(
+        let (source, streams) = WebRtcSource::open(
             "webrtc-player",
             &servers.http.whep_url("live/studio"),
-            WhepOptions::default(),
+            WebRtcOptions::default(),
         )
         .unwrap();
         assert!(

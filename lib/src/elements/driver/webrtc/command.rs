@@ -245,13 +245,9 @@ pub enum WebRtcError {
     /// codec, and for H.264 its parameter sets — in the time given.
     #[error("no track said what it carries within {0:?}")]
     NothingDescribed(Duration),
-    /// A `WhipPublisher` was opened with no track.
-    #[error("a WHIP publisher needs a track")]
+    /// A `WebRtcMuxer` was opened with no track.
+    #[error("a WebRTC muxer needs a track")]
     NoTracks,
-    /// A `WhipPublisher`'s sinks were asked for a track it does not have, or
-    /// one already taken.
-    #[error("no track {0} to take")]
-    NoSuchTrack(usize),
 }
 
 /// One command sent from a [`super::track::WebRtcHandle`] (any thread) into

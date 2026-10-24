@@ -413,6 +413,9 @@ impl WebRtcHandle {
 /// returns a typed error rather than guessing an RTP payload type.
 pub struct WebRtcTrackSink {
     pp_log: PpLog,
+    /// What it goes by: a peer's track by its number, a muxer's by the name
+    /// its `add_stream` gave it.
+    identity: (ElementType, Arc<str>),
     id: TrackId,
     /// What this track was negotiated to carry — audio or video.
     kind: MediaKind,
@@ -439,7 +442,7 @@ pub struct WebRtcTrackSink {
     /// Only consulted while this sink has none of its own to prepend.
     parameter_sets_checked: bool,
     /// What the connection it writes into is kept alive by, where that is
-    /// its sinks — a `WhipPublisher`'s, whose last sink dropped ends it.
+    /// its sinks — a `WebRtcMuxer`'s, whose last sink dropped ends it.
     _keeps: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
@@ -463,12 +466,23 @@ impl WebRtcTrackSink {
             bitstream_checked: false,
             parameter_sets_checked: false,
             _keeps: None,
+            identity: (
+                ElementType::WebRtcPeer,
+                format!("webrtc-track-{}", id.0).into(),
+            ),
             pp_log: element_pp_log(
                 ElementType::WebRtcPeer,
                 &format!("webrtc-track-{}", id.0),
                 None,
             ),
         }
+    }
+
+    /// The same, going by `name` as an element of `element_type`.
+    pub(super) fn named(mut self, element_type: ElementType, name: Arc<str>) -> Self {
+        self.pp_log = element_pp_log(element_type, &name, None);
+        self.identity = (element_type, name);
+        self
     }
 
     /// The same, keeping `owner` alive for as long as it lives.
@@ -654,11 +668,11 @@ impl WebRtcTrackSink {
 
 impl Element for WebRtcTrackSink {
     fn name(&self) -> Arc<str> {
-        format!("webrtc-track-{}", self.id.0).into()
+        Arc::clone(&self.identity.1)
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::WebRtcPeer
+        self.identity.0
     }
 
     fn pp_log(&self) -> &PpLog {

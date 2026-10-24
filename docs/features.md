@@ -56,7 +56,7 @@ choice.
 | `whisper-vulkan` | `VulkanWhisperTranscriber`, on any GPU through Vulkan; enables `whisper` | Linux, Windows |
 | `whisper-cuda` | `CudaWhisperTranscriber`, on an NVIDIA GPU with CUDA; enables `whisper` | Linux, Windows |
 | `whisper-metal` | `MetalWhisperTranscriber`, on a Mac's GPU; enables `whisper` | macOS |
-| `webrtc` | `str0m`-based WebRTC peer and track elements; `WebRtcServer`: `Broadcast`s to WebRTC players and from WHIP publishers, WHEP and WHIP over HTTP; and the WHIP and WHEP clients `WhipPublisher` and `WhepSource`, over `http` or `https` (`ureq` with `rustls`, no system TLS library) | All |
+| `webrtc` | `str0m`-based WebRTC peer and track elements; `WebRtcServer`: `Broadcast`s to WebRTC players and from WHIP publishers, WHEP and WHIP over HTTP; and the WHIP and WHEP clients `WebRtcMuxer` and `WebRtcSource`, over `http` or `https` (`ureq` with `rustls`, no system TLS library) | All |
 | `rtsp-server` | `RtspServer`: `Broadcast`s played to RTSP players, and RTSP publishers taken into them; tokio, inside the server | All |
 | `rtmp-server` | `RtmpServer`: RTMP publishers — OBS, FFmpeg, encoders — taken into `Broadcast`s, H.264 and AAC and Enhanced RTMP's H.265, AV1, VP9 and Opus; nothing beyond FFmpeg | All |
 

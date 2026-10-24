@@ -133,9 +133,9 @@ pub enum ElementType {
     /// WebRTC server driver, serving broadcasts.
     WebRtcServer,
     /// WHIP client, publishing to a WebRTC server.
-    WhipPublisher,
+    WebRtcMuxer,
     /// WHEP client source, playing from a WebRTC server.
-    WhepSource,
+    WebRtcSource,
     /// Filter dropping frames that come faster than a rate.
     FrameRateLimiter,
     /// Filter that stops a branch taking frames, and takes the paused span

@@ -91,21 +91,21 @@ impl MuxerSinks {
 /// Which muxer a [`MuxerTrack`] came from — unique across the process, so a
 /// track of one muxer is refused by another's sinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct MuxerId(u64);
+pub(crate) struct MuxerId(u64);
 
 impl MuxerId {
-    pub(super) fn next() -> Self {
+    pub(crate) fn next() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 
     /// The track at `index` in this muxer's order.
-    pub(super) fn track(self, index: usize) -> MuxerTrack {
+    pub(crate) fn track(self, index: usize) -> MuxerTrack {
         MuxerTrack { muxer: self, index }
     }
 
     /// `sinks`, one per track, in the order the tracks were added.
-    pub(super) fn sinks(self, sinks: Vec<Box<dyn RawSink>>) -> MuxerSinks {
+    pub(crate) fn sinks(self, sinks: Vec<Box<dyn RawSink>>) -> MuxerSinks {
         MuxerSinks {
             muxer: self,
             sinks: sinks.into_iter().map(Some).collect(),

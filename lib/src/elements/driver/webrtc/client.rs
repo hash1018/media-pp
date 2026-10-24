@@ -1,6 +1,6 @@
 //! What a WHIP or WHEP client is made of — one HTTP exchange, and a thread
-//! driving the connection it makes; see [`super::WhipPublisher`] and
-//! [`super::WhepSource`].
+//! driving the connection it makes; see [`super::WebRtcMuxer`] and
+//! [`super::WebRtcSource`].
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -18,6 +18,35 @@ use crate::buffer::MediaBuffer;
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
 use super::command::{TrackId, WebRtcError};
+
+/// How a [`WebRtcSource`](super::WebRtcSource) or a
+/// [`WebRtcMuxer`](super::WebRtcMuxer) reaches its server — the URL it is
+/// made with being the WHEP or WHIP endpoint.
+#[derive(Debug, Clone)]
+pub struct WebRtcOptions {
+    /// Sent as `Authorization: Bearer <token>`, where the server asks for
+    /// one — a stream key, as WHIP servers call it.
+    pub bearer_token: Option<String>,
+    /// How long opening waits for the server's answer, and then for the
+    /// connection to come up. Ten seconds by default.
+    pub connect_within: Duration,
+    /// How long a [`WebRtcSource`](super::WebRtcSource) then waits for its
+    /// tracks to say what they carry — for H.264, until its parameter sets
+    /// arrive, which a stream sends ahead of each keyframe. It returns once
+    /// every track has, or at this with the ones that have. Five seconds by
+    /// default. A muxer, which says what it sends, does not wait.
+    pub describe_within: Duration,
+}
+
+impl Default for WebRtcOptions {
+    fn default() -> Self {
+        Self {
+            bearer_token: None,
+            connect_within: Duration::from_secs(10),
+            describe_within: Duration::from_secs(5),
+        }
+    }
+}
 use super::connection::{self, Next, Outputs};
 use super::inbox::{Delivered, Inbox};
 use super::outbox::Outbox;

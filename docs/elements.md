@@ -51,7 +51,7 @@ fails.
 
 | | |
 |---|---|
-| Files and the network | `FileDemuxer`; `RtspSource`, from a camera or a server, or with a publisher pushing into it (`RtspSource::listen`) — this crate's own RTSP client, taking H.264, H.265 (B-frames given decoding times), VP8, VP9, AAC, Opus and G.711 over TCP or UDP, with Digest or Basic credentials; `WhepSource`, from any WHEP server; `WebRtcTrackSource` |
+| Files and the network | `FileDemuxer`; `RtspSource`, from a camera or a server, or with a publisher pushing into it (`RtspSource::listen`) — this crate's own RTSP client, taking H.264, H.265 (B-frames given decoding times), VP8, VP9, AAC, Opus and G.711 over TCP or UDP, with Digest or Basic credentials; `WebRtcSource`, from any WHEP server; `WebRtcTrackSource` |
 | From your code | `AppSource`; `PipelineBridge`, from another pipeline; packets of a client of your own — an RTSP client, say — described with `StreamInfo::video` or `StreamInfo::audio` and written into a `BroadcastSink` or an `AppSource` |
 | Synthetic | `TestVideoSource`, `TestAudioSource` |
 
@@ -82,7 +82,7 @@ fails.
 | Files cut by time or size | `SegmentedFileMuxer`, each cut on a keyframe |
 | The last stretch, saved on demand | `ReplayBuffer` |
 | One stream written once, read by many | `Broadcast`: its `BroadcastSink`s take an input's packets, and any number of `BroadcastSource`s (a pipeline each) and `BroadcastReader`s (your code, blocking or as a future) read them — never waiting on one another, each starting at a keyframe — while the input drops and comes back; `Broadcast::stats` says who reads it, what it was written and who fell behind |
-| Streaming | `HlsMuxer` (a file per segment, or for a recording every segment in one file by byte range), `DashMuxer` (also HLS over its segments), `RtmpMuxer`, `RtspMuxer`, `WhipPublisher` (to any WHIP server), `WebRtcTrackSink` with `WebRtcPeer` |
+| Streaming | `HlsMuxer` (a file per segment, or for a recording every segment in one file by byte range), `DashMuxer` (also HLS over its segments), `RtmpMuxer`, `RtspMuxer`, `WebRtcMuxer` (to any WHIP server), `WebRtcTrackSink` with `WebRtcPeer` |
 | Serving | `RtspServer` (`rtsp-server`): each `Broadcast` under a path, to any number of RTSP players over TCP or UDP, and a publisher's push into one — the path's own, or another the players do not read (`add_publish_path`) — and each session's path, transport and bytes (`session_stats`); `WebRtcServer` (`webrtc`): the same to WebRTC players — browsers through WHEP — and WHIP publishers, with data channels, and each session's round trip and losses (`session_stats`), telling WHIP and WHEP clients the STUN and TURN servers to reach it through (`ice_servers`); `RtmpServer` (`rtmp-server`): RTMP publishers — OBS, FFmpeg, encoders — taken into a `Broadcast` each, for the others to serve; `Authorize`, given to any of them, decides who may play and publish which path from the credentials a client presents (`Digest` or `Basic` over RTSP, or `?token=` in its URL, `Bearer` over WHIP/WHEP, `?user=&pass=` or `?token=` in an RTMP stream name); `RtspServer::carries`, `WebRtcServer::carries` and `HlsMuxer::carries` say whether a track goes out as it is, for an application to convert one that does not |
 | A camera other applications open | `MfVirtualCamera` (Windows 11), `V4l2VirtualCamera` (Linux) |
 | Your code | `AppSink` |

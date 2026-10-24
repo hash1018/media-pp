@@ -148,14 +148,15 @@ compile error with no explanation.
   over those very segments, so that one recording plays in DASH players and
   Safari alike. Reading a manifest back takes an FFmpeg built with libxml2.
 
-- **`WhipPublisher` and `WhepSource`: WebRTC to and from any WHIP or WHEP
-  server.** `WhipPublisher` is made, given its tracks and opened as
-  `RtspMuxer` is, handing out a `WebRtcTrackSink` per track; `WhepSource` is
+- **`WebRtcMuxer` and `WebRtcSource`: WebRTC to and from any WHIP or WHEP
+  server.** `WebRtcMuxer` is made, given its tracks and opened as
+  `RtspMuxer` is, handing out a sink per track out of a `MuxerSinks`;
+  `WebRtcSource` is
   opened as `RtspSource` is, answering with its streams, an output each, and
   can be driven. Each is one HTTP exchange — `Authorization: Bearer` where a
   token is given — and a `DELETE` as it goes; what the server refuses is an
   error at open (`WebRtcError::Refused`, `Request`, `NotConnected`,
-  `NothingDescribed`, `NoTracks`, `NoSuchTrack`, `InvalidUrl` are new — a
+  `NothingDescribed`, `NoTracks`, `InvalidUrl` are new — a
   `match` on `WebRtcError` needs an arm for each). `https` comes with the
   `webrtc` feature through `ureq` and `rustls`. Tried against `WebRtcServer`
   and MediaMTX; `lib/tests/streaming.rs` carries a stream across WHIP,

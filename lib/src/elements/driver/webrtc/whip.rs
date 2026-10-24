@@ -1,8 +1,8 @@
-//! Publishing to a WHIP server: [`WhipPublisher`].
+//! Publishing to a WHIP server: [`WebRtcMuxer`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ffmpeg_next as ffmpeg;
 use str0m::Rtc;
@@ -10,11 +10,13 @@ use str0m::change::SdpAnswer;
 use str0m::format::Codec;
 use str0m::media::{Direction, MediaKind};
 
-use crate::element::{ElementType, element_pp_log};
+use crate::element::{ElementType, RawSink, element_pp_log};
+use crate::elements::sink::MuxerId;
+use crate::elements::{MuxerSinks, MuxerTrack, StreamInfo};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info};
 
-use super::client::{self, Client, Parts, Url};
+use super::client::{self, Client, Parts, Url, WebRtcOptions};
 use super::command::{TrackId, WebRtcError};
 use super::outbox::Outbox;
 use super::stream_info::str0m_codec;
@@ -24,26 +26,6 @@ use super::track::WebRtcTrackSink;
 /// to have fallen behind — see [`WebRtcTrackSink`].
 const OUTBOX: usize = 512;
 
-/// How a [`WhipPublisher`] reaches its server.
-#[derive(Debug, Clone)]
-pub struct WhipOptions {
-    /// Sent as `Authorization: Bearer <token>`, where the server asks for
-    /// one — a stream key, as WHIP servers call it.
-    pub bearer_token: Option<String>,
-    /// How long [`WhipPublisher::open`] waits for the server's answer, and
-    /// then for the connection to come up. Ten seconds by default.
-    pub connect_within: Duration,
-}
-
-impl Default for WhipOptions {
-    fn default() -> Self {
-        Self {
-            bearer_token: None,
-            connect_within: Duration::from_secs(10),
-        }
-    }
-}
-
 /// Publishes encoded tracks to a WHIP server — `WebRtcServer`, MediaMTX,
 /// a streaming service that takes WHIP. Needs the `webrtc` feature.
 ///
@@ -51,24 +33,24 @@ impl Default for WhipOptions {
 /// [`RtspMuxer`](crate::elements::RtspMuxer) is: [`Self::open`] posts the
 /// offer, takes the answer, and waits for the connection, so a server
 /// that refuses — a wrong token, a path it does not serve, one already
-/// published — or cannot be reached is an error there. It hands out a
-/// [`WebRtcTrackSink`] for each track, the sink a
-/// [`WebRtcPeer`](crate::elements::WebRtcPeer) hands out, to end each
-/// track's chain with.
+/// published — or cannot be reached is an error there. It hands out a sink
+/// for each track, as every muxer does, to end each track's chain with.
+/// What [`WebRtcSource`](crate::elements::WebRtcSource) is to receiving,
+/// this is to sending.
 ///
 /// # Example
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
-/// use media_pp::elements::{WhipOptions, WhipPublisher};
-/// # let video: media_pp::ffmpeg::codec::Parameters = unimplemented!();
+/// use media_pp::elements::{StreamInfo, WebRtcMuxer, WebRtcOptions};
+/// # let video: StreamInfo = unimplemented!();
 ///
-/// let mut publisher = WhipPublisher::create("camera", "https://example.com/live/whip", WhipOptions {
+/// let mut muxer = WebRtcMuxer::create("camera", "https://example.com/live/whip", WebRtcOptions {
 ///     bearer_token: Some("stream-key".into()),
-///     ..WhipOptions::default()
+///     ..WebRtcOptions::default()
 /// })?;
-/// let track = publisher.add_track(&video)?; // an H.264 encoder's parameters
-/// let mut sinks = publisher.open()?;
+/// let track = muxer.add_stream("video", video)?; // an H.264 encoder's stream
+/// let mut sinks = muxer.open()?;
 /// let sink = sinks.take(track)?; // ends the encoder's chain
 /// # Ok(())
 /// # }
@@ -83,24 +65,21 @@ impl Default for WhipOptions {
 /// sinks: the last of them dropped ends the session on the server with a
 /// `DELETE`, closes the connection and joins its thread. A connection that
 /// falls behind goes on from each track's next keyframe.
-pub struct WhipPublisher {
+pub struct WebRtcMuxer {
     name: Arc<str>,
     url: Url,
-    options: WhipOptions,
-    tracks: Vec<(MediaKind, ffmpeg::codec::Parameters)>,
+    options: WebRtcOptions,
+    /// Each track: its name, what it carries, and its parameters.
+    tracks: Vec<(Arc<str>, MediaKind, ffmpeg::codec::Parameters)>,
+    id: MuxerId,
     pp_log: PpLog,
 }
 
 // SAFETY: the codec parameters are this value's own copies, not shared with
 // anything else, and moved with it rather than used from two threads.
-unsafe impl Send for WhipPublisher {}
+unsafe impl Send for WebRtcMuxer {}
 
-/// A [`WhipPublisher`]'s tracks, each a sink to end its chain with.
-pub struct WhipSinks {
-    sinks: Vec<Option<WebRtcTrackSink>>,
-}
-
-impl WhipPublisher {
+impl WebRtcMuxer {
     /// A publisher to `url` with no tracks yet. Nothing is sent before
     /// [`Self::open`].
     ///
@@ -108,40 +87,48 @@ impl WhipPublisher {
     ///
     /// [`WebRtcError::InvalidUrl`] for a URL that is not `http` or `https`
     /// with a host.
-    pub fn create(name: impl Into<String>, url: &str, options: WhipOptions) -> Result<Self> {
+    pub fn create(name: impl Into<String>, url: &str, options: WebRtcOptions) -> Result<Self> {
         let name: Arc<str> = name.into().into();
         let url = Url::parse(url)?;
-        let pp_log = element_pp_log(ElementType::WhipPublisher, &name, None);
+        let pp_log = element_pp_log(ElementType::WebRtcMuxer, &name, None);
         Ok(Self {
             name,
             url,
             options,
             tracks: Vec::new(),
+            id: MuxerId::next(),
             pp_log,
         })
     }
 
-    /// Adds a track of what `parameters` describe — an encoder's, or a
-    /// demuxer's stream's — and answers its number, which
-    /// [`WhipSinks::take`] takes.
+    /// Adds a track called `name` of what `format` describes — an
+    /// encoder's stream, or a demuxer's — and answers what its sink is
+    /// taken out of [`Self::open`]'s answer with.
     ///
     /// # Errors
     ///
     /// [`WebRtcError::SourceCodecUnsupported`] for a codec WebRTC does not
     /// carry — AAC among them.
-    pub fn add_track(&mut self, parameters: &ffmpeg::codec::Parameters) -> Result<usize> {
+    pub fn add_stream(
+        &mut self,
+        name: impl Into<String>,
+        format: impl Into<StreamInfo>,
+    ) -> Result<MuxerTrack> {
+        let parameters = format.into().into_parameters();
         let id = parameters.id();
         let kind = match (str0m_codec(id), parameters.medium()) {
             (Some(_), ffmpeg::media::Type::Video) => MediaKind::Video,
             (Some(_), ffmpeg::media::Type::Audio) => MediaKind::Audio,
             _ => return Err(WebRtcError::SourceCodecUnsupported(id).into()),
         };
-        self.tracks.push((kind, parameters.clone()));
-        Ok(self.tracks.len() - 1)
+        let track = self.id.track(self.tracks.len());
+        self.tracks.push((name.into().into(), kind, parameters));
+        Ok(track)
     }
 
     /// Posts the offer, takes the answer, and waits for the connection:
-    /// the tracks' sinks, once it is up.
+    /// the tracks' sinks, once it is up, each taken out by the
+    /// [`MuxerTrack`] its [`Self::add_stream`] returned.
     ///
     /// # Errors
     ///
@@ -150,10 +137,10 @@ impl WhipPublisher {
     /// connection fails; [`WebRtcError::Refused`] with the status the
     /// server refused with; [`WebRtcError::NotConnected`] where the
     /// connection does not come up within
-    /// [`WhipOptions::connect_within`]; and
+    /// [`WebRtcOptions::connect_within`]; and
     /// [`WebRtcError::OutboundCodecNotNegotiated`] for a track whose codec
     /// the server's answer did not take. Nothing is left open on an error.
-    pub fn open(self) -> Result<WhipSinks> {
+    pub fn open(self) -> Result<MuxerSinks> {
         if self.tracks.is_empty() {
             return Err(WebRtcError::NoTracks.into());
         }
@@ -164,7 +151,7 @@ impl WhipPublisher {
         let mids: Vec<_> = self
             .tracks
             .iter()
-            .map(|(kind, _)| changes.add_media(*kind, Direction::SendOnly, None, None, None))
+            .map(|(_, kind, _)| changes.add_media(*kind, Direction::SendOnly, None, None, None))
             .collect();
         let (offer, pending) = changes.apply().ok_or_else(|| WebRtcError::Request {
             url: self.url.full.clone(),
@@ -227,8 +214,10 @@ impl WhipPublisher {
             self.url.full
         );
         let keeps: Arc<dyn std::any::Any + Send + Sync> = client;
-        let mut sinks = Vec::with_capacity(self.tracks.len());
-        for (index, ((kind, parameters), codecs)) in self.tracks.iter().zip(codecs).enumerate() {
+        let mut sinks: Vec<Box<dyn RawSink>> = Vec::with_capacity(self.tracks.len());
+        for (index, ((name, kind, parameters), codecs)) in
+            self.tracks.iter().zip(codecs).enumerate()
+        {
             let mut sink = WebRtcTrackSink::new(
                 TrackId(index as u64),
                 *kind,
@@ -236,26 +225,11 @@ impl WhipPublisher {
                 Arc::new(Mutex::new(codecs)),
                 outbox.clone(),
             )
-            .keeping(Arc::clone(&keeps));
+            .keeping(Arc::clone(&keeps))
+            .named(ElementType::WebRtcMuxer, Arc::clone(name));
             sink.set_source_parameters(parameters)?;
-            sinks.push(Some(sink));
+            sinks.push(Box::new(sink));
         }
-        Ok(WhipSinks { sinks })
-    }
-}
-
-impl WhipSinks {
-    /// The sink of track `track`, as [`WhipPublisher::add_track`] numbered
-    /// it — each once.
-    ///
-    /// # Errors
-    ///
-    /// [`WebRtcError::NoSuchTrack`] for a track it does not have, or one
-    /// already taken.
-    pub fn take(&mut self, track: usize) -> Result<WebRtcTrackSink> {
-        self.sinks
-            .get_mut(track)
-            .and_then(Option::take)
-            .ok_or_else(|| WebRtcError::NoSuchTrack(track).into())
+        Ok(self.id.sinks(sinks))
     }
 }

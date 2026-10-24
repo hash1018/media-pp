@@ -1,7 +1,7 @@
-//! Playing from a WHEP server: [`WhepSource`].
+//! Playing from a WHEP server: [`WebRtcSource`].
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use str0m::Rtc;
 use str0m::change::SdpAnswer;
@@ -17,39 +17,13 @@ use crate::pad::SrcPad;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 use crate::produce::{Received, source_stage};
 
-use super::client::{self, Client, Incoming, Parts, Url};
+use super::client::{self, Client, Incoming, Parts, Url, WebRtcOptions};
 use super::command::WebRtcError;
 use super::inbox::{Inbox, Taken};
 
 /// How many packets a track holds for the source before the newest are
 /// let go of.
 const INBOX: usize = 1024;
-
-/// How a [`WhepSource`] reaches its server.
-#[derive(Debug, Clone)]
-pub struct WhepOptions {
-    /// Sent as `Authorization: Bearer <token>`, where the server asks for
-    /// one.
-    pub bearer_token: Option<String>,
-    /// How long [`WhepSource::open`] waits for the server's answer, and
-    /// then for the connection to come up. Ten seconds by default.
-    pub connect_within: Duration,
-    /// How long it then waits for the tracks to say what they carry — for
-    /// H.264, until its parameter sets arrive, which a stream sends ahead of
-    /// each keyframe. It returns once every track has, or at this with the
-    /// ones that have. Five seconds by default.
-    pub describe_within: Duration,
-}
-
-impl Default for WhepOptions {
-    fn default() -> Self {
-        Self {
-            bearer_token: None,
-            connect_within: Duration::from_secs(10),
-            describe_within: Duration::from_secs(5),
-        }
-    }
-}
 
 /// Plays a stream from a WHEP server — `WebRtcServer`, MediaMTX, any server
 /// that speaks WHEP — into a pipeline: an output for each of its tracks,
@@ -64,10 +38,10 @@ impl Default for WhepOptions {
 ///
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
-/// use media_pp::elements::{FrameCounter, SwDecoder, WhepOptions, WhepSource};
+/// use media_pp::elements::{FrameCounter, SwDecoder, WebRtcOptions, WebRtcSource};
 /// use media_pp::pipeline::Pipeline;
 ///
-/// let (source, streams) = WhepSource::open("relay", "https://example.com/cam1/whep", WhepOptions::default())?;
+/// let (source, streams) = WebRtcSource::open("relay", "https://example.com/cam1/whep", WebRtcOptions::default())?;
 /// let video = streams.iter().find(|s| s.kind() == media_pp::ffmpeg::media::Type::Video).unwrap();
 /// let decoder = SwDecoder::new("decoder", video.parameters().clone())?;
 /// let (counter, _pictures) = FrameCounter::new("pictures");
@@ -84,7 +58,7 @@ impl Default for WhepOptions {
 ///
 /// It offers to receive a picture and a sound, and its outputs are the
 /// tracks the server sent — in that order, a picture first — whose packets
-/// said what they carry within [`WhepOptions::describe_within`]: the
+/// said what they carry within [`WebRtcOptions::describe_within`]: the
 /// packets come stamped in their RTP clock, which each [`StreamInfo`]'s
 /// time base is. A thread of its own drives the connection and fills each
 /// track's inbox, which the source reads: it can be driven — run in a
@@ -92,11 +66,11 @@ impl Default for WhepOptions {
 /// wakes the poll. The server ending the session, or the connection lost,
 /// ends its stream; dropped, it ends the session on the server with a
 /// `DELETE`.
-pub struct WhepSource(SourceStage<Watching>);
+pub struct WebRtcSource(SourceStage<Watching>);
 
-source_stage!(WhepSource);
+source_stage!(WebRtcSource);
 
-/// What a [`WhepSource`] does: hands on what its connection receives, a
+/// What a [`WebRtcSource`] does: hands on what its connection receives, a
 /// track an output.
 struct Watching {
     inboxes: Vec<Inbox>,
@@ -109,7 +83,7 @@ struct Watching {
     pp_log: PpLog,
 }
 
-impl WhepSource {
+impl WebRtcSource {
     /// Connects to `url` and waits for its tracks to say what they carry:
     /// the source, and its streams — each the output of its `index`.
     ///
@@ -124,11 +98,11 @@ impl WhepSource {
     pub fn open(
         name: impl Into<String>,
         url: &str,
-        options: WhepOptions,
+        options: WebRtcOptions,
     ) -> Result<(Self, Vec<StreamInfo>)> {
         let name = name.into();
         let url = Url::parse(url)?;
-        let pp_log = element_pp_log(ElementType::WhepSource, &name, None);
+        let pp_log = element_pp_log(ElementType::WebRtcSource, &name, None);
         let (socket, local) = client::socket_toward(&url)?;
         let mut rtc = Rtc::builder().build(Instant::now());
         rtc.add_local_candidate(client::candidate(local)?);
@@ -227,7 +201,7 @@ impl WhepSource {
             );
         }
         pp_info!(pp_log: &pp_log, "playing {} tracks from {}", streams.len(), url.full);
-        let identity = Identity::new(ElementType::WhepSource, name);
+        let identity = Identity::new(ElementType::WebRtcSource, name);
         let source = Self(SourceStage::new(
             identity,
             Watching {
