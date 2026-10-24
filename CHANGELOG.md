@@ -397,6 +397,21 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A `TestVideoSource` keeps its time with the clock across dropped
+  pictures.** A tick a slow downstream overran was dropped and the next
+  picture stamped one after the last made, so every drop put the pictures
+  a tick further behind the clock — and behind a `TestAudioSource` beside
+  them, whose time is the clock's: six hours of a busy machine left an
+  RTMP publish of the two 7.4 s apart. The next picture is now stamped
+  after the ticks dropped.
+
+- **A WebRTC player catching up is paced on each track's own timeline.**
+  `WebRtcServer` sends a joining player what the broadcast held at twice
+  its speed, timed from the first packet sent; a track whose timestamps
+  were ahead of the other's had its packets due that much later, and the
+  first of them held up every packet after it, then let them all go at
+  once. Each track is now timed from its own first packet.
+
 - **A muxer gives a packet that says no duration the step from the last.**
   RTP carries no duration, so neither did a packet from an `RtspSource` or
   a `WebRtcSource`; written into an `HlsMuxer`, FFmpeg warned of every

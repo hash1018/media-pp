@@ -199,9 +199,40 @@ struct Playing {
     /// Where each of the broadcast's tracks is sent, by its number — the
     /// id its sink writes with — if anywhere.
     mids: Vec<Option<Mid>>,
-    /// Where pacing is measured from: when the first packet was sent, and
-    /// where it is on the timeline.
-    paced_from: Option<(Instant, f64)>,
+    /// When each packet is due as it catches up.
+    pacing: Pacing,
+}
+
+/// When a player is sent each packet while it catches up on what the
+/// broadcast held as it joined: at [`CATCH_UP`] times the stream's speed,
+/// from when the first was sent.
+///
+/// Each track from where its own first packet was. A stream's tracks are
+/// not always on one timeline — a publisher's sound may be seconds ahead of
+/// its pictures — and measured from one track's first packet, the other's
+/// packets were due seconds out: the first of them held up everything
+/// written after it, then let it all go at once, more than a player's
+/// socket on a busy machine could take.
+#[derive(Default)]
+struct Pacing {
+    began: Option<Instant>,
+    /// Each track's first packet's time, by the track it was written on.
+    from: Vec<(TrackId, f64)>,
+}
+
+impl Pacing {
+    /// When a packet of `track` at `at` seconds is due, asked at `now`.
+    fn due(&mut self, track: TrackId, at: f64, now: Instant) -> Instant {
+        let began = *self.began.get_or_insert(now);
+        let from = match self.from.iter().find(|(id, _)| *id == track) {
+            Some(&(_, from)) => from,
+            None => {
+                self.from.push((track, at));
+                at
+            }
+        };
+        began + Duration::from_secs_f64(((at - from) / CATCH_UP).max(0.0))
+    }
 }
 
 /// A publisher's tracks on their way out as a source.
@@ -291,7 +322,7 @@ impl Session {
                 connected: false,
                 outbox: Outbox::new(OUTBOX),
                 mids: Vec::new(),
-                paced_from: None,
+                pacing: Pacing::default(),
             })),
             Target::Publish(arrivals) => Role::Publish(Box::new(Publishing {
                 arrivals,
@@ -472,13 +503,12 @@ impl Session {
         let Role::Play(playing) = &mut self.role else {
             return None;
         };
-        let paced_from = &mut playing.paced_from;
+        let pacing = &mut playing.pacing;
         let outgoing = match playing.outbox.take_due(now, |outgoing| {
             let Some(at) = seconds(outgoing) else {
                 return now;
             };
-            let (began, from) = *paced_from.get_or_insert((now, at));
-            began + Duration::from_secs_f64(((at - from) / CATCH_UP).max(0.0))
+            pacing.due(outgoing.track, at, now)
         }) {
             Ok(outgoing) => outgoing,
             Err(due) => return due,
@@ -813,5 +843,28 @@ impl Publishing {
         }
         self.published = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A track whose timeline is seconds ahead of the other's is paced from
+    /// its own first packet: written interleaved as the broadcast held them,
+    /// each packet falls due no later than one written after it, so none
+    /// holds up the rest — and each track still goes at twice its speed.
+    #[test]
+    fn each_track_is_paced_from_its_own_first_packet() {
+        let (pictures, sound) = (TrackId(0), TrackId(1));
+        let began = Instant::now();
+        let mut pacing = Pacing::default();
+        for step in 0..50 {
+            let at = f64::from(step) * 0.02;
+            for (track, ahead) in [(pictures, 0.0), (sound, 2.0)] {
+                let due = pacing.due(track, at + ahead, began);
+                assert_eq!(due, began + Duration::from_secs_f64(at / CATCH_UP));
+            }
+        }
     }
 }
