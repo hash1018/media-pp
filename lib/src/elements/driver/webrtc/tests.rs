@@ -1374,6 +1374,152 @@ fn a_muxers_tracks_are_offered_in_the_order_it_was_given_them() {
     pair.driver_b.stop();
 }
 
+/// A str0m connection the test drives itself, as a browser's would be: the
+/// remote side of a peer, saying what it adds in its own offers.
+struct Remote {
+    rtc: Rtc,
+    socket: UdpSocket,
+    local: std::net::SocketAddr,
+    connected: bool,
+    /// How many of each medium's frames arrived.
+    received: std::collections::HashMap<Mid, usize>,
+}
+
+impl Remote {
+    /// Drives it until `done` says so, or `within` has gone by.
+    fn run_until(&mut self, within: Duration, mut done: impl FnMut(&mut Self) -> bool) -> bool {
+        use str0m::net::{Protocol, Receive};
+        use str0m::{Input, Output};
+        let deadline = Instant::now() + within;
+        let mut buffer = vec![0u8; 65_536];
+        while Instant::now() < deadline {
+            if done(self) {
+                return true;
+            }
+            let mut wait = Duration::from_millis(5);
+            loop {
+                match self.rtc.poll_output().expect("the remote runs") {
+                    Output::Timeout(at) => {
+                        wait = wait.min(at.saturating_duration_since(Instant::now()));
+                        break;
+                    }
+                    Output::Transmit(transmit) => {
+                        let _ = self
+                            .socket
+                            .send_to(&transmit.contents, transmit.destination);
+                    }
+                    Output::Event(Event::MediaData(data)) => {
+                        *self.received.entry(data.mid).or_default() += 1;
+                    }
+                    Output::Event(event) => self.connected |= matches!(event, Event::Connected),
+                }
+            }
+            self.socket
+                .set_read_timeout(Some(wait.max(Duration::from_millis(1))))
+                .unwrap();
+            match self.socket.recv_from(&mut buffer) {
+                Ok((length, source)) => {
+                    if let Ok(contents) = buffer[..length].try_into() {
+                        let _ = self.rtc.handle_input(Input::Receive(
+                            Instant::now(),
+                            Receive {
+                                proto: Protocol::Udp,
+                                source,
+                                destination: self.local,
+                                contents,
+                            },
+                        ));
+                    }
+                }
+                Err(_) => {
+                    let _ = self.rtc.handle_input(Input::Timeout(Instant::now()));
+                }
+            }
+        }
+        done(self)
+    }
+}
+
+/// A section the remote peer added asking to be sent to is where a muxer's
+/// track of its kind goes — at once, with no renegotiation; the peer had
+/// left such a section alone.
+#[test]
+fn a_muxers_track_is_sent_on_a_section_the_remote_peer_asked_for() {
+    let socket_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
+    let socket_b = UdpSocket::bind("127.0.0.1:0").expect("bind b");
+    let addr_a = socket_a.local_addr().expect("addr a");
+    let addr_b = socket_b.local_addr().expect("addr b");
+    let mut rtc_a = Rtc::builder().build(Instant::now());
+    rtc_a
+        .add_local_candidate(Candidate::host(addr_a, "udp").expect("candidate a"))
+        .expect("add candidate a");
+    let mut rtc_b = Rtc::builder().build(Instant::now());
+    rtc_b
+        .add_local_candidate(Candidate::host(addr_b, "udp").expect("candidate b"))
+        .expect("add candidate b");
+    // The remote peer's first offer asks to be sent a picture.
+    let mut changes = rtc_b.sdp_api();
+    let asked = changes.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+    changes.add_channel("bootstrap".to_string());
+    let (offer, pending) = changes.apply().expect("the remote peer offers");
+    let answer = rtc_a.sdp_api().accept_offer(offer).expect("a accepts");
+    rtc_b
+        .sdp_api()
+        .accept_answer(pending, answer)
+        .expect("b accepts the answer");
+
+    let (offer_a, offers_a) = unbounded::<SdpOffer>();
+    let (peer_a, handle_a) = WebRtcPeer::new(
+        "peer-a",
+        rtc_a,
+        socket_a,
+        move |offer| {
+            let _ = offer_a.send(offer);
+        },
+        |_track| {},
+    );
+    let driver_a = DriverRunner::new(peer_a);
+    driver_a.run().unwrap();
+    let mut remote = Remote {
+        rtc: rtc_b,
+        socket: socket_b,
+        local: addr_b,
+        connected: false,
+        received: Default::default(),
+    };
+    assert!(remote.run_until(Duration::from_secs(10), |remote| remote.connected));
+
+    let mut muxer = handle_a.muxer("send");
+    let track = muxer.add_stream("video", h264_stream()).unwrap();
+    let mut sink = muxer
+        .open()
+        .expect("the track goes on the section asked for")
+        .take(track)
+        .unwrap();
+    let mut round = 0;
+    let mut pushed = Instant::now() - Duration::from_secs(1);
+    let got = remote.run_until(Duration::from_secs(10), |remote| {
+        if pushed.elapsed() >= Duration::from_millis(100) {
+            push_packets(&mut *sink, round);
+            round += 1;
+            pushed = Instant::now();
+        }
+        remote
+            .received
+            .get(&asked)
+            .is_some_and(|frames| *frames >= 5)
+    });
+    assert!(
+        got,
+        "the remote peer is sent the picture on the section it asked for"
+    );
+    assert!(
+        offers_a.try_recv().is_err(),
+        "nothing to renegotiate: the section was already there"
+    );
+    driver_a.stop();
+}
+
 /// Regression test for the claim in `Driver::run`'s own docs: stopping
 /// one side must clear its `tracks_in` immediately, so a source of its
 /// remote tracks already handed out sees its inboxes close and ends with a

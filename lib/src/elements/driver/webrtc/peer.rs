@@ -118,14 +118,15 @@ const CHANNEL_CAPACITY: usize = 128;
 /// signaling has established the connection; it does not provide a signaling
 /// server itself.
 ///
-/// Every media section goes one way. What this side sends, a muxer adds,
-/// sending only; what the remote peer adds is received, as a source's
-/// outputs — the tracks one of its offers adds coming out together, as one
-/// source, once str0m has said everything that offer brought. A section
-/// the remote peer adds asking to be sent to has nothing here to send on
-/// it, and is left alone. A remote peer that changes the direction of one
-/// it sends on is reported as [`WebRtcError::DirectionChanged`] on the
-/// [`Bus`].
+/// Every media section goes one way. What this side sends goes through a
+/// muxer: on a section the remote peer added asking to be sent to, where
+/// it asked for one of the track's kind that took its codec — with no
+/// renegotiation — and else on a section the muxer adds, sending only, in
+/// one renegotiation for all its tracks. What the remote peer sends is
+/// received, as a source's outputs — the tracks one of its offers adds
+/// coming out together, as one source, once str0m has said everything that
+/// offer brought. A remote peer that changes the direction of one it sends
+/// on is reported as [`WebRtcError::DirectionChanged`] on the [`Bus`].
 pub struct WebRtcPeer {
     pp_log: PpLog,
     name: Arc<str>,
@@ -145,6 +146,9 @@ pub struct WebRtcPeer {
     /// Muxers' tracks offered and not all attached yet, with where their
     /// sinks go once they are.
     opening: Vec<Opening>,
+    /// Sections the remote peer added asking to be sent to, in the order
+    /// it added them, that no muxer's track has been sent on yet.
+    requested: Vec<(Mid, MediaKind)>,
     /// The remote peer's tracks attached since its last batch went out, and
     /// the bell they share: a batch is one source, which waits on one bell.
     arriving: Vec<Arriving>,
@@ -248,6 +252,7 @@ impl WebRtcPeer {
                 tracks_out: HashMap::new(),
                 track_names: HashMap::new(),
                 opening: Vec::new(),
+                requested: Vec::new(),
                 arriving: Vec::new(),
                 arriving_bell: None,
                 sources_tx: Some(sources_tx),
@@ -375,6 +380,11 @@ impl WebRtcPeer {
             Command::OpenTracks(tracks, reply) => {
                 pp_info!(self, "{} track(s) to send requested", tracks.len());
                 let ids: Vec<TrackId> = tracks.iter().map(|track| track.id).collect();
+                self.opening.push(Opening {
+                    sinks: ids.iter().map(|_| None).collect(),
+                    ids,
+                    reply,
+                });
                 for OpenTrack {
                     id,
                     kind,
@@ -382,16 +392,37 @@ impl WebRtcPeer {
                     name,
                 } in tracks
                 {
-                    self.tracks_out
-                        .insert(id, TrackOutState::ToOpen(kind, Direction::SendOnly));
                     self.track_codec.insert(id, codec);
                     self.track_names.insert(id, name);
+                    // A section the remote peer asked to be sent to, of the
+                    // track's kind, that took its codec: sent on as it is.
+                    let candidates: Vec<(usize, Mid)> = self
+                        .requested
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (_, of))| *of == kind)
+                        .map(|(at, (mid, _))| (at, *mid))
+                        .collect();
+                    let asked = candidates
+                        .into_iter()
+                        .find(|&(_, mid)| self.codecs_for_mid(mid).contains(&codec))
+                        .map(|(at, _)| at);
+                    match asked {
+                        Some(at) => {
+                            let (mid, _) = self.requested.remove(at);
+                            pp_info!(
+                                self,
+                                "track {id:?} sent on mid={mid}, which the remote peer asked for"
+                            );
+                            self.tracks_out.insert(id, TrackOutState::Open(mid));
+                            self.attach_outgoing(id, mid, kind);
+                        }
+                        None => {
+                            self.tracks_out
+                                .insert(id, TrackOutState::ToOpen(kind, Direction::SendOnly));
+                        }
+                    }
                 }
-                self.opening.push(Opening {
-                    sinks: ids.iter().map(|_| None).collect(),
-                    ids,
-                    reply,
-                });
             }
             Command::SetAnswer(answer) => {
                 let Some((pending, ids)) = self.pending.take() else {
@@ -568,10 +599,18 @@ impl WebRtcPeer {
                 // in; one it asks to be sent to has nothing here to send.
                 if added.direction.is_receiving() {
                     self.attach_incoming(added.mid, added.kind, added.direction);
+                } else if added.direction.is_sending() {
+                    pp_info!(
+                        self,
+                        "the remote peer added mid={} ({:?}) to be sent to, for a muxer's track",
+                        added.mid,
+                        added.kind
+                    );
+                    self.requested.push((added.mid, added.kind));
                 } else {
                     pp_info!(
                         self,
-                        "the remote peer added mid={} to be sent to, which nothing here sends on; left alone",
+                        "the remote peer added mid={}, inactive; left alone",
                         added.mid
                     );
                 }

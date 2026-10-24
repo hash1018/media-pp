@@ -40,8 +40,8 @@ compile error with no explanation.
   `handle.next_source(name)` as one source of the tracks one of its offers
   adds, an output each, with what each carries — waited for, by its first
   packets, as `wait_stream_info` was. A section the remote peer adds asking
-  to be sent to is left alone; what this side sends back goes through a
-  muxer of its own. `add_track`, `next_track`, `AttachedTrack`,
+  to be sent to is where a muxer's track of its kind goes, as it opens, with
+  no renegotiation, where the section took the track's codec. `add_track`, `next_track`, `AttachedTrack`,
   `TrackEndpoints`, `WebRtcTrackSink`, `WebRtcTrackSource`,
   `WebRtcStreamInfo` and `WebRtcError::StreamInfoTimeout` are gone, and
   `on_keyframe_request` is handed the track's name from `add_stream` where

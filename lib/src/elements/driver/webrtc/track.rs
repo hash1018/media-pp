@@ -258,11 +258,15 @@ impl WebRtcHandle {
     /// given its tracks with `add_stream` and opened as a [`WebRtcMuxer`]
     /// to a WHIP server is, a sink per track out of what it opens.
     ///
-    /// Opening it adds a media section for each of its tracks — sending
-    /// only — in one renegotiation: its offer goes to the peer's
-    /// `on_offer`, for the application to carry to the remote peer, and
-    /// the answer comes back through [`Self::set_answer`]. A packet a sink
-    /// takes before the answer is let go of.
+    /// Opening it sends each of its tracks on a section the remote peer
+    /// added asking to be sent to, where there is one of the track's kind
+    /// that took its codec — at once, with no renegotiation — and adds a
+    /// media section, sending only, for each of the others, in one
+    /// renegotiation: its offer goes to the peer's `on_offer`, for the
+    /// application to carry to the remote peer, and the answer comes back
+    /// through [`Self::set_answer`]. Where every track found a section
+    /// asked for, no offer is made. A packet a sink takes before the answer
+    /// is let go of.
     pub fn muxer(&self, name: impl Into<String>) -> WebRtcMuxer {
         WebRtcMuxer::over_peer(name, self.clone())
     }
@@ -273,9 +277,9 @@ impl WebRtcHandle {
     /// is waited for up to five seconds to say, by its first packets.
     /// Tracks it adds later come out of a later call, a source of their own.
     ///
-    /// Only what the remote peer sends is received: a track it adds asking
-    /// to be sent to has nothing to send on it, and is left out. What this
-    /// side sends, it sends through a [`Self::muxer`] of its own.
+    /// Only what the remote peer sends is received: a section it adds
+    /// asking to be sent to is not one of these, but where a
+    /// [`Self::muxer`]'s track of its kind is sent.
     ///
     /// # Errors
     ///
