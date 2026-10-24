@@ -415,7 +415,7 @@ impl RtspSource {
         let (items, rx) = crossbeam_channel::bounded(BACKLOG);
         let bell = Bell::new();
         let outbox = Outbox {
-            items,
+            items: std::mem::ManuallyDrop::new(items),
             bell: bell.clone(),
         };
         let reader = Reader::start(session, outbox, silence, &pp_log)?;

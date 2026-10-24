@@ -11,6 +11,7 @@
 //! next keyframe rather than handing on pictures that cannot be decoded.
 
 use std::io::{self, Read, Write};
+use std::mem::ManuallyDrop;
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -219,12 +220,19 @@ fn hevc_picture(unit: &[u8]) -> Option<u8> {
 /// thread ends, so that the source sees the channel gone.
 #[derive(Clone)]
 pub(super) struct Outbox {
-    pub(super) items: Sender<Item>,
+    /// Let go of in [`Drop`] before the bell is rung, so that the source
+    /// woken finds it gone.
+    pub(super) items: ManuallyDrop<Sender<Item>>,
     pub(super) bell: Bell,
 }
 
 impl Drop for Outbox {
+    /// Goes first, then rings: rung while it was still there, the source
+    /// woken found the channel as it was and waited again, for a ring that
+    /// never came.
     fn drop(&mut self) {
+        // SAFETY: dropped once, here, and not touched after.
+        unsafe { ManuallyDrop::drop(&mut self.items) };
         self.bell.ring();
     }
 }

@@ -17,6 +17,7 @@
 //! woken by another ring, or by anything else that unparks it — is looked
 //! at and waited past.
 
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::Thread;
@@ -86,7 +87,9 @@ impl Bell {
 /// it goes — what feeds a source that waits on the channel with
 /// [`Wait::recv`](crate::element::Wait). Sends as crossbeam's does.
 pub(crate) struct Ringing<T> {
-    tx: crossbeam_channel::Sender<T>,
+    /// Let go of in [`Drop`] before the bell is rung, so that whoever the
+    /// ring wakes finds it gone.
+    tx: ManuallyDrop<crossbeam_channel::Sender<T>>,
     bell: Bell,
 }
 
@@ -114,8 +117,13 @@ impl<T> Clone for Ringing<T> {
 }
 
 impl<T> Drop for Ringing<T> {
-    /// The last sender gone is something for the receiver to see.
+    /// The last sender gone is something for the receiver to see: it goes
+    /// first, then rings. Rung while it was still there, a receiver woken
+    /// found the channel as it was and waited again, for a ring that never
+    /// came.
     fn drop(&mut self) {
+        // SAFETY: dropped once, here, and not touched after.
+        unsafe { ManuallyDrop::drop(&mut self.tx) };
         self.bell.ring();
     }
 }
@@ -126,7 +134,7 @@ pub(crate) fn ringing<T>(capacity: usize) -> (Ringing<T>, crossbeam_channel::Rec
     let bell = Bell::new();
     (
         Ringing {
-            tx,
+            tx: ManuallyDrop::new(tx),
             bell: bell.clone(),
         },
         rx,
@@ -174,5 +182,32 @@ mod tests {
         assert!(bell.is_shared());
         drop(other);
         assert!(!bell.is_shared());
+    }
+
+    /// The ring a sender gives as it goes comes once it has gone: whoever
+    /// it wakes finds the channel without it. Rung first, a receiver woken
+    /// found its sender still there, waited again, and was never woken for
+    /// it going — an offline render whose inputs had all ended waited for
+    /// them for ever.
+    #[test]
+    fn a_sender_going_rings_once_it_has_gone() {
+        for _ in 0..200 {
+            let (tx, rx, bell) = ringing::<()>(1);
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let looking = std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                while !bell.take() {
+                    std::hint::spin_loop();
+                }
+                rx.try_recv()
+            });
+            // Looking before it goes, so that the ring is seen at once.
+            ready_rx.recv().unwrap();
+            drop(tx);
+            assert_eq!(
+                looking.join().unwrap(),
+                Err(crossbeam_channel::TryRecvError::Disconnected)
+            );
+        }
     }
 }
