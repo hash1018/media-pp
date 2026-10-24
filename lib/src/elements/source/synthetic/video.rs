@@ -74,7 +74,10 @@ impl Default for TestVideoOptions {
 /// It keeps its own time at `options.frame_rate`, on an absolute schedule:
 /// each picture is due one frame interval after the one before was *due*,
 /// not after it was made, so the time making one takes never adds up into
-/// drift. A file source hands its pictures on as fast as it reads them and
+/// drift. A tick a slow push overran is dropped, as a camera drops a
+/// picture, and the next picture is stamped after it: its `pts` keeps with
+/// the clock, and with a [`TestAudioSource`](super::TestAudioSource)'s
+/// beside it, however many were dropped. A file source hands its pictures on as fast as it reads them and
 /// leaves the pace to a `Pacer`; this one has no outside clock to follow, so
 /// it keeps the rate itself, and a renderer after it shows it smoothly with
 /// no `Pacer` between. It is live, like a camera.
@@ -223,6 +226,11 @@ impl Source for Generating {
     /// frames it would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> crate::error::Result<Produced> {
         let tick = self.schedule.next(self.frame_interval, wait.now());
+        // The ticks the last push overran are time gone by: stamped as if
+        // they had not been, the pictures fell a tick behind the clock for
+        // each, and six hours of a busy machine left them seconds behind
+        // the sound published with them.
+        self.frame_index += tick.missed as i64;
         if !tick.come(wait, Duration::MAX) {
             return Ok(Produced::Nothing);
         }
@@ -338,6 +346,97 @@ mod tests {
                 "expected pts to strictly increase frame over frame, got {:?} then {:?}",
                 pts,
                 window[1].3
+            );
+        }
+    }
+
+    /// A picture's `pts`, and when it came.
+    type Stamped = (Option<i64>, Instant);
+
+    /// Takes its time over one picture — a downstream that stalled — and
+    /// records every picture's `pts` and when it came.
+    struct StallingSink {
+        pp_log: PpLog,
+        stall: Duration,
+        seen: Arc<Mutex<Vec<Stamped>>>,
+    }
+
+    impl Element for StallingSink {
+        fn name(&self) -> Arc<str> {
+            "stalling".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl RawSink for StallingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            if let MediaBuffer::Video(frame) = buf {
+                let mut seen = self.seen.lock().unwrap();
+                seen.push((frame.pts(), Instant::now()));
+                if seen.len() == 3 {
+                    drop(seen);
+                    thread::sleep(self.stall);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// The pictures a stalled push cost are dropped, and the next is
+    /// stamped after them: what comes after keeps with the clock rather
+    /// than falling behind it by every tick missed.
+    #[test]
+    fn pictures_a_stall_cost_are_skipped_in_time_not_lost_from_it() {
+        const INTERVAL: Duration = Duration::from_millis(20);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = StallingSink {
+            pp_log: element_pp_log(ElementType::Other, "stalling", None),
+            stall: INTERVAL * 6,
+            seen: seen.clone(),
+        };
+        let source = TestVideoSource::new(
+            "test-video",
+            TestVideoOptions {
+                width: 16,
+                height: 16,
+                frame_rate: ffmpeg::Rational::new(50, 1),
+            },
+        );
+        let (pipeline, ()) = Pipeline::new("stall", source, |source, ctx| {
+            let branch = ctx.branch().to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        pipeline.run().unwrap();
+        thread::sleep(Duration::from_millis(400));
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let seen = seen.lock().unwrap();
+        assert!(seen.len() > 6, "{} pictures", seen.len());
+        let jump = seen[3].0.unwrap() - seen[2].0.unwrap();
+        assert!(
+            jump >= 5,
+            "the picture after the stall skips its ticks: {jump}"
+        );
+        // Every picture is stamped where it came on the clock, within a
+        // couple of ticks of scheduling slack.
+        let (first, began) = (seen[0].0.unwrap(), seen[0].1);
+        for (pts, at) in seen.iter().skip(4) {
+            let ticks = at.duration_since(began).as_secs_f64() / INTERVAL.as_secs_f64();
+            let stamped = (pts.unwrap() - first) as f64;
+            assert!(
+                (stamped - ticks).abs() <= 2.5,
+                "stamped {stamped} ticks in, came {ticks:.1} ticks in"
             );
         }
     }
