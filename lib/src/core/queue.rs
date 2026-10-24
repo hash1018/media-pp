@@ -267,6 +267,9 @@ pub struct Queue {
     /// Rings the thread handing buffers over — for room made, an interrupt,
     /// and the worker ending.
     room: Bell,
+    /// Set as the worker's thread ends, before `room` rings for it — see
+    /// [`EndsOnDrop`].
+    ended: Arc<AtomicBool>,
     /// How many `Eos` this queue has taken and not yet handed on or
     /// discarded — see [`Inbox::owes_an_end`].
     ends_owed: Arc<AtomicUsize>,
@@ -412,6 +415,7 @@ impl Queue {
         let worker_pp_log = pp_log.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let ended = Arc::new(AtomicBool::new(false));
         if let Some(queue) = counters.as_deref().and_then(ElementCounters::queue) {
             queue.watch(tx.clone());
         }
@@ -432,6 +436,7 @@ impl Queue {
             stopped_during_interrupt: Cell::new(None),
             flushing: Cell::new(false),
         };
+        let (worker_ended, worker_room) = (Arc::clone(&ended), room.clone());
 
         // `Builder::name` panics on interior NULs. Queue names are caller
         // input and remain unchanged for element/log identity; only the OS
@@ -440,6 +445,11 @@ impl Queue {
         let handle = spawn(
             thread_name.clone(),
             Box::new(move || {
+                // Dropped last, once whatever a panic posts is posted.
+                let _ends = EndsOnDrop {
+                    ended: worker_ended,
+                    room: worker_room,
+                };
                 // A panic downstream ends this thread, and the elements it
                 // fed with it; it is told on the bus as the failure of the
                 // element this queue feeds, as a returned error would be.
@@ -493,6 +503,7 @@ impl Queue {
             capacity,
             worker_bell,
             room,
+            ended,
             ends_owed,
             state,
             direct,
@@ -751,7 +762,8 @@ impl Queue {
     /// Whether the worker has ended, so nothing will take what is handed
     /// over.
     fn worker_gone(&self) -> bool {
-        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+        self.ended.load(Ordering::Acquire)
+            || self.handle.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
     /// What a handover answers once its worker is gone: nothing once the
@@ -926,13 +938,23 @@ impl Inbox {
     }
 }
 
-/// Rings the thread handing buffers over as the worker ends, so one waiting
-/// for room finds there will never be any.
-struct RingOnEnd(Bell);
+/// Says the worker has ended, then rings the thread handing buffers over,
+/// so one waiting for room finds there will never be any.
+///
+/// Held by the worker's thread to its very end, after what a panic posts.
+/// It was held inside the worker's loop, and rang while the thread still
+/// ran: a thread waiting for room, woken, found the worker not yet finished
+/// and waited again — for a ring that would never come, where the queue
+/// blocks without a limit, as it does by default.
+struct EndsOnDrop {
+    ended: Arc<AtomicBool>,
+    room: Bell,
+}
 
-impl Drop for RingOnEnd {
+impl Drop for EndsOnDrop {
     fn drop(&mut self) {
-        self.0.ring();
+        self.ended.store(true, Ordering::Release);
+        self.room.ring();
     }
 }
 
@@ -976,8 +998,6 @@ fn worker_loop(
         counters: counters.as_deref(),
         errors: &error_reporter,
     };
-    // However this ends, a thread waiting to hand a buffer over hears of it.
-    let _ends = RingOnEnd(inbox.room.clone());
     let apply = |msg, ack: &Sender<()>, direct: bool, downstream: &mut Box<dyn RawSink>| {
         apply_control(
             &inbox,
@@ -2731,6 +2751,87 @@ mod tests {
         let queue = producer.join().unwrap();
         state.settle();
         drop(queue);
+    }
+
+    /// Takes nothing, and panics once it is let go — a worker that ends
+    /// without making room.
+    struct PanicsWhenLetGo {
+        pp_log: PpLog,
+        open: Arc<AtomicBool>,
+    }
+
+    impl Element for PanicsWhenLetGo {
+        fn name(&self) -> Arc<str> {
+            "panics-when-let-go".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl RawSink for PanicsWhenLetGo {
+        fn ready_consume(&mut self) -> bool {
+            if self.open.load(Ordering::SeqCst) {
+                panic!("simulated panic downstream");
+            }
+            false
+        }
+
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A thread waiting for room hears of the worker ending, and goes: the
+    /// ring that tells it comes once the worker has ended.
+    ///
+    /// It rang while the worker's thread still ran, the panic not yet
+    /// posted: the thread woken found the worker not finished and waited
+    /// again, for good — the queue blocks without a limit by default.
+    #[test]
+    fn a_thread_waiting_for_room_hears_of_the_worker_ending() {
+        let (bus, _bus_rx) = Bus::new();
+        let open = Arc::new(AtomicBool::new(false));
+        let sink = PanicsWhenLetGo {
+            pp_log: element_pp_log(ElementType::Other, "panics-when-let-go", None),
+            open: Arc::clone(&open),
+        };
+        let mut queue = Queue::spawn_with_policy(
+            "ending",
+            1,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        )
+        .expect("spawn");
+        queue.consume(packet()).expect("room for one");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let _producer = thread::spawn(move || {
+            let handed_over = queue.consume(packet());
+            done_tx.send(handed_over.is_err()).unwrap();
+            queue
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "full, so it waits"
+        );
+        open.store(true, Ordering::SeqCst);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the worker ended: nothing will take it"
+        );
     }
 
     /// With no capacity at all, handing a buffer over waits until the worker
