@@ -125,6 +125,8 @@ fn live(encoders: Encoders, video: BoxSink, audio: Option<BoxSink>) -> Arc<Pipel
 /// broadcast.
 #[derive(Clone, Copy)]
 enum Takes {
+    /// Only the RTMP test's servers take no publisher themselves.
+    #[cfg_attr(not(feature = "rtmp-server"), allow(dead_code))]
     Nothing,
     Whip,
     Rtsp,
