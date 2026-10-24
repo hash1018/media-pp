@@ -362,6 +362,21 @@ impl Broadcast {
         state.subscribers
     }
 
+    /// Waits until it has other than `from` readers, and answers how many
+    /// it has: at once where that is already so.
+    #[cfg(any(test, feature = "rtsp-server", feature = "webrtc"))]
+    pub(crate) async fn readers_other_than(&self, from: usize) -> usize {
+        std::future::poll_fn(|cx| {
+            let mut state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.subscribers != from {
+                return std::task::Poll::Ready(state.subscribers);
+            }
+            state.add_counting(cx.waker());
+            std::task::Poll::Pending
+        })
+        .await
+    }
+
     /// What it is doing and has done, for a dashboard or a list of what a
     /// server serves. See [`BroadcastStats`].
     pub fn stats(&self) -> BroadcastStats {

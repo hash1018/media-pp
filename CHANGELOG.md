@@ -137,6 +137,12 @@ compile error with no explanation.
   written into a path by a `BroadcastSource` of it into the path's muxer,
   as the `rtsp_server` and `webrtc_server` examples do.
 
+  A path's `players()` says how many play it, and `players_change(from)`
+  waits, on any async runtime, until other than `from` do: so what writes
+  into it can do so only while it is played. Between runs a path still
+  describes its last one, so a player plays it, is counted, and goes on
+  with the next run its muxer opens.
+
 ### Changed
 
 - **A muxer of MP4 refuses a track whose pictures change partway.** An

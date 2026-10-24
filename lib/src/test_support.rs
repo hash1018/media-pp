@@ -153,6 +153,26 @@ impl RawSink for Room {
 /// did — what a test's sink counts its refusals or its room down with. A
 /// loop of its own rather than `fetch_update`, which Rust 1.99 deprecates
 /// for a `try_update` the crate's minimum Rust does not have.
+/// Runs `future` to its end on this thread: an executor of the least
+/// kind, so an async wait is tested without a runtime of any one.
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        std::thread::park();
+    }
+}
+
 pub(crate) fn take_one(count: &std::sync::atomic::AtomicUsize) -> bool {
     use std::sync::atomic::Ordering;
     let mut current = count.load(Ordering::SeqCst);

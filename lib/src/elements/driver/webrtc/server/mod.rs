@@ -896,6 +896,14 @@ impl WebRtcServerPath {
         self.served.broadcast.stats().readers
     }
 
+    /// Waits until other than `from` players play it, and answers how many
+    /// do — at once where that is already so: what follows its players
+    /// without asking again and again. Any runtime's task may await it; the
+    /// server's thread wakes it.
+    pub async fn players_change(&self, from: usize) -> usize {
+        self.served.broadcast.readers_other_than(from).await
+    }
+
     /// What its players read, for this crate's own tests.
     #[cfg(test)]
     pub(crate) fn broadcast(&self) -> &Broadcast {

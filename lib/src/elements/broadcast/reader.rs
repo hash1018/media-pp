@@ -134,7 +134,7 @@ impl BroadcastReader {
             .state
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .subscribers += 1;
+            .count_reader(true);
         Self {
             shared,
             run: 0,
@@ -325,8 +325,7 @@ fn item(entry: &Entry) -> BroadcastItem {
 
 impl Drop for BroadcastReader {
     fn drop(&mut self) {
-        let mut state = self.lock();
-        state.subscribers = state.subscribers.saturating_sub(1);
+        self.lock().count_reader(false);
     }
 }
 

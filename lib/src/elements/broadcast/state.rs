@@ -100,6 +100,8 @@ pub(crate) struct State {
     /// went in since the last time is still waiting in `wakers`.
     pub(crate) wakes: u64,
     bells: Vec<Bell>,
+    /// What waits for the number of readers to change.
+    counting: Vec<Waker>,
 }
 
 impl State {
@@ -336,6 +338,31 @@ impl State {
     /// waker for each was a cost that grew as their square.
     pub(crate) fn add_waker(&mut self, waker: &Waker) {
         self.wakers.push(waker.clone());
+    }
+
+    /// One reader more, where `joined`, or one fewer; what waits for
+    /// their number to change is woken.
+    pub(crate) fn count_reader(&mut self, joined: bool) {
+        if joined {
+            self.subscribers += 1;
+        } else {
+            self.subscribers = self.subscribers.saturating_sub(1);
+        }
+        for waker in self.counting.drain(..) {
+            waker.wake();
+        }
+    }
+
+    /// Wakes `waker` when the number of readers next changes; once, however
+    /// many times the same task asks.
+    #[cfg_attr(
+        not(any(test, feature = "rtsp-server", feature = "webrtc")),
+        allow(dead_code)
+    )]
+    pub(crate) fn add_counting(&mut self, waker: &Waker) {
+        if !self.counting.iter().any(|waiting| waiting.will_wake(waker)) {
+            self.counting.push(waker.clone());
+        }
     }
 
     pub(crate) fn add_bell(&mut self, bell: Bell) {

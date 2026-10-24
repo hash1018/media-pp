@@ -611,6 +611,34 @@ fn readers_are_counted() {
     assert_eq!(broadcast.subscribers(), 0);
 }
 
+/// What waits for the readers to change is woken by one joining or going,
+/// and answers how many there are.
+#[test]
+fn a_wait_for_the_readers_to_change_is_woken_as_one_joins_or_goes() {
+    let broadcast = Broadcast::new("counting", BroadcastOptions::default());
+    let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+
+    let mut none_left = std::pin::pin!(broadcast.readers_other_than(0));
+    assert!(none_left.as_mut().poll(&mut cx).is_pending());
+    assert!(none_left.as_mut().poll(&mut cx).is_pending());
+    let reader = broadcast.subscribe();
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "woken once");
+    assert_eq!(none_left.as_mut().poll(&mut cx), Poll::Ready(1));
+
+    let mut one = std::pin::pin!(broadcast.readers_other_than(1));
+    assert!(one.as_mut().poll(&mut cx).is_pending());
+    drop(reader);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+    assert_eq!(one.as_mut().poll(&mut cx), Poll::Ready(0));
+    assert_eq!(
+        crate::test_support::block_on(broadcast.readers_other_than(5)),
+        0,
+        "at once where it already has other than that"
+    );
+}
+
 struct CountWakes(AtomicUsize);
 
 impl Wake for CountWakes {

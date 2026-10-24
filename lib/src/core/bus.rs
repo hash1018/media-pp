@@ -623,25 +623,7 @@ mod tests {
         );
     }
 
-    /// Runs `future` to its end on this thread: an executor of the least
-    /// kind, so the async wait is tested without a runtime of any one.
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        struct Unpark(std::thread::Thread);
-        impl std::task::Wake for Unpark {
-            fn wake(self: Arc<Self>) {
-                self.0.unpark();
-            }
-        }
-        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-        let mut cx = std::task::Context::from_waker(&waker);
-        let mut future = std::pin::pin!(future);
-        loop {
-            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-                return output;
-            }
-            std::thread::park();
-        }
-    }
+    use crate::test_support::block_on;
 
     /// An async wait is woken by a post from another thread, and by the
     /// last sender going — once what was posted before it has been

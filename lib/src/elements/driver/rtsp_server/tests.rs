@@ -507,6 +507,80 @@ fn a_path_plays_what_its_muxers_write_and_ends_its_players_as_it_goes() {
     runner.stop();
 }
 
+/// A path whose run has ended still describes its last one: a player
+/// plays it, is counted — which what waits for its players hears — and
+/// goes on with the next run its muxer opens.
+#[test]
+fn a_path_between_runs_is_played_and_says_its_players_change() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, _cam) = server(false);
+    let door = Arc::new(handle.path("door").unwrap());
+    let write = |round: &str| {
+        let (demuxer, streams) = FileDemuxer::open(round, &path).unwrap();
+        demuxer.looping_handle().set_looping(true);
+        let mut muxer = door.muxer();
+        let tracks: Vec<_> = streams
+            .iter()
+            .map(|stream| {
+                muxer
+                    .add_stream(format!("track-{}", stream.index()), stream)
+                    .unwrap()
+            })
+            .collect();
+        let mut sinks = muxer.open().unwrap();
+        let (pipeline, ()) = Pipeline::new(round, demuxer, |source, ctx| {
+            for (stream, track) in streams.iter().zip(tracks) {
+                let branch = ctx
+                    .branch()
+                    .queue(format!("packets-{}", stream.index()), 64)
+                    .pipe(Pacer::new(format!("pacer-{}", stream.index())))
+                    .to(sinks.take(track)?)?;
+                ctx.attach(source, stream.index(), branch)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        pipeline.run().unwrap();
+        pipeline
+    };
+    // A run described the path, and ended.
+    let first = write("first");
+    first.stop();
+    drop(first);
+
+    let waiting = {
+        let door = Arc::clone(&door);
+        thread::spawn(move || crate::test_support::block_on(door.players_change(0)))
+    };
+    let player = play(&handle.url("door"), RtspTransport::Tcp);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !waiting.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "what waits for the players hears of the one that came"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(waiting.join().unwrap(), 1);
+
+    let second = write("second");
+    player.wait_for(10);
+    assert_eq!(door.players(), 1);
+    player.pipeline.stop();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while door.players() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the player that went is not counted"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    second.stop();
+    runner.stop();
+}
+
 #[test]
 fn binding_a_taken_port_fails_at_once() {
     let (_runner, handle, _broadcast) = server(false);
