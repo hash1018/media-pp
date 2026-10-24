@@ -62,6 +62,8 @@ pub enum ElementType {
     AppSource,
     /// RTSP network stream source.
     RtspSource,
+    /// An RTMP publisher an `RtmpServer` took, as a source.
+    RtmpSource,
     /// Synthetic video source.
     TestVideoSource,
     /// Synthetic audio source.

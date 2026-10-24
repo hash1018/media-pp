@@ -1,4 +1,5 @@
-//! An RTSP server serving [`Broadcast`]s: [`RtspServer`].
+//! An RTSP server serving [`Broadcast`]s and taking publishers:
+//! [`RtspServer`].
 
 mod digest;
 mod record;
@@ -14,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use thiserror::Error as ThisError;
@@ -22,7 +23,8 @@ use thiserror::Error as ThisError;
 use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
-use crate::elements::{Access, Authorize, Broadcast};
+use crate::elements::driver::publishers::{self, Arrivals, OnDrop, Publishers};
+use crate::elements::{Access, Authorize, Broadcast, RtspSource};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
@@ -42,7 +44,8 @@ pub enum RtspServerError {
         /// Why.
         source: io::Error,
     },
-    /// A path is already served under that name.
+    /// A path is already served under that name — or, for
+    /// [`RtspServerHandle::take_publishers`], already takes publishers.
     #[error("path {0:?} is already served")]
     PathTaken(String),
     /// A path a URL could not name as it is: empty, or holding a character
@@ -53,18 +56,6 @@ pub enum RtspServerError {
     /// The server's threads could not be started.
     #[error("could not start the server's runtime: {0}")]
     Runtime(io::Error),
-}
-
-/// What an [`RtspServer`] lets clients do on a path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RtspPathMode {
-    /// Players may play it; what is written into its broadcast comes from
-    /// the application.
-    Play,
-    /// A publisher may also push into it — `ANNOUNCE` and `RECORD` — one at
-    /// a time, whose stream is published into its broadcast; players play
-    /// it as ever.
-    Record,
 }
 
 /// How an [`RtspServer`] runs.
@@ -101,8 +92,10 @@ impl Default for RtspServerOptions {
 }
 
 /// An RTSP server: plays [`Broadcast`]s to RTSP players, each under a path
-/// of its own, and — on a path that allows it — takes an RTSP publisher's
-/// stream into one. Needs the `rtsp-server` feature.
+/// of its own, and takes RTSP publishers — `ANNOUNCE` and `RECORD` — on the
+/// paths that take them, each handed out as an [`RtspSource`] of what it
+/// sends ([`RtspServerHandle::take_publishers`]). Needs the `rtsp-server`
+/// feature.
 ///
 /// A broadcast is written once, by whatever pipeline the application has —
 /// an [`RtspSource`](crate::elements::RtspSource) pulling a camera, an
@@ -123,14 +116,14 @@ impl Default for RtspServerOptions {
 /// # fn main() -> media_pp::Result<()> {
 /// use media_pp::driver::DriverRunner;
 /// use media_pp::elements::{
-///     Broadcast, BroadcastOptions, RtspOptions, RtspPathMode, RtspServer, RtspServerOptions,
-///     RtspSource, StreamInfo,
+///     Broadcast, BroadcastOptions, RtspOptions, RtspServer, RtspServerOptions, RtspSource,
+///     StreamInfo,
 /// };
 /// use media_pp::pipeline::Pipeline;
 ///
 /// let (server, handle) = RtspServer::bind("server", "0.0.0.0:8554", RtspServerOptions::default())?;
 /// let camera = Broadcast::new("camera", BroadcastOptions::default());
-/// handle.add_path("cam1", &camera, RtspPathMode::Play)?;
+/// handle.add_path("cam1", &camera)?;
 /// let server = DriverRunner::new(server);
 /// server.run()?;
 ///
@@ -184,6 +177,11 @@ impl Default for RtspServerOptions {
 /// across the broadcast's runs: one that begins with tracks of a different
 /// shape ends the player's session, since its description no longer holds.
 /// A session lasts as long as its connection.
+///
+/// A publisher is taken on a path apart from what players play under the
+/// same name: a pipeline of the application's carries what it sends — an
+/// `RtspSource` like a pulled camera's — wherever the application wants it,
+/// a broadcast its players read among them, converted or not.
 pub struct RtspServer {
     name: Arc<str>,
     pp_log: PpLog,
@@ -198,7 +196,8 @@ pub struct RtspServer {
 /// Cheap to clone; every clone is the same server's. It keeps the paths'
 /// broadcasts it was given — so a broadcast served stays open while its
 /// path is — and nothing else of the server: once the server has stopped,
-/// adding a path still succeeds and nobody connects to it.
+/// adding a path still succeeds and nobody connects to it, and the paths'
+/// [`Publishers`] answer `None`.
 #[derive(Clone)]
 pub struct RtspServerHandle {
     shared: Arc<Shared>,
@@ -220,9 +219,12 @@ pub(crate) struct Shared {
     pub(crate) next_session: AtomicU64,
     /// The paths a publisher holds.
     pub(crate) publishing: Mutex<HashSet<String>>,
-    /// Where a publisher of a path is published into, apart from what its
-    /// players read — see [`RtspServerHandle::add_publish_path`].
-    publish_into: Mutex<HashMap<String, Broadcast>>,
+    /// Where a publisher of each path that takes them is handed out, apart
+    /// from what its players read — see
+    /// [`RtspServerHandle::take_publishers`] — under the number of the
+    /// registration, so that a `Publishers` gone takes away only its own.
+    publishers: Mutex<HashMap<String, (u64, Arrivals<RtspSource>)>>,
+    next_registration: AtomicU64,
     /// Where a publisher's RTP over UDP comes from, and which of its tracks
     /// and connection it goes to.
     pub(crate) routes:
@@ -232,7 +234,6 @@ pub(crate) struct Shared {
 #[derive(Clone)]
 pub(crate) struct Path {
     pub(crate) broadcast: Broadcast,
-    pub(crate) mode: RtspPathMode,
 }
 
 impl Shared {
@@ -244,22 +245,22 @@ impl Shared {
             .cloned()
     }
 
-    /// What a publisher of `name` is published into: what
-    /// [`RtspServerHandle::add_publish_path`] gave, or else the broadcast of
-    /// a path added in [`RtspPathMode::Record`]. `Err` with the status to
-    /// answer where there is none: 404 for no path, 403 for one players
-    /// alone may use.
-    pub(crate) fn publish_target(&self, name: &str) -> std::result::Result<Broadcast, u16> {
-        if let Some(broadcast) = self
-            .publish_into
+    /// Where a publisher of `name` is handed out. `Err` with the status to
+    /// answer where nothing takes it: 403 for a path players alone may use,
+    /// 404 for none.
+    pub(crate) fn publish_target(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Arrivals<RtspSource>, u16> {
+        if let Some((_, arrivals)) = self
+            .publishers
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(name)
         {
-            return Ok(broadcast.clone());
+            return Ok(arrivals.clone());
         }
         match self.path(name) {
-            Some(path) if path.mode == RtspPathMode::Record => Ok(path.broadcast),
             Some(_) => Err(403),
             None => Err(404),
         }
@@ -339,7 +340,8 @@ impl RtspServer {
             sessions: Mutex::default(),
             next_session: AtomicU64::new(0),
             publishing: Mutex::new(HashSet::new()),
-            publish_into: Mutex::default(),
+            publishers: Mutex::default(),
+            next_registration: AtomicU64::new(0),
             routes: Mutex::new(HashMap::new()),
         });
         Ok((
@@ -357,8 +359,8 @@ impl RtspServer {
 }
 
 impl RtspServerHandle {
-    /// Serves `broadcast` under `path` — at `rtsp://<address>/<path>` — as
-    /// `mode` allows, from now on.
+    /// Serves `broadcast` under `path` — at `rtsp://<address>/<path>` — to
+    /// players, from now on.
     ///
     /// # Errors
     ///
@@ -369,7 +371,6 @@ impl RtspServerHandle {
         &self,
         path: &str,
         broadcast: &Broadcast,
-        mode: RtspPathMode,
     ) -> std::result::Result<(), RtspServerError> {
         if !valid_path(path) {
             return Err(RtspServerError::InvalidPath(path.to_owned()));
@@ -382,13 +383,12 @@ impl RtspServerHandle {
             path.to_owned(),
             Path {
                 broadcast: broadcast.clone(),
-                mode,
             },
         );
         drop(paths);
         pp_info!(
             pp_log: &self.shared.pp_log,
-            "path added: {path} broadcast={} mode={mode:?}",
+            "path added: {path} broadcast={}",
             broadcast.name()
         );
         Ok(())
@@ -411,62 +411,47 @@ impl RtspServerHandle {
         removed
     }
 
-    /// Has a publisher of `path` — `ANNOUNCE` and `RECORD` — published into
-    /// `broadcast`, whatever its players read: what [`Self::add_path`] gave
-    /// for `path`, or nothing yet. For an application that makes what its
-    /// players read of what is published — converts it, say — at the one
-    /// URL a publisher pushes to and a player plays. One publisher at a time.
+    /// Takes publishers on `path` — `ANNOUNCE` and `RECORD` to
+    /// `rtsp://<address>/<path>` — from now on, each handed out as an
+    /// [`RtspSource`] of what it sends through the [`Publishers`] returned,
+    /// and none once that is dropped. Apart from what players play under
+    /// the same name: an application that makes what they play of what is
+    /// published — converts it, say — gives them one URL for both. One
+    /// publisher at a time.
     ///
     /// # Errors
     ///
     /// [`RtspServerError::InvalidPath`] for a path no URL can carry, and
-    /// [`RtspServerError::PathTaken`] where `path` already has one, by this
-    /// or by a path added in [`RtspPathMode::Record`].
-    pub fn add_publish_path(
+    /// [`RtspServerError::PathTaken`] where `path` already takes publishers.
+    pub fn take_publishers(
         &self,
         path: &str,
-        broadcast: &Broadcast,
-    ) -> std::result::Result<(), RtspServerError> {
+    ) -> std::result::Result<Publishers<RtspSource>, RtspServerError> {
         if !valid_path(path) {
             return Err(RtspServerError::InvalidPath(path.to_owned()));
         }
-        let recorded = self
+        let mut taken = self
             .shared
-            .path(path)
-            .is_some_and(|added| added.mode == RtspPathMode::Record);
-        let mut into = self
-            .shared
-            .publish_into
+            .publishers
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if recorded || into.contains_key(path) {
+        if taken.contains_key(path) {
             return Err(RtspServerError::PathTaken(path.to_owned()));
         }
-        into.insert(path.to_owned(), broadcast.clone());
-        drop(into);
-        pp_info!(
-            pp_log: &self.shared.pp_log,
-            "publish path added: {path} into broadcast={}",
-            broadcast.name()
-        );
-        Ok(())
-    }
-
-    /// Takes away what [`Self::add_publish_path`] gave `path`: no publisher
-    /// begins on it from here, and one under way goes on until it ends.
-    /// Whether there was one.
-    pub fn remove_publish_path(&self, path: &str) -> bool {
-        let removed = self
+        let registration = self
             .shared
-            .publish_into
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(path)
-            .is_some();
-        if removed {
-            pp_info!(pp_log: &self.shared.pp_log, "publish path removed: {path}");
-        }
-        removed
+            .next_registration
+            .fetch_add(1, Ordering::Relaxed);
+        let shared = Arc::downgrade(&self.shared);
+        let name = path.to_owned();
+        let (arrivals, publishers) = publishers::publishers(
+            path,
+            OnDrop::new(move || release(&shared, &name, registration)),
+        );
+        taken.insert(path.to_owned(), (registration, arrivals));
+        drop(taken);
+        pp_info!(pp_log: &self.shared.pp_log, "publishers taken on {path}");
+        Ok(publishers)
     }
 
     /// The address it listens on — with the port the system chose, where
@@ -511,6 +496,21 @@ impl RtspServerHandle {
                 bytes_received: session.received.load(Ordering::Relaxed),
             })
             .collect()
+    }
+}
+
+/// Takes away what [`RtspServerHandle::take_publishers`] registered for
+/// `path` as `registration`: no publisher begins on it from here, and one
+/// under way goes on into the source it was handed out as.
+fn release(shared: &Weak<Shared>, path: &str, registration: u64) {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    let mut taken = shared.publishers.lock().unwrap_or_else(|p| p.into_inner());
+    if taken.get(path).is_some_and(|(id, _)| *id == registration) {
+        taken.remove(path);
+        drop(taken);
+        pp_info!(pp_log: &shared.pp_log, "publishers let go of on {path}");
     }
 }
 
@@ -656,6 +656,12 @@ impl Driver for RtspServer {
             Ok(())
         });
         runtime.shutdown_timeout(Duration::from_secs(1));
+        // Nothing more will be handed out: each path's `Publishers` hears it.
+        self.shared
+            .publishers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         pp_info!(self, "stopped");
         result.map_err(|error| RtspServerError::Runtime(error).into())
     }

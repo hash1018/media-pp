@@ -40,7 +40,7 @@ pub(super) const POLL: Duration = Duration::from_millis(100);
 pub(super) const BACKLOG: usize = 256;
 
 /// What the source is handed.
-pub(super) enum Item {
+pub(crate) enum Item {
     Packet(usize, ffmpeg::Packet),
     /// The session ended as it should: the server or publisher closed it.
     End,
@@ -219,11 +219,11 @@ fn hevc_picture(unit: &[u8]) -> Option<u8> {
 /// and the bell its thread parks on — rung with each item, and as each
 /// thread ends, so that the source sees the channel gone.
 #[derive(Clone)]
-pub(super) struct Outbox {
+pub(crate) struct Outbox {
     /// Let go of in [`Drop`] before the bell is rung, so that the source
     /// woken finds it gone.
-    pub(super) items: ManuallyDrop<Sender<Item>>,
-    pub(super) bell: Bell,
+    pub(crate) items: ManuallyDrop<Sender<Item>>,
+    pub(crate) bell: Bell,
 }
 
 impl Drop for Outbox {
@@ -383,6 +383,16 @@ pub(super) struct Reader {
 }
 
 impl Reader {
+    /// A reader with no threads: a source an `RtspServer`'s connection
+    /// feeds, which reads nothing itself.
+    #[cfg(feature = "rtsp-server")]
+    pub(super) fn idle() -> Self {
+        Self {
+            stop: Arc::default(),
+            threads: Vec::new(),
+        }
+    }
+
     /// Starts reading `session` into `tx`.
     pub(super) fn start(
         session: Session,

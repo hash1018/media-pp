@@ -23,7 +23,7 @@ use super::inbox::{Delivered, Inbox};
 use super::outbox::{Outbox, Outgoing};
 use super::peer::{Arriving, packet_rtp_time};
 use super::stream_info::WebRtcStreamInfo;
-use super::track::{WebRtcTrackSink, WebRtcTrackSource};
+use super::track::WebRtcTrackSink;
 use super::{TrackId, WebRtcError, WebRtcHandle, WebRtcMuxer, WebRtcPeer, WebRtcSource};
 use crate::{
     buffer::MediaBuffer,
@@ -1776,11 +1776,11 @@ fn a_peer_that_dies_notifies_the_surviving_peer_on_both_endpoints() {
     pair.driver_a.stop();
 }
 
-/// Driven, a track source waits on its inbox: what the connection puts in
-/// wakes the poll that found nothing, and the connection letting go of the
-/// track ends the pipeline — what a server's publisher sessions run on.
+/// Driven, a source of a connection's tracks waits on their inboxes: what
+/// the connection puts in wakes the poll that found nothing, and the
+/// connection letting go of the track ends the pipeline.
 #[test]
-fn a_track_source_driven_is_woken_by_what_the_connection_receives() {
+fn a_source_of_tracks_driven_is_woken_by_what_the_connection_receives() {
     use std::task::{Context, Wake, Waker};
 
     use crate::elements::PacketCounter;
@@ -1794,7 +1794,14 @@ fn a_track_source_driven_is_woken_by_what_the_connection_receives() {
     }
 
     let inbox = Inbox::new(8);
-    let source = WebRtcTrackSource::new(MediaKind::Video, "track-in", inbox.clone());
+    let (source, _) = WebRtcSource::described(
+        "tracks-in".into(),
+        vec![(inbox.clone(), Some(vp8_info()))],
+        Duration::from_secs(1),
+        None,
+        element_pp_log(ElementType::WebRtcSource, "tracks-in", None),
+    )
+    .unwrap();
     let (counter, count) = PacketCounter::new("counter");
     let (mut pipeline, ()) = DrivenPipeline::new("publisher", source, |source, ctx| {
         ctx.attach(source, 0, ctx.branch().to(counter)?)?;

@@ -213,8 +213,11 @@ impl WebRtcSource {
     }
 
     /// The source of `tracks` that said what they carry — an output each,
-    /// in order — and their streams; the others' inboxes let go of.
-    fn described(
+    /// in order — and their streams; the others' inboxes let go of. Their
+    /// inboxes share one bell, which the source waits on. What a WHEP
+    /// connection, a peer's remote tracks and a server's publisher are
+    /// handed out as.
+    pub(super) fn described(
         name: String,
         tracks: Vec<(Inbox, Option<WebRtcStreamInfo>)>,
         within: Duration,
@@ -231,15 +234,14 @@ impl WebRtcSource {
                 inbox.reader_gone();
                 continue;
             };
-            let parameters = info.codec_parameters()?;
-            let kind = parameters.medium();
+            let stream = info.stream_info()?;
             contracts.push(
-                crate::contract::MediaKind::packet_for(kind)
+                crate::contract::MediaKind::packet_for(stream.kind())
                     .map_or(OutputContract::Unknown, |kind| {
                         OutputContract::Fixed(PortContract::packet(kind))
                     }),
             );
-            streams.push(StreamInfo::new(parameters, info.time_base()?).with_index(streams.len()));
+            streams.push(stream.with_index(streams.len()));
             kept.push(inbox);
         }
         if streams.is_empty() {

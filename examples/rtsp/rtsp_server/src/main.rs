@@ -7,12 +7,16 @@
 //!                              |
 //!                      Broadcast "file" ----\
 //!                                            RtspServer -> players
-//! publisher -> RtspServer -> Broadcast "live" /
-//!                                ^
-//! with --rtmp: OBS -> RtmpServer "live/stream"
+//! publisher -> RtspServer -> RtspSource -> BroadcastSink -> Broadcast "live"
+//!
+//! with --rtmp:  OBS -> RtmpServer "live/stream" -> RtmpSource -> BroadcastSink -> Broadcast "live"
 //!
 //! with --record:  Broadcast "file" -> BroadcastSource -> HlsMuxer (event playlist)
 //! ```
+//!
+//! The server hands each publisher out as a source of what it sends, and a
+//! pipeline of the example's own writes it into the broadcast `live`'s
+//! players play.
 //!
 //! Each player is sent the broadcast's packets as they are — nothing is
 //! decoded or encoded for it — from the newest keyframe on. `live` takes one
@@ -43,10 +47,12 @@ mod example {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use media_pp::bus::BusEvent;
     use media_pp::driver::DriverRunner;
+    use media_pp::element::IntoSource;
     use media_pp::elements::{
         Broadcast, BroadcastOptions, BroadcastSource, FileDemuxer, HlsMode, HlsMuxer, HlsOptions,
-        Pacer, RtmpServer, RtmpServerOptions, RtspPathMode, RtspServer, RtspServerOptions,
+        Pacer, Publishers, RtmpServer, RtmpServerOptions, RtspServer, RtspServerOptions,
         StreamInfo,
     };
     use media_pp::pipeline::Pipeline;
@@ -116,15 +122,17 @@ mod example {
         let (server, handle) = RtspServer::bind("server", &args.address, options)?;
         let file = Broadcast::new("file", BroadcastOptions::default());
         let live = Broadcast::new("live", BroadcastOptions::default());
-        handle.add_path("file", &file, RtspPathMode::Play)?;
-        handle.add_path("live", &live, RtspPathMode::Record)?;
+        handle.add_path("file", &file)?;
+        handle.add_path("live", &live)?;
+        // A publisher of `live`, into what its players play.
+        relay(handle.take_publishers("live")?, live.clone());
         // RTMP publishers into the same broadcast: OBS's server
         // `rtmp://ADDRESS/live`, its stream key `stream`.
         let rtmp = match &args.rtmp {
             Some(address) => {
                 let (rtmp, ingest) =
                     RtmpServer::bind("rtmp", address, RtmpServerOptions::default())?;
-                ingest.add_path("live/stream", &live)?;
+                relay(ingest.take_publishers("live/stream")?, live.clone());
                 let rtmp = DriverRunner::new(rtmp);
                 rtmp.run()?;
                 println!(
@@ -205,6 +213,43 @@ mod example {
         wait_stopped(&server);
         println!("stopped");
         Ok(())
+    }
+
+    /// Writes each publisher `publishers` hands out into `broadcast`, a
+    /// pipeline of its source each, on a thread of its own until the server
+    /// stops. A publisher's source ends as it leaves; the broadcast's players
+    /// go on to the next one.
+    fn relay<S, M>(publishers: Publishers<S>, broadcast: Broadcast)
+    where
+        S: IntoSource<M> + Send + 'static,
+    {
+        std::thread::spawn(move || {
+            while let Some((source, streams)) = publishers.next() {
+                let Ok(sinks) = broadcast.publish(&streams) else {
+                    continue;
+                };
+                let wired = Pipeline::new(publishers.path(), source, |source, ctx| {
+                    for (stream, sink) in streams.iter().zip(sinks) {
+                        ctx.attach(source, stream.index(), ctx.branch().to(sink)?)?;
+                    }
+                    Ok(())
+                });
+                let Ok((pipeline, ())) = wired else {
+                    continue;
+                };
+                if pipeline.run().is_err() {
+                    continue;
+                }
+                println!("a publisher began on {}", publishers.path());
+                for event in pipeline.bus().iter() {
+                    if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                        break;
+                    }
+                }
+                pipeline.stop();
+                println!("the publisher of {} left", publishers.path());
+            }
+        });
     }
 
     /// Records `broadcast` while it is served, as an HLS event playlist

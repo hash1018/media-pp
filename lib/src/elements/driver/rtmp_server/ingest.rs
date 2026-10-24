@@ -1,18 +1,21 @@
-//! A publisher's audio and video messages written into its path's
-//! broadcast: [`Ingest`].
+//! A publisher's audio and video messages handed out as a source:
+//! [`Ingest`].
 
 use std::time::{Duration, Instant};
 
 use ffmpeg_next::{self as ffmpeg, codec::Id, ffi};
 
-use crate::buffer::MediaBuffer;
-use crate::element::RawSink;
+use crossbeam_channel::TrySendError;
+
+use crate::core::bell::Ringing;
+use crate::elements::StreamInfo;
+use crate::elements::driver::publishers::Arrivals;
 use crate::elements::parameters::{picture_size, set_extradata};
-use crate::elements::{Broadcast, BroadcastError, BroadcastSink, StreamInfo};
-use crate::error::Error;
+use crate::pp_log::{PpLog, pp_warn};
 
 use super::amf::Amf;
 use super::flv::Tag;
+use super::source::RtmpSource;
 
 /// RTMP counts time in milliseconds.
 const TIME_BASE: ffmpeg::Rational = ffmpeg::Rational(1, 1000);
@@ -28,8 +31,9 @@ const HOLD_AT_MOST: usize = 4096;
 
 /// Why an ingest cannot go on.
 pub(crate) enum Stopped {
-    /// The broadcast was closed, or published again by someone else.
-    Broadcast(BroadcastError),
+    /// Nothing takes the publisher: its path's `Publishers` has gone, or
+    /// the source it was handed out as was dropped.
+    Gone,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,6 +41,10 @@ pub(crate) enum Medium {
     Video,
     Audio,
 }
+
+/// Where an [`RtmpSource`] is fed: each packet with the output it goes out
+/// on.
+type Feed = Ringing<(usize, ffmpeg::Packet)>;
 
 /// One track's configuration, as the publisher last sent it.
 struct Track {
@@ -47,15 +55,17 @@ struct Track {
     size: Option<(i32, i32)>,
 }
 
-/// A publisher's stream on its way into a broadcast.
+/// A publisher's stream on its way out as an [`RtmpSource`].
 ///
-/// A broadcast is published once its tracks are known — those the
+/// The source is handed out once its tracks are known — those the
 /// metadata names, or, without metadata, those configured within a second
 /// of the first frame — each with its configuration and a picture its
 /// size, so that what reads it has them; what came before is held, and
-/// handed on then. A configuration that changes later publishes again.
+/// handed on then. A configuration that changes later ends that source,
+/// and hands out another.
 pub(crate) struct Ingest {
-    broadcast: Broadcast,
+    arrivals: Arrivals<RtmpSource>,
+    path: String,
     video: Option<Track>,
     audio: Option<Track>,
     /// The tracks the metadata names, where there was metadata.
@@ -64,8 +74,12 @@ pub(crate) struct Ingest {
     metadata_size: Option<(i32, i32)>,
     held: Vec<(Medium, ffmpeg::Packet)>,
     first_frame: Option<Instant>,
-    /// The published tracks' sinks, and which medium each is.
-    sinks: Option<Vec<(Medium, BroadcastSink)>>,
+    /// Where the source handed out is fed, and which medium each of its
+    /// outputs is.
+    feed: Option<(Vec<Medium>, Feed)>,
+    /// Whether the pictures lost a packet the source had no room for, and
+    /// go on from their next keyframe.
+    losing: bool,
     /// Timestamps unwrapped past 2^32 milliseconds.
     last_timestamp: Option<u32>,
     epoch: i64,
@@ -76,16 +90,18 @@ pub(crate) struct Ingest {
 unsafe impl Send for Ingest {}
 
 impl Ingest {
-    pub(crate) fn new(broadcast: Broadcast) -> Self {
+    pub(crate) fn new(arrivals: Arrivals<RtmpSource>, path: &str) -> Self {
         Self {
-            broadcast,
+            arrivals,
+            path: path.to_owned(),
             video: None,
             audio: None,
             expected: None,
             metadata_size: None,
             held: Vec::new(),
             first_frame: None,
-            sinks: None,
+            feed: None,
+            losing: false,
             last_timestamp: None,
             epoch: 0,
         }
@@ -119,6 +135,7 @@ impl Ingest {
         medium: Medium,
         tag: Tag<'_>,
         timestamp: u32,
+        pp_log: &PpLog,
     ) -> Result<(), Stopped> {
         let dts = self.unwrap(timestamp);
         match tag {
@@ -146,8 +163,8 @@ impl Ingest {
                 if key {
                     packet.set_flags(ffmpeg::packet::Flags::KEY);
                 }
-                if self.sinks.is_some() {
-                    return self.write(medium, packet);
+                if self.feed.is_some() {
+                    return self.write(medium, packet, pp_log);
                 }
                 self.first_frame.get_or_insert_with(Instant::now);
                 if medium == Medium::Video
@@ -161,7 +178,7 @@ impl Ingest {
                 }
                 self.held.push((medium, packet));
                 if self.ready() {
-                    self.publish()?;
+                    self.hand_out(pp_log)?;
                 }
                 Ok(())
             }
@@ -198,10 +215,12 @@ impl Ingest {
             extradata: extradata.to_vec(),
             size: None,
         });
-        if changed && self.sinks.is_some() {
-            // A new configuration mid-stream — a new resolution: published
-            // again from its next keyframe, which is what readers start at.
-            self.sinks = None;
+        if changed && self.feed.is_some() {
+            // A new configuration mid-stream — a new resolution: the source
+            // ends, and another is handed out from its next keyframe, which
+            // is what readers start at.
+            self.feed = None;
+            self.losing = false;
             self.first_frame = None;
             if let Some(video) = &mut self.video {
                 video.size = None;
@@ -235,38 +254,67 @@ impl Ingest {
         (!want_video || video_ready) && (!want_audio || audio_ready) && (want_video || want_audio)
     }
 
-    fn publish(&mut self) -> Result<(), Stopped> {
+    /// Hands the publisher out as a source of its tracks, and feeds it what
+    /// was held.
+    fn hand_out(&mut self, pp_log: &PpLog) -> Result<(), Stopped> {
         let mut media = Vec::new();
-        let mut formats = Vec::new();
+        let mut streams = Vec::new();
         for (medium, track) in [(Medium::Video, &self.video), (Medium::Audio, &self.audio)] {
             if let Some(track) = track {
+                streams.push(
+                    StreamInfo::new(parameters(medium, track), TIME_BASE).with_index(media.len()),
+                );
                 media.push(medium);
-                formats.push(StreamInfo::new(parameters(medium, track), TIME_BASE));
             }
         }
-        let sinks = self
-            .broadcast
-            .publish(&formats)
-            .map_err(Stopped::Broadcast)?;
-        self.sinks = Some(media.into_iter().zip(sinks).collect());
+        let (source, feed) = RtmpSource::published(&self.path, &streams);
+        if !self.arrivals.hand(source, streams) {
+            return Err(Stopped::Gone);
+        }
+        self.feed = Some((media, feed));
         for (medium, packet) in std::mem::take(&mut self.held) {
-            self.write(medium, packet)?;
+            self.write(medium, packet, pp_log)?;
         }
         Ok(())
     }
 
-    fn write(&mut self, medium: Medium, packet: ffmpeg::Packet) -> Result<(), Stopped> {
-        let Some((_, sink)) = self
-            .sinks
-            .as_mut()
-            .and_then(|sinks| sinks.iter_mut().find(|(of, _)| *of == medium))
-        else {
+    fn write(
+        &mut self,
+        medium: Medium,
+        packet: ffmpeg::Packet,
+        pp_log: &PpLog,
+    ) -> Result<(), Stopped> {
+        let Some((media, feed)) = &self.feed else {
             return Ok(());
         };
-        match sink.consume(MediaBuffer::packet(packet)) {
-            Ok(()) => Ok(()),
-            Err(Error::BroadcastError(error)) => Err(Stopped::Broadcast(error)),
-            Err(_) => Ok(()),
+        let Some(index) = media.iter().position(|of| *of == medium) else {
+            return Ok(());
+        };
+        let video = medium == Medium::Video;
+        if video && self.losing && !packet.is_key() {
+            return Ok(());
+        }
+        match feed.try_send((index, packet)) {
+            Ok(()) => {
+                if video {
+                    self.losing = false;
+                }
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                // A picture lost leaves those after it to the next keyframe;
+                // a sound lost is only itself.
+                if video && !self.losing {
+                    pp_warn!(
+                        pp_log: pp_log,
+                        "{}: its source is not reading; the pictures go on from the next keyframe",
+                        self.path
+                    );
+                    self.losing = true;
+                }
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => Err(Stopped::Gone),
         }
     }
 }
@@ -376,7 +424,9 @@ mod tests {
 
     #[test]
     fn timestamps_go_on_past_their_wrap() {
-        let mut ingest = Ingest::new(Broadcast::new("wrap", Default::default()));
+        let (arrivals, _publishers) =
+            crate::elements::driver::publishers::publishers("live/wrap", ());
+        let mut ingest = Ingest::new(arrivals, "live/wrap");
         assert_eq!(ingest.unwrap(u32::MAX - 10), i64::from(u32::MAX - 10));
         assert_eq!(ingest.unwrap(20), (1i64 << 32) + 20);
         // A small step back is a reordered message, not a wrap.

@@ -1,12 +1,12 @@
 //! One session of a WebRTC server: a player or a publisher — its `str0m`
-//! connection, and the driven pipeline that feeds it or that it feeds.
+//! connection, and what goes through it.
 //!
-//! A player is a pipeline `BroadcastSource → WebRtcTrackSink`, a sink for
-//! each of the broadcast's tracks the player takes, writing into the
-//! session's outbox; a publisher a pipeline `WebRtcTrackSource →
-//! BroadcastSink` for each of its tracks, reading what the connection puts
-//! in their inboxes. The session polls them on the server's thread, as what
-//! they wait on wakes them, and is left the transport: the connection, its
+//! A player is a driven pipeline `BroadcastSource → WebRtcTrackSink`, a
+//! sink for each of the broadcast's tracks the player takes, writing into
+//! the session's outbox, which the session polls on the server's thread as
+//! what it waits on wakes it. A publisher is handed out as a
+//! `WebRtcSource` of its tracks, whose inboxes the connection puts what it
+//! receives in. The session is left the transport: the connection, its
 //! socket, and when a player is sent each packet.
 
 use std::collections::HashMap;
@@ -25,7 +25,10 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Rtc};
 
 use crate::buffer::MediaBuffer;
 use crate::bus::BusEvent;
-use crate::elements::{Broadcast, BroadcastSource, StreamInfo};
+use crate::core::bell::Bell;
+use crate::element::{ElementType, element_pp_log};
+use crate::elements::driver::publishers::Arrivals;
+use crate::elements::{Broadcast, BroadcastSource, WebRtcSource};
 use crate::pipeline::{Driven, DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info};
 
@@ -33,8 +36,8 @@ use super::super::command::TrackId;
 use super::super::connection::{self, Next, Outputs};
 use super::super::inbox::{Delivered, Inbox};
 use super::super::outbox::{Outbox, Outgoing};
-use super::super::stream_info::{StreamInfoProbe, str0m_codec};
-use super::super::track::{WebRtcTrackSink, WebRtcTrackSource};
+use super::super::stream_info::{StreamInfoProbe, WebRtcStreamInfo, str0m_codec};
+use super::super::track::WebRtcTrackSink;
 use super::{SessionId, SessionRole, SessionStats, Shared, WebRtcServerError, WebRtcServerEvent};
 
 /// How much faster than it plays a player is sent what the broadcast held
@@ -56,7 +59,7 @@ const ROUNDS: usize = 256;
 const CONNECT_WITHIN: Duration = Duration::from_secs(30);
 
 /// How long a publisher's packets are held while its tracks say what they
-/// are, before what has said so is published without the rest.
+/// are, before what has said so is handed out without the rest.
 const HOLD_FOR: Duration = Duration::from_secs(10);
 const HOLD_AT_MOST: usize = 4096;
 
@@ -83,7 +86,6 @@ pub(crate) struct Session {
     id: SessionId,
     path: String,
     rtc: Rtc,
-    broadcast: Broadcast,
     /// When str0m next asks for the time.
     deadline: Instant,
     opened: Instant,
@@ -179,8 +181,16 @@ enum Role {
     Publish(Box<Publishing>),
 }
 
+/// What a session is opened for: a player of a broadcast, or a publisher,
+/// handed out where it goes.
+pub(crate) enum Target {
+    Play(Broadcast),
+    Publish(Arrivals<WebRtcSource>),
+}
+
 /// A player's pipeline, and the packets it has made ready to be sent.
 struct Playing {
+    broadcast: Broadcast,
     /// Made once it connects, so it starts at the newest keyframe then —
     /// at the poll after, by when the media it offered has been told.
     pipeline: Option<Driving>,
@@ -194,9 +204,10 @@ struct Playing {
     paced_from: Option<(Instant, f64)>,
 }
 
-/// A publisher's tracks on their way into its path.
-#[derive(Default)]
+/// A publisher's tracks on their way out as a source.
 struct Publishing {
+    /// Where it is handed out.
+    arrivals: Arrivals<WebRtcSource>,
     /// Each medium sent, in the order the publisher offered them.
     tracks: Vec<Published>,
     /// Packets held while the tracks say what they are: the track's number
@@ -206,16 +217,26 @@ struct Publishing {
     published: bool,
 }
 
+impl Drop for Publishing {
+    /// The publisher has gone, or the session is ending: its source ends
+    /// once it has handed on what it holds.
+    fn drop(&mut self) {
+        for track in &self.tracks {
+            if let Some(inbox) = &track.inbox {
+                inbox.close();
+            }
+        }
+    }
+}
+
 /// One medium a publisher sends.
 struct Published {
     mid: Mid,
-    kind: MediaKind,
     probe: StreamInfoProbe,
-    format: Option<StreamInfo>,
-    /// Once published: where its packets go, and the pipeline taking them
-    /// into the broadcast.
+    /// What its first packets say it carries, once they have.
+    info: Option<WebRtcStreamInfo>,
+    /// Once handed out: where its packets go, the source's output's inbox.
     inbox: Option<Inbox>,
-    pipeline: Option<Driving>,
 }
 
 impl Session {
@@ -224,8 +245,7 @@ impl Session {
     pub(crate) fn open(
         id: SessionId,
         path: &str,
-        role: SessionRole,
-        broadcast: Broadcast,
+        target: Target,
         offer: &str,
         candidates: &[Candidate],
         pp_log: PpLog,
@@ -244,6 +264,10 @@ impl Session {
             .sdp_api()
             .accept_offer(offer)
             .map_err(|error| WebRtcServerError::InvalidOffer(error.to_string()))?;
+        let role = match target {
+            Target::Play(_) => SessionRole::Play,
+            Target::Publish(_) => SessionRole::Publish,
+        };
         let stats = SessionStats {
             session: id,
             path: path.to_owned(),
@@ -260,15 +284,22 @@ impl Session {
             fell_behind: 0,
             updated: None,
         };
-        let role = match role {
-            SessionRole::Play => Role::Play(Box::new(Playing {
+        let role = match target {
+            Target::Play(broadcast) => Role::Play(Box::new(Playing {
+                broadcast,
                 pipeline: None,
                 connected: false,
                 outbox: Outbox::new(OUTBOX),
                 mids: Vec::new(),
                 paced_from: None,
             })),
-            SessionRole::Publish => Role::Publish(Box::default()),
+            Target::Publish(arrivals) => Role::Publish(Box::new(Publishing {
+                arrivals,
+                tracks: Vec::new(),
+                held: Vec::new(),
+                first_packet: None,
+                published: false,
+            })),
         };
         let woken = Arc::new(Woken(AtomicBool::new(false)));
         Ok((
@@ -276,7 +307,6 @@ impl Session {
                 id,
                 path: path.to_owned(),
                 rtc,
-                broadcast,
                 deadline: now,
                 opened: now,
                 connected: false,
@@ -422,32 +452,15 @@ impl Session {
                 // log has it.
                 driving.reported().for_each(drop);
                 if finished {
-                    return Err(if self.broadcast.is_closed() {
+                    return Err(if playing.broadcast.is_closed() {
                         "its broadcast closed".into()
                     } else {
                         "its broadcast's tracks changed".into()
                     });
                 }
             }
-            Role::Publish(publishing) => {
-                for track in &mut publishing.tracks {
-                    let Some(driving) = &mut track.pipeline else {
-                        continue;
-                    };
-                    driving.poll(woken, now, &mut cx, next);
-                    // The broadcast refusing the publisher — another
-                    // published, or it closed — ends the session.
-                    for event in driving.reported() {
-                        if let BusEvent::Error {
-                            error: crate::error::Error::BroadcastError(error),
-                            ..
-                        } = event
-                        {
-                            return Err(error.to_string());
-                        }
-                    }
-                }
-            }
+            // What it receives goes into its source's inboxes as it comes.
+            Role::Publish(_) => {}
         }
         Ok(())
     }
@@ -562,17 +575,15 @@ impl Session {
                 if let Role::Publish(publishing) = &mut self.role {
                     publishing.tracks.push(Published {
                         mid: added.mid,
-                        kind: added.kind,
                         probe: StreamInfoProbe::new(),
-                        format: None,
+                        info: None,
                         inbox: None,
-                        pipeline: None,
                     });
                 }
             }
             Event::MediaData(data) => {
                 if let Role::Publish(publishing) = &mut self.role {
-                    publishing.take(&data, self.id, &self.broadcast, &self.pp_log)?;
+                    publishing.take(&data, self.id, &self.path, &self.pp_log)?;
                 }
             }
             Event::ChannelOpen(id, label) => {
@@ -641,7 +652,7 @@ impl Session {
         // in it breaks the picture until the next keyframe anyway.
         let (source, tracks) = BroadcastSource::joining_within(
             format!("webrtc-{}-reader", self.id),
-            &self.broadcast,
+            &playing.broadcast,
             crate::elements::broadcast::PLAYER_JOIN_WITHIN,
         )
         .map_err(|error| error.to_string())?;
@@ -726,13 +737,13 @@ fn seconds(outgoing: &Outgoing) -> Option<f64> {
 }
 
 impl Publishing {
-    /// One of the publisher's packets: held until its tracks are published,
-    /// then put in its track's inbox.
+    /// One of the publisher's packets: held until it is handed out, then
+    /// put in its track's inbox.
     fn take(
         &mut self,
         data: &MediaData,
         session: SessionId,
-        broadcast: &Broadcast,
+        path: &str,
         pp_log: &PpLog,
     ) -> Result<(), String> {
         let Some(index) = self.tracks.iter().position(|track| track.mid == data.mid) else {
@@ -740,71 +751,60 @@ impl Publishing {
         };
         let packet = connection::received(data);
         if self.published {
-            if let Some(inbox) = &self.tracks[index].inbox
-                && inbox.push(MediaBuffer::packet(packet)) == Delivered::Full
-            {
-                pp_debug!(pp_log: pp_log, "session {session} dropped a packet it could not keep up with");
+            if let Some(inbox) = &self.tracks[index].inbox {
+                match inbox.push(MediaBuffer::packet(packet)) {
+                    Delivered::Taken => {}
+                    Delivered::Full => {
+                        pp_debug!(pp_log: pp_log, "session {session} dropped a packet it could not keep up with");
+                    }
+                    // Its source was dropped: nothing takes the publisher.
+                    Delivered::Gone => return Err("nothing takes the publisher any more".into()),
+                }
             }
             return Ok(());
         }
         let track = &mut self.tracks[index];
-        if track.format.is_none()
-            && let Some(info) = track.probe.observe(data.params.spec(), &data.data)
-        {
-            track.format = info.stream_info().ok();
+        if track.info.is_none() {
+            track.info = track.probe.observe(data.params.spec(), &data.data);
         }
         self.held.push((index, packet));
         let first = *self.first_packet.get_or_insert_with(Instant::now);
-        let all = self.tracks.iter().all(|track| track.format.is_some());
+        let all = self.tracks.iter().all(|track| track.info.is_some());
         if all || self.held.len() >= HOLD_AT_MOST || first.elapsed() >= HOLD_FOR {
-            self.publish(session, broadcast, pp_log)?;
+            self.hand_out(session, path, pp_log)?;
         }
         Ok(())
     }
 
-    /// Publishes the tracks that have said what they are into the
-    /// broadcast, each through a pipeline of its own, and hands them what
-    /// was held.
-    fn publish(
-        &mut self,
-        session: SessionId,
-        broadcast: &Broadcast,
-        pp_log: &PpLog,
-    ) -> Result<(), String> {
-        let ready: Vec<usize> = (0..self.tracks.len())
-            .filter(|&index| self.tracks[index].format.is_some())
-            .collect();
-        if ready.is_empty() {
+    /// Hands the publisher out as a source of the tracks that have said
+    /// what they are, an output each, and gives them what was held.
+    fn hand_out(&mut self, session: SessionId, path: &str, pp_log: &PpLog) -> Result<(), String> {
+        let bell = Bell::new();
+        let mut tracks = Vec::new();
+        for track in &mut self.tracks {
+            let Some(info) = &track.info else {
+                continue;
+            };
+            let inbox = Inbox::sharing(HOLD_AT_MOST, &bell);
+            tracks.push((inbox.clone(), Some(info.clone())));
+            track.inbox = Some(inbox);
+        }
+        if tracks.is_empty() {
             self.held.clear();
             return Err("nothing it sent could be described".into());
         }
-        let formats: Vec<StreamInfo> = ready
-            .iter()
-            .filter_map(|&index| self.tracks[index].format.clone())
-            .collect();
-        let sinks = broadcast
-            .publish(&formats)
-            .map_err(|error| error.to_string())?;
-        pp_info!(pp_log: pp_log, "published {} tracks into {}", ready.len(), broadcast.name());
-        for (index, sink) in ready.into_iter().zip(sinks) {
-            let track = &mut self.tracks[index];
-            let inbox = Inbox::new(HOLD_AT_MOST);
-            let source = WebRtcTrackSource::new(
-                track.kind,
-                format!("webrtc-{session}-in-{index}"),
-                inbox.clone(),
-            );
-            let (pipeline, ()) = DrivenPipeline::new(
-                format!("webrtc-{session}-{index}"),
-                source,
-                |source, ctx| {
-                    ctx.attach(source, 0, ctx.branch().to(sink)?)?;
-                    Ok(())
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            track.inbox = Some(inbox);
-            track.pipeline = Some(Driving::new(pipeline));
+        let (source, streams) = WebRtcSource::described(
+            path.to_owned(),
+            tracks,
+            HOLD_FOR,
+            None,
+            element_pp_log(ElementType::WebRtcSource, path, None),
+        )
+        .map_err(|error| error.to_string())?;
+        pp_info!(pp_log: pp_log, "session {session} handed out as {path}'s publisher, {} tracks", streams.len());
+        if !self.arrivals.hand(source, streams) {
+            self.held.clear();
+            return Err("nothing takes the publisher".into());
         }
         for (index, packet) in std::mem::take(&mut self.held) {
             if let Some(inbox) = &self.tracks[index].inbox {

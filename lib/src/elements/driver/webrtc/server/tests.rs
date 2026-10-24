@@ -20,18 +20,21 @@ use crate::driver::DriverRunner;
 use crate::elements::{BroadcastOptions, FileDemuxer, Pacer, StreamInfo};
 use crate::pipeline::Pipeline;
 
-/// A server on the loopback serving `cam` for players and `live` for a
-/// publisher.
+/// A server on the loopback serving `cam` for players, and taking a
+/// publisher on `live`, relayed into the broadcast `live`'s players play.
 fn server() -> (Arc<DriverRunner>, WebRtcServerHandle, Broadcast, Broadcast) {
     let (server, handle) =
         WebRtcServer::bind("server", "127.0.0.1:0", WebRtcServerOptions::default())
             .expect("a loopback port is free");
     let cam = Broadcast::new("cam", BroadcastOptions::default());
     let live = Broadcast::new("live", BroadcastOptions::default());
-    handle.add_path("cam", &cam, WebRtcPathMode::Play).unwrap();
-    handle
-        .add_path("live", &live, WebRtcPathMode::Publish)
-        .unwrap();
+    handle.add_path("cam", &cam).unwrap();
+    handle.add_path("live", &live).unwrap();
+    // Left to run until the server stops.
+    drop(crate::test_support::relay(
+        handle.take_publishers("live").unwrap(),
+        live.clone(),
+    ));
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     (runner, handle, cam, live)
@@ -281,6 +284,46 @@ fn offers_for_what_is_not_served_are_refused() {
         "a refused offer leaves no session behind"
     );
     runner.stop();
+}
+
+/// A publisher is taken where a path's `Publishers` lives, apart from what
+/// its players play: refused where nothing is served, refused for a path
+/// players alone use, and taken again once let go of.
+#[test]
+fn publishers_are_taken_apart_from_what_players_play() {
+    let (runner, handle, _cam, _live) = server();
+    let mut client = Client::new();
+    let (offer, ..) = client.offer(&[MediaKind::Video], Direction::SendOnly, None);
+    assert!(matches!(
+        handle.publish("nowhere", &offer),
+        Err(WebRtcServerError::NoSuchPath(_))
+    ));
+    assert!(matches!(
+        handle.take_publishers("live"),
+        Err(WebRtcServerError::PathTaken(_))
+    ));
+    assert!(matches!(
+        handle.take_publishers("bad path"),
+        Err(WebRtcServerError::InvalidPath(_))
+    ));
+
+    // A path that only takes publishers, with nothing to play.
+    let studio = handle.take_publishers("studio").unwrap();
+    assert_eq!(studio.path(), "studio");
+    let (session, _answer) = handle
+        .publish("studio", &offer)
+        .expect("the path takes a publisher");
+    assert!(handle.close(session));
+    drop(studio);
+    assert!(matches!(
+        handle.publish("studio", &offer),
+        Err(WebRtcServerError::NoSuchPath(_))
+    ));
+    let studio = handle
+        .take_publishers("studio")
+        .expect("taken again once let go of");
+    runner.stop();
+    assert!(studio.next().is_none(), "the server stopped");
 }
 
 #[test]
@@ -753,7 +796,7 @@ fn offers_over_http_are_authorized_and_session_urls_cannot_be_guessed() {
     )
     .expect("a loopback port is free");
     let cam = Broadcast::new("cam", BroadcastOptions::default());
-    handle.add_path("cam", &cam, WebRtcPathMode::Play).unwrap();
+    handle.add_path("cam", &cam).unwrap();
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     let camera = feed(&cam, &path);
@@ -959,7 +1002,7 @@ fn ice_servers_are_told_to_clients_let_in_and_no_one_else() {
     )
     .unwrap();
     let cam = Broadcast::new("cam", BroadcastOptions::default());
-    handle.add_path("cam", &cam, WebRtcPathMode::Play).unwrap();
+    handle.add_path("cam", &cam).unwrap();
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     let camera = feed(&cam, &path);

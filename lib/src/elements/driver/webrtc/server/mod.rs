@@ -1,4 +1,5 @@
-//! A WebRTC server serving [`Broadcast`]s: [`WebRtcServer`].
+//! A WebRTC server serving [`Broadcast`]s and taking publishers:
+//! [`WebRtcServer`].
 
 mod http;
 mod session;
@@ -11,7 +12,7 @@ use std::hash::BuildHasher;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -22,12 +23,13 @@ use thiserror::Error as ThisError;
 use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
-use crate::elements::{Authorize, Broadcast};
+use crate::elements::driver::publishers::{self, Arrivals, OnDrop, Publishers};
+use crate::elements::{Authorize, Broadcast, WebRtcSource};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
 pub use http::WebRtcHttpEndpoint;
-use session::Session;
+use session::{Session, Target};
 
 /// The longest the server's loop waits on its socket before it looks at
 /// what its players are to be sent and what it has been asked.
@@ -59,7 +61,8 @@ pub enum WebRtcServerError {
         "bound to {0}, which a player cannot reach: name the addresses it can in WebRtcServerOptions::candidates"
     )]
     NoCandidate(SocketAddr),
-    /// A path is already served under that name.
+    /// A path is already served under that name — or, for
+    /// [`WebRtcServerHandle::take_publishers`], already takes publishers.
     #[error("path {0:?} is already served")]
     PathTaken(String),
     /// A path a URL could not name as it is: empty, or holding a character
@@ -70,8 +73,8 @@ pub enum WebRtcServerError {
     /// No path is served under that name.
     #[error("no path {0:?} is served")]
     NoSuchPath(String),
-    /// The path takes no publisher — it was added as
-    /// [`WebRtcPathMode::Play`] — or one is publishing into it already.
+    /// The path takes no publisher — players alone may use it — or one is
+    /// publishing on it already.
     #[error("path {0:?} takes no publisher now")]
     NotPublishable(String),
     /// The path's broadcast has nothing a WebRTC player can be sent: no
@@ -100,16 +103,6 @@ pub enum WebRtcServerError {
         /// Why.
         source: io::Error,
     },
-}
-
-/// What a [`WebRtcServer`] lets clients do on a path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebRtcPathMode {
-    /// Players may play it — [`WebRtcServerHandle::play`], WHEP.
-    Play,
-    /// A publisher may also publish into it, one at a time —
-    /// [`WebRtcServerHandle::publish`], WHIP; players play it as ever.
-    Publish,
 }
 
 /// One session of a [`WebRtcServer`]: a player or a publisher. Shown, and
@@ -304,8 +297,10 @@ impl Default for WebRtcServerOptions {
 }
 
 /// A WebRTC server: plays [`Broadcast`]s to WebRTC players — browsers among
-/// them — each under a path of its own, and takes a WebRTC publisher's
-/// stream into one on a path that allows it. Needs the `webrtc` feature.
+/// them — each under a path of its own, and takes WebRTC publishers on the
+/// paths that take them, each handed out as a [`WebRtcSource`] of what it
+/// sends ([`WebRtcServerHandle::take_publishers`]). Needs the `webrtc`
+/// feature.
 ///
 /// A few UDP sockets serve every session — one for each of its threads (see
 /// [`WebRtcServerOptions::threads`]). A player is sent its path's
@@ -333,13 +328,11 @@ impl Default for WebRtcServerOptions {
 /// ```no_run
 /// # fn main() -> media_pp::Result<()> {
 /// use media_pp::driver::DriverRunner;
-/// use media_pp::elements::{
-///     Broadcast, BroadcastOptions, WebRtcPathMode, WebRtcServer, WebRtcServerOptions,
-/// };
+/// use media_pp::elements::{Broadcast, BroadcastOptions, WebRtcServer, WebRtcServerOptions};
 ///
 /// let (server, handle) = WebRtcServer::bind("server", "192.168.0.5:8189", WebRtcServerOptions::default())?;
 /// let camera = Broadcast::new("camera", BroadcastOptions::default());
-/// handle.add_path("cam1", &camera, WebRtcPathMode::Play)?;
+/// handle.add_path("cam1", &camera)?;
 /// DriverRunner::new(server).run()?;
 /// // Browsers play http://192.168.0.5:8080/cam1/whep.
 /// let _http = handle.serve_http("0.0.0.0:8080")?;
@@ -366,12 +359,17 @@ impl Default for WebRtcServerOptions {
 /// as it is written — at most a second of it: where the newest keyframe is
 /// further behind, the player waits for the next one, as a packet lost in a
 /// longer stretch of large pictures is past what the connection keeps to
-/// send again. A publisher's tracks are each a pipeline of a source of the
-/// track into the path's broadcast, published once each has said enough of
-/// itself — H.264's parameter sets — and its leaving ends the run. The sinks
-/// are the ones a [`WebRtcPeer`](super::WebRtcPeer)'s muxer sends through:
-/// a peer and a server's session are one connection, driven by different
-/// owners.
+/// send again. A publisher is handed out as a [`WebRtcSource`] of its
+/// tracks once each has said enough of itself — H.264's parameter sets —
+/// and its leaving ends the source. The sinks are the ones a
+/// [`WebRtcPeer`](super::WebRtcPeer)'s muxer sends through, and the source
+/// the one its remote tracks come out of: a peer and a server's session are
+/// one connection, driven by different owners.
+///
+/// A publisher is taken on a path apart from what players play under the
+/// same name — WHIP to `/<path>/whip`, WHEP from `/<path>/whep` — and a
+/// pipeline of the application's carries what it sends wherever it wants
+/// it, a broadcast its players read among them, converted or not.
 pub struct WebRtcServer {
     name: Arc<str>,
     pp_log: PpLog,
@@ -396,7 +394,8 @@ struct Shard {
 /// broadcasts it was given — so a broadcast served stays open while its
 /// path is. What it asks of the server waits for the server's loop to
 /// answer, up to five seconds, and fails with
-/// [`WebRtcServerError::NotRunning`] when the server is not running.
+/// [`WebRtcServerError::NotRunning`] when the server is not running. Once
+/// the server has stopped, the paths' [`Publishers`] answer `None`.
 #[derive(Clone)]
 pub struct WebRtcServerHandle {
     shared: Arc<Shared>,
@@ -407,7 +406,12 @@ pub struct WebRtcServerHandle {
 /// What a server and its handles share.
 pub(crate) struct Shared {
     pub(crate) pp_log: PpLog,
-    paths: Mutex<HashMap<String, Path>>,
+    paths: Mutex<HashMap<String, Broadcast>>,
+    /// Where a publisher of each path that takes them is handed out, apart
+    /// from what its players play, under the number of the registration,
+    /// so that a `Publishers` gone takes away only its own.
+    publishers: Mutex<HashMap<String, (u64, Arrivals<WebRtcSource>)>>,
+    next_registration: AtomicU64,
     local_addr: SocketAddr,
     next_session: AtomicU64,
     /// Keys what a session's id is made of beyond its number, so that one
@@ -424,12 +428,6 @@ pub(crate) struct Shared {
     /// Each open session's latest figures, written by its thread as
     /// they change.
     pub(crate) stats: Mutex<HashMap<SessionId, SessionStats>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct Path {
-    pub(crate) broadcast: Broadcast,
-    pub(crate) mode: WebRtcPathMode,
 }
 
 /// What a handle asks of a thread.
@@ -557,6 +555,8 @@ impl WebRtcServer {
         let shared = Arc::new(Shared {
             pp_log: pp_log.clone(),
             paths: Mutex::new(HashMap::new()),
+            publishers: Mutex::default(),
+            next_registration: AtomicU64::new(0),
             local_addr: shards[0].local,
             next_session: AtomicU64::new(seed()),
             sessions: AtomicUsize::new(0),
@@ -605,7 +605,7 @@ fn udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
 }
 
 impl WebRtcServerHandle {
-    /// Serves `broadcast` under `path`, as `mode` allows, from now on.
+    /// Serves `broadcast` under `path` to players, from now on.
     ///
     /// # Errors
     ///
@@ -616,7 +616,6 @@ impl WebRtcServerHandle {
         &self,
         path: &str,
         broadcast: &Broadcast,
-        mode: WebRtcPathMode,
     ) -> std::result::Result<(), WebRtcServerError> {
         if !valid_path(path) {
             return Err(WebRtcServerError::InvalidPath(path.to_owned()));
@@ -625,20 +624,56 @@ impl WebRtcServerHandle {
         if paths.contains_key(path) {
             return Err(WebRtcServerError::PathTaken(path.to_owned()));
         }
-        paths.insert(
-            path.to_owned(),
-            Path {
-                broadcast: broadcast.clone(),
-                mode,
-            },
-        );
+        paths.insert(path.to_owned(), broadcast.clone());
         drop(paths);
         pp_info!(
             pp_log: &self.shared.pp_log,
-            "path added: {path} broadcast={} mode={mode:?}",
+            "path added: {path} broadcast={}",
             broadcast.name()
         );
         Ok(())
+    }
+
+    /// Takes publishers on `path` — [`Self::publish`], WHIP to
+    /// `/<path>/whip` — from now on, each handed out as a [`WebRtcSource`]
+    /// of what it sends through the [`Publishers`] returned, and none once
+    /// that is dropped. Apart from what players play under the same name.
+    /// One publisher at a time.
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcServerError::InvalidPath`] for a path a URL could not name
+    /// as it is, and [`WebRtcServerError::PathTaken`] for one that already
+    /// takes publishers.
+    pub fn take_publishers(
+        &self,
+        path: &str,
+    ) -> std::result::Result<Publishers<WebRtcSource>, WebRtcServerError> {
+        if !valid_path(path) {
+            return Err(WebRtcServerError::InvalidPath(path.to_owned()));
+        }
+        let mut taken = self
+            .shared
+            .publishers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if taken.contains_key(path) {
+            return Err(WebRtcServerError::PathTaken(path.to_owned()));
+        }
+        let registration = self
+            .shared
+            .next_registration
+            .fetch_add(1, Ordering::Relaxed);
+        let shared = Arc::downgrade(&self.shared);
+        let name = path.to_owned();
+        let (arrivals, publishers) = publishers::publishers(
+            path,
+            OnDrop::new(move || release(&shared, &name, registration)),
+        );
+        taken.insert(path.to_owned(), (registration, arrivals));
+        drop(taken);
+        pp_info!(pp_log: &self.shared.pp_log, "publishers taken on {path}");
+        Ok(publishers)
     }
 
     /// Stops serving `path`: nobody new opens it. Whether it was served.
@@ -674,13 +709,14 @@ impl WebRtcServerHandle {
         self.open(path, SessionRole::Play, offer)
     }
 
-    /// Answers `offer` — SDP from a publisher — with a session publishing
-    /// into `path`: the session, and the SDP answer to send back.
+    /// Answers `offer` — SDP from a publisher — with a session publishing on
+    /// `path`, handed out through its [`Publishers`] once its tracks have
+    /// said what they carry: the session, and the SDP answer to send back.
     ///
     /// # Errors
     ///
-    /// [`WebRtcServerError::NoSuchPath`],
-    /// [`WebRtcServerError::NotPublishable`] where the path takes no
+    /// [`WebRtcServerError::NoSuchPath`] where nothing is served or taken
+    /// under `path`, [`WebRtcServerError::NotPublishable`] where it takes no
     /// publisher now, [`WebRtcServerError::InvalidOffer`], and
     /// [`WebRtcServerError::NotRunning`].
     pub fn publish(
@@ -812,12 +848,36 @@ impl WebRtcServerHandle {
 }
 
 impl Shared {
-    pub(crate) fn path(&self, name: &str) -> Option<Path> {
+    pub(crate) fn path(&self, name: &str) -> Option<Broadcast> {
         self.paths
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(name)
             .cloned()
+    }
+
+    /// Where a publisher of `name` is handed out, where it takes any.
+    fn publishers_of(&self, name: &str) -> Option<Arrivals<WebRtcSource>> {
+        self.publishers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(name)
+            .map(|(_, arrivals)| arrivals.clone())
+    }
+}
+
+/// Takes away what [`WebRtcServerHandle::take_publishers`] registered for
+/// `path` as `registration`: no publisher begins on it from here, and one
+/// under way goes on into the source it was handed out as.
+fn release(shared: &Weak<Shared>, path: &str, registration: u64) {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    let mut taken = shared.publishers.lock().unwrap_or_else(|p| p.into_inner());
+    if taken.get(path).is_some_and(|(id, _)| *id == registration) {
+        taken.remove(path);
+        drop(taken);
+        pp_info!(pp_log: &shared.pp_log, "publishers let go of on {path}");
     }
 }
 
@@ -882,6 +942,12 @@ impl Driver for WebRtcServer {
             }
             first[0].run(stop, shared);
         });
+        // Nothing more will be handed out: each path's `Publishers` hears it.
+        self.shared
+            .publishers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         pp_info!(self, "stopped");
         Ok(())
     }
@@ -1078,12 +1144,26 @@ impl Shard {
         offer: &str,
         shared: &Shared,
     ) -> std::result::Result<(SessionId, Session, String), WebRtcServerError> {
-        let entry = shared
-            .path(path)
-            .ok_or_else(|| WebRtcServerError::NoSuchPath(path.to_owned()))?;
-        if role == SessionRole::Play && !session::playable(&entry.broadcast) {
-            return Err(WebRtcServerError::NothingToPlay(path.to_owned()));
-        }
+        let target = match role {
+            SessionRole::Play => {
+                let broadcast = shared
+                    .path(path)
+                    .ok_or_else(|| WebRtcServerError::NoSuchPath(path.to_owned()))?;
+                if !session::playable(&broadcast) {
+                    return Err(WebRtcServerError::NothingToPlay(path.to_owned()));
+                }
+                Target::Play(broadcast)
+            }
+            SessionRole::Publish => {
+                Target::Publish(shared.publishers_of(path).ok_or_else(|| {
+                    if shared.path(path).is_some() {
+                        WebRtcServerError::NotPublishable(path.to_owned())
+                    } else {
+                        WebRtcServerError::NoSuchPath(path.to_owned())
+                    }
+                })?)
+            }
+        };
         let number = shared.next_session.fetch_add(1, Ordering::Relaxed);
         let id = SessionId(
             u128::from(shared.session_key.hash_one(number)) << 64
@@ -1092,16 +1172,13 @@ impl Shard {
         // A publisher holds its path from here: looked at and taken under
         // one lock, so that two threads cannot each give it one.
         let mut publishing = shared.publishing.lock().unwrap_or_else(|p| p.into_inner());
-        if role == SessionRole::Publish
-            && (entry.mode != WebRtcPathMode::Publish || publishing.contains_key(path))
-        {
+        if role == SessionRole::Publish && publishing.contains_key(path) {
             return Err(WebRtcServerError::NotPublishable(path.to_owned()));
         }
         let (session, answer) = Session::open(
             id,
             path,
-            role,
-            entry.broadcast,
+            target,
             offer,
             &self.candidates,
             self.pp_log.clone(),

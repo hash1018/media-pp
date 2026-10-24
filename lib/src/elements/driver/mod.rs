@@ -11,6 +11,8 @@
 
 #[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
 mod access;
+#[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
+pub(crate) mod publishers;
 #[cfg(feature = "rtmp-server")]
 mod rtmp_server;
 #[cfg(feature = "rtsp-server")]
@@ -20,16 +22,19 @@ mod webrtc;
 
 #[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
 pub use access::{Access, AccessRequest, Authorize, Credentials};
+#[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
+pub use publishers::Publishers;
 #[cfg(feature = "rtmp-server")]
-pub use rtmp_server::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions};
+pub use rtmp_server::{
+    RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions, RtmpSource,
+};
 #[cfg(feature = "rtsp-server")]
 pub use rtsp_server::{
-    RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,
-    RtspSessionStats,
+    RtspDigest, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions, RtspSessionStats,
 };
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
     IceServer, SessionId, SessionRole, SessionStats, TrackId, WebRtcError, WebRtcHandle,
-    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPathMode, WebRtcPeer, WebRtcServer,
-    WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
+    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPeer, WebRtcServer, WebRtcServerError,
+    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
 };

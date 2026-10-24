@@ -16,12 +16,12 @@ use media_pp::driver::DriverRunner;
 use media_pp::element::BoxSink;
 use media_pp::elements::{
     AudioCodec, Broadcast, BroadcastOptions, BroadcastSource, CounterHandle, FileDemuxer,
-    FileMuxer, FrameCounter, HlsMode, HlsMuxer, HlsOptions, Mp4Layout, PacketCounter, RtspMuxer,
-    RtspOptions, RtspPathMode, RtspServer, RtspServerHandle, RtspServerOptions, RtspSource,
+    FileMuxer, FrameCounter, HlsMode, HlsMuxer, HlsOptions, Mp4Layout, PacketCounter, Publishers,
+    RtspMuxer, RtspOptions, RtspServer, RtspServerHandle, RtspServerOptions, RtspSource,
     StreamInfo, SwAudioEncoder, SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions,
     TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, VideoCodec, WebRtcError,
-    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPathMode, WebRtcServer,
-    WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
+    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcServer, WebRtcServerHandle,
+    WebRtcServerOptions, WebRtcSource,
 };
 use media_pp::ffmpeg::{self, media};
 use media_pp::pipeline::{Pipeline, PipelineBuilder};
@@ -120,9 +120,45 @@ fn live(encoders: Encoders, video: BoxSink, audio: Option<BoxSink>) -> Arc<Pipel
     pipeline
 }
 
-/// Both servers on the loopback, serving `broadcast` under `path` — the
-/// WebRTC one taking a WHIP publisher where `webrtc` is `Publish`, the RTSP
-/// one an RTSP publisher where `rtsp` is `Record`.
+/// What the servers take a publisher of their path over, into its
+/// broadcast.
+#[derive(Clone, Copy)]
+enum Takes {
+    Nothing,
+    Whip,
+    Rtsp,
+}
+
+/// Writes each publisher `publishers` hands out into `broadcast`, a pipeline
+/// of its source each, as an application does — until the server stops.
+fn relay<S, M>(publishers: Publishers<S>, broadcast: Broadcast)
+where
+    S: media_pp::element::IntoSource<M> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        while let Some((source, streams)) = publishers.next() {
+            let sinks = broadcast.publish(&streams).unwrap();
+            let (pipeline, ()) = Pipeline::new("relay", source, |source, ctx| {
+                for (stream, sink) in streams.iter().zip(sinks) {
+                    ctx.attach(source, stream.index(), ctx.branch().to(sink)?)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            pipeline.run().unwrap();
+            // Until the publisher has gone, which ends its source.
+            for event in pipeline.bus().iter() {
+                if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                    break;
+                }
+            }
+            pipeline.stop();
+        }
+    });
+}
+
+/// Both servers on the loopback, serving `broadcast` under `path`, and the
+/// one `takes` says taking a publisher of the path into it.
 struct Servers {
     webrtc: Arc<DriverRunner>,
     _webrtc_handle: WebRtcServerHandle,
@@ -132,21 +168,28 @@ struct Servers {
 }
 
 impl Servers {
-    fn serving(
-        path: &str,
-        broadcast: &Broadcast,
-        webrtc: WebRtcPathMode,
-        rtsp: RtspPathMode,
-    ) -> Self {
+    fn serving(path: &str, broadcast: &Broadcast, takes: Takes) -> Self {
         let (server, webrtc_handle) =
             WebRtcServer::bind("webrtc", "127.0.0.1:0", WebRtcServerOptions::default()).unwrap();
-        webrtc_handle.add_path(path, broadcast, webrtc).unwrap();
+        webrtc_handle.add_path(path, broadcast).unwrap();
+        if let Takes::Whip = takes {
+            relay(
+                webrtc_handle.take_publishers(path).unwrap(),
+                broadcast.clone(),
+            );
+        }
         let webrtc_runner = DriverRunner::new(server);
         webrtc_runner.run().unwrap();
         let http = webrtc_handle.serve_http("127.0.0.1:0").unwrap();
         let (server, rtsp_handle) =
             RtspServer::bind("rtsp", "127.0.0.1:0", RtspServerOptions::default()).unwrap();
-        rtsp_handle.add_path(path, broadcast, rtsp).unwrap();
+        rtsp_handle.add_path(path, broadcast).unwrap();
+        if let Takes::Rtsp = takes {
+            relay(
+                rtsp_handle.take_publishers(path).unwrap(),
+                broadcast.clone(),
+            );
+        }
         let rtsp_runner = DriverRunner::new(server);
         rtsp_runner.run().unwrap();
         Self {
@@ -398,12 +441,7 @@ fn whip_in_whep_out() {
     let encoders = encoders(AudioCodec::Opus);
     let sound = encoders.audio.is_some();
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
     until_live(&live_stream);
 
@@ -431,12 +469,7 @@ fn whip_in_rtsp_out() {
     let encoders = encoders(AudioCodec::Opus);
     let sound = encoders.audio.is_some();
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
     until_live(&live_stream);
 
@@ -464,7 +497,7 @@ fn rtsp_in_whep_out() {
             continue; // no libopus here
         };
         let camera = Broadcast::new("camera", BroadcastOptions::default());
-        let servers = Servers::serving("cam", &camera, WebRtcPathMode::Play, RtspPathMode::Record);
+        let servers = Servers::serving("cam", &camera, Takes::Rtsp);
         let input = publish_rtsp(&servers.rtsp_handle.url("cam"), encoders);
         until_live(&camera);
 
@@ -501,12 +534,7 @@ fn whip_in_recorded() {
     let encoders = encoders(AudioCodec::Opus);
     let sound = encoders.audio.is_some();
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
     until_live(&live_stream);
 
@@ -526,7 +554,7 @@ fn whip_in_recorded() {
 fn rtsp_in_recorded() {
     let encoders = encoders(AudioCodec::Aac);
     let camera = Broadcast::new("camera", BroadcastOptions::default());
-    let servers = Servers::serving("cam", &camera, WebRtcPathMode::Play, RtspPathMode::Record);
+    let servers = Servers::serving("cam", &camera, Takes::Rtsp);
     let input = publish_rtsp(&servers.rtsp_handle.url("cam"), encoders);
     until_live(&camera);
 
@@ -548,12 +576,7 @@ fn whep_out_recorded() {
     let encoders = encoders(AudioCodec::Opus);
     let sound = encoders.audio.is_some();
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
     until_live(&live_stream);
 
@@ -579,12 +602,7 @@ fn whep_out_recorded() {
 #[test]
 fn a_player_goes_on_across_a_publisher_coming_back() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
     until_live(&live_stream);
     let (source, streams) = WebRtcSource::open(
@@ -617,12 +635,7 @@ fn a_player_goes_on_across_a_publisher_coming_back() {
 #[test]
 fn what_a_server_refuses_is_an_error_at_open() {
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
 
     let refused = |error: media_pp::Error| match error {
         media_pp::Error::WebRtcError(WebRtcError::Refused { status, .. }) => status,
@@ -729,12 +742,7 @@ fn whep_out_driven() {
     use media_pp::pipeline::{DrivenPipeline, DrivenRunner};
 
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders(AudioCodec::Opus));
     until_live(&live_stream);
 
@@ -778,12 +786,7 @@ fn recorded_while_played_both_ways() {
     let encoders = encoders(AudioCodec::Opus);
     let sound = encoders.audio.is_some();
     let live_stream = Broadcast::new("live", BroadcastOptions::default());
-    let servers = Servers::serving(
-        "live",
-        &live_stream,
-        WebRtcPathMode::Publish,
-        RtspPathMode::Play,
-    );
+    let servers = Servers::serving("live", &live_stream, Takes::Whip);
     let input = publish_whip(&servers.http.whip_url("live"), encoders);
     until_live(&live_stream);
 
@@ -835,12 +838,12 @@ mod rtmp {
     use super::*;
     use media_pp::elements::{RtmpMuxer, RtmpServer, RtmpServerHandle, RtmpServerOptions};
 
-    /// An RTMP server on the loopback taking publishers into `broadcast`
-    /// at `path`.
+    /// An RTMP server on the loopback taking publishers at `path`, each
+    /// relayed into `broadcast`.
     fn rtmp_server(path: &str, broadcast: &Broadcast) -> (Arc<DriverRunner>, RtmpServerHandle) {
         let (server, handle) =
             RtmpServer::bind("rtmp", "127.0.0.1:0", RtmpServerOptions::default()).unwrap();
-        handle.add_path(path, broadcast).unwrap();
+        relay(handle.take_publishers(path).unwrap(), broadcast.clone());
         let runner = DriverRunner::new(server);
         runner.run().unwrap();
         (runner, handle)
@@ -868,12 +871,7 @@ mod rtmp {
     fn rtmp_in_rtsp_and_whep_out() {
         let encoders = encoders(AudioCodec::Aac);
         let studio = Broadcast::new("studio", BroadcastOptions::default());
-        let servers = Servers::serving(
-            "live/studio",
-            &studio,
-            WebRtcPathMode::Play,
-            RtspPathMode::Play,
-        );
+        let servers = Servers::serving("live/studio", &studio, Takes::Nothing);
         let (rtmp, ingest) = rtmp_server("live/studio", &studio);
         let input = publish_rtmp(&ingest.url("live/studio"), encoders);
         until_live(&studio);

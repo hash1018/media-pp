@@ -9,20 +9,28 @@ use ffmpeg_next as ffmpeg;
 use super::*;
 use crate::driver::DriverRunner;
 use crate::elements::{
-    AccessRequest, BroadcastItem, BroadcastOptions, Credentials, FileDemuxer, Pacer, RtmpMuxer,
+    AccessRequest, Broadcast, BroadcastItem, BroadcastOptions, Credentials, FileDemuxer, Pacer,
+    RtmpMuxer, StreamInfo,
 };
 use crate::pipeline::Pipeline;
 
+/// What a relay of a path's publishers did: the streams each was handed
+/// out with, as the server stopped.
+type Relayed = std::thread::JoinHandle<Vec<Vec<StreamInfo>>>;
+
 /// A server on a port of the system's choice on the loopback, taking
-/// publishers into one broadcast at `live/cam`.
-fn server(options: RtmpServerOptions) -> (Arc<DriverRunner>, RtmpServerHandle, Broadcast) {
+/// publishers at `live/cam`, each relayed into one broadcast.
+fn server(options: RtmpServerOptions) -> (Arc<DriverRunner>, RtmpServerHandle, Broadcast, Relayed) {
     let (server, handle) =
         RtmpServer::bind("server", "127.0.0.1:0", options).expect("a loopback port is free");
     let broadcast = Broadcast::new("cam", BroadcastOptions::default());
-    handle.add_path("live/cam", &broadcast).unwrap();
+    let relayed = crate::test_support::relay(
+        handle.take_publishers("live/cam").unwrap(),
+        broadcast.clone(),
+    );
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
-    (runner, handle, broadcast)
+    (runner, handle, broadcast, relayed)
 }
 
 /// Pushes the fixture to `url` at its own speed, over and over, as an
@@ -83,11 +91,11 @@ fn read(broadcast: &Broadcast, within: Duration) -> Vec<(usize, bool, i64)> {
 }
 
 #[test]
-fn a_publisher_is_taken_into_its_broadcast_as_it_sends() {
+fn a_publisher_is_handed_out_as_a_source_of_what_it_sends() {
     let Some(path) = crate::test_support::try_test_video() else {
         return;
     };
-    let (runner, handle, broadcast) = server(RtmpServerOptions::default());
+    let (runner, handle, broadcast, relayed) = server(RtmpServerOptions::default());
     let publisher = publish(&handle.url("live/cam"), &path).unwrap();
     wait_published(&broadcast, 1);
     assert_eq!(handle.publishers(), 1);
@@ -128,7 +136,7 @@ fn a_publisher_is_taken_into_its_broadcast_as_it_sends() {
     );
     assert_eq!(handle.publishers(), 1);
 
-    // It drops and comes back: published again into the same broadcast.
+    // It drops and comes back: handed out again, as a source of its own.
     publisher.stop();
     drop(publisher);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -140,6 +148,12 @@ fn a_publisher_is_taken_into_its_broadcast_as_it_sends() {
     wait_published(&broadcast, 2);
     again.stop();
     runner.stop();
+    let runs = relayed.join().unwrap();
+    assert_eq!(runs.len(), 2, "each publisher a source of its own");
+    for streams in &runs {
+        let indices: Vec<usize> = streams.iter().map(StreamInfo::index).collect();
+        assert_eq!(indices, [0, 1], "an output for each, in order");
+    }
 }
 
 #[test]
@@ -155,7 +169,7 @@ fn a_publisher_is_authorized_by_what_its_stream_name_asks() {
                     password: "s3cret".into(),
                 }
     });
-    let (runner, handle, broadcast) = server(RtmpServerOptions {
+    let (runner, handle, broadcast, _relayed) = server(RtmpServerOptions {
         authorize: Some(authorize),
         ..RtmpServerOptions::default()
     });
@@ -170,13 +184,14 @@ fn a_publisher_is_authorized_by_what_its_stream_name_asks() {
 }
 
 /// Stopping the server closes its publishers' connections and returns —
-/// none of their threads is left reading.
+/// none of their threads is left reading — which ends the publisher's
+/// source, and what waits for the next publisher hears there is none.
 #[test]
 fn stopping_the_server_ends_its_publishers() {
     let Some(path) = crate::test_support::try_test_video() else {
         return;
     };
-    let (runner, handle, broadcast) = server(RtmpServerOptions::default());
+    let (runner, handle, broadcast, relayed) = server(RtmpServerOptions::default());
     let publisher = publish(&handle.url("live/cam"), &path).unwrap();
     wait_published(&broadcast, 1);
     let began = Instant::now();
@@ -184,29 +199,64 @@ fn stopping_the_server_ends_its_publishers() {
     while runner.bus().recv_timeout(Duration::from_secs(5)).is_ok() {}
     assert!(began.elapsed() < Duration::from_secs(5), "stopped at once");
     assert_eq!(handle.publishers(), 0);
+    assert_eq!(relayed.join().unwrap().len(), 1, "the relay heard the end");
     assert!(!broadcast.is_live(), "its run ended with it");
     publisher.stop();
 }
 
+/// A path's `Publishers` dropped takes the path away: a publisher of it is
+/// refused, and the path can be taken again.
 #[test]
-fn paths_are_checked_as_they_are_added() {
+fn a_path_takes_publishers_while_its_publishers_lives() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (server, handle) =
+        RtmpServer::bind("server", "127.0.0.1:0", RtmpServerOptions::default()).unwrap();
+    let runner = DriverRunner::new(server);
+    runner.run().unwrap();
+    let publishers = handle.take_publishers("live/cam").unwrap();
+    drop(publishers);
+    assert!(
+        publish(&handle.url("live/cam"), &path).is_err(),
+        "nothing takes the path"
+    );
+    let publishers = handle.take_publishers("live/cam").unwrap();
+    let publisher = publish(&handle.url("live/cam"), &path).unwrap();
+    let (source, streams) = publishers.next().expect("the publisher is handed out");
+    assert_eq!(streams.len(), 2);
+    // The source let go of ends the publisher's connection.
+    drop(source);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while handle.publishers() > 0 {
+        assert!(Instant::now() < deadline, "the publisher was let go of");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    publisher.stop();
+    runner.stop();
+}
+
+#[test]
+fn paths_are_checked_as_they_are_taken() {
     let (_server, handle) =
         RtmpServer::bind("server", "127.0.0.1:0", RtmpServerOptions::default()).unwrap();
-    let broadcast = Broadcast::new("b", BroadcastOptions::default());
     for path in ["cam", "live/", "/cam", "live//cam", "live/c am"] {
         assert!(
             matches!(
-                handle.add_path(path, &broadcast),
+                handle.take_publishers(path),
                 Err(RtmpServerError::InvalidPath(_))
             ),
             "{path:?}"
         );
     }
-    handle.add_path("live/cam", &broadcast).unwrap();
+    let taken = handle.take_publishers("live/cam").unwrap();
+    assert_eq!(taken.path(), "live/cam");
     assert!(matches!(
-        handle.add_path("live/cam", &broadcast),
+        handle.take_publishers("live/cam"),
         Err(RtmpServerError::PathTaken(_))
     ));
-    assert!(handle.remove_path("live/cam"));
-    assert!(!handle.remove_path("live/cam"));
+    drop(taken);
+    handle
+        .take_publishers("live/cam")
+        .expect("taken again once let go of");
 }

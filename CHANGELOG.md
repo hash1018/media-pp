@@ -68,6 +68,42 @@ compile error with no explanation.
   track's `WebRtcTrackSource` and its `wait_stream_info` were. The four
   WebRTC examples show both sides.
 
+- **A server hands each publisher out as a source.** `RtspServer`,
+  `WebRtcServer` and `RtmpServer` no longer write a publisher into a
+  `Broadcast`: `take_publishers(path)` answers the path's `Publishers`,
+  whose `next()` — or `next_async()`, for an async runtime — answers each
+  publisher as it begins, an `RtspSource`, a `WebRtcSource` or the new
+  `RtmpSource` of what it sends, with its streams, to be wired as any
+  source is. Its source ends as the publisher leaves, and dropping it ends
+  the publisher's connection; dropping the `Publishers` takes the path
+  away. A publisher is taken apart from what players play under the same
+  name. `RtspPathMode` and `WebRtcPathMode` are gone, and `add_path` takes
+  the path and its broadcast alone; `RtspServerHandle::add_publish_path`
+  and `remove_publish_path`, and `RtmpServerHandle::add_path` and
+  `remove_path`, are gone. Where a path was added for a publisher —
+  `RtspPathMode::Record`, `WebRtcPathMode::Publish`, an RTMP path — write
+  its publishers into the broadcast its players read:
+
+  ```rust
+  handle.add_path("live", &live)?;
+  let publishers = handle.take_publishers("live")?;
+  while let Some((source, streams)) = publishers.next() {
+      let sinks = live.publish(&streams)?;
+      let (pipeline, ()) = Pipeline::new("live", source, |source, ctx| {
+          for (stream, sink) in streams.iter().zip(sinks) {
+              ctx.attach(source, stream.index(), ctx.branch().to(sink)?)?;
+          }
+          Ok(())
+      })?;
+      pipeline.run()?;
+      // ... until its bus says `Finished`: the publisher has gone.
+  }
+  ```
+
+  `ElementType` has an `RtmpSource` variant, so a `match` on it needs an
+  arm for it. The `rtsp_server` and `webrtc_server` examples relay their
+  publishers this way.
+
 ### Changed
 
 - **A muxer of MP4 refuses a track whose pictures change partway.** An

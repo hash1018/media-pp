@@ -122,6 +122,8 @@ pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };
 pub use render_mode::RenderMode;
+#[cfg(feature = "rtsp-server")]
+pub(crate) use rtsp_source::{PublishedItem, PublishedOutbox};
 pub use rtsp_source::{RtspListenOptions, RtspSource, RtspSourceError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use shared_texture::{

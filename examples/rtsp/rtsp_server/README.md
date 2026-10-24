@@ -8,8 +8,12 @@ FileDemuxer -> Pacer -> BroadcastSink    (the file, looped, at its own speed)
                              |
                      Broadcast "file" ----\
                                            RtspServer -> players
-publisher -> RtspServer -> Broadcast "live" /
+publisher -> RtspServer -> RtspSource -> BroadcastSink -> Broadcast "live"
 ```
+
+The server hands each publisher out as an `RtspSource` of what it sends
+(`RtspServerHandle::take_publishers`), and a pipeline of the example's own
+writes it into the broadcast `live`'s players play.
 
 Each player is sent the broadcast's packets as they are — nothing is decoded
 or encoded for it — from the newest keyframe on. `live` takes one publisher at
@@ -39,7 +43,7 @@ ffplay rtsp://127.0.0.1:8554/live
 ```
 
 ```text
-OBS -> RtmpServer "live/stream" -> Broadcast "live" -> RtspServer -> players
+OBS -> RtmpServer "live/stream" -> RtmpSource -> BroadcastSink -> Broadcast "live" -> RtspServer -> players
 ```
 
 H.264 and AAC go through as they come, and so does H.265, which OBS and

@@ -1659,3 +1659,42 @@ pub(crate) fn changing_camera(
         }
     })
 }
+
+/// Writes each publisher `publishers` hands out into `broadcast`, a pipeline
+/// of its source each, as an application does — until the server stops —
+/// and answers the streams each was handed out with.
+#[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
+pub(crate) fn relay<S, M>(
+    publishers: crate::elements::Publishers<S>,
+    broadcast: crate::elements::Broadcast,
+) -> std::thread::JoinHandle<Vec<Vec<crate::elements::StreamInfo>>>
+where
+    S: crate::element::IntoSource<M> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut runs = Vec::new();
+        while let Some((source, streams)) = publishers.next() {
+            let sinks = broadcast.publish(&streams).unwrap();
+            let (pipeline, ()) = crate::pipeline::Pipeline::new("relay", source, |source, ctx| {
+                for (stream, sink) in streams.iter().zip(sinks) {
+                    ctx.attach(source, stream.index(), ctx.branch().to(sink)?)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            pipeline.run().unwrap();
+            runs.push(streams);
+            // Until the publisher has gone, which ends its source.
+            for event in pipeline.bus().iter() {
+                if matches!(
+                    event,
+                    crate::bus::BusEvent::Finished | crate::bus::BusEvent::Error { .. }
+                ) {
+                    break;
+                }
+            }
+            pipeline.stop();
+        }
+        runs
+    })
+}

@@ -1,36 +1,40 @@
-//! A publisher's stream written into its path's broadcast: [`Recording`].
+//! A publisher's stream handed out as a source: [`Recording`].
 
 use std::time::{Duration, Instant};
 
+use crossbeam_channel::TrySendError;
 use ffmpeg_next as ffmpeg;
 
-use crate::buffer::MediaBuffer;
-use crate::element::RawSink;
-use crate::elements::{Broadcast, BroadcastError, BroadcastSink, StreamInfo};
-use crate::error::Error;
+use crate::elements::source::{PublishedItem, PublishedOutbox};
+use crate::elements::{RtspSource, StreamInfo};
+use crate::pp_log::{PpLog, pp_warn};
 
+use crate::elements::driver::publishers::Arrivals;
 use crate::elements::rtsp::depacketize::Depacketizer;
 use crate::elements::rtsp::sdp::Announced;
 
 /// How long a recording holds what it is sent while it waits for every
-/// picture's size, and how much — past either, it publishes without.
+/// picture's size, and how much — past either, it is handed out without.
 const HOLD_FOR: Duration = Duration::from_secs(10);
 const HOLD_AT_MOST: usize = 4096;
 
 /// Why a recording cannot go on.
 pub(crate) enum Stopped {
-    /// The broadcast was closed, or published again by someone else.
-    Broadcast(BroadcastError),
+    /// Nothing takes the publisher: its path's `Publishers` has gone, or
+    /// the source it was handed out as was dropped.
+    Gone,
 }
 
-/// A publisher's tracks being written into a broadcast.
+/// A publisher's tracks being handed on, as an [`RtspSource`] of them.
 ///
 /// What the description does not say — a picture's size, and parameter
 /// sets a publisher sends only in band — is read from each picture track's
-/// first keyframe before the broadcast is published, so that what reads it,
-/// a player's description or a recording's file, has it.
+/// first keyframe before the source is handed out, so that what reads it,
+/// a player's description or a recording's file, has it; what came before
+/// waits in the source.
 pub(crate) struct Recording {
-    broadcast: Broadcast,
+    arrivals: Arrivals<RtspSource>,
+    path: String,
     tracks: Vec<Announced>,
     depacketizers: Vec<Depacketizer>,
     parameters: Vec<ffmpeg::codec::Parameters>,
@@ -39,7 +43,11 @@ pub(crate) struct Recording {
     /// What came before they all were.
     held: Vec<(usize, ffmpeg::Packet)>,
     began: Instant,
-    sinks: Option<Vec<BroadcastSink>>,
+    /// Where the source handed out is fed, once it is.
+    outbox: Option<PublishedOutbox>,
+    /// Each picture track that lost a packet the source had no room for,
+    /// going on from its next keyframe.
+    losing: Vec<bool>,
 }
 
 // SAFETY: every field is `Send` but the codec parameters, which are this
@@ -47,35 +55,37 @@ pub(crate) struct Recording {
 unsafe impl Send for Recording {}
 
 impl Recording {
-    pub(crate) fn new(broadcast: Broadcast, tracks: Vec<Announced>) -> Self {
+    pub(crate) fn new(arrivals: Arrivals<RtspSource>, path: &str, tracks: Vec<Announced>) -> Self {
         let complete = tracks
             .iter()
             .map(|track| track.medium != ffmpeg::media::Type::Video)
             .collect();
         Self {
-            broadcast,
+            arrivals,
+            path: path.to_owned(),
             depacketizers: tracks
                 .iter()
                 .map(|track| Depacketizer::new(track.payload))
                 .collect(),
             parameters: tracks.iter().map(Announced::parameters).collect(),
+            losing: vec![false; tracks.len()],
             tracks,
             complete,
             held: Vec::new(),
             began: Instant::now(),
-            sinks: None,
+            outbox: None,
         }
     }
 
     /// Takes one RTP packet of `track`.
-    pub(crate) fn take(&mut self, track: usize, rtp: &[u8]) -> Result<(), Stopped> {
+    pub(crate) fn take(&mut self, track: usize, rtp: &[u8], pp_log: &PpLog) -> Result<(), Stopped> {
         let Some(depacketizer) = self.depacketizers.get_mut(track) else {
             return Ok(());
         };
         for mut packet in depacketizer.push(rtp) {
             packet.set_time_base(self.tracks[track].time_base());
-            if self.sinks.is_some() {
-                self.write(track, packet)?;
+            if self.outbox.is_some() {
+                self.write(track, packet, pp_log)?;
                 continue;
             }
             if !self.complete[track] && packet.is_key() {
@@ -85,43 +95,72 @@ impl Recording {
             self.held.push((track, packet));
             let all = self.complete.iter().all(|complete| *complete);
             if all || self.held.len() >= HOLD_AT_MOST || self.began.elapsed() >= HOLD_FOR {
-                self.publish()?;
+                self.hand_out(pp_log)?;
             }
         }
         Ok(())
     }
 
-    fn publish(&mut self) -> Result<(), Stopped> {
-        let formats: Vec<StreamInfo> = self
+    /// Hands the publisher out as a source of its tracks, and feeds it what
+    /// was held.
+    fn hand_out(&mut self, pp_log: &PpLog) -> Result<(), Stopped> {
+        let streams: Vec<StreamInfo> = self
             .parameters
             .iter()
             .zip(&self.tracks)
-            .map(|(parameters, track)| StreamInfo::new(parameters.clone(), track.time_base()))
+            .enumerate()
+            .map(|(index, (parameters, track))| {
+                StreamInfo::new(parameters.clone(), track.time_base()).with_index(index)
+            })
             .collect();
-        let sinks = self
-            .broadcast
-            .publish(&formats)
-            .map_err(Stopped::Broadcast)?;
-        self.sinks = Some(sinks);
+        let (source, outbox) = RtspSource::published(&self.path, streams.clone());
+        if !self.arrivals.hand(source, streams) {
+            return Err(Stopped::Gone);
+        }
+        self.outbox = Some(outbox);
         for (track, packet) in std::mem::take(&mut self.held) {
-            self.write(track, packet)?;
+            self.write(track, packet, pp_log)?;
         }
         Ok(())
     }
 
-    fn write(&mut self, track: usize, packet: ffmpeg::Packet) -> Result<(), Stopped> {
-        let Some(sink) = self.sinks.as_mut().and_then(|sinks| sinks.get_mut(track)) else {
+    fn write(
+        &mut self,
+        track: usize,
+        packet: ffmpeg::Packet,
+        pp_log: &PpLog,
+    ) -> Result<(), Stopped> {
+        let Some(outbox) = &self.outbox else {
             return Ok(());
         };
-        match sink.consume(MediaBuffer::packet(packet)) {
-            Ok(()) => Ok(()),
-            Err(Error::BroadcastError(error)) => Err(Stopped::Broadcast(error)),
-            Err(_) => Ok(()),
+        if self.losing[track] && !packet.is_key() {
+            return Ok(());
+        }
+        match outbox.items.try_send(PublishedItem::Packet(track, packet)) {
+            Ok(()) => {
+                outbox.bell.ring();
+                self.losing[track] = false;
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                // A picture lost leaves those after it to the next keyframe;
+                // a sound lost is only itself.
+                if self.tracks[track].medium == ffmpeg::media::Type::Video && !self.losing[track] {
+                    pp_warn!(
+                        pp_log: pp_log,
+                        "{}: track {track}'s source is not reading; going on from the next keyframe",
+                        self.path
+                    );
+                    self.losing[track] = true;
+                }
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => Err(Stopped::Gone),
         }
     }
 
-    /// Whether the broadcast has been published to by this recording yet.
+    /// Whether the publisher has been handed out yet.
     pub(crate) fn published(&self) -> bool {
-        self.sinks.is_some()
+        self.outbox.is_some()
     }
 }

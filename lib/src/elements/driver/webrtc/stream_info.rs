@@ -86,10 +86,10 @@ impl WebRtcStreamInfo {
         Ok(parameters)
     }
 
-    /// What a muxer's `add_stream` is to be told to record this stream: its
+    /// What a source of this track says it carries: its
     /// [`Self::codec_parameters`], timed in its [`Self::time_base`]. Fails
     /// where either of those would.
-    pub fn stream_info(&self) -> Result<crate::elements::StreamInfo> {
+    pub(crate) fn stream_info(&self) -> Result<crate::elements::StreamInfo> {
         Ok(crate::elements::StreamInfo::new(
             self.codec_parameters()?,
             self.time_base()?,

@@ -24,7 +24,8 @@ use tokio::sync::mpsc;
 
 use crate::elements::broadcast::same_shape;
 use crate::elements::driver::access::{Access, AccessRequest, Credentials};
-use crate::elements::{Broadcast, BroadcastSource, StreamInfo};
+use crate::elements::driver::publishers::Arrivals;
+use crate::elements::{Broadcast, BroadcastSource, RtspSource, StreamInfo};
 use crate::pipeline::{DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
@@ -98,12 +99,12 @@ impl Udp {
 struct Session {
     id: String,
     path: String,
-    broadcast: Broadcast,
     role: Role,
 }
 
 enum Role {
     Play {
+        broadcast: Broadcast,
         /// The broadcast's tracks as they were described.
         tracks: Vec<StreamInfo>,
         /// Which of them were described, by their `streamid`: the ones the
@@ -113,6 +114,8 @@ enum Role {
         delivery: Vec<Option<Delivery>>,
     },
     Record {
+        /// Where the publisher is handed out, once it records.
+        arrivals: Arrivals<RtspSource>,
         tracks: Vec<Announced>,
         /// The channel each track's RTP comes in on, interleaved.
         channels: Vec<Option<u8>>,
@@ -358,10 +361,9 @@ pub(super) async fn serve(
                 let outgoing = match played {
                     Played::Send(outgoing) => outgoing,
                     Played::Ended => {
-                        let closed = connection
-                            .session
-                            .as_ref()
-                            .is_none_or(|session| session.broadcast.is_closed());
+                        let closed = connection.session.as_ref().is_none_or(|session| {
+                            matches!(&session.role, Role::Play { broadcast, .. } if broadcast.is_closed())
+                        });
                         break 'connection if closed {
                             "the broadcast closed"
                         } else {
@@ -619,8 +621,8 @@ impl Connection {
         if !self.allows(request, &target.path, Access::Publish) {
             return self.unauthorized();
         }
-        let broadcast = match self.shared.publish_target(&target.path) {
-            Ok(broadcast) => broadcast,
+        let arrivals = match self.shared.publish_target(&target.path) {
+            Ok(arrivals) => arrivals,
             Err(status) => return Response::new(status),
         };
         let tracks = match std::str::from_utf8(&request.body)
@@ -651,8 +653,8 @@ impl Connection {
         self.session = Some(Session {
             id: session_id(),
             path: target.path,
-            broadcast,
             role: Role::Record {
+                arrivals,
                 channels: vec![None; tracks.len()],
                 tracks,
                 _claim: claim,
@@ -699,8 +701,8 @@ impl Connection {
             self.session = Some(Session {
                 id: session_id(),
                 path: target.path.clone(),
-                broadcast,
                 role: Role::Play {
+                    broadcast,
                     tracks,
                     delivery: vec![None; described.len()],
                     described,
@@ -806,9 +808,9 @@ impl Connection {
         let Some(Session {
             id,
             path,
-            broadcast,
             role:
                 Role::Play {
+                    broadcast,
                     tracks,
                     described,
                     delivery,
@@ -935,8 +937,9 @@ impl Connection {
         let Some(Session {
             id,
             path,
-            broadcast,
-            role: Role::Record { tracks, .. },
+            role: Role::Record {
+                arrivals, tracks, ..
+            },
         }) = self.session.as_ref()
         else {
             return Response::new(455);
@@ -949,7 +952,7 @@ impl Connection {
                 self.peer,
                 tracks.len()
             );
-            self.recording = Some(Recording::new(broadcast.clone(), tracks.clone()));
+            self.recording = Some(Recording::new(arrivals.clone(), path, tracks.clone()));
             let udp = matches!(
                 &self.session,
                 Some(Session { role: Role::Record { channels, .. }, .. })
@@ -999,19 +1002,19 @@ impl Connection {
                 .received
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
         }
-        match recording.take(track, data) {
+        match recording.take(track, data, pp_log) {
             Ok(()) => {
                 if !was
                     && recording.published()
                     && let Some(session) = &self.session
                 {
-                    pp_info!(pp_log: pp_log, "{} published into {}", self.peer, session.path);
+                    pp_info!(pp_log: pp_log, "{} handed out as {}'s publisher", self.peer, session.path);
                 }
                 Ok(())
             }
-            Err(Stopped::Broadcast(error)) => {
-                pp_info!(pp_log: pp_log, "{}'s publication ended: {error}", self.peer);
-                Err("the broadcast took no more")
+            Err(Stopped::Gone) => {
+                pp_info!(pp_log: pp_log, "{}'s publication ended: nothing takes it", self.peer);
+                Err("nothing takes the publisher")
             }
         }
     }

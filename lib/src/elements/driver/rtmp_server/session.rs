@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::elements::driver::access::{Access, AccessRequest, Credentials};
-use crate::pp_log::{pp_debug, pp_info, pp_warn};
+use crate::pp_log::{pp_debug, pp_info};
 
 use super::Shared;
 use super::amf::{self, Amf};
@@ -30,7 +30,8 @@ const STATUS: u8 = 5;
 enum Ended {
     Io(io::Error),
     Refused(&'static str),
-    Broadcast(String),
+    /// Nothing takes the publisher any more.
+    Gone,
 }
 
 impl From<io::Error> for Ended {
@@ -102,8 +103,8 @@ pub(super) fn serve(stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
         Err(Ended::Refused(why)) => {
             pp_info!(pp_log: &shared.pp_log, "refused {peer}: {why}");
         }
-        Err(Ended::Broadcast(why)) => {
-            pp_warn!(pp_log: &shared.pp_log, "the publication of {peer} ended: {why}");
+        Err(Ended::Gone) => {
+            pp_info!(pp_log: &shared.pp_log, "the publication of {peer} ended: nothing takes it");
         }
     }
 }
@@ -188,10 +189,13 @@ impl Connection<'_> {
                         pp_debug!(pp_log: &self.shared.pp_log, "{} sent {what}; passed over", self.peer);
                     }
                     Ok(tag) => {
-                        if let Err(Stopped::Broadcast(error)) =
-                            publishing.ingest.take(medium, tag, message.timestamp)
-                        {
-                            return Err(Ended::Broadcast(error.to_string()));
+                        if let Err(Stopped::Gone) = publishing.ingest.take(
+                            medium,
+                            tag,
+                            message.timestamp,
+                            &self.shared.pp_log,
+                        ) {
+                            return Err(Ended::Gone);
                         }
                     }
                     Err(what) => {
@@ -305,7 +309,7 @@ impl Connection<'_> {
                 return Err(Ended::Refused("not authorized"));
             }
         }
-        let Some(broadcast) = self.shared.path(&path) else {
+        let Some(arrivals) = self.shared.path(&path) else {
             self.status(
                 stream,
                 status("error", "NetStream.Publish.BadName", "No such path."),
@@ -319,14 +323,9 @@ impl Connection<'_> {
             )?;
             return Err(Ended::Refused("another publisher holds its path"));
         };
-        pp_info!(
-            pp_log: &self.shared.pp_log,
-            "{} publishes {path} into broadcast={}",
-            self.peer,
-            broadcast.name()
-        );
+        pp_info!(pp_log: &self.shared.pp_log, "{} publishes {path}", self.peer);
         self.publishing = Some(Publishing {
-            ingest: Ingest::new(broadcast),
+            ingest: Ingest::new(arrivals, &path),
             path,
             _claim: claim,
         });

@@ -4,8 +4,8 @@ use media_pp::{
     buffer::{MediaBuffer, set_time_base},
     driver::DriverRunner,
     elements::{
-        AppSource, Broadcast, BroadcastOptions, Pacer, RtspPathMode, RtspServer, RtspServerOptions,
-        StreamInfo, SwEncoder, SwEncoderOptions, VideoCodec,
+        AppSource, Broadcast, BroadcastOptions, Pacer, RtspServer, RtspServerOptions, StreamInfo,
+        SwEncoder, SwEncoderOptions, VideoCodec,
     },
     ffmpeg::{self, format::Pixel},
     pipeline::Pipeline,
@@ -29,9 +29,7 @@ fn players_play_and_are_summed_up() {
     let (server, handle) =
         RtspServer::bind("server", "127.0.0.1:0", RtspServerOptions::default()).unwrap();
     let broadcast = Broadcast::new("camera", BroadcastOptions::default());
-    handle
-        .add_path("cam", &broadcast, RtspPathMode::Play)
-        .unwrap();
+    handle.add_path("cam", &broadcast).unwrap();
     let server = DriverRunner::new(server);
     server.run().unwrap();
     let camera = camera(&broadcast).unwrap();

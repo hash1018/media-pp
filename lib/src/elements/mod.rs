@@ -118,19 +118,18 @@ pub use crate::platform::macos::videotoolbox::{
     VideoToolboxFramePoolError,
 };
 #[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
-pub use driver::{Access, AccessRequest, Authorize, Credentials};
+pub use driver::{Access, AccessRequest, Authorize, Credentials, Publishers};
 #[cfg(feature = "webrtc")]
 pub use driver::{
     IceServer, SessionId, SessionRole, SessionStats, TrackId, WebRtcError, WebRtcHandle,
-    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPathMode, WebRtcPeer, WebRtcServer,
-    WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
+    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPeer, WebRtcServer, WebRtcServerError,
+    WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
 };
 #[cfg(feature = "rtmp-server")]
-pub use driver::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions};
+pub use driver::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions, RtmpSource};
 #[cfg(feature = "rtsp-server")]
 pub use driver::{
-    RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,
-    RtspSessionStats,
+    RtspDigest, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions, RtspSessionStats,
 };
 pub use filter::{
     AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,

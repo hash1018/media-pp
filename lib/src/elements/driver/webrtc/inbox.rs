@@ -56,6 +56,7 @@ pub(super) enum Taken {
 }
 
 impl Inbox {
+    #[cfg(test)]
     pub(super) fn new(capacity: usize) -> Self {
         Self::ringing(capacity, &Bell::new())
     }

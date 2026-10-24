@@ -8,10 +8,9 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 
-use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
+use crate::pp_log::{PpLog, pp_error, pp_warn};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
-use super::inbox::{Inbox, Taken};
 use str0m::{
     change::{SdpAnswer, SdpOffer},
     format::Codec,
@@ -21,13 +20,9 @@ use str0m::{
 use crate::elements::StreamInfo;
 use crate::{
     buffer::{MediaBuffer, PacketBuffer},
-    contract::{InputContract, OutputContract, PortContract},
-    element::{
-        Attached, Element, ElementType, Identity, Produced, RawSink, Source, SourceStage, Wait,
-        element_pp_log,
-    },
+    contract::{InputContract, PortContract},
+    element::{Element, ElementType, RawSink, element_pp_log},
     error::Result,
-    produce::{Received, source_stage},
 };
 
 use super::{
@@ -782,85 +777,5 @@ impl WebRtcTrackSink {
             normalized = normalized.with_metadata(Arc::clone(metadata));
         }
         Ok(normalized)
-    }
-}
-
-/// Hands on the encoded packets a publisher sends on one track, to the
-/// broadcast a [`WebRtcServer`](crate::elements::WebRtcServer) publishes
-/// it into. Its connection puts each packet received on the track into its
-/// inbox, from the connection's thread; it can be driven — a packet wakes
-/// the poll that found none. The connection letting go of the track ends
-/// its stream.
-pub(crate) struct WebRtcTrackSource(SourceStage<Receiving>);
-
-source_stage!(WebRtcTrackSource);
-
-/// What a [`WebRtcTrackSource`] hands on, a packet at a time as the
-/// connection receives it.
-struct Receiving {
-    pp_log: PpLog,
-    /// Its one output's: encoded media of the track's kind, whichever
-    /// codec the publisher sends.
-    contract: OutputContract,
-    inbox: Inbox,
-}
-
-impl WebRtcTrackSource {
-    pub(super) fn new(kind: MediaKind, name: impl Into<String>, inbox: Inbox) -> Self {
-        let identity = Identity::new(ElementType::WebRtcServer, name);
-        let pp_log = identity.pp_log().clone();
-        Self(SourceStage::new(
-            identity,
-            Receiving {
-                pp_log,
-                contract: OutputContract::Fixed(PortContract::packet(packet_kind(kind))),
-                inbox,
-            },
-        ))
-    }
-}
-
-impl Source for Receiving {
-    fn is_live(&self) -> bool {
-        true
-    }
-
-    fn output_contract(&self) -> OutputContract {
-        self.contract
-    }
-
-    /// It waits on its inbox, which a packet wakes.
-    fn drivable(&self) -> bool {
-        true
-    }
-
-    /// The next packet the connection received — or, once it has let go of
-    /// the track, the end of the stream.
-    fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
-        loop {
-            let waker = wait.waker().cloned();
-            match self.inbox.take(waker.as_ref()) {
-                Taken::Packet(buf) => return Ok(Produced::Buffer(buf)),
-                Taken::Ended => {
-                    pp_info!(self, "the connection let go of the track, ending");
-                    return Ok(Produced::End);
-                }
-                Taken::Empty if waker.is_some() => return Ok(Produced::Nothing),
-                Taken::Empty => match wait.rung(self.inbox.bell()) {
-                    Received::Got(()) => {}
-                    Received::LetGo | Received::Gone => return Ok(Produced::Nothing),
-                },
-            }
-        }
-    }
-
-    fn attached(&mut self, cx: &Attached<'_>) {
-        self.pp_log = cx.pp_log().clone();
-    }
-}
-
-impl Drop for Receiving {
-    fn drop(&mut self) {
-        self.inbox.reader_gone();
     }
 }

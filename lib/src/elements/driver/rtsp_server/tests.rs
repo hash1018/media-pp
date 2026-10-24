@@ -34,9 +34,7 @@ fn server(udp: bool) -> (Arc<DriverRunner>, RtspServerHandle, Broadcast) {
     )
     .expect("a loopback port is free");
     let broadcast = Broadcast::new("cam", BroadcastOptions::default());
-    handle
-        .add_path("cam", &broadcast, RtspPathMode::Play)
-        .unwrap();
+    handle.add_path("cam", &broadcast).unwrap();
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     (runner, handle, broadcast)
@@ -269,9 +267,7 @@ fn each_session_says_its_path_and_what_it_was_sent() {
         return;
     };
     let (runner, handle, broadcast) = server(true);
-    handle
-        .add_path("door", &broadcast, RtspPathMode::Play)
-        .unwrap();
+    handle.add_path("door", &broadcast).unwrap();
     let camera = feed(&broadcast, &path);
     let players = [
         play(&handle.url("cam"), RtspTransport::Tcp),
@@ -387,7 +383,7 @@ fn stopping_the_server_ends_its_players() {
 fn paths_are_checked_as_they_are_added() {
     let (_runner, handle, broadcast) = server(false);
     assert!(matches!(
-        handle.add_path("cam", &broadcast, RtspPathMode::Play),
+        handle.add_path("cam", &broadcast),
         Err(RtspServerError::PathTaken(_))
     ));
     for bad in [
@@ -401,15 +397,13 @@ fn paths_are_checked_as_they_are_added() {
     ] {
         assert!(
             matches!(
-                handle.add_path(bad, &broadcast, RtspPathMode::Play),
+                handle.add_path(bad, &broadcast),
                 Err(RtspServerError::InvalidPath(_))
             ),
             "{bad:?}"
         );
     }
-    handle
-        .add_path("site/door-1", &broadcast, RtspPathMode::Play)
-        .unwrap();
+    handle.add_path("site/door-1", &broadcast).unwrap();
     assert!(handle.remove_path("site/door-1"));
     assert!(!handle.remove_path("site/door-1"));
 }
@@ -573,14 +567,18 @@ fn what_is_not_rtsp_closes_the_connection() {
     assert!(rest.is_empty());
 }
 
-/// A server serving `live` for a publisher to push into, besides `cam`.
-fn server_for_publishers(udp: bool) -> (Arc<DriverRunner>, RtspServerHandle, Broadcast) {
+/// What a relay of a path's publishers did: the streams each was handed
+/// out with, as the server stopped.
+type Relayed = thread::JoinHandle<Vec<Vec<StreamInfo>>>;
+
+/// A server taking publishers on `live`, each relayed into the broadcast
+/// its players play under the same name, besides `cam`.
+fn server_for_publishers(udp: bool) -> (Arc<DriverRunner>, RtspServerHandle, Broadcast, Relayed) {
     let (runner, handle, _cam) = server(udp);
     let live = Broadcast::new("live", BroadcastOptions::default());
-    handle
-        .add_path("live", &live, RtspPathMode::Record)
-        .unwrap();
-    (runner, handle, live)
+    handle.add_path("live", &live).unwrap();
+    let relayed = crate::test_support::relay(handle.take_publishers("live").unwrap(), live.clone());
+    (runner, handle, live, relayed)
 }
 
 /// Pushes the fixture to `url` at its own speed, over and over, as an
@@ -636,7 +634,7 @@ fn a_publisher_is_played_back(transport: RtspTransport) {
     let Some(path) = crate::test_support::try_test_video() else {
         return;
     };
-    let (runner, handle, live) = server_for_publishers(true);
+    let (runner, handle, live, relayed) = server_for_publishers(true);
     let publisher =
         publish(&handle.url("live"), &path, transport).expect("the server takes a publisher");
     wait_published(&live);
@@ -685,6 +683,14 @@ fn a_publisher_is_played_back(transport: RtspTransport) {
         thread::sleep(Duration::from_millis(20));
     }
     runner.stop();
+    let runs = relayed.join().unwrap();
+    assert_eq!(runs.len(), 1);
+    let indices: Vec<usize> = runs[0].iter().map(StreamInfo::index).collect();
+    assert_eq!(
+        indices,
+        (0..runs[0].len()).collect::<Vec<_>>(),
+        "an output each, in order"
+    );
 }
 
 #[test]
@@ -702,7 +708,7 @@ fn a_path_holds_one_publisher_and_a_path_for_players_none() {
     let Some(path) = crate::test_support::try_test_video() else {
         return;
     };
-    let (runner, handle, live) = server_for_publishers(false);
+    let (runner, handle, live, _relayed) = server_for_publishers(false);
     let first = publish(&handle.url("live"), &path, RtspTransport::Tcp).unwrap();
     wait_published(&live);
     assert!(
@@ -890,10 +896,13 @@ fn server_asking() -> (
     .expect("a loopback port is free");
     let cam = Broadcast::new("cam", BroadcastOptions::default());
     let live = Broadcast::new("live", BroadcastOptions::default());
-    handle.add_path("cam", &cam, RtspPathMode::Play).unwrap();
-    handle
-        .add_path("live", &live, RtspPathMode::Record)
-        .unwrap();
+    handle.add_path("cam", &cam).unwrap();
+    handle.add_path("live", &live).unwrap();
+    // Left to run until the server stops.
+    drop(crate::test_support::relay(
+        handle.take_publishers("live").unwrap(),
+        live.clone(),
+    ));
     let runner = DriverRunner::new(server);
     runner.run().unwrap();
     (runner, handle, cam, live, asked)
@@ -1463,30 +1472,33 @@ fn a_player_presents_a_token_in_its_urls_query() {
     );
 }
 
-/// A publisher of a path given a publish target is published into it,
-/// while the path's players read what the path was added with: the one
-/// URL pushed to and played, two broadcasts apart.
+/// A publisher of a path is handed out as a source, while the path's
+/// players read what the path was added with: the one URL pushed to and
+/// played, apart. Its `Publishers` gone, the path takes none; the source
+/// gone, the publisher's connection ends.
 #[test]
-fn a_publisher_goes_into_its_target_and_players_read_the_path() {
+fn a_publisher_is_handed_out_apart_from_what_players_read() {
     let Some(path) = crate::test_support::try_test_video() else {
         return;
     };
     let (runner, handle, cam) = server(false);
     let camera = feed(&cam, &path);
     wait_published(&cam);
-    let into = Broadcast::new("into", BroadcastOptions::default());
-    handle.add_publish_path("cam", &into).unwrap();
+    let publishers = handle.take_publishers("cam").unwrap();
+    assert_eq!(publishers.path(), "cam");
     assert!(
         matches!(
-            handle.add_publish_path("cam", &into),
+            handle.take_publishers("cam"),
             Err(RtspServerError::PathTaken(_))
         ),
-        "one target a path"
+        "one taker a path"
     );
 
     let publisher =
         publish(&handle.url("cam"), &path, RtspTransport::Tcp).expect("the server takes it");
-    wait_published(&into);
+    let (source, streams) = publishers.next().expect("the publisher is handed out");
+    let (_, fixture) = FileDemuxer::open("probe", &path).unwrap();
+    assert_eq!(streams.len(), fixture.len(), "every track it set up");
     assert_eq!(
         cam.stats().publications,
         1,
@@ -1495,14 +1507,29 @@ fn a_publisher_goes_into_its_target_and_players_read_the_path() {
     let player = play(&handle.url("cam"), RtspTransport::Tcp);
     check_played(&player);
     player.pipeline.stop();
+
+    // Its source let go of, nothing takes the publisher.
+    drop(source);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while handle
+        .session_stats()
+        .iter()
+        .any(|session| session.role == Access::Publish)
+    {
+        assert!(Instant::now() < deadline, "the publisher was let go of");
+        thread::sleep(Duration::from_millis(20));
+    }
     publisher.stop();
 
-    assert!(handle.remove_publish_path("cam"));
-    assert!(!handle.remove_publish_path("cam"));
+    drop(publishers);
     assert!(
         publish(&handle.url("cam"), &path, RtspTransport::Tcp).is_err(),
         "a path players alone use takes no publisher"
     );
+    let publishers = handle
+        .take_publishers("cam")
+        .expect("taken again once let go of");
     camera.stop();
     runner.stop();
+    assert!(publishers.next().is_none(), "the server stopped");
 }

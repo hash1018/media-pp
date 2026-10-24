@@ -9,8 +9,12 @@ FileDemuxer -> Pacer -> BroadcastSink    (the file, looped, at its own speed)
                              |
                      Broadcast "file" ----\
                                            WebRtcServer -> players (WHEP)
-publisher (WHIP) -> Broadcast "live" -----/
+publisher (WHIP) -> WebRtcServer -> WebRtcSource -> BroadcastSink -> Broadcast "live"
 ```
+
+The server hands each publisher out as a `WebRtcSource` of what it sends
+(`WebRtcServerHandle::take_publishers`), and a pipeline of the example's own
+writes it into the broadcast `live`'s players play.
 
 Open `http://127.0.0.1:8080/file` in a browser: the page offers to play the
 path through WHEP, and the server answers. Each player is sent the broadcast's
@@ -52,7 +56,7 @@ the encoder to send no B-frames (x264 or NVENC, "B-frames" 0), which a
 browser's H.264 needs; its AAC, which WebRTC does not carry, is left out:
 
 ```text
-OBS -> RtmpServer "live/stream" -> Broadcast "live" -> WebRtcServer -> browsers
+OBS -> RtmpServer "live/stream" -> RtmpSource -> BroadcastSink -> Broadcast "live" -> WebRtcServer -> browsers
 ```
 
 With `--record DIR` it also records what `file` plays, as it plays it, into

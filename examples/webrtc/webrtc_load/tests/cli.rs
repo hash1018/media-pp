@@ -5,7 +5,7 @@ use media_pp::{
     driver::DriverRunner,
     elements::{
         AppSource, Broadcast, BroadcastOptions, Pacer, StreamInfo, SwEncoder, SwEncoderOptions,
-        VideoCodec, WebRtcPathMode, WebRtcServer, WebRtcServerOptions,
+        VideoCodec, WebRtcServer, WebRtcServerOptions,
     },
     ffmpeg::{self, format::Pixel},
     pipeline::Pipeline,
@@ -29,9 +29,7 @@ fn players_play_and_are_summed_up() {
     let (server, handle) =
         WebRtcServer::bind("server", "127.0.0.1:0", WebRtcServerOptions::default()).unwrap();
     let broadcast = Broadcast::new("camera", BroadcastOptions::default());
-    handle
-        .add_path("cam", &broadcast, WebRtcPathMode::Play)
-        .unwrap();
+    handle.add_path("cam", &broadcast).unwrap();
     let server = DriverRunner::new(server);
     server.run().unwrap();
     let http = handle.serve_http("127.0.0.1:0").unwrap();

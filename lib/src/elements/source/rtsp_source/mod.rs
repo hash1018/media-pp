@@ -32,6 +32,8 @@ use crate::elements::StreamInfo;
 
 use crate::core::bell::Bell;
 use receive::{BACKLOG, Item, Outbox, Reader, Session, Silence};
+#[cfg(feature = "rtsp-server")]
+pub(crate) use receive::{Item as PublishedItem, Outbox as PublishedOutbox};
 
 /// Why an [`RtspSource`] could not connect or read.
 ///
@@ -460,16 +462,7 @@ impl RtspSource {
             .enumerate()
             .map(|(index, track)| track.stream().with_index(index))
             .collect();
-        // Per stream, from the medium the session announced: every output
-        // hands on `MediaBuffer::Packet`, so only this tells an audio
-        // stream apart from a video one.
-        let contracts = streams
-            .iter()
-            .map(|s| match MediaKind::packet_for(s.kind()) {
-                Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
-                None => OutputContract::Unknown,
-            })
-            .collect();
+        let contracts = contracts(&streams);
         Ok((
             Self(SourceStage::new(
                 identity,
@@ -485,6 +478,35 @@ impl RtspSource {
             )),
             streams,
         ))
+    }
+
+    /// The source of a publisher an `RtspServer` took, whose `streams` its
+    /// connection has described, numbered: what the connection hands on
+    /// through the outbox returned, read as a pulled session is, and ended
+    /// as the outbox goes.
+    #[cfg(feature = "rtsp-server")]
+    pub(crate) fn published(name: &str, streams: Vec<StreamInfo>) -> (Self, Outbox) {
+        let identity = Identity::new(ElementType::RtspSource, name);
+        let pp_log = identity.pp_log().clone();
+        let (items, rx) = crossbeam_channel::bounded(BACKLOG);
+        let bell = Bell::new();
+        let outbox = Outbox {
+            items: std::mem::ManuallyDrop::new(items),
+            bell: bell.clone(),
+        };
+        let source = Self(SourceStage::new(
+            identity,
+            Reading {
+                pp_log,
+                contracts: contracts(&streams),
+                streams,
+                rx,
+                bell,
+                held: VecDeque::new(),
+                reader: Reader::idle(),
+            },
+        ));
+        (source, outbox)
     }
 
     /// The first stream of `kind`, as everything a branch for it is built
@@ -503,6 +525,19 @@ impl RtspSource {
             .cloned()
             .ok_or(RtspSourceError::NoStream(kind))
     }
+}
+
+/// What each of `streams`' outputs declares, from the medium the session
+/// announced: every output hands on `MediaBuffer::Packet`, so only this
+/// tells an audio stream apart from a video one.
+fn contracts(streams: &[StreamInfo]) -> Vec<OutputContract> {
+    streams
+        .iter()
+        .map(|s| match MediaKind::packet_for(s.kind()) {
+            Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
+            None => OutputContract::Unknown,
+        })
+        .collect()
 }
 
 /// A track's description as it is completed: what the session said of it,

@@ -1,4 +1,4 @@
-//! An RTMP server taking publishers' streams into [`Broadcast`]s:
+//! An RTMP server taking publishers, each as an [`RtmpSource`]:
 //! [`RtmpServer`].
 
 mod amf;
@@ -6,14 +6,17 @@ mod chunk;
 mod flv;
 mod ingest;
 mod session;
+mod source;
 #[cfg(test)]
 mod tests;
+
+pub use source::RtmpSource;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -22,7 +25,8 @@ use thiserror::Error as ThisError;
 use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
-use crate::elements::{Authorize, Broadcast};
+use crate::elements::Authorize;
+use crate::elements::driver::publishers::{self, Arrivals, OnDrop, Publishers};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
@@ -45,8 +49,8 @@ pub enum RtmpServerError {
         /// Why.
         source: io::Error,
     },
-    /// A path is already served under that name.
-    #[error("path {0:?} is already served")]
+    /// A path already takes publishers.
+    #[error("path {0:?} already takes publishers")]
     PathTaken(String),
     /// A path an RTMP URL could not name: one without both an application
     /// and a stream name — `live/cam1` — or holding a character other than
@@ -80,18 +84,18 @@ impl Default for RtmpServerOptions {
     }
 }
 
-/// An RTMP server: takes publishers' streams — OBS, FFmpeg, an encoder or
-/// a camera pushing to `rtmp://<this machine>/<app>/<stream>` — into
-/// [`Broadcast`]s, each under a path of its own. Needs the `rtmp-server`
-/// feature.
+/// An RTMP server: takes publishers — OBS, FFmpeg, an encoder or a camera
+/// pushing to `rtmp://<this machine>/<app>/<stream>` — each handed out as an
+/// [`RtmpSource`] of what it sends, through the [`Publishers`] of its path
+/// ([`RtmpServerHandle::take_publishers`]). Needs the `rtmp-server` feature.
 ///
-/// It takes, and plays to no one: a path's broadcast is read by whatever
-/// the application has — an `RtspServer` or a `WebRtcServer` serving it
-/// to players, a recording. Nothing is
-/// decoded: H.264 and AAC as RTMP has always carried them, and H.265, AV1,
-/// VP9 and Opus as Enhanced RTMP does, go into the broadcast as they come.
-/// A publisher that drops and comes back publishes again into the same
-/// broadcast, and its readers go on.
+/// It takes, and plays to no one: what a publisher sends goes wherever the
+/// application's pipeline of its source takes it — a broadcast an
+/// `RtspServer` or a `WebRtcServer` serves to players, a recording. Nothing
+/// is decoded: H.264 and AAC as RTMP has always carried them, and H.265,
+/// AV1, VP9 and Opus as Enhanced RTMP does, come out as they come in. A
+/// publisher that drops and comes back is handed out again, as a source of
+/// its own.
 ///
 /// It is not a pipeline element: run it with a
 /// [`DriverRunner`](crate::driver::DriverRunner), and add paths through its
@@ -106,21 +110,35 @@ impl Default for RtmpServerOptions {
 /// # fn main() -> media_pp::Result<()> {
 /// use media_pp::driver::DriverRunner;
 /// use media_pp::elements::{
-///     Broadcast, BroadcastOptions, RtmpServer, RtmpServerOptions, RtspPathMode, RtspServer,
-///     RtspServerOptions,
+///     Broadcast, BroadcastOptions, RtmpServer, RtmpServerOptions, RtspServer, RtspServerOptions,
 /// };
+/// use media_pp::pipeline::Pipeline;
 ///
 /// // OBS publishes to rtmp://<this machine>/live with the stream key
 /// // `studio`; RTSP players play rtsp://<this machine>:8554/live/studio.
 /// let studio = Broadcast::new("studio", BroadcastOptions::default());
 /// let (rtmp, ingest) = RtmpServer::bind("rtmp", "0.0.0.0:1935", RtmpServerOptions::default())?;
-/// ingest.add_path("live/studio", &studio)?;
+/// let publishers = ingest.take_publishers("live/studio")?;
 /// let (rtsp, players) = RtspServer::bind("rtsp", "0.0.0.0:8554", RtspServerOptions::default())?;
-/// players.add_path("live/studio", &studio, RtspPathMode::Play)?;
+/// players.add_path("live/studio", &studio)?;
 /// let rtmp = DriverRunner::new(rtmp);
 /// rtmp.run()?;
 /// let rtsp = DriverRunner::new(rtsp);
 /// rtsp.run()?;
+///
+/// // Each publisher, as it comes, into the broadcast the players read.
+/// while let Some((source, streams)) = publishers.next() {
+///     let sinks = studio.publish(&streams)?;
+///     let (pipeline, ()) = Pipeline::new("studio", source, |source, ctx| {
+///         for (stream, sink) in streams.iter().zip(sinks) {
+///             ctx.attach(source, stream.index(), ctx.branch().to(sink)?)?;
+///         }
+///         Ok(())
+///     })?;
+///     pipeline.run()?;
+///     // ... until its bus says `Finished`: the publisher has gone.
+/// #   break;
+/// }
 /// # Ok(())
 /// # }
 /// # #[cfg(not(feature = "rtsp-server"))]
@@ -132,13 +150,13 @@ impl Default for RtmpServerOptions {
 /// [`Self::bind`] listens at once, so a port already taken is an error
 /// there; connections wait until it runs. Each connection is served on a
 /// thread of its own — publishers are few, and each sends at its own pace
-/// — up to 256 at once. A path takes one publisher at a time. What a
-/// publisher sends is written into its path's broadcast once its tracks
-/// are known: those its metadata names, each with its configuration, and
-/// a picture's size, from the metadata or its first keyframe. A new
-/// configuration mid-stream — a new resolution — publishes the broadcast
-/// again. Stopping the server closes every connection and waits for its
-/// thread.
+/// — up to 256 at once. A path takes one publisher at a time. A publisher
+/// is handed out once its tracks are known: those its metadata names, each
+/// with its configuration, and a picture's size, from the metadata or its
+/// first keyframe. A new configuration mid-stream — a new resolution —
+/// ends its source and hands out another. Stopping the server closes every
+/// connection and waits for its thread, and the paths' [`Publishers`]
+/// answer `None`.
 pub struct RtmpServer {
     name: Arc<str>,
     pp_log: PpLog,
@@ -148,10 +166,8 @@ pub struct RtmpServer {
 
 /// A handle to an [`RtmpServer`], to say what it takes while it runs.
 ///
-/// Cheap to clone; every clone is the same server's. It keeps the paths'
-/// broadcasts it was given — so a broadcast served stays open while its
-/// path is — and nothing else of the server: once the server has stopped,
-/// adding a path still succeeds and nobody publishes to it.
+/// Cheap to clone; every clone is the same server's, and keeps nothing of
+/// it but what it shares with the paths' [`Publishers`].
 #[derive(Clone)]
 pub struct RtmpServerHandle {
     shared: Arc<Shared>,
@@ -160,7 +176,11 @@ pub struct RtmpServerHandle {
 /// What a server, its connections and its handles share.
 pub(crate) struct Shared {
     pub(crate) pp_log: PpLog,
-    paths: Mutex<HashMap<String, Broadcast>>,
+    /// Where a publisher of each path that takes them is handed out, under
+    /// the number of the registration, so that a `Publishers` gone takes
+    /// away only its own.
+    paths: Mutex<HashMap<String, (u64, Arrivals<RtmpSource>)>>,
+    next_registration: AtomicU64,
     local_addr: SocketAddr,
     pub(crate) publisher_timeout: Duration,
     pub(crate) authorize: Option<Authorize>,
@@ -175,12 +195,13 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn path(&self, name: &str) -> Option<Broadcast> {
+    /// Where a publisher of `name` is handed out, where it takes any.
+    pub(crate) fn path(&self, name: &str) -> Option<Arrivals<RtmpSource>> {
         self.paths
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(name)
-            .cloned()
+            .map(|(_, arrivals)| arrivals.clone())
     }
 }
 
@@ -222,6 +243,7 @@ impl RtmpServer {
         let shared = Arc::new(Shared {
             pp_log: pp_log.clone(),
             paths: Mutex::new(HashMap::new()),
+            next_registration: AtomicU64::new(0),
             local_addr,
             publisher_timeout: options.publisher_timeout,
             authorize: options.authorize,
@@ -243,21 +265,22 @@ impl RtmpServer {
 }
 
 impl RtmpServerHandle {
-    /// Takes publishers into `broadcast` under `path` — `app/stream`, what
+    /// Takes publishers on `path` — `app/stream`, what
     /// `rtmp://<address>/app/stream` names, or what a publisher given the
     /// server `rtmp://<address>/app` and the stream key `stream` publishes
-    /// to — from now on.
+    /// to — from now on, each handed out as an [`RtmpSource`] of what it
+    /// sends through the [`Publishers`] returned, and none once that is
+    /// dropped.
     ///
     /// # Errors
     ///
     /// [`RtmpServerError::InvalidPath`] for a path an RTMP URL could not
-    /// name, and [`RtmpServerError::PathTaken`] for one already served; what
-    /// was served under it goes on unchanged.
-    pub fn add_path(
+    /// name, and [`RtmpServerError::PathTaken`] for one that already takes
+    /// publishers.
+    pub fn take_publishers(
         &self,
         path: &str,
-        broadcast: &Broadcast,
-    ) -> std::result::Result<(), RtmpServerError> {
+    ) -> std::result::Result<Publishers<RtmpSource>, RtmpServerError> {
         if !valid_path(path) {
             return Err(RtmpServerError::InvalidPath(path.to_owned()));
         }
@@ -265,30 +288,20 @@ impl RtmpServerHandle {
         if paths.contains_key(path) {
             return Err(RtmpServerError::PathTaken(path.to_owned()));
         }
-        paths.insert(path.to_owned(), broadcast.clone());
-        drop(paths);
-        pp_info!(
-            pp_log: &self.shared.pp_log,
-            "path added: {path} broadcast={}",
-            broadcast.name()
-        );
-        Ok(())
-    }
-
-    /// Stops taking publishers into `path`. Whether it was served. A
-    /// publisher already publishing goes on.
-    pub fn remove_path(&self, path: &str) -> bool {
-        let removed = self
+        let registration = self
             .shared
-            .paths
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(path)
-            .is_some();
-        if removed {
-            pp_info!(pp_log: &self.shared.pp_log, "path removed: {path}");
-        }
-        removed
+            .next_registration
+            .fetch_add(1, Ordering::Relaxed);
+        let shared = Arc::downgrade(&self.shared);
+        let name = path.to_owned();
+        let (arrivals, publishers) = publishers::publishers(
+            path,
+            OnDrop::new(move || release(&shared, &name, registration)),
+        );
+        paths.insert(path.to_owned(), (registration, arrivals));
+        drop(paths);
+        pp_info!(pp_log: &self.shared.pp_log, "publishers taken on {path}");
+        Ok(publishers)
     }
 
     /// The address it listens on.
@@ -312,6 +325,21 @@ impl std::fmt::Debug for RtmpServerHandle {
         f.debug_struct("RtmpServerHandle")
             .field("local_addr", &self.shared.local_addr)
             .finish()
+    }
+}
+
+/// Takes away what [`RtmpServerHandle::take_publishers`] registered for
+/// `path` as `registration`: no publisher begins on it from here, and one
+/// under way goes on into the source it was handed out as.
+fn release(shared: &Weak<Shared>, path: &str, registration: u64) {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    let mut paths = shared.paths.lock().unwrap_or_else(|p| p.into_inner());
+    if paths.get(path).is_some_and(|(id, _)| *id == registration) {
+        paths.remove(path);
+        drop(paths);
+        pp_info!(pp_log: &shared.pp_log, "publishers let go of on {path}");
     }
 }
 
@@ -417,6 +445,12 @@ impl Driver for RtmpServer {
         for thread in threads {
             let _ = thread.join();
         }
+        // Nothing more will be handed out: each path's `Publishers` hears it.
+        self.shared
+            .paths
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         pp_info!(self, "stopped");
         Ok(())
     }
