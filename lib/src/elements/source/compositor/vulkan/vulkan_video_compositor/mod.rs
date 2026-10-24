@@ -1967,6 +1967,9 @@ impl Compositing {
         let tick = self
             .schedule
             .next(self.shared.frame_rate.interval(), wait.now());
+        // The ticks the last one overran are time gone by: the next
+        // picture is stamped after them — see `Tick::missed`.
+        self.frame_index += tick.missed as i64;
         if let Some(ticks) = &self.ticks {
             ticks.missed(tick.missed);
         }

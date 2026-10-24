@@ -226,10 +226,8 @@ impl Source for Generating {
     /// frames it would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> crate::error::Result<Produced> {
         let tick = self.schedule.next(self.frame_interval, wait.now());
-        // The ticks the last push overran are time gone by: stamped as if
-        // they had not been, the pictures fell a tick behind the clock for
-        // each, and six hours of a busy machine left them seconds behind
-        // the sound published with them.
+        // The ticks the last one overran are time gone by: the next
+        // picture is stamped after them — see `Tick::missed`.
         self.frame_index += tick.missed as i64;
         if !tick.come(wait, Duration::MAX) {
             return Ok(Produced::Nothing);

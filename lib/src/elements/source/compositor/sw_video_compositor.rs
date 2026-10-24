@@ -1183,6 +1183,9 @@ impl Compositing {
         let tick = self
             .schedule
             .next(self.shared.frame_rate.interval(), wait.now());
+        // The ticks the last one overran are time gone by: the next
+        // picture is stamped after them — see `Tick::missed`.
+        self.frame_index += tick.missed as i64;
         if let Some(ticks) = &self.ticks {
             ticks.missed(tick.missed);
         }
@@ -2094,6 +2097,90 @@ mod tests {
                 .all(|element| element.ticks.is_none()),
             "only an element that asked reports ticks"
         );
+    }
+
+    /// Holds every picture a while, and says each one's `pts` and when it
+    /// was handed on.
+    struct StampSink {
+        pp_log: PpLog,
+        tx: crossbeam_channel::Sender<(Option<i64>, Instant)>,
+        hold: Duration,
+    }
+
+    impl Element for StampSink {
+        fn name(&self) -> Arc<str> {
+            "stamps".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl RawSink for StampSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Video(frame) = buf {
+                let _ = self.tx.send((frame.pts(), Instant::now()));
+                thread::sleep(self.hold);
+            }
+            Ok(())
+        }
+    }
+
+    /// The ticks a slow downstream made a compositor miss are skipped in
+    /// its pictures' time, not lost from it: each picture is stamped where
+    /// it came on the clock, as sound beside it is, however many were
+    /// dropped. Counted as pictures made instead, ten frames a second held
+    /// 250 ms each fell more than a tick behind the clock with every one.
+    #[test]
+    fn the_ticks_a_held_push_missed_are_skipped_in_the_pictures_time() {
+        use crate::pipeline::Pipeline;
+
+        const INTERVAL: Duration = Duration::from_millis(100);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = StampSink {
+            pp_log: element_pp_log(ElementType::Other, "stamps", None),
+            tx,
+            hold: Duration::from_millis(250),
+        };
+        let (compositor, _handle) = SwVideoCompositor::new(
+            "dropping",
+            VideoCompositorOptions {
+                frame_rate: ffmpeg::Rational::new(10, 1),
+                ..options(2, 2)
+            },
+        )
+        .unwrap();
+        let (pipeline, ()) = Pipeline::new("dropped", compositor, |source, ctx| {
+            let branch = ctx.branch().to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        pipeline.run().unwrap();
+        let stamps: Vec<(Option<i64>, Instant)> = (0..5)
+            .map(|_| {
+                rx.recv_timeout(Duration::from_secs(2))
+                    .expect("the compositor keeps drawing")
+            })
+            .collect();
+        pipeline.stop();
+
+        let (first, began) = (stamps[0].0.unwrap(), stamps[0].1);
+        for (pts, at) in &stamps[1..] {
+            let ticks = at.duration_since(began).as_secs_f64() / INTERVAL.as_secs_f64();
+            let stamped = (pts.unwrap() - first) as f64;
+            assert!(
+                (stamped - ticks).abs() <= 1.5,
+                "stamped {stamped} ticks in, came {ticks:.1} ticks in: {stamps:?}"
+            );
+        }
     }
 
     /// The rate a running compositor emits at can be changed, and the unit its

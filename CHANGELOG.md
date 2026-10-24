@@ -397,13 +397,19 @@ compile error with no explanation.
 
 ### Fixed
 
-- **A `TestVideoSource` keeps its time with the clock across dropped
+- **A live picture source keeps its time with the clock across dropped
   pictures.** A tick a slow downstream overran was dropped and the next
   picture stamped one after the last made, so every drop put the pictures
-  a tick further behind the clock — and behind a `TestAudioSource` beside
-  them, whose time is the clock's: six hours of a busy machine left an
-  RTMP publish of the two 7.4 s apart. The next picture is now stamped
-  after the ticks dropped.
+  a tick further behind the clock — and behind sound beside them, whose
+  time is the clock's: six hours of a busy machine left an RTMP publish of
+  a `TestVideoSource` and a `TestAudioSource` 7.4 s apart, and a recording
+  of a compositor or a screen capture beside a microphone drifted the same
+  way. Every video compositor (software, D3D11, D3D12, CUDA, Vulkan,
+  Metal), every screen capture (DXGI, WGC, PipeWire, ScreenCaptureKit) and
+  `TestVideoSource` now stamps the next picture after the ticks it
+  dropped, and after an overrun the next tick is the first still ahead on
+  the same cadence rather than one interval from when the overrun ended,
+  so what was dropped is a whole number of ticks.
 
 - **A WebRTC player catching up is paced on each track's own timeline.**
   `WebRtcServer` sends a joining player what the broadcast held at twice

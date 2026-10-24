@@ -46,8 +46,11 @@ impl PeriodicSchedule {
     /// capture, generation, push) took longer than `interval` — drops
     /// every missed tick instead of letting them all fire back-to-back
     /// with no sleep between them the next time this loop runs, and
-    /// resumes cadence anchored at "one interval from now" rather than the
-    /// stale deadline.
+    /// resumes at the first tick still ahead, on the same cadence: a whole
+    /// number of ticks were dropped, so a source stamping by ticks keeps
+    /// its pictures' time with the clock. Anchored at "one interval from
+    /// now" instead, each drop cost the cadence the part of a tick the
+    /// overrun went past the last deadline, which no count of ticks says.
     ///
     /// Returns how many deadlines were skipped that way, which is the count
     /// of ticks this schedule never produced — zero whenever the tick
@@ -94,8 +97,10 @@ impl PeriodicSchedule {
     }
 
     fn resync_if_behind(&mut self, now: Instant) {
-        if self.next_due < now {
-            self.next_due = now + self.interval;
+        let behind = self.ticks_behind(now);
+        if behind > 0 {
+            let skipped = u32::try_from(behind).unwrap_or(u32::MAX);
+            self.next_due += self.interval.saturating_mul(skipped);
         }
     }
 }
@@ -123,6 +128,12 @@ pub(crate) struct Tick {
     /// When it is due, on the clock it was asked on.
     pub(crate) due: Instant,
     /// How many ticks the last one's work overran, and were dropped.
+    ///
+    /// A source that stamps its pictures by ticks counts these too, as a
+    /// camera's clock goes on past the pictures it drops: counted as
+    /// pictures made instead, each drop put the pictures one tick further
+    /// behind the clock — and behind sound stamped by it, which a long
+    /// recording on a busy machine heard seconds apart.
     pub(crate) missed: u64,
     /// Whether it was asked for at a rate other than the last one's, which
     /// the schedule is anchored afresh to.
@@ -212,6 +223,25 @@ mod tests {
             "expected a resync to one interval from now, not 14 missed \
              ticks all firing back-to-back"
         );
+    }
+
+    /// Past an overrun, the next tick is the first one still ahead on the
+    /// cadence it kept, not one interval from when the overrun ended: what
+    /// was dropped is a whole number of ticks.
+    #[test]
+    fn advance_after_tick_keeps_its_cadence_past_an_overrun() {
+        let t0 = Instant::now();
+        let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
+        let done = t0 + INTERVAL * 3 / 2;
+        assert_eq!(schedule.advance_after_tick(done), 1);
+        assert_eq!(
+            schedule.remaining(done),
+            INTERVAL / 2,
+            "the next tick is at 2 intervals, where it always was"
+        );
+        let done = t0 + INTERVAL * 2 + INTERVAL * 37 / 10;
+        assert_eq!(schedule.advance_after_tick(done), 3);
+        assert_eq!(schedule.remaining(done), INTERVAL * 3 / 10);
     }
 
     /// What was dropped is answered, so a compositor can say how much of its

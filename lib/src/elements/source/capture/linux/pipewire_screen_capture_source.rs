@@ -1235,6 +1235,9 @@ impl Source for Capturing {
         // through `frame_rate()` while this is running is kept from the next
         // tick.
         let tick = self.schedule.next(self.frame_rate.interval(), wait.now());
+        // The ticks the last one overran are time gone by: the next
+        // picture is stamped after them — see `Tick::missed`.
+        self.frame_index += tick.missed as i64;
         if tick.rate_changed {
             pp_info!(self, "frame rate is now {}", self.frame_rate.get());
         }

@@ -774,6 +774,9 @@ impl Source for Capturing {
     /// burst of the ticks it would have owed.
     fn produce(&mut self, wait: &mut Wait<'_>) -> Result<Produced> {
         let tick = self.schedule.next(self.frame_rate.interval(), wait.now());
+        // The ticks the last one overran are time gone by: the next
+        // picture is stamped after them — see `Tick::missed`.
+        self.frame_index += tick.missed as i64;
         if tick.rate_changed {
             pp_info!(self, "frame rate is now {}", self.frame_rate.get());
         }
