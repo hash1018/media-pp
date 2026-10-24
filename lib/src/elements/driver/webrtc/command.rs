@@ -208,9 +208,10 @@ pub enum WebRtcError {
         to: Direction,
     },
 
-    /// The peer run loop has ended and accepts no further commands.
-
-    #[error("WebRtcPeer's run() has already ended")]
+    /// The connection has ended — a peer's run loop, or the connection a
+    /// `WebRtcMuxer` or `WebRtcSource` made, gone with the server — and
+    /// takes nothing more.
+    #[error("the WebRTC connection has ended")]
     Closed,
 
     /// A WHIP or WHEP URL that is not an `http` or `https` one with a host.
