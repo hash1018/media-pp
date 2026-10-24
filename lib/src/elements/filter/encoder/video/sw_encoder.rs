@@ -222,7 +222,7 @@ pub struct SwEncoderOptions {
     /// a second keyframe against smoothly-changing content — so this is
     /// always set explicitly rather than left to whatever a given codec
     /// happens to default to. Matters beyond segmenting a recording, too:
-    /// [`crate::elements::RtspMuxer`]/`WebRtcTrackSink`
+    /// [`crate::elements::RtspMuxer`]/`WebRtcMuxer`
     /// viewers/peers joining mid-stream can't decode anything until the
     /// next keyframe, so an unbounded interval is a real join-latency
     /// problem, not just a segmenting one.

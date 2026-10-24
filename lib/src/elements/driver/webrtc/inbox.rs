@@ -1,5 +1,5 @@
-//! What a connection has received on one track, for its
-//! [`WebRtcTrackSource`](super::WebRtcTrackSource): [`Inbox`].
+//! What a connection has received on one track, for the source that
+//! hands it on: [`Inbox`].
 
 use std::{
     collections::VecDeque,
@@ -64,6 +64,13 @@ impl Inbox {
     pub(super) fn group(count: usize, capacity: usize) -> Vec<Self> {
         let bell = Bell::new();
         (0..count).map(|_| Self::ringing(capacity, &bell)).collect()
+    }
+
+    /// One rung by `bell`, which the other inboxes of the source that reads
+    /// it share — for tracks that arrive one at a time, and are read
+    /// together.
+    pub(super) fn sharing(capacity: usize, bell: &Bell) -> Self {
+        Self::ringing(capacity, bell)
     }
 
     fn ringing(capacity: usize, bell: &Bell) -> Self {

@@ -44,6 +44,13 @@ Underneath, each is a `WebRtcTrackSink` on the connection pieces
 `outbox.rs`). A track's codec is read from its stream, and one WebRTC
 cannot carry is refused at `add_stream`.
 
+Since 2026-10-24 the two are also what a `WebRtcPeer` is used through:
+`WebRtcHandle::muxer` makes a `WebRtcMuxer` over the peer's connection,
+whose `open` offers its tracks in one renegotiation instead of an HTTP
+exchange, and `WebRtcHandle::next_source` answers a `WebRtcSource` of the
+tracks one of the remote peer's offers adds. A track goes one way; the
+per-track sink and source a peer used to hand out are internal.
+
 `open` does the exchange and waits for the connection — ICE and DTLS —
 within `WebRtcOptions::connect_within`, so what goes wrong goes wrong there:
 a status the server answers with (401, 404, 409 for a path already

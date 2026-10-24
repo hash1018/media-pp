@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
@@ -10,13 +11,13 @@ use str0m::{
 };
 use thiserror::Error as ThisError;
 
-/// Names one track of a [`WebRtcPeer`](crate::elements::WebRtcPeer), from
-/// the moment it is requested.
+use super::track::WebRtcTrackSink;
+
+/// Names one track a connection sends, as an error about it says which:
+/// opaque, made only here.
 ///
-/// It identifies one outbound track before/after negotiation. str0m's own
-/// [`Mid`] doesn't exist until the SDP exchange that creates it completes,
-/// so this is a stable handle usable from the moment
-/// [`super::track::WebRtcHandle::add_track`] returns.
+/// str0m's own [`Mid`] doesn't exist until the SDP exchange that creates it
+/// completes, so this is a stable name for the track before and after.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrackId(pub(super) u64);
 
@@ -77,15 +78,11 @@ pub enum WebRtcError {
         /// Packet time-base denominator.
         denominator: i32,
     },
-    /// A sink for a track added by the remote peer was pushed before the
-    /// caller declared which codec its packets contain. SDP can negotiate
-    /// several codecs for one track, so the peer cannot infer this from the
-    /// track itself without risking a payload-type mismatch.
-    #[error(
-        "track {0:?} has no outbound codec declaration; call \
-         WebRtcTrackSink::set_source_parameters with what feeds it, or \
-         set_codec when there are no parameters to hand"
-    )]
+    /// A track's sink was pushed before what feeds it was declared. SDP can
+    /// negotiate several codecs for one track, so the connection cannot
+    /// infer which its packets contain without risking a payload-type
+    /// mismatch; the stream a muxer's `add_stream` is given says.
+    #[error("track {0:?} was sent a packet before what feeds it was declared")]
     OutboundCodecNotDeclared(TrackId),
     /// Codec parameters describe a codec WebRTC does not carry, so there is
     /// no RTP payload type this sink could send them under.
@@ -108,13 +105,12 @@ pub enum WebRtcError {
     /// RTP has no container to carry them, so a receiver would wait forever.
     #[error(
         "track {0:?} sent a keyframe with no SPS/PPS and has none to prepend; \
-         call WebRtcTrackSink::set_source_parameters with the encoder's parameters"
+         give its muxer the encoder's stream, whose parameters hold them"
     )]
     MissingParameterSets(TrackId),
-    /// The caller selected or tried to send an outbound codec that this
-    /// track's SDP negotiation did not retain. A failed
-    /// [`super::track::WebRtcTrackSink::set_codec`] leaves the previous valid
-    /// selection unchanged.
+    /// A track was declared with, or sent, an outbound codec that its SDP
+    /// negotiation did not retain. A failed declaration leaves the previous
+    /// valid one unchanged.
     #[error(
         "codec {codec:?} is not negotiated for track {track_id:?}; negotiated codecs: {negotiated:?}"
     )]
@@ -140,15 +136,6 @@ pub enum WebRtcError {
     /// not parse as one — truncated, or carrying a different prefix size.
     #[error("track {0:?} was pushed a malformed length-prefixed H.264 packet")]
     MalformedLengthPrefixedPacket(TrackId),
-    /// No RTP media arrived before a caller's explicit wait deadline. The
-    /// source remains usable and the caller may retry with another timeout.
-    #[error("timed out after {timeout:?} waiting for stream info on track {track_id:?}")]
-    StreamInfoTimeout {
-        /// Track whose first actual payload has not arrived yet.
-        track_id: TrackId,
-        /// Caller-supplied maximum wait.
-        timeout: Duration,
-    },
     /// The selected RTP payload is not media that can be represented as
     /// FFmpeg codec parameters (for example, RTX repair payload).
     #[error("WebRTC codec {0:?} cannot be converted to FFmpeg codec parameters")]
@@ -190,14 +177,13 @@ pub enum WebRtcError {
         /// Invalid channel count from the payload specification.
         channels: u8,
     },
-    /// The remote peer renegotiated a track's direction after this element
-    /// had already handed out its endpoints. Those describe the direction
-    /// the track attached with (see
-    /// [`super::track::TrackEndpoints`]) and cannot be re-issued, so what
-    /// the caller holds no longer matches the connection. Reported rather
-    /// than silently tolerated — the outbound half of a track that just
-    /// became receive-only is dropped by str0m without an error, and the
-    /// inbound half of one that just became send-only simply goes quiet.
+    /// The remote peer renegotiated a track's direction after it attached.
+    /// Each track goes one way — a muxer's sink or a source's output — and
+    /// what the caller holds cannot be re-issued, so it no longer matches
+    /// the connection. Reported rather than silently tolerated — the
+    /// outbound half of a track that just became receive-only is dropped by
+    /// str0m without an error, and the inbound half of one that just became
+    /// send-only simply goes quiet.
     #[error("track {mid} renegotiated its direction from {from:?} to {to:?} after attaching")]
     DirectionChanged {
         /// The `mid` of the track whose direction changed.
@@ -255,7 +241,13 @@ pub enum WebRtcError {
 /// the thread [`super::peer::WebRtcPeer`] runs on as a driver. What its
 /// track sinks send goes through its outbox instead.
 pub(super) enum Command {
-    AddTrack(TrackId, MediaKind, Direction, Codec),
+    /// A muxer's tracks, to be offered sending only in one renegotiation;
+    /// the sink of each comes back on the `Sender`, in order, once the
+    /// offer is made.
+    OpenTracks(
+        Vec<OpenTrack>,
+        Sender<std::result::Result<Vec<WebRtcTrackSink>, WebRtcError>>,
+    ),
     SetAnswer(SdpAnswer),
     /// A fresh offer from the *remote* peer (their own renegotiation, e.g.
     /// them adding a track) — out of scope to originate ourselves in v1
@@ -267,6 +259,17 @@ pub(super) enum Command {
         SdpOffer,
         Sender<std::result::Result<SdpAnswer, WebRtcError>>,
     ),
+}
+
+/// One track a muxer sends over a peer's connection.
+pub(super) struct OpenTrack {
+    pub(super) id: TrackId,
+    pub(super) kind: MediaKind,
+    /// What its sink is fed — what its payload type is chosen by.
+    pub(super) codec: Codec,
+    /// The name its muxer's `add_stream` gave it: what a keyframe request
+    /// for it is reported by.
+    pub(super) name: Arc<str>,
 }
 
 /// Where one outbound track is in str0m's own offer/answer dance — mirrors

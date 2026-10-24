@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Wake, Waker};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::bounded;
 use ffmpeg_next as ffmpeg;
 use str0m::change::SdpOffer;
 use str0m::channel::ChannelId;
@@ -790,16 +789,10 @@ impl Publishing {
         for (index, sink) in ready.into_iter().zip(sinks) {
             let track = &mut self.tracks[index];
             let inbox = Inbox::new(HOLD_AT_MOST);
-            // What the stream says of itself the server read as it held it.
-            let (_, stream_info) = bounded(1);
             let source = WebRtcTrackSource::new(
-                TrackId(index as u64),
                 track.kind,
                 format!("webrtc-{session}-in-{index}"),
                 inbox.clone(),
-                Arc::new(Mutex::new(None)),
-                Arc::new(Mutex::new(Vec::new())),
-                stream_info,
             );
             let (pipeline, ()) = DrivenPipeline::new(
                 format!("webrtc-{session}-{index}"),

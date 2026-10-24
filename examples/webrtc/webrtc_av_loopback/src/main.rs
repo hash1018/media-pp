@@ -1,14 +1,16 @@
 //! Proves that one `WebRtcPeer` connection can carry video and audio tracks at
-//! the same time. Peer-a adds both tracks through two sequential negotiations,
-//! encodes `TestVideoSource` and `TestAudioSource` in one multi-source
-//! pipeline, and peer-b counts the two received packet streams independently.
+//! the same time. Peer-a sends both through one `WebRtcMuxer` — one
+//! renegotiation for the two — encoding `TestVideoSource` and
+//! `TestAudioSource` in one multi-source pipeline, and peer-b takes them as
+//! one `WebRtcSource` with an output each, counting the two received packet
+//! streams independently.
 //!
 //! Send:
-//! `TestVideoSource -> Queue -> SwEncoder -> WebRtcTrackSink` and
-//! `TestAudioSource -> Queue -> SwAudioEncoder -> WebRtcTrackSink`.
+//! `TestVideoSource -> Queue -> SwEncoder -> WebRtcMuxer` and
+//! `TestAudioSource -> Queue -> SwAudioEncoder -> WebRtcMuxer`.
 //!
-//! Receive: one pipeline with two `WebRtcTrackSource -> CountingSink`
-//! sources, one per track.
+//! Receive: one pipeline of a `WebRtcSource` whose video output goes to one
+//! `CountingSink` and audio output to another.
 //!
 //!     cargo run -p webrtc_av_loopback
 
@@ -33,18 +35,13 @@ mod example {
         driver::DriverRunner,
         element::Sink,
         elements::{
-            AttachedTrack, AudioCodec, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+            AudioCodec, StreamInfo, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
             SwEncoderOptions, TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
-            TrackEndpoints, VideoCodec, WebRtcPeer,
+            VideoCodec, WebRtcPeer,
         },
-        pipeline::PipelineBuilder,
+        pipeline::{Pipeline, PipelineBuilder},
     };
-    use str0m::{
-        Candidate, Rtc,
-        change::SdpOffer,
-        format::Codec,
-        media::{Direction, MediaKind},
-    };
+    use str0m::{Candidate, Rtc, change::SdpOffer};
 
     pub(super) fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let _log_guard = media_pp::log::init(
@@ -84,9 +81,10 @@ mod example {
             move |offer| {
                 let _ = offer_tx.send(offer);
             },
-            |_id| {},
+            |_track| {},
         );
-        let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+        let (peer_b, handle_b) =
+            WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_track| {});
 
         let driver_a = DriverRunner::new(peer_a);
         let driver_b = DriverRunner::new(peer_b);
@@ -96,67 +94,8 @@ mod example {
         thread::sleep(Duration::from_millis(200));
         println!("ICE/DTLS-SRTP established over loopback UDP");
 
-        // -- Track 1: video. One full renegotiation round before starting the
-        // second track — str0m only allows one SDP exchange in flight at a
-        // time.
-        let video_id = handle_a.add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)?;
-        // `next_track` yields whichever track attaches next — including one
-        // the *remote* peer added — so the `TrackId` it returns has to be
-        // matched against the one `add_track` handed back. Nothing else adds
-        // a track here, but pushing an encoder onto the wrong track's sink
-        // fails silently (see `WebRtcHandle::add_track`), so the check is
-        // what makes that impossible rather than merely unlikely.
-        let attached = handle_a.next_track()?;
-        assert_eq!(
-            attached.id, video_id,
-            "peer-a attached a track it did not add"
-        );
-        let kind = attached.kind;
-        let mut video_sink_a = send_only(attached);
-        println!("peer-a: track attached ({kind:?})");
-        let offer = offer_rx.recv_timeout(Duration::from_secs(2))?;
-        let answer = handle_b.accept_remote_offer(offer)?;
-        handle_a.set_answer(answer);
-        // Nothing to match on this side: peer-b never calls `add_track`, so
-        // every track it sees is one the remote peer added and there is no
-        // locally-issued `TrackId` to compare against. peer-a asked for
-        // `SendOnly`, so what peer-b gets is the inverse — a track with no
-        // sink at all, rather than one it could push into to no effect.
-        let attached = handle_b.next_track()?;
-        let kind = attached.kind;
-        let video_source_b = recv_only(attached);
-        println!("peer-b: track attached ({kind:?})");
-        thread::sleep(Duration::from_millis(100)); // let the answer actually apply
-
-        // -- Track 2: audio, on the *same* connection.
-        let audio_id = handle_a.add_track(MediaKind::Audio, Direction::SendOnly, Codec::Opus)?;
-        let attached = handle_a.next_track()?;
-        assert_eq!(
-            attached.id, audio_id,
-            "peer-a attached a track it did not add"
-        );
-        assert_ne!(
-            attached.id, video_id,
-            "the audio track reused the video track's id"
-        );
-        let kind = attached.kind;
-        let mut audio_sink_a = send_only(attached);
-        println!("peer-a: track attached ({kind:?})");
-        let offer = offer_rx.recv_timeout(Duration::from_secs(2))?;
-        let answer = handle_b.accept_remote_offer(offer)?;
-        handle_a.set_answer(answer);
-        let attached = handle_b.next_track()?;
-        let kind = attached.kind;
-        let audio_source_b = recv_only(attached);
-        println!("peer-b: track attached ({kind:?})");
-        thread::sleep(Duration::from_millis(100));
-
-        println!("both tracks negotiated on the same connection — now pushing real encoded media");
-
-        // -- Send side: TestVideoSource/TestAudioSource, each through its own
-        // real encoder, straight onto the track `add_track` gave us for it.
-        // Two independent sources feeding one `Pipeline` — same shape
-        // `screen_record_av` uses for two *capture* sources.
+        // -- The encoders first: what they make is what the muxer's tracks
+        // declare.
         let video_options = TestVideoOptions {
             width: 320,
             height: 240,
@@ -176,39 +115,53 @@ mod example {
                 max_b_frames: None,
             },
         )?;
-        // Declares what feeds the sink: the payload type, and H.264's SPS/PPS,
-        // which live in `parameters()` rather than in the bitstream while RTP
-        // has no container to carry them — so the sender puts them in front of
-        // every keyframe itself. Opus needs nothing of the kind, and its
-        // `OpusHead` is not something to prepend to packets, so the audio
-        // declaration below settles only the codec.
-        video_sink_a.set_source_parameters(&video_encoder.parameters())?;
-
         let audio_options = TestAudioOptions::default();
         let audio_source = TestAudioSource::new("audio", audio_options);
         let audio_encoder = SwAudioEncoder::new(
             "audio-encoder",
             SwAudioEncoderOptions {
-                // Must be the codec the audio track was declared with
-                // below: str0m packetizes whatever bytes it is handed as
-                // that codec, so AAC here would put AAC on the wire under
-                // an Opus payload type. Opus is also the only audio codec
-                // WebRTC negotiates at all.
+                // Opus is the only audio codec WebRTC negotiates at all.
                 codec: AudioCodec::Opus,
                 sample_rate: audio_options.sample_rate,
                 channels: audio_options.channels,
                 bit_rate: 64_000,
             },
         )?;
-        audio_sink_a.set_source_parameters(&audio_encoder.parameters())?;
 
+        // -- Both tracks in one muxer: one renegotiation offers the two. Each
+        // stream is the whole declaration of its track — the payload type,
+        // and for H.264 the SPS/PPS that live in `parameters()` rather than
+        // in the bitstream, which the sender puts in front of every keyframe
+        // itself. Opus needs nothing of the kind.
+        let mut muxer = handle_a.muxer("peer-a-send");
+        let video_track = muxer.add_stream(
+            "video",
+            StreamInfo::new(video_encoder.parameters(), video_encoder.time_base()),
+        )?;
+        let audio_track = muxer.add_stream(
+            "audio",
+            StreamInfo::new(audio_encoder.parameters(), audio_encoder.time_base()),
+        )?;
+        let mut sinks = muxer.open()?;
+        let offer = offer_rx.recv_timeout(Duration::from_secs(2))?;
+        let answer = handle_b.accept_remote_offer(offer)?;
+        handle_a.set_answer(answer);
+        println!("peer-a: video and audio offered in one renegotiation, peer-b answered");
+        thread::sleep(Duration::from_millis(100)); // let the answer actually apply
+
+        // -- Send side: TestVideoSource/TestAudioSource, each through its own
+        // real encoder, onto its track's sink. Two independent sources
+        // feeding one `Pipeline` — same shape `screen_record_av` uses for two
+        // *capture* sources.
+        let video_sink = sinks.take(video_track)?;
+        let audio_sink = sinks.take(audio_track)?;
         let builder = PipelineBuilder::new("peer-a-send");
         let (builder, ()) = builder.add_source(video_source, |source, ctx| {
             let branch = ctx
                 .branch()
                 .queue("encode-video", 4)
                 .pipe(video_encoder)
-                .to(video_sink_a)?;
+                .to(video_sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -217,39 +170,48 @@ mod example {
                 .branch()
                 .queue("encode-audio", 4)
                 .pipe(audio_encoder)
-                .to(audio_sink_a)?;
+                .to(audio_sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
         let send_pipeline = builder.build();
+        send_pipeline.run()?;
 
-        // -- Receive side: count packets on each track independently.
+        // -- Receive side: the tracks one offer added come out as one
+        // source, an output each, once each has said what it carries — the
+        // video track by its first keyframe's parameter sets.
+        let (source_b, streams) = handle_b.next_source("peer-b-recv")?;
+        let output_of = |kind| {
+            streams
+                .iter()
+                .find(|stream| stream.kind() == kind)
+                .map(StreamInfo::index)
+                .ok_or("peer-b is missing a track peer-a sent")
+        };
+        let video_output = output_of(ffmpeg::media::Type::Video)?;
+        let audio_output = output_of(ffmpeg::media::Type::Audio)?;
+        println!(
+            "peer-b: one source of {} tracks (video output {video_output}, audio output {audio_output})",
+            streams.len()
+        );
+
         let video_count = Arc::new(AtomicUsize::new(0));
         let audio_count = Arc::new(AtomicUsize::new(0));
-        let builder = PipelineBuilder::new("peer-b-recv");
-        let (builder, ()) = builder.add_source(video_source_b, {
-            let count = video_count.clone();
+        let (recv_pipeline, ()) = Pipeline::new("peer-b-recv", source_b, {
+            let video_count = video_count.clone();
+            let audio_count = audio_count.clone();
             move |source, ctx| {
-                let branch = ctx
+                let video = ctx
                     .branch()
-                    .to(CountingSink { count }.named("video-counter"))?;
-                ctx.attach(source, 0, branch)?;
+                    .to(CountingSink { count: video_count }.named("video-counter"))?;
+                ctx.attach(source, video_output, video)?;
+                let audio = ctx
+                    .branch()
+                    .to(CountingSink { count: audio_count }.named("audio-counter"))?;
+                ctx.attach(source, audio_output, audio)?;
                 Ok(())
             }
         })?;
-        let (builder, ()) = builder.add_source(audio_source_b, {
-            let count = audio_count.clone();
-            move |source, ctx| {
-                let branch = ctx
-                    .branch()
-                    .to(CountingSink { count }.named("audio-counter"))?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            }
-        })?;
-        let recv_pipeline = builder.build();
-
-        send_pipeline.run()?;
         recv_pipeline.run()?;
 
         thread::sleep(Duration::from_secs(2));
@@ -275,27 +237,6 @@ mod example {
         );
         println!("ok — two tracks, one connection, no cross-contamination");
         Ok(())
-    }
-
-    /// The outbound half of a `Direction::SendOnly` track — every track
-    /// peer-a opens here. `TrackEndpoints` carries only what the direction
-    /// permits, so there is no inbound half to name and discard, and a
-    /// track that somehow negotiated otherwise fails here rather than
-    /// downstream.
-    fn send_only(track: AttachedTrack) -> media_pp::elements::WebRtcTrackSink {
-        let TrackEndpoints::Send(sink) = track.endpoints else {
-            panic!("peer-a opens SendOnly tracks and expects a sink back");
-        };
-        sink
-    }
-
-    /// The mirror image on peer-b: `SendOnly` from peer-a arrives as
-    /// receive-only here.
-    fn recv_only(track: AttachedTrack) -> media_pp::elements::WebRtcTrackSource {
-        let TrackEndpoints::Recv(source) = track.endpoints else {
-            panic!("peer-b receives SendOnly tracks and expects a source back");
-        };
-        source
     }
 
     struct CountingSink {

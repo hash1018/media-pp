@@ -1,7 +1,7 @@
 //! Connects two `WebRtcPeer`s over real loopback UDP with no browser or
-//! signaling server. One `Direction::SendRecv` track carries packets both
-//! ways, and each peer drives its inbound `WebRtcTrackSource -> CountingSink`
-//! pipeline independently.
+//! signaling server. Each peer sends one VP8 track through a `WebRtcMuxer`
+//! of its own and takes the other's as a `WebRtcSource`, driving its own
+//! `WebRtcSource -> CountingSink` pipeline.
 //!
 //! The initial ICE/DTLS connection uses a bootstrap data channel directly
 //! through str0m. A real application would carry the same offer and answer
@@ -19,6 +19,7 @@ mod example {
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
+            mpsc::{self, Receiver},
         },
         thread,
         time::{Duration, Instant},
@@ -30,16 +31,11 @@ mod example {
         Result,
         buffer::MediaBuffer,
         driver::DriverRunner,
-        element::{Element, ElementType, RawSink, element_pp_log},
-        elements::{AttachedTrack, TrackEndpoints, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
+        element::{BoxSink, Element, ElementType, RawSink, element_pp_log},
+        elements::{StreamInfo, WebRtcHandle, WebRtcPeer, WebRtcSource},
         pipeline::Pipeline,
     };
-    use str0m::{
-        Candidate, Rtc,
-        change::SdpOffer,
-        format::Codec,
-        media::{Direction, MediaKind},
-    };
+    use str0m::{Candidate, Rtc, change::SdpOffer};
 
     pub(super) fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let _log_guard = media_pp::log::init(
@@ -70,23 +66,32 @@ mod example {
         rtc_a.sdp_api().accept_answer(pending, answer)?;
         println!("initial connection negotiated (bootstrap data channel only, no media yet)");
 
-        let (offer_tx, offer_rx) = std::sync::mpsc::channel::<SdpOffer>();
-
+        // Each peer's renegotiation offers, for this program to carry to the
+        // other as its signalling would.
+        let (offer_a, offers_a) = mpsc::channel::<SdpOffer>();
+        let (offer_b, offers_b) = mpsc::channel::<SdpOffer>();
         let (peer_a, handle_a) = WebRtcPeer::new(
             "peer-a",
             rtc_a,
             socket_a,
             move |offer| {
-                println!("peer-a: generated a renegotiation offer for its new track");
-                let _ = offer_tx.send(offer);
+                let _ = offer_a.send(offer);
             },
-            |_id| {},
+            |_track| {},
         );
-        let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+        let (peer_b, handle_b) = WebRtcPeer::new(
+            "peer-b",
+            rtc_b,
+            socket_b,
+            move |offer| {
+                let _ = offer_b.send(offer);
+            },
+            |_track| {},
+        );
 
-        // `WebRtcPeer` is a `Driver`, not a `Pipeline` source — no wiring
-        // closure needed; inbound tracks attach dynamically via `next_track()`
-        // instead, each into its own `Pipeline`.
+        // `WebRtcPeer` is a `Driver`, not a `Pipeline` source: it runs the
+        // connection, and what goes through it goes through the muxers and
+        // sources its handle makes, each in a pipeline of its own.
         let driver_a = DriverRunner::new(peer_a);
         let driver_b = DriverRunner::new(peer_b);
         driver_a.run()?;
@@ -95,65 +100,45 @@ mod example {
         thread::sleep(Duration::from_millis(200));
         println!("ICE/DTLS-SRTP established over loopback UDP");
 
-        let _track_id = handle_a.add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)?;
-        // `next_track()` returns for peer-a's own track the moment `add_track`'s
-        // negotiation mints a Mid — before the offer even leaves this process.
-        let attached_a = handle_a.next_track()?;
-        let kind = attached_a.kind;
-        let (mut sink_a, source_a) = send_recv(attached_a);
-        println!("peer-a: track attached ({kind:?}) — got a WebRtcTrackSink to reply on");
+        let mut sink_a = open_vp8(&handle_a, &offers_a, &handle_b)?;
+        println!("peer-a: its track offered, peer-b answered");
+        let mut sink_b = open_vp8(&handle_b, &offers_b, &handle_a)?;
+        println!("peer-b: its track offered, peer-a answered");
+        thread::sleep(Duration::from_millis(100)); // let the answers actually apply
 
-        let offer = offer_rx.recv_timeout(Duration::from_secs(2))?;
-        let answer = handle_b.accept_remote_offer(offer)?;
-        println!("peer-b: accepted the offer, answer relayed back to peer-a");
-        handle_a.set_answer(answer);
-        // peer-b's track attaches as part of accepting the offer, independent
-        // of the answer round-trip.
-        let attached_b = handle_b.next_track()?;
-        let kind = attached_b.kind;
-        let (mut sink_b, source_b) = send_recv(attached_b);
+        // Sent before either side has a source of it: what arrives waits in
+        // the track's inbox, and is what the source says the track carries
+        // from.
+        println!("\n-- each peer pushes 5 packets on its own track --");
+        push_packets(&mut sink_a);
+        push_packets(&mut sink_b);
+
+        let (source_b, streams_b) = handle_b.next_source("from-peer-a")?;
+        let (source_a, streams_a) = handle_a.next_source("from-peer-b")?;
         println!(
-            "peer-b: inbound codecs={:?}, outbound codecs={:?}",
-            source_b.negotiated_codecs(),
-            sink_b.negotiated_codecs()
+            "peer-b receives {:?}, peer-a receives {:?}",
+            streams_b[0].parameters().id(),
+            streams_a[0].parameters().id()
         );
-        // This endpoint belongs to a track peer-a added, so peer-b selects
-        // its outbound codec from the negotiated capability list.
-        sink_b.set_codec(Codec::Vp8)?;
-        println!("peer-b: track attached ({kind:?}) — got a WebRtcTrackSink to reply on");
 
         let received_by_a = Arc::new(AtomicUsize::new(0));
         let received_by_b = Arc::new(AtomicUsize::new(0));
-        let track_pipeline_a = wire_counting(source_a, received_by_a.clone());
-        let track_pipeline_b = wire_counting(source_b, received_by_b.clone());
-        track_pipeline_a.run()?;
-        track_pipeline_b.run()?;
-
-        thread::sleep(Duration::from_millis(100)); // let the answer actually apply
-
-        println!("\n-- pushing peer-a -> peer-b on the one shared track --");
-        push_packets(&mut sink_a);
+        let pipeline_a = wire_counting(source_a, received_by_a.clone());
+        let pipeline_b = wire_counting(source_b, received_by_b.clone());
+        pipeline_a.run()?;
+        pipeline_b.run()?;
         thread::sleep(Duration::from_millis(300));
-        println!(
-            "peer-b: received {}/5 packets",
-            received_by_b.load(Ordering::SeqCst)
-        );
-
-        println!("\n-- pushing peer-b -> peer-a on that *same* track, no renegotiation --");
-        push_packets(&mut sink_b);
-        thread::sleep(Duration::from_millis(300));
-        println!(
-            "peer-a: received {}/5 packets",
-            received_by_a.load(Ordering::SeqCst)
-        );
-
-        driver_a.stop();
-        driver_b.stop();
-        track_pipeline_a.stop();
-        track_pipeline_b.stop();
 
         let count_b = received_by_b.load(Ordering::SeqCst);
         let count_a = received_by_a.load(Ordering::SeqCst);
+        println!("peer-b: received {count_b}/5 packets");
+        println!("peer-a: received {count_a}/5 packets");
+
+        driver_a.stop();
+        driver_b.stop();
+        pipeline_a.stop();
+        pipeline_b.stop();
+
         assert_eq!(
             count_b, 5,
             "expected every packet peer-a sent to reach peer-b"
@@ -166,23 +151,35 @@ mod example {
         Ok(())
     }
 
-    /// Both halves of the one `Direction::SendRecv` track this example
-    /// opens. `TrackEndpoints` carries only what the negotiated direction
-    /// permits, so this is where "we asked for SendRecv" turns back into a
-    /// sink and a source — and where anything else would fail loudly
-    /// instead of leaving a half that silently does nothing.
-    fn send_recv(track: AttachedTrack) -> (WebRtcTrackSink, WebRtcTrackSource) {
-        let TrackEndpoints::SendRecv(sink, source) = track.endpoints else {
-            panic!("this example opens one SendRecv track and expects both halves back");
-        };
-        (sink, source)
+    /// The sink of one VP8 track `from` sends `to`: its muxer opened over
+    /// `from`'s connection, the offer that makes carried to `to`, and the
+    /// answer back.
+    fn open_vp8(
+        from: &WebRtcHandle,
+        offers: &Receiver<SdpOffer>,
+        to: &WebRtcHandle,
+    ) -> std::result::Result<BoxSink, Box<dyn std::error::Error>> {
+        let mut muxer = from.muxer("send");
+        let track = muxer.add_stream(
+            "video",
+            StreamInfo::video(
+                ffmpeg::codec::Id::VP8,
+                &[],
+                (320, 240),
+                ffmpeg::Rational::new(1, 90_000),
+            )?,
+        )?;
+        let mut sinks = muxer.open()?;
+        let answer = to.accept_remote_offer(offers.recv_timeout(Duration::from_secs(2))?)?;
+        from.set_answer(answer);
+        Ok(sinks.take(track)?)
     }
 
     /// Wires `source` into its own `Pipeline`, forwarding every packet it
     /// produces into a `CountingSink` that increments `count` — a
-    /// `WebRtcTrackSource` is a source like any other, so it plugs into
+    /// `WebRtcSource` is a source like any other, so it plugs into
     /// `Pipeline`/`ChainBuilder` the same way.
-    fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
+    fn wire_counting(source: WebRtcSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
         let sink = CountingSink {
             count,
             pp_log: element_pp_log(ElementType::Other, "counter", None),
@@ -196,7 +193,7 @@ mod example {
         pipeline
     }
 
-    fn push_packets(sink: &mut WebRtcTrackSink) {
+    fn push_packets(sink: &mut BoxSink) {
         for i in 0..5 {
             let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
             packet.set_time_base(ffmpeg::Rational::new(1, 90_000));

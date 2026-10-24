@@ -55,7 +55,7 @@ impl StopReceiver {
 /// A `Driver` has no `RawSink`/`SrcPads` ports of its own — nothing to push
 /// into, nothing to pull out of *this* object; whatever it produces or consumes
 /// happens through other `RawSink`/`SrcPads` pairs it mints on the side (e.g.
-/// `WebRtcPeer` handing out `WebRtcTrackSink`/`WebRtcTrackSource`). Reach for
+/// `WebRtcPeer` handing out a `WebRtcMuxer`'s sinks and a `WebRtcSource`). Reach for
 /// [`crate::pipeline::Pipeline`]/[`crate::element::RawSource`] instead for
 /// anything that actually has a `src_pads()` dataflow graph to wire — `Driver`
 /// deliberately has no `Pause`/`Seek`/`Clock`, none of which have a sensible

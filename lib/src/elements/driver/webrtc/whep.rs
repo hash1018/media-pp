@@ -1,7 +1,12 @@
 //! Playing from a WHEP server: [`WebRtcSource`].
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long a source of a peer's tracks waits for them to say what they
+/// carry, as [`WebRtcOptions::describe_within`] does by default for one
+/// made over WHEP.
+const DESCRIBE_WITHIN: Duration = Duration::from_secs(5);
 
 use str0m::Rtc;
 use str0m::change::SdpAnswer;
@@ -20,6 +25,8 @@ use crate::produce::{Received, source_stage};
 use super::client::{self, Client, Incoming, Parts, Url, WebRtcOptions};
 use super::command::WebRtcError;
 use super::inbox::{Inbox, Taken};
+use super::peer::Arriving;
+use super::stream_info::WebRtcStreamInfo;
 
 /// How many packets a track holds for the source before the newest are
 /// let go of.
@@ -78,8 +85,9 @@ struct Watching {
     /// Which output is looked at first next, so that one busy track does
     /// not keep another waiting.
     next: usize,
-    /// The connection, which this keeps alive.
-    _client: Arc<Client>,
+    /// The connection, where this keeps it alive: a WHEP one, which ends
+    /// with its source; not a peer's, which runs on its own.
+    _client: Option<Arc<Client>>,
     pp_log: PpLog,
 }
 
@@ -168,10 +176,56 @@ impl WebRtcSource {
                 described[slot] = Some(info);
             }
         }
+        let (source, streams) = Self::described(
+            name,
+            inboxes.into_iter().zip(described).collect(),
+            options.describe_within,
+            Some(client),
+            pp_log,
+        )?;
+        pp_info!(pp_log: &source.0.inner().pp_log, "playing {} tracks from {}", streams.len(), url.full);
+        Ok((source, streams))
+    }
+
+    /// A source of tracks a peer's remote side added together — see
+    /// [`WebRtcHandle::next_source`](super::WebRtcHandle::next_source).
+    pub(super) fn arriving(
+        name: String,
+        arriving: Vec<Arriving>,
+    ) -> Result<(Self, Vec<StreamInfo>)> {
+        let pp_log = element_pp_log(ElementType::WebRtcSource, &name, None);
+        let deadline = Instant::now() + DESCRIBE_WITHIN;
+        let tracks = arriving
+            .into_iter()
+            .map(|track| {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let info = track.described.recv_timeout(left).ok();
+                (track.inbox, info)
+            })
+            .collect();
+        let (source, streams) = Self::described(name, tracks, DESCRIBE_WITHIN, None, pp_log)?;
+        pp_info!(
+            pp_log: &source.0.inner().pp_log,
+            "playing {} tracks the remote peer added",
+            streams.len()
+        );
+        Ok((source, streams))
+    }
+
+    /// The source of `tracks` that said what they carry — an output each,
+    /// in order — and their streams; the others' inboxes let go of.
+    fn described(
+        name: String,
+        tracks: Vec<(Inbox, Option<WebRtcStreamInfo>)>,
+        within: Duration,
+        client: Option<Arc<Client>>,
+        pp_log: PpLog,
+    ) -> Result<(Self, Vec<StreamInfo>)> {
+        let offered = tracks.len();
         let mut streams = Vec::new();
         let mut kept = Vec::new();
         let mut contracts = Vec::new();
-        for (inbox, info) in inboxes.into_iter().zip(described) {
+        for (inbox, info) in tracks {
             let Some(info) = info else {
                 // Nothing will read it: what comes is let go of.
                 inbox.reader_gone();
@@ -189,18 +243,16 @@ impl WebRtcSource {
             kept.push(inbox);
         }
         if streams.is_empty() {
-            return Err(WebRtcError::NothingDescribed(options.describe_within).into());
+            return Err(WebRtcError::NothingDescribed(within).into());
         }
-        if streams.len() < mids.len() {
+        if streams.len() < offered {
             pp_warn!(
                 pp_log: &pp_log,
-                "{} of {} tracks said what they carry within {:?}; the rest are left out",
+                "{} of {} tracks said what they carry within {within:?}; the rest are left out",
                 streams.len(),
-                mids.len(),
-                options.describe_within
+                offered,
             );
         }
-        pp_info!(pp_log: &pp_log, "playing {} tracks from {}", streams.len(), url.full);
         let identity = Identity::new(ElementType::WebRtcSource, name);
         let source = Self(SourceStage::new(
             identity,

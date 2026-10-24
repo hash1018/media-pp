@@ -17,8 +17,7 @@ pub use server::{
     IceServer, SessionId, SessionRole, SessionStats, WebRtcHttpEndpoint, WebRtcPathMode,
     WebRtcServer, WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions,
 };
-pub use stream_info::WebRtcStreamInfo;
-pub use track::{AttachedTrack, TrackEndpoints, WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource};
+pub use track::WebRtcHandle;
 pub use whep::WebRtcSource;
 pub use whip::WebRtcMuxer;
 

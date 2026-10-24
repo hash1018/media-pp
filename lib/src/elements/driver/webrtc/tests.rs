@@ -3,7 +3,6 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -13,40 +12,42 @@ use crate::pp_log::PpLog;
 use crossbeam_channel::{Receiver, bounded, unbounded};
 use ffmpeg_next as ffmpeg;
 use str0m::{
-    Candidate, Rtc,
+    Candidate, Event, Rtc,
     change::SdpOffer,
     format::{Codec, CodecSpec, FormatParams},
-    media::{Direction, Frequency, MediaKind, Mid},
+    media::{Direction, Frequency, MediaAdded, MediaChanged, MediaKind, Mid},
 };
 
 use super::command::Command;
+use super::inbox::{Delivered, Inbox};
 use super::outbox::{Outbox, Outgoing};
-use super::peer::packet_rtp_time;
-use super::{
-    AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
-    WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
-};
+use super::peer::{Arriving, packet_rtp_time};
+use super::stream_info::WebRtcStreamInfo;
+use super::track::{WebRtcTrackSink, WebRtcTrackSource};
+use super::{TrackId, WebRtcError, WebRtcHandle, WebRtcMuxer, WebRtcPeer, WebRtcSource};
 use crate::{
     buffer::MediaBuffer,
-    bus::BusEvent,
+    bus::{Bus, BusEvent},
     driver::DriverRunner,
-    element::{Element, ElementType, RawSink, element_pp_log},
+    element::{BoxSink, Element, ElementType, IntoSource, RawSink, element_pp_log},
     elements::{
-        CounterHandle, FileDemuxer, FrameCounter, SwDecoder, SwEncoder, SwEncoderOptions,
-        TestVideoOptions, TestVideoSource, VideoCodec,
+        CounterHandle, FileDemuxer, FrameCounter, MuxerSinks, StreamInfo, SwDecoder, SwEncoder,
+        SwEncoderOptions, TestVideoOptions, TestVideoSource, VideoCodec,
     },
     error::Result,
     pipeline::Pipeline,
 };
 
+/// A handle whose peer is the test: what it asks lands on the returned
+/// receiver, and it has no remote tracks to hand out.
 fn command_only_handle(capacity: usize) -> (WebRtcHandle, Receiver<Command>) {
     let (command_tx, command_rx) = bounded(capacity);
-    let (_new_track_tx, new_track_rx) = unbounded();
+    let (_sources_tx, sources_rx) = unbounded();
     (
         WebRtcHandle {
             next_id: Arc::new(AtomicU64::new(0)),
             command_tx,
-            new_track_rx,
+            sources_rx,
         },
         command_rx,
     )
@@ -80,77 +81,176 @@ fn outbox_of(capacity: usize) -> (Outbox, Pushes) {
     (outbox.clone(), Pushes(outbox, Default::default()))
 }
 
-#[test]
-fn add_track_returns_the_id_that_was_enqueued() {
-    let (handle, command_rx) = command_only_handle(1);
-
-    let returned = handle
-        .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
-        .expect("live command receiver should accept AddTrack");
-    let Command::AddTrack(enqueued, kind, direction, codec) =
-        command_rx.recv().expect("AddTrack should be queued")
-    else {
-        panic!("expected AddTrack command");
-    };
-
-    assert_eq!(returned, enqueued);
-    assert_eq!(kind, MediaKind::Video);
-    assert_eq!(direction, Direction::SendRecv);
-    assert_eq!(codec, Codec::Vp8);
+/// A stream of `id`, of `kind`, with no extradata: what a sender that
+/// writes its parameter sets in-band declares — as `push_packets`' do.
+fn stream_of(id: ffmpeg::codec::Id, kind: ffmpeg::media::Type) -> StreamInfo {
+    let mut parameters = parameters_for(id, &[]);
+    // SAFETY: `parameters` is a live `AVCodecParameters` this test owns.
+    unsafe {
+        (*parameters.as_mut_ptr()).codec_type = kind.into();
+    }
+    StreamInfo::new(parameters, ffmpeg::Rational::new(1, 90_000))
 }
 
+fn h264_stream() -> StreamInfo {
+    stream_of(ffmpeg::codec::Id::H264, ffmpeg::media::Type::Video)
+}
+
+/// A muxer's tracks reach the peer as one request — one renegotiation —
+/// each with its kind, its codec and the name a keyframe request for it is
+/// reported by; the muxer opens with the sinks the peer answers.
 #[test]
-fn add_track_blocks_for_backpressure_then_unblocks_when_capacity_opens() {
+fn a_muxers_tracks_are_asked_for_together() {
     let (handle, command_rx) = command_only_handle(1);
-    handle
-        .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
-        .expect("first command should fill the queue");
+    let mut muxer = handle.muxer("camera");
+    let video = muxer.add_stream("video", h264_stream()).unwrap();
+    let audio = muxer
+        .add_stream(
+            "audio",
+            stream_of(ffmpeg::codec::Id::OPUS, ffmpeg::media::Type::Audio),
+        )
+        .unwrap();
+    let opening = thread::spawn(move || muxer.open());
 
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (done_tx, done_rx) = mpsc::channel();
-    let blocked_handle = handle.clone();
-    let worker = thread::spawn(move || {
-        entered_tx.send(()).expect("test receiver alive");
-        let result = blocked_handle.add_track(MediaKind::Audio, Direction::SendOnly, Codec::Opus);
-        done_tx.send(result).expect("test receiver alive");
-    });
-
-    entered_rx.recv().expect("worker should start add_track");
+    let Command::OpenTracks(tracks, reply) = command_rx.recv().expect("the muxer asks the peer")
+    else {
+        panic!("expected OpenTracks");
+    };
+    let asked: Vec<_> = tracks
+        .iter()
+        .map(|track| (track.kind, track.codec, track.name.to_string()))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            (MediaKind::Video, Codec::H264, "video".to_owned()),
+            (MediaKind::Audio, Codec::Opus, "audio".to_owned()),
+        ]
+    );
+    assert_ne!(tracks[0].id, tracks[1].id);
     assert!(
-        done_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-        "second AddTrack must wait while the bounded queue is full"
+        command_rx.try_recv().is_err(),
+        "two tracks are one request, not two renegotiations"
     );
 
-    let _first = command_rx.recv().expect("free one queue slot");
-    let second_id = done_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("add_track should unblock once capacity opens")
-        .expect("command receiver is still alive");
-    let Command::AddTrack(enqueued_id, ..) =
-        command_rx.recv().expect("second AddTrack should be queued")
-    else {
-        panic!("expected AddTrack command");
-    };
-    assert_eq!(second_id, enqueued_id);
-    worker.join().expect("worker should finish cleanly");
+    let (outbox, _pushes) = outbox_of(4);
+    let sinks = tracks
+        .iter()
+        .map(|track| {
+            WebRtcTrackSink::new(
+                track.id,
+                track.kind,
+                Some(track.codec),
+                Arc::new(std::sync::Mutex::new(vec![track.codec])),
+                outbox.clone(),
+            )
+        })
+        .collect();
+    reply.send(Ok(sinks)).unwrap();
+    let mut sinks = opening
+        .join()
+        .unwrap()
+        .expect("the muxer opens with the peer's sinks");
+    let _video = sinks.take(video).expect("the video track has its sink");
+    let _audio = sinks.take(audio).expect("the audio track has its sink");
 }
 
 #[test]
-fn add_track_returns_closed_instead_of_a_phantom_id() {
+fn a_muxer_of_a_stopped_peer_fails_closed() {
     let (handle, command_rx) = command_only_handle(1);
     drop(command_rx);
+    let mut muxer = handle.muxer("camera");
+    let _track = muxer.add_stream("video", h264_stream()).unwrap();
 
-    let error = handle
-        .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
-        .expect_err("closed peer must not yield a TrackId");
     assert!(matches!(
-        error,
-        crate::Error::WebRtcError(WebRtcError::Closed)
+        muxer.open(),
+        Err(crate::Error::WebRtcError(WebRtcError::Closed))
+    ));
+}
+
+/// The peer stopping between taking a muxer's request and attaching its
+/// tracks lets go of the reply, which the muxer hears as the end it is.
+#[test]
+fn a_muxer_hears_of_a_peer_that_stops_while_it_opens() {
+    let (handle, command_rx) = command_only_handle(1);
+    let mut muxer = handle.muxer("camera");
+    let _track = muxer.add_stream("video", h264_stream()).unwrap();
+    let opening = thread::spawn(move || muxer.open());
+
+    drop(command_rx.recv().expect("the muxer asks the peer"));
+
+    assert!(matches!(
+        opening.join().unwrap(),
+        Err(crate::Error::WebRtcError(WebRtcError::Closed))
     ));
 }
 
 #[test]
-fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
+fn next_source_returns_closed_once_the_peer_has_stopped() {
+    let (handle, _command_rx) = command_only_handle(1);
+
+    assert!(matches!(
+        handle.next_source("remote"),
+        Err(crate::Error::WebRtcError(WebRtcError::Closed))
+    ));
+}
+
+/// One track of a batch: its inbox, and a description sent already or —
+/// `None` — never coming.
+fn arriving(info: Option<WebRtcStreamInfo>) -> (Inbox, Arriving) {
+    let inbox = Inbox::new(4);
+    let (described_tx, described) = bounded(1);
+    if let Some(info) = info {
+        described_tx.send(info).unwrap();
+    }
+    (inbox.clone(), Arriving { inbox, described })
+}
+
+fn vp8_info() -> WebRtcStreamInfo {
+    WebRtcStreamInfo::from(CodecSpec {
+        codec: Codec::Vp8,
+        clock_rate: Frequency::NINETY_KHZ,
+        channels: None,
+        format: FormatParams::default(),
+    })
+}
+
+/// A source of the remote peer's tracks has an output for each that said
+/// what it carries, and lets go of the inbox of one that did not, which
+/// the peer then stops filling.
+#[test]
+fn a_source_of_a_batch_leaves_out_a_track_that_never_said_what_it_carries() {
+    let (silent_inbox, silent) = arriving(None);
+    let (said_inbox, said) = arriving(Some(vp8_info()));
+
+    let (_source, streams) = WebRtcSource::arriving("remote".into(), vec![silent, said])
+        .expect("one of the tracks said what it carries");
+
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].index(), 0);
+    assert_eq!(streams[0].parameters().id(), ffmpeg::codec::Id::VP8);
+    assert_eq!(
+        silent_inbox.push(video_packet(&[1, 2, 3, 4], true)),
+        Delivered::Gone
+    );
+    assert_eq!(
+        said_inbox.push(video_packet(&[1, 2, 3, 4], true)),
+        Delivered::Taken
+    );
+}
+
+#[test]
+fn a_batch_none_of_which_said_what_it_carries_is_no_source() {
+    let (_inbox, silent) = arriving(None);
+
+    assert!(matches!(
+        WebRtcSource::arriving("remote".into(), vec![silent]),
+        Err(crate::Error::WebRtcError(WebRtcError::NothingDescribed(_)))
+    ));
+}
+
+#[test]
+fn a_track_sink_rejects_packets_until_its_codec_is_declared() {
     let (outbox, _command_rx) = outbox_of(1);
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Vp8]));
     let mut sink = WebRtcTrackSink::new(
@@ -166,7 +266,7 @@ fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
 
     let error = sink
         .consume(MediaBuffer::Packet(Arc::new(packet).into()))
-        .expect_err("a remote endpoint must not guess its outbound payload type");
+        .expect_err("a sink must not guess its outbound payload type");
 
     assert!(matches!(
         error,
@@ -446,42 +546,6 @@ fn a_sink_declared_from_an_avcc_record_still_takes_annex_b_packets() {
         packet.data().expect("packet has a payload"),
         [&AVCC_AS_ANNEX_B[..], payload].concat(),
         "the payload is passed through and still gets the record's parameter sets"
-    );
-}
-
-/// `set_codec` says the codec and nothing else, including after a
-/// declaration that said more.
-///
-/// Both halves of what the earlier call left have to go. The length prefix
-/// would refuse every Annex-B packet that follows, and the headers would be
-/// put in front of keyframes that are no longer the ones they describe.
-#[test]
-fn set_codec_forgets_what_a_previous_declaration_said() {
-    let (mut sink, command_rx) = h264_sink(16, 1);
-    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &AVCC))
-        .expect("H.264 is negotiated for this track");
-    sink.set_codec(Codec::H264)
-        .expect("H.264 is negotiated for this track");
-
-    // Its own parameter sets, and deliberately not the record's: headers that
-    // survived the redeclaration would be prepended to this, where the ones
-    // it carries would have hidden that by matching.
-    let payload: &[u8] = &[
-        0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, 0, 0, 0, 1, 0x65,
-        0x88,
-    ];
-    sink.consume(video_packet(payload, true))
-        .expect("a self-assembled Annex-B keyframe carrying its own parameter sets is accepted");
-
-    let Push(TrackId(16), _, MediaBuffer::Packet(packet)) =
-        command_rx.recv().expect("packet was queued")
-    else {
-        panic!("expected a packet command");
-    };
-    assert_eq!(
-        packet.data().expect("packet has a payload"),
-        payload,
-        "nothing of the previous declaration is left to rewrite or prepend"
     );
 }
 
@@ -777,10 +841,10 @@ fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
         outbox.clone(),
     );
 
-    sink.set_codec(Codec::Vp8)
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::VP8, &[]))
         .expect("VP8 is negotiated for this track");
     let error = sink
-        .set_codec(Codec::H264)
+        .set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &[]))
         .expect_err("H.264 must be rejected without changing the VP8 selection");
     assert!(matches!(
         error,
@@ -802,77 +866,6 @@ fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
     assert_eq!(codec, Some(Codec::Vp8));
 }
 
-#[test]
-fn wait_stream_info_can_retry_after_timeout_and_caches_the_result() {
-    let inbox = super::inbox::Inbox::new(1);
-    let (info_tx, info_rx) = bounded(1);
-    let source = WebRtcTrackSource::new(
-        TrackId(9),
-        MediaKind::Video,
-        "track-in",
-        inbox,
-        Arc::new(std::sync::Mutex::new(None)),
-        Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
-        info_rx,
-    );
-    let timeout = Duration::from_millis(10);
-
-    let error = source
-        .wait_stream_info(timeout)
-        .expect_err("no media should time out");
-    assert!(matches!(
-        error,
-        crate::Error::WebRtcError(WebRtcError::StreamInfoTimeout {
-            track_id: TrackId(9),
-            timeout: actual,
-        }) if actual == timeout
-    ));
-
-    let expected = WebRtcStreamInfo::from(CodecSpec {
-        codec: Codec::H264,
-        clock_rate: Frequency::NINETY_KHZ,
-        channels: None,
-        format: FormatParams::default(),
-    });
-    info_tx
-        .send(expected.clone())
-        .expect("source still owns receiver");
-    assert_eq!(
-        source
-            .wait_stream_info(Duration::from_secs(1))
-            .expect("retry should receive the first payload info"),
-        expected
-    );
-    drop(info_tx);
-    assert_eq!(
-        source
-            .wait_stream_info(Duration::ZERO)
-            .expect("cached info should not depend on the channel"),
-        expected
-    );
-}
-
-#[test]
-fn wait_stream_info_returns_closed_if_the_peer_ends_before_media() {
-    let inbox = super::inbox::Inbox::new(1);
-    let (info_tx, info_rx) = bounded(1);
-    let source = WebRtcTrackSource::new(
-        TrackId(10),
-        MediaKind::Video,
-        "track-in",
-        inbox,
-        Arc::new(std::sync::Mutex::new(None)),
-        Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
-        info_rx,
-    );
-    drop(info_tx);
-
-    assert!(matches!(
-        source.wait_stream_info(Duration::from_secs(1)),
-        Err(crate::Error::WebRtcError(WebRtcError::Closed))
-    ));
-}
-
 /// The other kind of source a sink is fed from, end to end: a container's
 /// own packets, which no example sends and nothing but a unit test had ever
 /// put on the wire.
@@ -881,7 +874,7 @@ fn wait_stream_info_returns_closed_if_the_peer_ends_before_media() {
 /// length-prefixed rather than Annex-B, so each one is rewritten; the
 /// parameter sets come out of an `avcC` record rather than from Annex-B
 /// extradata; and the far side has to end up with a stream it can decode
-/// all the same. `wait_stream_info` returning at all is the load-bearing
+/// all the same. `next_source` returning at all is the load-bearing
 /// assertion — for H.264 it waits for real SPS/PPS to cross RTP, which is
 /// precisely what a mis-framed payload would never deliver.
 #[test]
@@ -889,60 +882,27 @@ fn a_demuxers_own_packets_reach_a_peer_and_decode() {
     let Some(path) = crate::test_support::try_test_video() else {
         return;
     };
-    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
-    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
-    let (peer_a, handle_a) = WebRtcPeer::new(
-        "peer-a",
-        rtc_a,
-        socket_a,
-        move |offer| {
-            let _ = offer_tx.send(offer);
-        },
-        |_id| {},
-    );
-    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
-    let driver_a = DriverRunner::new(peer_a);
-    let driver_b = DriverRunner::new(peer_b);
-    driver_a.run().unwrap();
-    driver_b.run().unwrap();
-    thread::sleep(Duration::from_millis(200));
-
-    handle_a
-        .add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)
-        .expect("running peer should accept AddTrack");
-    let TrackEndpoints::Send(mut sink) = handle_a
-        .next_track()
-        .expect("peer-a's own track should attach")
-        .endpoints
-    else {
-        panic!("expected a SendOnly track");
-    };
-    let offer = offer_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("peer-a should generate a renegotiation offer");
-    let answer = handle_b
-        .accept_remote_offer(offer)
-        .expect("peer-b should accept the offer");
-    handle_a.set_answer(answer);
-    let source = recv_only(
-        handle_b
-            .next_track()
-            .expect("peer-b's remote track should attach"),
-    );
-    thread::sleep(Duration::from_millis(100));
+    let pair = running_pair();
 
     let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("test video should open");
     let video = streams
         .iter()
         .find(|stream| stream.kind() == ffmpeg::media::Type::Video)
-        .expect("test video has a video stream");
+        .expect("test video has a video stream")
+        .clone();
     let index = video.index();
-    let parameters = video.parameters().clone();
     // The whole declaration, from the container rather than an encoder: the
     // payload type, the parameter sets the record holds, and the fact that
     // the packets behind it are length-prefixed.
-    sink.set_source_parameters(&parameters)
-        .expect("a container's H.264 is the H.264 this track negotiated");
+    let mut muxer = pair.handle_a.muxer("demux-send");
+    let track = muxer
+        .add_stream("video", video)
+        .expect("a container's H.264 is a stream WebRTC carries");
+    let sink = open_toward(muxer, &pair.handle_a, &pair.offers_a, &pair.handle_b)
+        .take(track)
+        .unwrap();
+    // What is sent before the answer applies is let go of.
+    thread::sleep(Duration::from_millis(100));
 
     // Unpaced deliberately: this sends as fast as the file reads and is
     // stopped as soon as the far side has decoded something, so the test
@@ -955,17 +915,14 @@ fn a_demuxers_own_packets_reach_a_peer_and_decode() {
     .expect("send pipeline should wire");
     send.run().expect("send pipeline should start");
 
-    let info = source
-        .wait_stream_info(Duration::from_secs(5))
+    let (source, received) = pair
+        .handle_b
+        .next_source("demux-recv")
         .expect("the peer should observe H.264 parameter sets crossing RTP");
-    assert_eq!(info.codec(), Codec::H264);
+    assert_eq!(received[0].parameters().id(), ffmpeg::codec::Id::H264);
 
-    let decoder = SwDecoder::new(
-        "recv-decode",
-        info.codec_parameters()
-            .expect("observed H.264 info should create codec parameters"),
-    )
-    .expect("H.264 decoder should open");
+    let decoder = SwDecoder::new("recv-decode", received[0].parameters().clone())
+        .expect("H.264 decoder should open");
     let (counter, decoded) = FrameCounter::new("decoded");
     let (receive, ()) = Pipeline::new("demux-recv", source, |source, ctx| {
         let branch = ctx.branch().pipe(decoder).to(counter)?;
@@ -977,8 +934,8 @@ fn a_demuxers_own_packets_reach_a_peer_and_decode() {
     wait_for_frames(&decoded);
 
     send.stop();
-    driver_a.stop();
-    driver_b.stop();
+    pair.driver_a.stop();
+    pair.driver_b.stop();
     receive.stop();
 
     let send_events: Vec<_> = send.bus().iter().collect();
@@ -1081,30 +1038,117 @@ fn connected_pair() -> (Rtc, UdpSocket, Rtc, UdpSocket) {
     (rtc_a, socket_a, rtc_b, socket_b)
 }
 
-/// Both halves of a `Direction::SendRecv` track, panicking if the track
-/// attached with anything else — the direction is what the test asked
-/// `add_track` for, so a different one is a failure of the code under
-/// test rather than a case to handle.
-fn send_recv(track: AttachedTrack) -> (WebRtcTrackSink, WebRtcTrackSource) {
-    let TrackEndpoints::SendRecv(sink, source) = track.endpoints else {
-        panic!("expected a SendRecv track");
-    };
-    (sink, source)
+/// Two peers running over a connected pair, the renegotiation offers each
+/// makes caught for the test to carry to the other, as an application's
+/// signalling would.
+struct Running {
+    driver_a: Arc<DriverRunner>,
+    handle_a: WebRtcHandle,
+    offers_a: Receiver<SdpOffer>,
+    driver_b: Arc<DriverRunner>,
+    handle_b: WebRtcHandle,
+    offers_b: Receiver<SdpOffer>,
 }
 
-/// The inbound half of a receive-only track — what the peer that did
-/// *not* call `add_track` sees for a `Direction::SendOnly` one.
-fn recv_only(track: AttachedTrack) -> WebRtcTrackSource {
-    let TrackEndpoints::Recv(source) = track.endpoints else {
-        panic!("expected a RecvOnly track");
+fn running_pair() -> Running {
+    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+    let (offer_a, offers_a) = unbounded();
+    let (offer_b, offers_b) = unbounded();
+    let (peer_a, handle_a) = WebRtcPeer::new(
+        "peer-a",
+        rtc_a,
+        socket_a,
+        move |offer| {
+            let _ = offer_a.send(offer);
+        },
+        |_track| {},
+    );
+    let (peer_b, handle_b) = WebRtcPeer::new(
+        "peer-b",
+        rtc_b,
+        socket_b,
+        move |offer| {
+            let _ = offer_b.send(offer);
+        },
+        |_track| {},
+    );
+    let driver_a = DriverRunner::new(peer_a);
+    let driver_b = DriverRunner::new(peer_b);
+    driver_a.run().unwrap();
+    driver_b.run().unwrap();
+    // Let ICE/DTLS actually finish over the real loopback sockets before
+    // renegotiating.
+    thread::sleep(Duration::from_millis(200));
+    Running {
+        driver_a,
+        handle_a,
+        offers_a,
+        driver_b,
+        handle_b,
+        offers_b,
+    }
+}
+
+/// Opens `muxer` over `from`'s peer, and carries the offer that makes to
+/// `to`'s peer and its answer back.
+fn open_toward(
+    muxer: WebRtcMuxer,
+    from: &WebRtcHandle,
+    offers: &Receiver<SdpOffer>,
+    to: &WebRtcHandle,
+) -> MuxerSinks {
+    let sinks = muxer.open().expect("a running peer opens a muxer's tracks");
+    let offer = offers
+        .recv_timeout(Duration::from_secs(2))
+        .expect("opening the muxer makes an offer");
+    let answer = to
+        .accept_remote_offer(offer)
+        .expect("the other peer accepts the offer");
+    from.set_answer(answer);
+    sinks
+}
+
+/// The sink of one H.264 track `from` sends `to`.
+fn h264_toward(from: &WebRtcHandle, offers: &Receiver<SdpOffer>, to: &WebRtcHandle) -> BoxSink {
+    let mut muxer = from.muxer("send");
+    let track = muxer.add_stream("video", h264_stream()).unwrap();
+    open_toward(muxer, from, offers, to).take(track).unwrap()
+}
+
+/// `to`'s source of what `sink` sends, taken while `push_packets` keeps
+/// sending on it: the source is not made until its track has said what it
+/// carries, which an H.264 track says with a keyframe's parameter sets.
+/// Sent round after round, as a stream sends its keyframes — sent once,
+/// after a fixed wait for the answer to apply, a keyframe was lost on a
+/// loaded machine and the peer never saw the parameter sets.
+fn source_while_sending(
+    to: &WebRtcHandle,
+    name: &str,
+    sink: &mut dyn RawSink,
+) -> (WebRtcSource, Vec<StreamInfo>) {
+    let taking = {
+        let to = to.clone();
+        let name = name.to_owned();
+        thread::spawn(move || to.next_source(name))
     };
-    source
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut round = 0;
+    while !taking.is_finished() {
+        assert!(Instant::now() < deadline, "the remote track never came");
+        push_packets(sink, round);
+        round += 1;
+        thread::sleep(Duration::from_millis(100));
+    }
+    taking
+        .join()
+        .unwrap()
+        .expect("the remote track should say what it carries")
 }
 
 /// Five packets, the first a keyframe with its parameter sets, stamped on
 /// from where the `round` before ended — sent again round after round, as a
 /// stream sends its keyframes, until the peer has seen one.
-fn push_packets(sink: &mut WebRtcTrackSink, round: i64) {
+fn push_packets(sink: &mut dyn RawSink, round: i64) {
     for i in round * 5..round * 5 + 5 {
         // `write_track` needs a real time base to build str0m's own
         // `MediaTime` from — a bare `Packet::copy` defaults to 0/0,
@@ -1140,11 +1184,11 @@ fn wait_for_frames(frames: &CounterHandle) {
     panic!("expected at least one decoded frame");
 }
 
-/// Wires `source` into its own `Pipeline`, forwarding every packet it
-/// produces into a `CountingSink` that increments `count` — standing in
-/// for the real, independent downstream pipeline a `WebRtcTrackSource`
-/// is meant to be driven from.
-fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
+/// Wires `source`'s first output into its own `Pipeline`, forwarding every
+/// packet into a `CountingSink` that increments `count` — standing in for
+/// the real, independent downstream pipeline a source of a connection's
+/// tracks is meant to be driven from.
+fn wire_counting<M>(source: impl IntoSource<M>, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
     let sink = CountingSink {
         count,
         pp_log: element_pp_log(ElementType::Other, "counter", None),
@@ -1158,86 +1202,18 @@ fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipe
     pipeline
 }
 
-/// One H.264 `Direction::SendRecv` track, opened by `WebRtcHandle::add_track`
-/// on one peer and relayed to the other by hand (standing in for a
-/// real signaling transport — see `on_offer`'s docs), carries data
-/// *both* ways: peer-a pushes into the `WebRtcTrackSink` its own
-/// `next_track()` returned for the track it just added (str0m never
-/// fires `Event::MediaAdded` for that — see the type docs), and peer-b
-/// pushes back on the exact same `Mid` via the `WebRtcTrackSink` its
-/// own `next_track()` returned for the resulting `Event::MediaAdded` —
-/// no second `add_track`/renegotiation needed for the reverse
-/// direction. Also exercises real ICE/DTLS-SRTP over loopback UDP, with
-/// each `WebRtcTrackSource` driven by its own independent `Pipeline`.
+/// Each peer sends its own H.264 track through a muxer of its own and
+/// receives the other's as a source: two renegotiations, one each way,
+/// relayed by hand (standing in for a real signaling transport — see
+/// `on_offer`'s docs), over real ICE/DTLS-SRTP on loopback UDP, each source
+/// driven by its own independent `Pipeline`. What peer-a sends is pushed by
+/// hand and counted; what peer-b sends comes from a real OpenH264 encoder
+/// and is decoded, which a mislabeled payload would fail.
 #[test]
-fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type() {
-    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+fn each_peer_sends_its_own_track_and_receives_the_others() {
+    let pair = running_pair();
+    let mut sink_a = h264_toward(&pair.handle_a, &pair.offers_a, &pair.handle_b);
 
-    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
-
-    let (peer_a, handle_a) = WebRtcPeer::new(
-        "peer-a",
-        rtc_a,
-        socket_a,
-        move |offer| {
-            let _ = offer_tx.send(offer);
-        },
-        |_id| {},
-    );
-    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
-
-    // `WebRtcPeer` is a `Driver`, not a `Pipeline` source — no wiring
-    // closure needed; inbound tracks attach dynamically via
-    // `next_track()` instead, each into its own `Pipeline`.
-    let driver_a = DriverRunner::new(peer_a);
-    let driver_b = DriverRunner::new(peer_b);
-    driver_a.run().unwrap();
-    driver_b.run().unwrap();
-
-    // Let ICE/DTLS actually finish over the real loopback sockets
-    // before renegotiating.
-    thread::sleep(Duration::from_millis(200));
-
-    let track_id = handle_a
-        .add_track(MediaKind::Video, Direction::SendRecv, Codec::H264)
-        .expect("running peer should accept AddTrack");
-    // `next_track()` returns for peer-a's own track the moment
-    // `add_track`'s negotiation mints a `Mid` — before the offer even
-    // leaves this process, let alone before an answer comes back.
-    let attached_a = handle_a
-        .next_track()
-        .expect("peer-a's own track should attach");
-    assert_eq!(
-        track_id, attached_a.id,
-        "next_track should report the TrackId add_track just returned"
-    );
-    let (mut sink_a, source_a) = send_recv(attached_a);
-
-    let offer = offer_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("peer-a should generate a renegotiation offer");
-    let answer = handle_b
-        .accept_remote_offer(offer)
-        .expect("peer-b should accept the offer");
-    handle_a.set_answer(answer);
-    // peer-b's track attaches as part of accepting the offer (its
-    // `Event::MediaAdded`), independent of the answer round-trip.
-    let (mut sink_b, source_b) = send_recv(
-        handle_b
-            .next_track()
-            .expect("peer-b's remote track should attach"),
-    );
-    // The negotiated capability list is available when peer-b's endpoints
-    // are created, while the actual inbound codec remains unknown until the
-    // first RTP packet arrives. Peer-b then selects the codec its own encoder
-    // produces, validated against that list.
-    assert!(sink_b.negotiated_codecs().contains(&Codec::H264));
-    assert_eq!(sink_b.negotiated_codecs(), source_b.negotiated_codecs());
-    assert_eq!(source_b.codec(), None);
-
-    // peer-b's return direction uses a real OpenH264 encoder. Besides
-    // checking the observed RTP codec below, peer-a decodes this stream and
-    // must produce a frame; a mislabeled VP8 payload would fail there.
     let video_options = TestVideoOptions {
         width: 160,
         height: 120,
@@ -1258,14 +1234,20 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
         },
     )
     .expect("OpenH264 encoder should open");
-    // One declaration covers peer-b's whole outbound half: the payload type
-    // (validated against the negotiated list asserted above) and the SPS/PPS
-    // the encoder keeps in `parameters()` rather than in the bitstream.
-    // Without the latter the peer never sees them and `wait_stream_info`
-    // below times out.
-    sink_b
-        .set_source_parameters(&encoder.parameters())
-        .expect("H.264 should be negotiated for peer-b's outbound half");
+    // The encoder's stream is the whole declaration of peer-b's track: the
+    // payload type, and the SPS/PPS the encoder keeps in `parameters()`
+    // rather than in the bitstream. Without the latter peer-a never sees
+    // them and its `next_source` below never returns.
+    let mut muxer_b = pair.handle_b.muxer("peer-b-send");
+    let track_b = muxer_b
+        .add_stream(
+            "video",
+            StreamInfo::new(encoder.parameters(), encoder.time_base()),
+        )
+        .unwrap();
+    let sink_b = open_toward(muxer_b, &pair.handle_b, &pair.offers_b, &pair.handle_a)
+        .take(track_b)
+        .unwrap();
     let (send_b, ()) = Pipeline::new("peer-b-h264-send", video_source, |source, ctx| {
         let branch = ctx.branch().pipe(encoder).to(sink_b)?;
         ctx.attach(source, 0, branch)?;
@@ -1274,44 +1256,22 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     .expect("peer-b send pipeline should wire");
     send_b.run().expect("peer-b send pipeline should start");
 
-    // Keep each source out of its receive pipeline until the peer has seen a
-    // packet. The returned specs come from payload types str0m actually
-    // received, not from either sink's declared encoder choice. The receive
-    // pipelines below also prove those first packets remain queued.
-    let info_a = source_a
-        .wait_stream_info(Duration::from_secs(2))
-        .expect("peer-a should observe peer-b's H.264 payload");
-    // peer-a's keyframe goes out again until peer-b has seen one, as a
-    // stream's keyframes do. It went once, after a fixed wait for the answer
-    // to apply on both sides; on a loaded machine that wait was too short,
-    // the one keyframe was lost, and peer-b never saw the parameter sets.
-    let info_b = {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut round = 0;
-        loop {
-            push_packets(&mut sink_a, round);
-            match source_b.wait_stream_info(Duration::from_millis(200)) {
-                Ok(info) => break info,
-                Err(error) if Instant::now() >= deadline => {
-                    panic!("peer-b should observe peer-a's H.264 payload: {error}")
-                }
-                Err(_) => round += 1,
-            }
-        }
-    };
-    assert_eq!(info_a.codec(), Codec::H264);
-    assert_eq!(info_b.codec(), Codec::H264);
-    assert_eq!(source_a.codec(), Some(Codec::H264));
-    assert_eq!(source_b.codec(), Some(Codec::H264));
+    // What each source says it carries comes from the payload str0m
+    // actually received, not from either side's declaration; the receive
+    // pipelines below also prove those first packets stay queued.
+    let (source_a, from_b) = pair
+        .handle_a
+        .next_source("from-b")
+        .expect("peer-a should observe peer-b's H.264 parameter sets");
+    let (source_b, from_a) = source_while_sending(&pair.handle_b, "from-a", &mut *sink_a);
+    assert_eq!(from_b.len(), 1);
+    assert_eq!(from_a.len(), 1);
+    assert_eq!(from_b[0].parameters().id(), ffmpeg::codec::Id::H264);
+    assert_eq!(from_a[0].parameters().id(), ffmpeg::codec::Id::H264);
 
     let received_by_b = Arc::new(AtomicUsize::new(0));
-    let decoder = SwDecoder::new(
-        "peer-a-h264-decode",
-        info_a
-            .codec_parameters()
-            .expect("actual H.264 info should create codec parameters"),
-    )
-    .expect("peer-a H.264 decoder should open");
+    let decoder = SwDecoder::new("peer-a-h264-decode", from_b[0].parameters().clone())
+        .expect("peer-a H.264 decoder should open");
     let (counter, decoded_by_a) = FrameCounter::new("decoded-by-a");
     let (track_pipeline_a, ()) = Pipeline::new("peer-a-h264-recv", source_a, |source, ctx| {
         let branch = ctx.branch().pipe(decoder).to(counter)?;
@@ -1324,134 +1284,124 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     track_pipeline_b.run().unwrap();
     wait_for_frames(&decoded_by_a);
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(
-        received_by_b.load(Ordering::SeqCst),
-        5,
-        "peer-b should receive everything peer-a pushed"
-    );
+    // Every round that got through, whole: nothing pushed was lost on the
+    // way to the pipeline wired after it.
+    let received = received_by_b.load(Ordering::SeqCst);
     assert!(
-        decoded_by_a.get() > 0,
-        "peer-a should decode peer-b's reverse H.264 stream"
+        received >= 5 && received.is_multiple_of(5),
+        "peer-b should receive every round peer-a pushed, got {received} packets"
     );
 
     // Trivial now — `DriverRunner::stop` just flips a flag, no
     // rendezvous ack to race (see `StopReceiver`'s own docs).
     send_b.stop();
-    driver_a.stop();
-    driver_b.stop();
-    // Deliberately also stopped even though each `WebRtcTrackSource`'s
-    // `Pipeline` may already be ending on its own by this point (the
-    // `driver_a/b.stop()` above disconnects its data channel, which
-    // ends it with a natural `Eos` — see that type's own docs): this is
-    // a regression guard for a real `Pipeline::stop` bug this exact
-    // race used to hit, now fixed at its source (see `Pipeline`'s own
-    // `control_rx` field docs).
+    pair.driver_a.stop();
+    pair.driver_b.stop();
+    // Deliberately also stopped even though each source's `Pipeline` may
+    // already be ending on its own by this point (the drivers' stop above
+    // closes its inboxes, which ends it with a natural `Eos`): this is a
+    // regression guard for a real `Pipeline::stop` bug this exact race used
+    // to hit, now fixed at its source (see `Pipeline`'s own `control_rx`
+    // field docs).
     track_pipeline_a.stop();
     track_pipeline_b.stop();
 
-    let events_a: Vec<_> = driver_a.bus().iter().collect();
-    let events_b: Vec<_> = driver_b.bus().iter().collect();
-    let send_events_b: Vec<_> = send_b.bus().iter().collect();
-    let track_events_a: Vec<_> = track_pipeline_a.bus().iter().collect();
-    let track_events_b: Vec<_> = track_pipeline_b.bus().iter().collect();
-    assert!(
-        !events_a.iter().any(|e| matches!(e, BusEvent::Error { .. })),
-        "unexpected error event(s) on peer-a: {events_a:?}"
+    for (what, events) in [
+        ("peer-a", pair.driver_a.bus().iter().collect::<Vec<_>>()),
+        ("peer-b", pair.driver_b.bus().iter().collect()),
+        ("peer-b's outbound encoder", send_b.bus().iter().collect()),
+        (
+            "peer-a's inbound track",
+            track_pipeline_a.bus().iter().collect(),
+        ),
+        (
+            "peer-b's inbound track",
+            track_pipeline_b.bus().iter().collect(),
+        ),
+    ] {
+        assert!(
+            !events.iter().any(|e| matches!(e, BusEvent::Error { .. })),
+            "unexpected error event(s) on {what}: {events:?}"
+        );
+    }
+}
+
+/// A muxer's tracks are offered in the order its streams were added, so the
+/// remote peer's source of them has its outputs in that order. The peer
+/// once listed them in a hash map's order, and a video-then-audio muxer
+/// came out of `next_source` as audio then video, as often as not.
+#[test]
+fn a_muxers_tracks_are_offered_in_the_order_it_was_given_them() {
+    let pair = running_pair();
+    let kinds = [
+        ffmpeg::media::Type::Video,
+        ffmpeg::media::Type::Audio,
+        ffmpeg::media::Type::Video,
+        ffmpeg::media::Type::Audio,
+        ffmpeg::media::Type::Video,
+        ffmpeg::media::Type::Audio,
+    ];
+    let mut muxer = pair.handle_a.muxer("send");
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let id = match kind {
+            ffmpeg::media::Type::Video => ffmpeg::codec::Id::VP8,
+            _ => ffmpeg::codec::Id::OPUS,
+        };
+        let _track = muxer
+            .add_stream(format!("track-{index}"), stream_of(id, kind))
+            .unwrap();
+    }
+    let _sinks = muxer.open().expect("a running peer opens a muxer's tracks");
+    let offer = pair
+        .offers_a
+        .recv_timeout(Duration::from_secs(2))
+        .expect("opening the muxer makes an offer");
+
+    let offered: Vec<_> = offer
+        .to_sdp_string()
+        .lines()
+        .filter_map(|line| line.strip_prefix("m="))
+        .filter_map(|media| media.split(' ').next())
+        .filter(|media| *media != "application")
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        offered,
+        ["video", "audio", "video", "audio", "video", "audio"]
     );
-    assert!(
-        !events_b.iter().any(|e| matches!(e, BusEvent::Error { .. })),
-        "unexpected error event(s) on peer-b: {events_b:?}"
-    );
-    assert!(
-        !send_events_b
-            .iter()
-            .any(|e| matches!(e, BusEvent::Error { .. })),
-        "unexpected error event(s) on peer-b's outbound encoder: {send_events_b:?}"
-    );
-    assert!(
-        !track_events_a
-            .iter()
-            .any(|e| matches!(e, BusEvent::Error { .. })),
-        "unexpected error event(s) on peer-a's inbound track: {track_events_a:?}"
-    );
-    assert!(
-        !track_events_b
-            .iter()
-            .any(|e| matches!(e, BusEvent::Error { .. })),
-        "unexpected error event(s) on peer-b's inbound track: {track_events_b:?}"
-    );
+
+    pair.driver_a.stop();
+    pair.driver_b.stop();
 }
 
 /// Regression test for the claim in `Driver::run`'s own docs: stopping
-/// one side must clear its `tracks_in` immediately, so an
-/// already-attached `WebRtcTrackSource` sees its data channel
-/// disconnect and ends with a final `Eos` on its own — not left
-/// hanging until some other, unrelated thing (e.g. a caller's own
-/// `Pipeline::stop`) intervenes. There's no "reconnect" concept here
-/// to test instead: `WebRtcPeer::run` only ever reacts to its `Rtc`
-/// going not-alive or an explicit `Stop`, treating both the same way
-/// (see that `if` right before `tracks_in.clear()`); `Stop` is the
-/// deterministic one of the two to trigger from a test. Deliberately
+/// one side must clear its `tracks_in` immediately, so a source of its
+/// remote tracks already handed out sees its inboxes close and ends with a
+/// final `Eos` on its own — not left hanging until some other, unrelated
+/// thing (e.g. a caller's own `Pipeline::stop`) intervenes. There's no
+/// "reconnect" concept here to test instead: `WebRtcPeer::run` only ever
+/// reacts to its `Rtc` going not-alive or an explicit `Stop`, treating both
+/// the same way (see that `if` right before `tracks_in.clear()`); `Stop` is
+/// the deterministic one of the two to trigger from a test. Deliberately
 /// omits the `track_pipeline.stop()` safety net
-/// `one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type`
-/// uses — the whole point
-/// here is to prove the `Pipeline` ends on its own.
+/// `each_peer_sends_its_own_track_and_receives_the_others` uses — the whole
+/// point here is to prove the `Pipeline` ends on its own.
 #[test]
 fn stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos() {
-    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
-
-    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
-    let (peer_a, handle_a) = WebRtcPeer::new(
-        "peer-a",
-        rtc_a,
-        socket_a,
-        move |offer| {
-            let _ = offer_tx.send(offer);
-        },
-        |_id| {},
-    );
-    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
-
-    let driver_a = DriverRunner::new(peer_a);
-    let driver_b = DriverRunner::new(peer_b);
-    driver_a.run().unwrap();
-    driver_b.run().unwrap();
-
-    thread::sleep(Duration::from_millis(200));
-
-    handle_a
-        .add_track(MediaKind::Video, Direction::SendOnly, Codec::Vp8)
-        .expect("running peer should accept AddTrack");
-    let offer = offer_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("peer-a should generate a renegotiation offer");
-    let answer = handle_b
-        .accept_remote_offer(offer)
-        .expect("peer-b should accept the offer");
-    handle_a.set_answer(answer);
-
-    // peer-a asked for `SendOnly`, so peer-b sees the inverse: a track it
-    // can only receive on, and one this crate hands out without a sink at
-    // all rather than with an inert one.
-    let source_b = recv_only(
-        handle_b
-            .next_track()
-            .expect("peer-b's remote track should attach"),
-    );
+    let pair = running_pair();
+    let mut sink_a = h264_toward(&pair.handle_a, &pair.offers_a, &pair.handle_b);
+    let (source_b, _) = source_while_sending(&pair.handle_b, "from-a", &mut *sink_a);
 
     let received = Arc::new(AtomicUsize::new(0));
     let track_pipeline_b = wire_counting(source_b, received);
     track_pipeline_b.run().unwrap();
 
-    // Let the answer actually apply before tearing the connection down.
-    thread::sleep(Duration::from_millis(100));
-
-    driver_b.stop();
+    pair.driver_b.stop();
 
     // No `track_pipeline_b.stop()` — draining the bus to completion is
     // itself the proof: it only returns once every `Bus` sender,
-    // including the one `WebRtcTrackSource`'s own `Pipeline::run`
-    // thread holds, has actually dropped.
+    // including the one the source's own `Pipeline::run` thread holds, has
+    // actually dropped.
     let track_events_b: Vec<_> = track_pipeline_b.bus().iter().collect();
     assert!(
         track_events_b
@@ -1468,7 +1418,7 @@ fn stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos() {
         "unexpected error event(s): {track_events_b:?}"
     );
 
-    driver_a.stop();
+    pair.driver_a.stop();
 }
 
 /// Regression test for the RTP-timestamp bug where `write_track` built
@@ -1560,114 +1510,6 @@ fn packet_rtp_time_rejects_timestamp_overflow() {
 /// that added it gets a sink and nothing to receive on, and the side that
 /// only receives gets a source and no sink it could push into to no
 /// effect. This is the contract that replaced handing out an inert half.
-#[test]
-fn a_send_only_track_yields_a_sink_on_one_side_and_a_source_on_the_other() {
-    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
-
-    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
-    let (peer_a, handle_a) = WebRtcPeer::new(
-        "peer-a",
-        rtc_a,
-        socket_a,
-        move |offer| {
-            let _ = offer_tx.send(offer);
-        },
-        |_id| {},
-    );
-    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
-    let driver_a = DriverRunner::new(peer_a);
-    let driver_b = DriverRunner::new(peer_b);
-    driver_a.run().unwrap();
-    driver_b.run().unwrap();
-    thread::sleep(Duration::from_millis(200));
-
-    handle_a
-        .add_track(MediaKind::Video, Direction::SendOnly, Codec::Vp8)
-        .expect("running peer should accept AddTrack");
-    let attached_a = handle_a
-        .next_track()
-        .expect("peer-a's own track should attach");
-    assert!(
-        matches!(attached_a.endpoints, TrackEndpoints::Send(_)),
-        "a SendOnly track must not hand its adder a source"
-    );
-
-    let offer = offer_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("peer-a should generate a renegotiation offer");
-    let answer = handle_b
-        .accept_remote_offer(offer)
-        .expect("peer-b should accept the offer");
-    handle_a.set_answer(answer);
-
-    let attached_b = handle_b
-        .next_track()
-        .expect("peer-b's remote track should attach");
-    assert!(
-        matches!(attached_b.endpoints, TrackEndpoints::Recv(_)),
-        "the receiving side of a SendOnly track must not get a sink"
-    );
-
-    driver_a.stop();
-    driver_b.stop();
-}
-
-/// The mirror of the `SendOnly` case, so neither direction is covered
-/// only by inference from the other: asking for `RecvOnly` gives the
-/// *adder* the inbound half, and the remote peer — which sees the
-/// inverse — the outbound one.
-#[test]
-fn a_recv_only_track_yields_a_source_on_one_side_and_a_sink_on_the_other() {
-    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
-
-    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
-    let (peer_a, handle_a) = WebRtcPeer::new(
-        "peer-a",
-        rtc_a,
-        socket_a,
-        move |offer| {
-            let _ = offer_tx.send(offer);
-        },
-        |_id| {},
-    );
-    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
-    let driver_a = DriverRunner::new(peer_a);
-    let driver_b = DriverRunner::new(peer_b);
-    driver_a.run().unwrap();
-    driver_b.run().unwrap();
-    thread::sleep(Duration::from_millis(200));
-
-    handle_a
-        .add_track(MediaKind::Video, Direction::RecvOnly, Codec::Vp8)
-        .expect("running peer should accept AddTrack");
-    let attached_a = handle_a
-        .next_track()
-        .expect("peer-a's own track should attach");
-    assert!(
-        matches!(attached_a.endpoints, TrackEndpoints::Recv(_)),
-        "a RecvOnly track must not hand its adder a sink"
-    );
-
-    let offer = offer_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("peer-a should generate a renegotiation offer");
-    let answer = handle_b
-        .accept_remote_offer(offer)
-        .expect("peer-b should accept the offer");
-    handle_a.set_answer(answer);
-
-    let attached_b = handle_b
-        .next_track()
-        .expect("peer-b's remote track should attach");
-    assert!(
-        matches!(attached_b.endpoints, TrackEndpoints::Send(_)),
-        "the sending side of a RecvOnly track must not get a source"
-    );
-
-    driver_a.stop();
-    driver_b.stop();
-}
-
 /// A `WebRtcPeer` with nothing running on it, for exercising the
 /// attach/event handling directly. Driving a *real* direction change
 /// end to end would mean hand-rolling one side's whole ICE/DTLS poll
@@ -1676,33 +1518,93 @@ fn a_recv_only_track_yields_a_source_on_one_side_and_a_sink_on_the_other() {
 /// what the tests below supply.
 fn idle_peer(name: &str) -> (WebRtcPeer, WebRtcHandle) {
     let (rtc, socket, _rtc_b, _socket_b) = connected_pair();
-    WebRtcPeer::new(name, rtc, socket, |_offer| {}, |_id| {})
+    WebRtcPeer::new(name, rtc, socket, |_offer| {}, |_track| {})
+}
+
+/// The remote peer adding `mid`, as str0m reports it — from this side, so
+/// a section it sends on is one this side receives on.
+fn media_added(mid: &str, kind: MediaKind, direction: Direction) -> Event {
+    Event::MediaAdded(MediaAdded {
+        mid: mid.into(),
+        kind,
+        direction,
+        simulcast: None,
+    })
+}
+
+/// What one remote offer adds comes out together, a source's worth — and
+/// only what the remote peer sends on: a section it adds asking to be sent
+/// to, or one inactive, has nothing here to send on it, so nothing is
+/// handed out for it.
+#[test]
+fn the_tracks_one_remote_offer_adds_come_out_together_and_only_those_it_sends() {
+    let (mut peer, handle) = idle_peer("peer");
+    let (bus, _bus_rx) = Bus::new();
+
+    peer.handle_event(
+        media_added("0", MediaKind::Video, Direction::RecvOnly),
+        &bus,
+    );
+    peer.handle_event(
+        media_added("1", MediaKind::Video, Direction::SendOnly),
+        &bus,
+    );
+    peer.handle_event(
+        media_added("2", MediaKind::Audio, Direction::Inactive),
+        &bus,
+    );
+    peer.handle_event(
+        media_added("3", MediaKind::Audio, Direction::SendRecv),
+        &bus,
+    );
+    peer.hand_out_arrivals();
+    peer.handle_event(
+        media_added("4", MediaKind::Audio, Direction::RecvOnly),
+        &bus,
+    );
+    peer.hand_out_arrivals();
+
+    let first = handle
+        .sources_rx
+        .try_recv()
+        .expect("the first offer's tracks are handed out");
+    assert_eq!(first.len(), 2, "the two the remote peer sends on");
+    let second = handle
+        .sources_rx
+        .try_recv()
+        .expect("a later offer's tracks are a batch of their own");
+    assert_eq!(second.len(), 1);
+    assert!(handle.sources_rx.try_recv().is_err());
 }
 
 /// `Event::Closed` is the deterministic signal produced by str0m for a
 /// received DTLS `close_notify`. Unlike the end-to-end loopback test below,
 /// this does not rely on a later UDP send eliciting an ICMP error: the event
-/// itself must end the driver and disconnect its inbound source.
+/// itself must end the driver and the source of its remote tracks.
 #[test]
 fn a_remote_closed_event_ends_the_peer_and_its_inbound_source() {
     let (mut peer, handle) = idle_peer("peer");
-    peer.attach_track(
-        TrackId(0),
-        "0".into(),
-        MediaKind::Video,
-        Direction::RecvOnly,
+    let (bus, _bus_rx) = Bus::new();
+    peer.handle_event(
+        media_added("0", MediaKind::Video, Direction::RecvOnly),
+        &bus,
     );
-    let source = recv_only(
-        handle
-            .next_track()
-            .expect("the inbound track should attach"),
-    );
+    peer.hand_out_arrivals();
+    let mut batch = handle
+        .sources_rx
+        .try_recv()
+        .expect("the inbound track should be handed out");
+    // What its first packets would have said, which nothing sends here.
+    let (described_tx, described) = bounded(1);
+    described_tx.send(vp8_info()).unwrap();
+    let inbox = batch.remove(0).inbox;
+    let (source, _) = WebRtcSource::arriving("in".into(), vec![Arriving { inbox, described }])
+        .expect("the track said what it carries");
     let received = Arc::new(AtomicUsize::new(0));
     let track_pipeline = wire_counting(source, received);
     track_pipeline.run().unwrap();
 
-    let (bus, _bus_rx) = crate::bus::Bus::new();
-    peer.handle_event(str0m::Event::Closed, &bus);
+    peer.handle_event(Event::Closed, &bus);
     let driver = DriverRunner::new(peer);
     driver.run().unwrap();
 
@@ -1720,31 +1622,37 @@ fn a_remote_closed_event_ends_the_peer_and_its_inbound_source() {
             .any(|event| matches!(event, BusEvent::Eos { .. })),
         "the inbound source should reach Eos, got {track_events:?}"
     );
+    let mut muxer = handle.muxer("late");
+    let _track = muxer.add_stream("video", h264_stream()).unwrap();
     assert!(matches!(
-        handle.add_track(MediaKind::Video, Direction::SendOnly, Codec::Vp8),
+        muxer.open(),
+        Err(crate::Error::WebRtcError(WebRtcError::Closed))
+    ));
+    assert!(matches!(
+        handle.next_source("late"),
         Err(crate::Error::WebRtcError(WebRtcError::Closed))
     ));
 }
 
-/// `TrackEndpoints` is minted once, from the direction the track
-/// attached with, so a remote peer renegotiating a different one leaves
-/// the caller holding endpoints that no longer describe the connection.
-/// Nothing can be re-issued at that point, which is exactly why it has
-/// to be reported rather than silently tolerated.
+/// A track goes the one way it attached with — here a source's output, the
+/// caller's already — so a remote peer renegotiating a different one leaves
+/// the caller holding something that no longer describes the connection.
+/// Nothing can be re-issued at that point, which is exactly why it has to
+/// be reported rather than silently tolerated.
 #[test]
 fn a_direction_change_after_attaching_is_reported_on_the_bus() {
-    let (mut peer, handle) = idle_peer("peer");
-    let (bus, bus_rx) = crate::bus::Bus::new();
+    let (mut peer, _handle) = idle_peer("peer");
+    let (bus, bus_rx) = Bus::new();
     let mid: Mid = "0".into();
-
-    peer.attach_track(TrackId(0), mid, MediaKind::Video, Direction::SendOnly);
-    let attached = handle.next_track().expect("the track should attach");
-    assert!(matches!(attached.endpoints, TrackEndpoints::Send(_)));
+    peer.handle_event(
+        media_added("0", MediaKind::Video, Direction::RecvOnly),
+        &bus,
+    );
 
     peer.handle_event(
-        str0m::Event::MediaChanged(str0m::media::MediaChanged {
+        Event::MediaChanged(MediaChanged {
             mid,
-            direction: Direction::RecvOnly,
+            direction: Direction::Inactive,
         }),
         &bus,
     );
@@ -1760,8 +1668,8 @@ fn a_direction_change_after_attaching_is_reported_on_the_bus() {
         panic!("expected WebRtcError::DirectionChanged, got {error}");
     };
     assert_eq!(at, mid);
-    assert_eq!(from, Direction::SendOnly);
-    assert_eq!(to, Direction::RecvOnly);
+    assert_eq!(from, Direction::RecvOnly);
+    assert_eq!(to, Direction::Inactive);
 }
 
 /// `MediaChanged` also fires when a renegotiation restates the direction
@@ -1769,17 +1677,17 @@ fn a_direction_change_after_attaching_is_reported_on_the_bus() {
 /// renegotiation into a bus error, so only an actual change counts.
 #[test]
 fn restating_the_direction_a_track_already_has_is_not_reported() {
-    let (mut peer, handle) = idle_peer("peer");
-    let (bus, bus_rx) = crate::bus::Bus::new();
-    let mid: Mid = "0".into();
-
-    peer.attach_track(TrackId(0), mid, MediaKind::Video, Direction::SendRecv);
-    let _attached = handle.next_track().expect("the track should attach");
+    let (mut peer, _handle) = idle_peer("peer");
+    let (bus, bus_rx) = Bus::new();
+    peer.handle_event(
+        media_added("0", MediaKind::Video, Direction::RecvOnly),
+        &bus,
+    );
 
     peer.handle_event(
-        str0m::Event::MediaChanged(str0m::media::MediaChanged {
-            mid,
-            direction: Direction::SendRecv,
+        Event::MediaChanged(MediaChanged {
+            mid: "0".into(),
+            direction: Direction::RecvOnly,
         }),
         &bus,
     );
@@ -1797,10 +1705,10 @@ fn restating_the_direction_a_track_already_has_is_not_reported() {
 #[test]
 fn a_direction_change_on_an_unattached_track_is_ignored() {
     let (mut peer, _handle) = idle_peer("peer");
-    let (bus, bus_rx) = crate::bus::Bus::new();
+    let (bus, bus_rx) = Bus::new();
 
     peer.handle_event(
-        str0m::Event::MediaChanged(str0m::media::MediaChanged {
+        Event::MediaChanged(MediaChanged {
             mid: "99".into(),
             direction: Direction::RecvOnly,
         }),
@@ -1813,34 +1721,12 @@ fn a_direction_change_on_an_unattached_track_is_ignored() {
     );
 }
 
-/// `Direction::Inactive` still attaches: the track exists and its `mid`
-/// is negotiated, so a caller matching attachments against its own
-/// `add_track` calls has to see it — it just has nothing to send or
-/// receive on yet.
-#[test]
-fn an_inactive_track_attaches_with_no_endpoints() {
-    let (mut peer, handle) = idle_peer("peer");
-
-    peer.attach_track(
-        TrackId(7),
-        "0".into(),
-        MediaKind::Audio,
-        Direction::Inactive,
-    );
-
-    let attached = handle
-        .next_track()
-        .expect("an inactive track should still attach");
-    assert_eq!(attached.id, TrackId(7));
-    assert_eq!(attached.kind, MediaKind::Audio);
-    assert!(matches!(attached.endpoints, TrackEndpoints::Inactive));
-}
-
 /// The other half of `stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos`:
-/// what the peer that *survives* observes. Both endpoints it was handed
-/// have to learn that the connection is over — the sink because there is
-/// nowhere left to send, the source because its stream has ended — and
-/// each says so in its own terms rather than going quiet.
+/// what the peer that *survives* observes. Both what it sends through and
+/// what it receives from have to learn that the connection is over — the
+/// sink because there is nowhere left to send, the source because its
+/// stream has ended — and each says so in its own terms rather than going
+/// quiet.
 ///
 /// This remains the end-to-end counterpart to
 /// `a_remote_closed_event_ends_the_peer_and_its_inbound_source`. Loopback
@@ -1849,66 +1735,25 @@ fn an_inactive_track_attaches_with_no_endpoints() {
 /// network side effect.
 #[test]
 fn a_peer_that_dies_notifies_the_surviving_peer_on_both_endpoints() {
-    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+    let pair = running_pair();
+    let mut sink_a = h264_toward(&pair.handle_a, &pair.offers_a, &pair.handle_b);
+    let mut sink_b = h264_toward(&pair.handle_b, &pair.offers_b, &pair.handle_a);
+    let (source_a, _) = source_while_sending(&pair.handle_a, "from-b", &mut *sink_b);
 
-    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
-    let (peer_a, handle_a) = WebRtcPeer::new(
-        "peer-a",
-        rtc_a,
-        socket_a,
-        move |offer| {
-            let _ = offer_tx.send(offer);
-        },
-        |_id| {},
-    );
-    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
-    let driver_a = DriverRunner::new(peer_a);
-    let driver_b = DriverRunner::new(peer_b);
-    driver_a.run().unwrap();
-    driver_b.run().unwrap();
-    thread::sleep(Duration::from_millis(200));
-
-    handle_a
-        .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
-        .expect("running peer should accept AddTrack");
-    let (mut sink_a, source_a) = send_recv(
-        handle_a
-            .next_track()
-            .expect("peer-a's own track should attach"),
-    );
-    let offer = offer_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("peer-a should generate a renegotiation offer");
-    let answer = handle_b
-        .accept_remote_offer(offer)
-        .expect("peer-b should accept the offer");
-    handle_a.set_answer(answer);
-    let (_sink_b, _source_b) = send_recv(
-        handle_b
-            .next_track()
-            .expect("peer-b's remote track should attach"),
-    );
-    thread::sleep(Duration::from_millis(200));
-
-    // peer-a's inbound half runs in its own `Pipeline`, the way a real
-    // caller drives it, so an `Eos` shows up on that pipeline's bus.
+    // peer-a's source runs in its own `Pipeline`, the way a real caller
+    // drives it, so an `Eos` shows up on that pipeline's bus.
     let received = Arc::new(AtomicUsize::new(0));
     let track_pipeline_a = wire_counting(source_a, received);
     track_pipeline_a.run().unwrap();
 
-    driver_b.stop();
+    pair.driver_b.stop();
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut sink_errored = false;
     let mut source_ended = false;
     while Instant::now() < deadline && !(sink_errored && source_ended) {
         if !sink_errored {
-            let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
-            packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
-            packet.set_pts(Some(0));
-            sink_errored = sink_a
-                .consume(MediaBuffer::Packet(Arc::new(packet).into()))
-                .is_err();
+            sink_errored = sink_a.consume(video_packet(&[1, 2, 3, 4], false)).is_err();
         }
         while let Some(event) = track_pipeline_a.bus().try_recv() {
             if matches!(event, BusEvent::Eos { .. }) {
@@ -1928,7 +1773,7 @@ fn a_peer_that_dies_notifies_the_surviving_peer_on_both_endpoints() {
     );
 
     track_pipeline_a.stop();
-    driver_a.stop();
+    pair.driver_a.stop();
 }
 
 /// Driven, a track source waits on its inbox: what the connection puts in
@@ -1948,17 +1793,8 @@ fn a_track_source_driven_is_woken_by_what_the_connection_receives() {
         }
     }
 
-    let inbox = super::inbox::Inbox::new(8);
-    let (_info_tx, info_rx) = bounded(1);
-    let source = WebRtcTrackSource::new(
-        TrackId(30),
-        MediaKind::Video,
-        "track-in",
-        inbox.clone(),
-        Arc::new(std::sync::Mutex::new(None)),
-        Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
-        info_rx,
-    );
+    let inbox = Inbox::new(8);
+    let source = WebRtcTrackSource::new(MediaKind::Video, "track-in", inbox.clone());
     let (counter, count) = PacketCounter::new("counter");
     let (mut pipeline, ()) = DrivenPipeline::new("publisher", source, |source, ctx| {
         ctx.attach(source, 0, ctx.branch().to(counter)?)?;

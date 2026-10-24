@@ -1,25 +1,27 @@
 # webrtc_record
 
 Sends a media file's video and audio — the streams `FileDemuxer::best` picks
-— over one WebRTC connection, then records both received tracks into one MP4.
-The sender transcodes to WebRTC's H.264 and Opus:
+— over one WebRTC connection, as two tracks of one `WebRtcMuxer`, then records
+both received tracks into one MP4. The sender transcodes to WebRTC's H.264 and
+Opus:
 
 ```text
 FileDemuxer(video) -> SwDecoder -> Queue -> Pacer -> SwScaler
-                   -> SwEncoder(H.264) -> WebRtcTrackSink
+                   -> SwEncoder(H.264) -> WebRtcMuxer
 FileDemuxer(audio) -> SwDecoder -> Queue -> Pacer
-                   -> SwAudioEncoder(Opus) -> WebRtcTrackSink
+                   -> SwAudioEncoder(Opus) -> WebRtcMuxer
 ```
 
 The receiver neither decodes nor re-encodes, and takes nothing from the
-sender's encoders: `WebRtcTrackSource::wait_stream_info` waits for the
-received H.264's SPS and PPS and derives the muxer's parameters from the
-bitstream itself, and Opus's come from its negotiated stream:
+sender's encoders: the two tracks come out of `WebRtcHandle::next_source` as
+one `WebRtcSource` with an output each, once each has said what it carries —
+H.264 by the SPS and PPS it receives, from which the muxer's parameters are
+derived, and Opus by its negotiated stream:
 
 ```text
-WebRtcTrackSource(H.264) -\
-                           -> FileMuxer
-WebRtcTrackSource(Opus)  --/
+WebRtcSource(H.264) -\
+                      -> FileMuxer
+WebRtcSource(Opus)  --/
 ```
 
 Both paths are required, and the input needs a video and an audio stream.

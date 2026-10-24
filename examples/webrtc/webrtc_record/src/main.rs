@@ -1,22 +1,23 @@
 //! Sends one file's best video and audio streams as H.264/Opus over two
-//! WebRTC tracks, then records both received tracks into one MP4 without
-//! decoding or re-encoding on the receiving side.
+//! WebRTC tracks of one `WebRtcMuxer`, then records both received tracks —
+//! one `WebRtcSource` with an output each — into one MP4 without decoding or
+//! re-encoding on the receiving side.
 //!
 //! Sender:
 //!
 //! ```text
 //! FileDemuxer(video) -> SwDecoder -> Queue -> Pacer -> SwScaler
-//!                    -> SwEncoder(H.264) -> WebRtcTrackSink
+//!                    -> SwEncoder(H.264) -> WebRtcMuxer
 //! FileDemuxer(audio) -> SwDecoder -> Queue -> Pacer
-//!                    -> SwAudioEncoder(Opus) -> WebRtcTrackSink
+//!                    -> SwAudioEncoder(Opus) -> WebRtcMuxer
 //! ```
 //!
 //! Receiver:
 //!
 //! ```text
-//! WebRtcTrackSource(H.264) -\
-//!                            -> FileMuxer
-//! WebRtcTrackSource(Opus)  --/
+//! WebRtcSource(H.264) -\
+//!                       -> FileMuxer
+//! WebRtcSource(Opus)  --/
 //! ```
 //!
 //!     cargo run -p webrtc_record -- input.mp4 output.mp4
@@ -38,21 +39,14 @@ mod example {
         bus::{BusEvent, BusReceiver},
         driver::DriverRunner,
         elements::{
-            AudioCodec, FileDemuxer, FileMuxer, Mp4Layout, Pacer, SwAudioEncoder,
-            SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
-            TrackEndpoints, VideoCodec, WebRtcHandle, WebRtcPeer, WebRtcTrackSink,
-            WebRtcTrackSource,
+            AudioCodec, FileDemuxer, FileMuxer, Mp4Layout, Pacer, StreamInfo, SwAudioEncoder,
+            SwAudioEncoderOptions, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
+            WebRtcHandle, WebRtcPeer, WebRtcSource,
         },
-        pipeline::{Pipeline, PipelineBuilder},
+        pipeline::Pipeline,
     };
-    use str0m::{
-        Candidate, Rtc,
-        change::SdpOffer,
-        format::Codec,
-        media::{Direction, MediaKind},
-    };
+    use str0m::{Candidate, Rtc, change::SdpOffer};
 
-    const STREAM_INFO_TIMEOUT: Duration = Duration::from_secs(5);
     const AUDIO_RATE: u32 = 48_000;
     const AUDIO_CHANNELS: u16 = 2;
 
@@ -72,47 +66,36 @@ mod example {
         let input = FileInput::open(&input_path)?;
         let (handle_a, handle_b, driver_a, driver_b, offer_rx) = connect_peers()?;
 
-        let (video_sink, video_source) = add_send_track(
-            &handle_a,
-            &handle_b,
-            &offer_rx,
-            MediaKind::Video,
-            Codec::H264,
-        )?;
-        let (audio_sink, audio_source) = add_send_track(
-            &handle_a,
-            &handle_b,
-            &offer_rx,
-            MediaKind::Audio,
-            Codec::Opus,
-        )?;
+        let send = send_pipeline(input, &handle_a, &handle_b, &offer_rx)?;
         println!("one WebRTC connection negotiated video (H.264) and audio (Opus) tracks");
-
-        let send = send_pipeline(input, video_sink, audio_sink)?;
         send.run()?;
 
-        // H.264 does not return until received SPS/PPS have supplied dimensions
-        // and codec configuration. All packets remain queued in each source.
-        let video_info = video_source.wait_stream_info(STREAM_INFO_TIMEOUT)?;
-        let audio_info = audio_source.wait_stream_info(STREAM_INFO_TIMEOUT)?;
-        if video_info.codec() != Codec::H264 || audio_info.codec() != Codec::Opus {
-            return Err(media_pp::Error::Other(format!(
-                "unexpected received codecs: video={:?}, audio={:?}",
-                video_info.codec(),
-                audio_info.codec()
-            ))
-            .into());
-        }
-        println!("received video stream: {video_info:?}");
-        println!("received audio stream: {audio_info:?}");
+        // The tracks the offer added come out as one source once each has
+        // said what it carries — H.264 not until received SPS/PPS have
+        // supplied dimensions and codec configuration. All packets remain
+        // queued meanwhile.
+        let (source, streams) = handle_b.next_source("received")?;
+        let output_of = |id| {
+            streams
+                .iter()
+                .find(|stream| stream.parameters().id() == id)
+                .cloned()
+                .ok_or_else(|| {
+                    media_pp::Error::Other(format!(
+                        "no {id:?} track was received: {:?}",
+                        streams
+                            .iter()
+                            .map(|stream| stream.parameters().id())
+                            .collect::<Vec<_>>()
+                    ))
+                })
+        };
+        let video = output_of(ffmpeg::codec::Id::H264)?;
+        let audio = output_of(ffmpeg::codec::Id::OPUS)?;
+        println!("received video stream: {:?}", video.size());
+        println!("received audio stream: output {}", audio.index());
 
-        let recv = receive_pipeline(
-            &output_path,
-            video_source,
-            video_info,
-            audio_source,
-            audio_info,
-        )?;
+        let recv = receive_pipeline(&output_path, source, video, audio)?;
         recv.run()?;
         println!("recording received tracks to {output_path}");
 
@@ -180,10 +163,14 @@ mod example {
         }
     }
 
+    /// The sender: the file decoded, paced and encoded again, onto a muxer
+    /// of `sender`'s connection, whose offer it carries to `receiver` and
+    /// whose answer back.
     fn send_pipeline(
         input: FileInput,
-        mut video_sink: WebRtcTrackSink,
-        mut audio_sink: WebRtcTrackSink,
+        sender: &WebRtcHandle,
+        receiver: &WebRtcHandle,
+        offer_rx: &Receiver<SdpOffer>,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let video_decoder = SwDecoder::new("decode-video", input.video_parameters)?;
         let video_pacer = Pacer::new("pace-video");
@@ -207,13 +194,6 @@ mod example {
                 max_b_frames: None,
             },
         )?;
-        // Each sink is told what feeds it, which settles its payload type and
-        // its codec headers together. H.264's SPS/PPS are in `parameters()`
-        // rather than in the bitstream, and RTP has no container to carry
-        // them, so they go out in front of every keyframe — which is what
-        // lets the receiver build its decoder parameters at all. Opus has
-        // nothing of the kind, and its declaration is only the codec.
-        video_sink.set_source_parameters(&video_encoder.parameters())?;
         let audio_decoder = SwDecoder::new("decode-audio", input.audio_parameters)?;
         let audio_pacer = Pacer::new("pace-audio");
         let audio_encoder = SwAudioEncoder::new(
@@ -225,7 +205,33 @@ mod example {
                 bit_rate: 96_000,
             },
         )?;
-        audio_sink.set_source_parameters(&audio_encoder.parameters())?;
+
+        // Each encoder's stream settles its track's payload type and codec
+        // headers together. H.264's SPS/PPS are in `parameters()` rather than
+        // in the bitstream, and RTP has no container to carry them, so they go
+        // out in front of every keyframe — which is what lets the receiver
+        // build its decoder parameters at all. Opus has nothing of the kind.
+        let mut muxer = sender.muxer("webrtc-send");
+        let video_track = muxer.add_stream(
+            "video",
+            StreamInfo::new(video_encoder.parameters(), video_encoder.time_base()),
+        )?;
+        let audio_track = muxer.add_stream(
+            "audio",
+            StreamInfo::new(audio_encoder.parameters(), audio_encoder.time_base()),
+        )?;
+        let mut sinks = muxer.open()?;
+        let offer = offer_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| {
+                media_pp::Error::Other(format!("timed out waiting for the SDP offer: {error}"))
+            })?;
+        let answer = receiver.accept_remote_offer(offer)?;
+        sender.set_answer(answer);
+        let video_sink = sinks.take(video_track)?;
+        let audio_sink = sinks.take(audio_track)?;
+        // What is sent before the answer applies is let go of.
+        thread::sleep(Duration::from_millis(100));
 
         let (pipeline, ()) = Pipeline::new("webrtc-send", input.source, move |source, ctx| {
             let video = ctx
@@ -253,30 +259,23 @@ mod example {
 
     fn receive_pipeline(
         output: &str,
-        video_source: WebRtcTrackSource,
-        video_info: media_pp::elements::WebRtcStreamInfo,
-        audio_source: WebRtcTrackSource,
-        audio_info: media_pp::elements::WebRtcStreamInfo,
+        source: WebRtcSource,
+        video: StreamInfo,
+        audio: StreamInfo,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let mut muxer = FileMuxer::create(output, Mp4Layout::Standard)?;
-        let video_track = muxer.add_stream("received-video", video_info.stream_info()?)?;
-        let audio_track = muxer.add_stream("received-audio", audio_info.stream_info()?)?;
+        let video_track = muxer.add_stream("received-video", video.clone())?;
+        let audio_track = muxer.add_stream("received-audio", audio.clone())?;
         let mut sinks = muxer.open()?;
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;
 
-        let builder = PipelineBuilder::new("webrtc-receive-record");
-        let (builder, ()) = builder.add_source(video_source, |source, ctx| {
-            let branch = ctx.branch().to(video_sink)?;
-            ctx.attach(source, 0, branch)?;
+        let (pipeline, ()) = Pipeline::new("webrtc-receive-record", source, move |source, ctx| {
+            ctx.attach(source, video.index(), ctx.branch().to(video_sink)?)?;
+            ctx.attach(source, audio.index(), ctx.branch().to(audio_sink)?)?;
             Ok(())
         })?;
-        let (builder, ()) = builder.add_source(audio_source, |source, ctx| {
-            let branch = ctx.branch().to(audio_sink)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })?;
-        Ok(builder.build())
+        Ok(pipeline)
     }
 
     // Naming this tuple would only move the same five types somewhere else:
@@ -321,59 +320,16 @@ mod example {
             move |offer| {
                 let _ = offer_tx.send(offer);
             },
-            |_id| {},
+            |_track| {},
         );
-        let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+        let (peer_b, handle_b) =
+            WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_track| {});
         let driver_a = DriverRunner::new(peer_a);
         let driver_b = DriverRunner::new(peer_b);
         driver_a.run()?;
         driver_b.run()?;
         thread::sleep(Duration::from_millis(200));
         Ok((handle_a, handle_b, driver_a, driver_b, offer_rx))
-    }
-
-    fn add_send_track(
-        sender: &WebRtcHandle,
-        receiver: &WebRtcHandle,
-        offer_rx: &Receiver<SdpOffer>,
-        kind: MediaKind,
-        codec: Codec,
-    ) -> media_pp::Result<(WebRtcTrackSink, WebRtcTrackSource)> {
-        let id = sender.add_track(kind, Direction::SendOnly, codec)?;
-        let attached_sender = sender.next_track()?;
-        if attached_sender.id != id || attached_sender.kind != kind {
-            return Err(media_pp::Error::Other(format!(
-                "sender attached unexpected track: id={:?}, kind={:?}",
-                attached_sender.id, attached_sender.kind
-            )));
-        }
-        let TrackEndpoints::Send(sink) = attached_sender.endpoints else {
-            return Err(media_pp::Error::Other(
-                "sender track is not SendOnly".into(),
-            ));
-        };
-
-        let offer = offer_rx
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|error| {
-                media_pp::Error::Other(format!("timed out waiting for {kind:?} SDP offer: {error}"))
-            })?;
-        let answer = receiver.accept_remote_offer(offer)?;
-        sender.set_answer(answer);
-        let attached_receiver = receiver.next_track()?;
-        if attached_receiver.kind != kind {
-            return Err(media_pp::Error::Other(format!(
-                "receiver attached {:?} while waiting for {kind:?}",
-                attached_receiver.kind
-            )));
-        }
-        let TrackEndpoints::Recv(source) = attached_receiver.endpoints else {
-            return Err(media_pp::Error::Other(
-                "receiver track is not RecvOnly".into(),
-            ));
-        };
-        thread::sleep(Duration::from_millis(100));
-        Ok((sink, source))
     }
 
     /// Waits until every terminal of `owner`'s pipeline has ended.

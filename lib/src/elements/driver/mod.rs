@@ -4,9 +4,9 @@
 //! They are not part of a dataflow graph. A [`Driver`](crate::driver::Driver)
 //! has no pads of its own; it runs a loop and mints ordinary
 //! `RawSink`/`SrcPads` endpoints on the side for pipelines to wire.
-//! `WebRtcPeer` owns a peer connection while `WebRtcTrackSink` and
-//! `WebRtcTrackSource` carry media in and out of whichever pipelines those
-//! tracks belong to. `RtspServer` serves
+//! `WebRtcPeer` owns a peer connection while a `WebRtcMuxer` of it and a
+//! `WebRtcSource` of what the remote side adds carry media out of and into
+//! whichever pipelines those tracks belong to. `RtspServer` serves
 //! [`Broadcast`](crate::elements::Broadcast)s, which pipelines write into.
 
 #[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
@@ -29,8 +29,7 @@ pub use rtsp_server::{
 };
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
-    AttachedTrack, IceServer, SessionId, SessionRole, SessionStats, TrackEndpoints, TrackId,
-    WebRtcError, WebRtcHandle, WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPathMode,
-    WebRtcPeer, WebRtcServer, WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle,
-    WebRtcServerOptions, WebRtcSource, WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
+    IceServer, SessionId, SessionRole, SessionStats, TrackId, WebRtcError, WebRtcHandle,
+    WebRtcHttpEndpoint, WebRtcMuxer, WebRtcOptions, WebRtcPathMode, WebRtcPeer, WebRtcServer,
+    WebRtcServerError, WebRtcServerEvent, WebRtcServerHandle, WebRtcServerOptions, WebRtcSource,
 };

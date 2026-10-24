@@ -359,20 +359,19 @@ impl Default for WebRtcServerOptions {
 /// its own — a [`DrivenPipeline`](crate::pipeline::DrivenPipeline) the
 /// session's thread polls as what it waits on wakes it. A player's is a
 /// [`BroadcastSource`](crate::elements::BroadcastSource) of its path's
-/// broadcast and a [`WebRtcTrackSink`](super::WebRtcTrackSink) for each
-/// track it takes, begun as it connects, so it starts at a keyframe; its
+/// broadcast and a sink for each track it takes, begun as it connects, so it starts at a keyframe; its
 /// tracks share one timeline, which goes on across the broadcast's runs.
 /// What the broadcast held then is sent at twice the stream's speed, so it
 /// catches up without a burst its socket cannot hold, and what comes after
 /// as it is written — at most a second of it: where the newest keyframe is
 /// further behind, the player waits for the next one, as a packet lost in a
 /// longer stretch of large pictures is past what the connection keeps to
-/// send again. A publisher's tracks are each a pipeline of a
-/// [`WebRtcTrackSource`](super::WebRtcTrackSource) into the path's
-/// broadcast, published once each has said enough of itself — H.264's
-/// parameter sets — and its leaving ends the run. The sinks and sources are
-/// the ones a [`WebRtcPeer`](super::WebRtcPeer) hands out: a peer and a
-/// server's session are one connection, driven by different owners.
+/// send again. A publisher's tracks are each a pipeline of a source of the
+/// track into the path's broadcast, published once each has said enough of
+/// itself — H.264's parameter sets — and its leaving ends the run. The sinks
+/// are the ones a [`WebRtcPeer`](super::WebRtcPeer)'s muxer sends through:
+/// a peer and a server's session are one connection, driven by different
+/// owners.
 pub struct WebRtcServer {
     name: Arc<str>,
     pp_log: PpLog,

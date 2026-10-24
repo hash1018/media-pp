@@ -18,7 +18,6 @@ compile error with no explanation.
   one into the other. Write `StreamInfo` where you wrote `TrackFormat`:
   `StreamInfo::new(parameters, time_base)` for a stream described by hand,
   `&encoder` and `&stream` as before, `.with_orientation(..)` as before.
-  `WebRtcStreamInfo::track_format` is `stream_info`.
 
 - **`StreamInfo`'s fields are read through methods.** Write
   `stream.index()`, `stream.kind()`, `stream.parameters()`,
@@ -29,6 +28,45 @@ compile error with no explanation.
 
 - **`MuxerTrackError` has a `FormatChanged` variant**, so a `match` on it
   needs an arm for it — see below.
+
+- **A `WebRtcPeer` sends through a `WebRtcMuxer` and receives through a
+  `WebRtcSource`**, the two a WHIP or a WHEP connection is used through.
+  Every media section goes one way. What this side sends,
+  `handle.muxer(name)` makes a muxer of — given its tracks with
+  `add_stream` and opened as one to a WHIP server is, a sink per track out
+  of its `MuxerSinks` — which offers its tracks in one renegotiation, in
+  the order it was given them: the offer goes to `on_offer`, the answer
+  comes back through `set_answer`. What the remote peer adds comes out of
+  `handle.next_source(name)` as one source of the tracks one of its offers
+  adds, an output each, with what each carries — waited for, by its first
+  packets, as `wait_stream_info` was. A section the remote peer adds asking
+  to be sent to is left alone; what this side sends back goes through a
+  muxer of its own. `add_track`, `next_track`, `AttachedTrack`,
+  `TrackEndpoints`, `WebRtcTrackSink`, `WebRtcTrackSource`,
+  `WebRtcStreamInfo` and `WebRtcError::StreamInfoTimeout` are gone, and
+  `on_keyframe_request` is handed the track's name from `add_stream` where
+  it was handed its `TrackId`. Instead of
+
+  ```rust
+  handle.add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)?;
+  let TrackEndpoints::Send(mut sink) = handle.next_track()?.endpoints else { .. };
+  sink.set_source_parameters(&encoder.parameters())?;
+  ```
+
+  write
+
+  ```rust
+  let mut muxer = handle.muxer("camera");
+  let track = muxer.add_stream(
+      "video",
+      StreamInfo::new(encoder.parameters(), encoder.time_base()),
+  )?;
+  let sink = muxer.open()?.take(track)?;
+  ```
+
+  and `let (source, streams) = handle.next_source("remote")?;` where a
+  track's `WebRtcTrackSource` and its `wait_stream_info` were. The four
+  WebRTC examples show both sides.
 
 ### Changed
 
@@ -162,12 +200,11 @@ compile error with no explanation.
   and MediaMTX; `lib/tests/streaming.rs` carries a stream across WHIP,
   WHEP, RTSP and a recording each way. See `docs/whip-whep-clients.md`.
 
-- **`WebRtcTrackSink` converts HEVC's `hvcC` as it does H.264's `avcC`.**
-  `set_source_parameters` with an MP4 demuxer's HEVC parameters puts the
-  record's parameter sets in front of each keyframe and rewrites every
+- **A WebRTC track converts HEVC's `hvcC` as it does H.264's `avcC`.** A
+  `WebRtcMuxer` given an MP4 demuxer's HEVC stream puts the record's
+  parameter sets in front of each keyframe and rewrites every
   length-prefixed packet as Annex-B; it used to refuse them with
   `ParameterSetsNotSupported`, which VVC's `vvcC` still is.
-  `WebRtcTrackSource` can be driven.
 
 - **`DrivenPipeline`: a pipeline with no thread of its own.** Wired as a
   `Pipeline` is, then polled by whoever owns it — many of them on a few

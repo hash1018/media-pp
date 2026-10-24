@@ -7,11 +7,10 @@ use crate::error::Result;
 
 use super::command::WebRtcError;
 
-/// What an inbound WebRTC track carries, confirmed from its first packets.
-///
-/// [`WebRtcTrackSource::wait_stream_info`](crate::elements::WebRtcTrackSource::wait_stream_info)
-/// returns it; [`Self::codec_parameters`] is what a decoder after the source is
-/// built from.
+/// What an inbound WebRTC track carries, confirmed from its first packets:
+/// what a [`WebRtcSource`](crate::elements::WebRtcSource) waits for before
+/// it says what each of its outputs carries, from
+/// [`Self::codec_parameters`].
 ///
 /// SDP exposes several possible codecs, while this value identifies the one
 /// the remote sender actually used. Audio payload metadata is sufficient as
@@ -19,7 +18,7 @@ use super::command::WebRtcError;
 /// until both SPS and PPS have arrived, so [`Self::codec_parameters`] can
 /// describe the stream without borrowing the remote encoder's configuration.
 #[derive(Clone, PartialEq, Eq)]
-pub struct WebRtcStreamInfo {
+pub(crate) struct WebRtcStreamInfo {
     codec_spec: CodecSpec,
     h264: Option<H264Config>,
 }
@@ -43,18 +42,8 @@ struct H264Config {
 }
 
 impl WebRtcStreamInfo {
-    /// Returns the full str0m payload specification observed on the stream.
-    pub fn codec_spec(&self) -> CodecSpec {
-        self.codec_spec
-    }
-
-    /// Returns the selected codec family.
-    pub fn codec(&self) -> Codec {
-        self.codec_spec.codec
-    }
-
     /// Returns dimensions parsed from received codec configuration, currently
-    /// `Some` for H.264 information returned by `wait_stream_info`.
+    /// `Some` for H.264 information.
     pub fn video_dimensions(&self) -> Option<(u32, u32)> {
         self.h264.as_ref().map(|h264| (h264.width, h264.height))
     }
@@ -493,7 +482,7 @@ mod tests {
     /// unconfirmed rather than panicking: this runs on `WebRtcPeer`'s own
     /// ICE/DTLS thread, directly on bytes a remote peer chose, so the only
     /// two acceptable outcomes are "confirmed" and "not yet". The caller
-    /// sees the second as a `wait_stream_info` timeout it can retry.
+    /// sees the second as a track that has not said what it carries yet.
     ///
     /// `parse_h264_dimensions` and `BitReader` return `Option` throughout
     /// today, and `annex_b_h264_extradata`'s own validation is unreachable

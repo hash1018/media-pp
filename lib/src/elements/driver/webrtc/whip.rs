@@ -17,9 +17,10 @@ use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info};
 
 use super::client::{self, Client, Parts, Url, WebRtcOptions};
-use super::command::{TrackId, WebRtcError};
+use super::command::{OpenTrack, TrackId, WebRtcError};
 use super::outbox::Outbox;
 use super::stream_info::str0m_codec;
+use super::track::WebRtcHandle;
 use super::track::WebRtcTrackSink;
 
 /// How many packets the connection holds for its tracks before it is taken
@@ -67,12 +68,19 @@ const OUTBOX: usize = 512;
 /// falls behind goes on from each track's next keyframe.
 pub struct WebRtcMuxer {
     name: Arc<str>,
-    url: Url,
-    options: WebRtcOptions,
+    via: Via,
     /// Each track: its name, what it carries, and its parameters.
     tracks: Vec<(Arc<str>, MediaKind, ffmpeg::codec::Parameters)>,
     id: MuxerId,
     pp_log: PpLog,
+}
+
+/// What a [`WebRtcMuxer`] sends over.
+enum Via {
+    /// A connection of its own, made with a WHIP server as it opens.
+    Whip { url: Url, options: WebRtcOptions },
+    /// A peer's, which it adds its tracks to as it opens.
+    Peer(WebRtcHandle),
 }
 
 // SAFETY: the codec parameters are this value's own copies, not shared with
@@ -93,12 +101,25 @@ impl WebRtcMuxer {
         let pp_log = element_pp_log(ElementType::WebRtcMuxer, &name, None);
         Ok(Self {
             name,
-            url,
-            options,
+            via: Via::Whip { url, options },
             tracks: Vec::new(),
             id: MuxerId::next(),
             pp_log,
         })
+    }
+
+    /// A muxer of `handle`'s peer's connection — see
+    /// [`WebRtcHandle::muxer`].
+    pub(super) fn over_peer(name: impl Into<String>, handle: WebRtcHandle) -> Self {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::WebRtcMuxer, &name, None);
+        Self {
+            name,
+            via: Via::Peer(handle),
+            tracks: Vec::new(),
+            id: MuxerId::next(),
+            pp_log,
+        }
     }
 
     /// Adds a track called `name` of what `format` describes — an
@@ -144,7 +165,11 @@ impl WebRtcMuxer {
         if self.tracks.is_empty() {
             return Err(WebRtcError::NoTracks.into());
         }
-        let (socket, local) = client::socket_toward(&self.url)?;
+        let (url, options) = match &self.via {
+            Via::Whip { url, options } => (url, options),
+            Via::Peer(handle) => return self.open_over_peer(handle),
+        };
+        let (socket, local) = client::socket_toward(url)?;
         let mut rtc = Rtc::builder().build(Instant::now());
         rtc.add_local_candidate(client::candidate(local)?);
         let mut changes = rtc.sdp_api();
@@ -154,18 +179,18 @@ impl WebRtcMuxer {
             .map(|(_, kind, _)| changes.add_media(*kind, Direction::SendOnly, None, None, None))
             .collect();
         let (offer, pending) = changes.apply().ok_or_else(|| WebRtcError::Request {
-            url: self.url.full.clone(),
+            url: url.full.clone(),
             reason: "there was nothing to offer".into(),
         })?;
         let (answer, resource) = client::exchange(
-            &self.url,
-            self.options.bearer_token.as_deref(),
+            url,
+            options.bearer_token.as_deref(),
             &offer.to_sdp_string(),
-            self.options.connect_within,
+            options.connect_within,
         )?;
         let accepted = SdpAnswer::from_sdp_string(&answer)
             .map_err(|error| WebRtcError::Request {
-                url: self.url.full.clone(),
+                url: url.full.clone(),
                 reason: format!("its answer is not SDP: {error}"),
             })
             .and_then(|answer| {
@@ -206,12 +231,12 @@ impl WebRtcMuxer {
             pp_log: self.pp_log.clone(),
         })?;
         accepted?;
-        client::connected(&said, &self.url, self.options.connect_within)?;
+        client::connected(&said, url, options.connect_within)?;
         pp_info!(
             pp_log: &self.pp_log,
             "publishing {} tracks to {}",
             self.tracks.len(),
-            self.url.full
+            url.full
         );
         let keeps: Arc<dyn std::any::Any + Send + Sync> = client;
         let mut sinks: Vec<Box<dyn RawSink>> = Vec::with_capacity(self.tracks.len());
@@ -227,6 +252,38 @@ impl WebRtcMuxer {
             )
             .keeping(Arc::clone(&keeps))
             .named(ElementType::WebRtcMuxer, Arc::clone(name));
+            sink.set_source_parameters(parameters)?;
+            sinks.push(Box::new(sink));
+        }
+        Ok(self.id.sinks(sinks))
+    }
+
+    /// Has the peer add the tracks, sending only, in one renegotiation, and
+    /// answers their sinks once the offer is made.
+    fn open_over_peer(&self, handle: &WebRtcHandle) -> Result<MuxerSinks> {
+        let tracks = self
+            .tracks
+            .iter()
+            .map(|(name, kind, parameters)| {
+                let codec = str0m_codec(parameters.id())
+                    .ok_or(WebRtcError::SourceCodecUnsupported(parameters.id()))?;
+                Ok(OpenTrack {
+                    id: handle.track_id(),
+                    kind: *kind,
+                    codec,
+                    name: Arc::clone(name),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let opened = handle.open_tracks(tracks)?;
+        pp_info!(
+            pp_log: &self.pp_log,
+            "{} tracks offered over the peer's connection",
+            self.tracks.len()
+        );
+        let mut sinks: Vec<Box<dyn RawSink>> = Vec::with_capacity(opened.len());
+        for (sink, (name, _, parameters)) in opened.into_iter().zip(&self.tracks) {
+            let mut sink = sink.named(ElementType::WebRtcMuxer, Arc::clone(name));
             sink.set_source_parameters(parameters)?;
             sinks.push(Box::new(sink));
         }
