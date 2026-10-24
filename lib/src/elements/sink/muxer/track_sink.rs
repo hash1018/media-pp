@@ -169,6 +169,7 @@ pub(super) fn open_tracks<M: Muxer>(
                     watch: stream.watch.filter(|_| options.keeps_parameter_sets),
                     refused: false,
                     done: false,
+                    steps: Steps::default(),
                 })
             })
             .collect(),
@@ -274,6 +275,48 @@ struct TrackSink<M> {
     /// Set once this track has counted itself finished, so an `Eos` and a
     /// later `Stop` for the same track cannot count it twice.
     done: bool,
+    /// Where the last packet written was, for one that says nothing of how
+    /// long it lasts.
+    steps: Steps,
+}
+
+/// What a packet that carries no duration is given: the step from the one
+/// before it on its track.
+///
+/// RTP says nothing of how long a picture lasts, so neither does a packet
+/// an RTSP or WebRTC source makes. Written so, FFmpeg's HLS muxer warns of
+/// every one — a line for each picture of every recording, gigabytes a day
+/// of a server's log — and MP4 guesses each fragment's last, wrongly by a
+/// few ticks at every cut. The step is a guess too, the one FFmpeg would
+/// make, without holding a packet back for the next to say how long it
+/// was: exact for a stream at a steady rate, the last interval for one
+/// that is not. A packet that says its duration keeps it.
+#[derive(Default)]
+struct Steps {
+    last: Option<i64>,
+}
+
+impl Steps {
+    /// Gives `packet` a duration where it has none and can be given one,
+    /// in the unit its timestamps are in now.
+    fn fill(&mut self, packet: &mut ffmpeg::Packet) {
+        let Some(at) = packet.dts().or(packet.pts()) else {
+            return;
+        };
+        if packet.duration() == 0
+            && let Some(last) = self.last
+            && at > last
+        {
+            packet.set_duration(at - last);
+        }
+        self.last = Some(at);
+    }
+
+    /// Forgets where the last packet was: what follows a seek or a new
+    /// segment is no step from it.
+    fn forget(&mut self) {
+        self.last = None;
+    }
 }
 
 impl<M: Muxer> TrackSink<M> {
@@ -363,6 +406,7 @@ impl<M: Muxer> RawSink for TrackSink<M> {
                 if let Some(timeline) = &mut self.timeline {
                     timeline.stamp(&mut packet);
                 }
+                self.steps.fill(&mut packet);
                 packet.set_stream(self.stream_index);
                 packet.set_position(-1);
                 self.shared
@@ -381,7 +425,10 @@ impl<M: Muxer> RawSink for TrackSink<M> {
     fn stream_event(&mut self, event: &StreamEvent) -> Result<()> {
         match event {
             StreamEvent::Eos => self.finish(),
-            StreamEvent::Segment(_) => Ok(()),
+            StreamEvent::Segment(_) => {
+                self.steps.forget();
+                Ok(())
+            }
         }
     }
 
@@ -395,6 +442,7 @@ impl<M: Muxer> RawSink for TrackSink<M> {
         // Terminal, so nothing is forwarded.
         match msg {
             ControlMsg::Seek(_) => {
+                self.steps.forget();
                 if let Some(timeline) = &mut self.timeline {
                     timeline.seeked();
                 }
@@ -479,6 +527,40 @@ mod tests {
             .take(track)
             .expect("the muxer's own track")
             .into_raw()
+    }
+
+    /// A packet that carries no duration — RTP's — is given the step from
+    /// the last; one that carries its own keeps it; and nothing is guessed
+    /// for the first, nor across a step back, nor after the track is told
+    /// to forget, as a seek or a new segment does.
+    #[test]
+    fn a_packet_without_a_duration_is_given_the_step_from_the_last() {
+        let packet = |dts: i64, duration: i64| {
+            let mut packet = ffmpeg::Packet::empty();
+            packet.set_dts(Some(dts));
+            packet.set_pts(Some(dts));
+            packet.set_duration(duration);
+            packet
+        };
+        let mut steps = Steps::default();
+        let filled = |steps: &mut Steps, dts, duration| {
+            let mut packet = packet(dts, duration);
+            steps.fill(&mut packet);
+            packet.duration()
+        };
+        assert_eq!(
+            filled(&mut steps, 0, 0),
+            0,
+            "the first has no step before it"
+        );
+        assert_eq!(filled(&mut steps, 3600, 0), 3600);
+        assert_eq!(filled(&mut steps, 7200, 0), 3600);
+        assert_eq!(filled(&mut steps, 10800, 1000), 1000, "its own is kept");
+        assert_eq!(filled(&mut steps, 9000, 0), 0, "no step back");
+        assert_eq!(filled(&mut steps, 12600, 0), 3600);
+        steps.forget();
+        assert_eq!(filled(&mut steps, 90_000, 0), 0, "nothing across a seek");
+        assert_eq!(filled(&mut steps, 93_000, 0), 3000);
     }
 
     fn seek_refused(sink: &mut Box<dyn RawSink>) -> bool {

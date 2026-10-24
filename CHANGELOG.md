@@ -397,6 +397,15 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A muxer gives a packet that says no duration the step from the last.**
+  RTP carries no duration, so neither did a packet from an `RtspSource` or
+  a `WebRtcSource`; written into an `HlsMuxer`, FFmpeg warned of every
+  one — a log line per picture of each recording, some 2 GB a day of a
+  server recording a dozen cameras — and an MP4 guessed each fragment's
+  last. Every muxer's track now gives such a packet the step from the one
+  before it on its track, as FFmpeg would guess, without holding a packet
+  back; one that says its duration keeps it.
+
 - **A `VulkanDecoder` goes on where the pictures change size, instead of
   crashing the process.** FFmpeg 8.0's Vulkan decoding, with the one
   decoding thread this opens it with, crashes inside libavcodec changing a
