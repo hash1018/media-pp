@@ -28,11 +28,11 @@ use crate::elements::{Broadcast, BroadcastSource, StreamInfo};
 use crate::pipeline::{DrivenPipeline, DrivenPipelineHandle};
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
-use super::Shared;
 use super::digest::{self, RtspDigest};
 use super::record::{Recording, Stopped};
 use super::rtp::{self, Packetizer};
 use super::track::{Delivery, Outbox, Outgoing, RtspTrackSink};
+use super::{SessionCounts, Shared};
 use crate::elements::rtsp::message::{self, Incoming, Request, Response, Transport};
 use crate::elements::rtsp::sdp::{self as announce, Announced};
 
@@ -129,7 +129,7 @@ struct Playing {
     /// Each described track's, by its number, where it was set up: what
     /// cuts its packets into RTP as they are sent.
     packetizers: Vec<Option<Packetizer>>,
-    _count: Count,
+    count: Count,
 }
 
 /// What a playing session's pipeline has for its connection next.
@@ -140,19 +140,46 @@ enum Played {
     Ended,
 }
 
-/// Counts a player for as long as it plays.
-struct Count(Arc<Shared>);
+/// A session among the server's while it plays or publishes, and what it
+/// counts of itself — see [`RtspServerHandle::session_stats`](super::RtspServerHandle::session_stats).
+struct Count {
+    shared: Arc<Shared>,
+    id: u64,
+    counts: Arc<SessionCounts>,
+}
 
 impl Count {
-    fn new(shared: &Arc<Shared>) -> Self {
-        shared.playing.fetch_add(1, Ordering::AcqRel);
-        Self(Arc::clone(shared))
+    fn new(shared: &Arc<Shared>, path: &str, role: Access, remote: SocketAddr, udp: bool) -> Self {
+        let id = shared.next_session.fetch_add(1, Ordering::Relaxed);
+        let counts = Arc::new(SessionCounts {
+            path: path.to_owned(),
+            role,
+            remote,
+            udp,
+            opened: Instant::now(),
+            sent: Default::default(),
+            received: Default::default(),
+        });
+        shared
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, Arc::clone(&counts));
+        Self {
+            shared: Arc::clone(shared),
+            id,
+            counts,
+        }
     }
 }
 
 impl Drop for Count {
     fn drop(&mut self) {
-        self.0.playing.fetch_sub(1, Ordering::AcqRel);
+        self.shared
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
     }
 }
 
@@ -221,6 +248,8 @@ struct Connection {
     peer: SocketAddr,
     session: Option<Session>,
     recording: Option<Recording>,
+    /// The publisher among the server's sessions, while it publishes.
+    publishing: Option<Count>,
     routes: Routes,
     /// When a publisher last sent anything — a packet or a request.
     heard: Instant,
@@ -255,6 +284,7 @@ pub(super) async fn serve(
         peer,
         session: None,
         recording: None,
+        publishing: None,
         routes: Routes {
             shared: Arc::clone(&shared),
             from: Vec::new(),
@@ -353,6 +383,7 @@ pub(super) async fn serve(
                         continue;
                     }
                 };
+                let bytes: usize = packets.iter().map(Vec::len).sum();
                 if let Err(why) = deliver(
                     outgoing.delivery,
                     packets,
@@ -365,6 +396,9 @@ pub(super) async fn serve(
                 .await
                 {
                     break 'connection why;
+                }
+                if let Some(play) = &playing {
+                    play.count.counts.sent.fetch_add(bytes as u64, Ordering::Relaxed);
                 }
             }
         }
@@ -790,7 +824,7 @@ impl Connection {
             .header("Session", session_header(id))
             .header("Range", "npt=0.000-");
         if playing.is_none() {
-            match self.begin_playing(id, broadcast, tracks, described, delivery) {
+            match self.begin_playing(id, path, broadcast, tracks, described, delivery) {
                 Ok(begun) => *playing = Some(begun),
                 Err(status) => return Response::new(status),
             }
@@ -812,6 +846,7 @@ impl Connection {
     fn begin_playing(
         &self,
         id: &str,
+        path: &str,
         broadcast: &Broadcast,
         tracks: &[StreamInfo],
         described: &[usize],
@@ -892,7 +927,7 @@ impl Connection {
             pipeline,
             outbox,
             packetizers,
-            _count: Count::new(&self.shared),
+            count: Count::new(&self.shared, path, Access::Play, self.peer, over_udp),
         })
     }
 
@@ -915,6 +950,18 @@ impl Connection {
                 tracks.len()
             );
             self.recording = Some(Recording::new(broadcast.clone(), tracks.clone()));
+            let udp = matches!(
+                &self.session,
+                Some(Session { role: Role::Record { channels, .. }, .. })
+                    if channels.iter().all(Option::is_none)
+            );
+            self.publishing = Some(Count::new(
+                &self.shared,
+                path,
+                Access::Publish,
+                self.peer,
+                udp,
+            ));
         }
         response
     }
@@ -946,6 +993,12 @@ impl Connection {
             return Ok(());
         };
         let was = recording.published();
+        if let Some(publishing) = &self.publishing {
+            publishing
+                .counts
+                .received
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
+        }
         match recording.take(track, data) {
             Ok(()) => {
                 if !was

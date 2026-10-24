@@ -13,16 +13,16 @@ pub use digest::RtspDigest;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error as ThisError;
 
 use crate::bus::Bus;
 use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
-use crate::elements::{Authorize, Broadcast};
+use crate::elements::{Access, Authorize, Broadcast};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 
@@ -214,8 +214,10 @@ pub(crate) struct Shared {
     pub(crate) write_timeout: Duration,
     pub(crate) publisher_timeout: Duration,
     pub(crate) authorize: Option<Authorize>,
-    /// How many players are playing now.
-    pub(crate) playing: AtomicUsize,
+    /// Every session playing or publishing now, by a number of its own —
+    /// see [`RtspServerHandle::session_stats`].
+    pub(crate) sessions: Mutex<HashMap<u64, Arc<SessionCounts>>>,
+    pub(crate) next_session: AtomicU64,
     /// The paths a publisher holds.
     pub(crate) publishing: Mutex<HashSet<String>>,
     /// Where a publisher of a path is published into, apart from what its
@@ -334,7 +336,8 @@ impl RtspServer {
             write_timeout: options.write_timeout,
             publisher_timeout: options.publisher_timeout,
             authorize: options.authorize,
-            playing: AtomicUsize::new(0),
+            sessions: Mutex::default(),
+            next_session: AtomicU64::new(0),
             publishing: Mutex::new(HashSet::new()),
             publish_into: Mutex::default(),
             routes: Mutex::new(HashMap::new()),
@@ -479,8 +482,73 @@ impl RtspServerHandle {
 
     /// How many players are playing now, every path together.
     pub fn players(&self) -> usize {
-        self.shared.playing.load(Ordering::Acquire)
+        self.shared
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .filter(|session| session.role == Access::Play)
+            .count()
     }
+
+    /// Every session playing or publishing now, in no particular order —
+    /// see [`RtspSessionStats`]. A session is counted from its `PLAY` or
+    /// `RECORD` until its connection ends. Copies a few figures of each
+    /// under a lock; nothing is asked of the sessions themselves.
+    pub fn session_stats(&self) -> Vec<RtspSessionStats> {
+        self.shared
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .map(|session| RtspSessionStats {
+                path: session.path.clone(),
+                role: session.role,
+                remote: session.remote,
+                udp: session.udp,
+                opened: session.opened,
+                bytes_sent: session.sent.load(Ordering::Relaxed),
+                bytes_received: session.received.load(Ordering::Relaxed),
+            })
+            .collect()
+    }
+}
+
+/// One session of an [`RtspServer`] — a player or a publisher — as
+/// [`RtspServerHandle::session_stats`] last read it.
+///
+/// The byte counts only rise, from the session's `PLAY` or `RECORD`; a rate
+/// is two readings apart. They are of RTP, without the framing that
+/// interleaves it on the connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RtspSessionStats {
+    /// Its path.
+    pub path: String,
+    /// Whether it plays its path or publishes into it.
+    pub role: Access,
+    /// Where its connection comes from.
+    pub remote: SocketAddr,
+    /// Whether its media goes over UDP rather than its connection.
+    pub udp: bool,
+    /// When it began to play or publish.
+    pub opened: Instant,
+    /// What it has been sent: a player's media. Nothing for a publisher.
+    pub bytes_sent: u64,
+    /// What it has sent: a publisher's media. Nothing for a player.
+    pub bytes_received: u64,
+}
+
+/// What a session counts of itself while it lasts, for
+/// [`RtspServerHandle::session_stats`].
+pub(crate) struct SessionCounts {
+    pub(crate) path: String,
+    pub(crate) role: Access,
+    pub(crate) remote: SocketAddr,
+    pub(crate) udp: bool,
+    pub(crate) opened: Instant,
+    pub(crate) sent: AtomicU64,
+    pub(crate) received: AtomicU64,
 }
 
 impl std::fmt::Debug for RtspServerHandle {

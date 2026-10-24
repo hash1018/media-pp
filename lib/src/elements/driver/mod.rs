@@ -25,6 +25,7 @@ pub use rtmp_server::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerO
 #[cfg(feature = "rtsp-server")]
 pub use rtsp_server::{
     RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,
+    RtspSessionStats,
 };
 #[cfg(feature = "webrtc")]
 pub use webrtc::{

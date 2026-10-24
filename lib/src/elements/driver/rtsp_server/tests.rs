@@ -260,6 +260,54 @@ fn many_players_play_at_once() {
     runner.stop();
 }
 
+/// Each player is a session of its own, told apart by its path: how many
+/// play one path is read off them, with how each is sent and what it has
+/// been sent. One that leaves is no longer among them.
+#[test]
+fn each_session_says_its_path_and_what_it_was_sent() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (runner, handle, broadcast) = server(true);
+    handle
+        .add_path("door", &broadcast, RtspPathMode::Play)
+        .unwrap();
+    let camera = feed(&broadcast, &path);
+    let players = [
+        play(&handle.url("cam"), RtspTransport::Tcp),
+        play(&handle.url("cam"), RtspTransport::Tcp),
+        play(&handle.url("door"), RtspTransport::Udp),
+    ];
+    for player in &players {
+        check_played(player);
+    }
+
+    let stats = handle.session_stats();
+    let on = |path: &str| stats.iter().filter(|session| session.path == path).count();
+    assert_eq!((on("cam"), on("door")), (2, 1));
+    for session in &stats {
+        assert_eq!(session.role, Access::Play);
+        assert_eq!(session.udp, session.path == "door", "{session:?}");
+        assert!(session.remote.ip().is_loopback());
+        assert!(session.bytes_sent > 0, "{session:?}");
+        assert_eq!(session.bytes_received, 0);
+    }
+    assert_eq!(handle.players(), 3);
+
+    let [first, ..] = &players;
+    first.pipeline.stop();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while handle.session_stats().len() > 2 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(handle.session_stats().len(), 2, "one that leaves is let go");
+    for player in &players {
+        player.pipeline.stop();
+    }
+    camera.stop();
+    runner.stop();
+}
+
 /// An input that drops and comes back publishes again; its players go on,
 /// on one timeline.
 #[test]
@@ -592,6 +640,15 @@ fn a_publisher_is_played_back(transport: RtspTransport) {
     let publisher =
         publish(&handle.url("live"), &path, transport).expect("the server takes a publisher");
     wait_published(&live);
+    let publishing: Vec<_> = handle
+        .session_stats()
+        .into_iter()
+        .filter(|session| session.role == Access::Publish)
+        .collect();
+    assert_eq!(publishing.len(), 1, "{publishing:?}");
+    assert_eq!(publishing[0].path, "live");
+    assert_eq!(publishing[0].udp, transport == RtspTransport::Udp);
+    assert!(publishing[0].bytes_received > 0);
 
     // What the description left out is read from the first keyframe: the
     // picture's size, which a player's description and a file both need.

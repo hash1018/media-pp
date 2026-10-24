@@ -132,6 +132,7 @@ pub use driver::{RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOption
 #[cfg(feature = "rtsp-server")]
 pub use driver::{
     RtspDigest, RtspPathMode, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions,
+    RtspSessionStats,
 };
 pub use filter::{
     AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,
