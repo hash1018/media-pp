@@ -1414,10 +1414,11 @@ impl Remote {
                     Output::Event(event) => self.connected |= matches!(event, Event::Connected),
                 }
             }
-            self.socket
-                .set_read_timeout(Some(wait.max(Duration::from_millis(1))))
-                .unwrap();
-            match self.socket.recv_from(&mut buffer) {
+            match crate::elements::udp::recv_within(
+                &self.socket,
+                &mut buffer,
+                wait.max(Duration::from_millis(1)),
+            ) {
                 Ok((length, source)) => {
                     if let Ok(contents) = buffer[..length].try_into() {
                         let _ = self.rtc.handle_input(Input::Receive(

@@ -411,6 +411,19 @@ compile error with no explanation.
 
 ### Fixed
 
+- **On Windows, nothing that waits on a UDP socket loses a datagram that
+  comes as the wait ends.** A receive with a read timeout drops a datagram
+  arriving as the timeout runs out, which neither it nor the next receive
+  hands over. Every UDP socket here was read that way: the WebRTC server's,
+  a `WebRtcPeer`'s, the WHIP and WHEP clients', and an `RtspSource`'s over
+  UDP. A socket read every few milliseconds with little arriving between —
+  a stream of thirty pictures a second at a quarter of a megabit — lost a
+  packet every few seconds on an idle machine; a resend made most good, and
+  under load, waiting on a resend, a WebRTC player stalled for a second and
+  skipped a picture. The wait is now `WSAPoll`'s, and the receive after it
+  has the datagram waiting. The `webrtc_load` example reads the same way,
+  having counted the losses as the server's gaps.
+
 - **A live picture source keeps its time with the clock across dropped
   pictures.** A tick a slow downstream overran was dropped and the next
   picture stamped one after the last made, so every drop put the pictures

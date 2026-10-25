@@ -15,6 +15,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Rtc};
 
 use crate::buffer::MediaBuffer;
+use crate::elements::udp;
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
 use super::command::{TrackId, WebRtcError};
@@ -384,10 +385,7 @@ impl Driving {
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .clamp(Duration::from_millis(1), POLL);
-            if self.socket.set_read_timeout(Some(wait)).is_err() {
-                break;
-            }
-            let input = match self.socket.recv_from(&mut buffer) {
+            let input = match udp::recv_within(&self.socket, &mut buffer, wait) {
                 Ok((length, source)) => match buffer[..length].try_into() {
                     Ok(contents) => Input::Receive(
                         Instant::now(),
@@ -400,12 +398,7 @@ impl Driving {
                     ),
                     Err(_) => continue,
                 },
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
                     Input::Timeout(Instant::now())
                 }
                 Err(error) => {

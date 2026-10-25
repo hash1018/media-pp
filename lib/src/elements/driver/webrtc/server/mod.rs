@@ -25,6 +25,7 @@ use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
 use crate::elements::driver::publishers::{self, Arrivals, OnDrop, Publishers};
 use crate::elements::driver::served::Served;
+use crate::elements::udp;
 use crate::elements::{Authorize, Broadcast, BroadcastOptions, WebRtcMuxer, WebRtcSource};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
@@ -1055,13 +1056,14 @@ impl Shard {
             let wait = next
                 .saturating_duration_since(Instant::now())
                 .clamp(Duration::from_micros(200), POLL);
-            if socket.set_read_timeout(Some(wait)).is_err() {
-                continue;
-            }
             // What arrives now, and whatever else is already waiting.
             let mut first = true;
             loop {
-                let received = socket.recv_from(&mut buffer);
+                let received = if first {
+                    udp::recv_within(&socket, &mut buffer, wait)
+                } else {
+                    socket.recv_from(&mut buffer)
+                };
                 let (length, source) = match received {
                     Ok(received) => received,
                     Err(_) => break,

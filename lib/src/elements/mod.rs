@@ -31,6 +31,7 @@ pub mod sink;
 pub mod source;
 pub mod speech;
 mod stream_info;
+pub(crate) mod udp;
 mod video_format;
 pub mod vision;
 

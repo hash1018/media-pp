@@ -247,6 +247,47 @@ mod example {
         }
     }
 
+    /// Waits up to `wait` for a datagram and reads it. Not with a read
+    /// timeout on Windows: a datagram that comes as one runs out is lost,
+    /// which a stream sending little — a picture every 33 ms — met every
+    /// few seconds, and counted as the server's gap. There the wait is
+    /// `WSAPoll`'s, the call itself, and the receive after it has a
+    /// datagram waiting.
+    fn recv_within(
+        socket: &UdpSocket,
+        buffer: &mut [u8],
+        wait: Duration,
+    ) -> std::io::Result<(usize, SocketAddr)> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawSocket;
+            #[repr(C)]
+            struct PollFd {
+                fd: usize,
+                events: i16,
+                revents: i16,
+            }
+            #[link(name = "ws2_32")]
+            unsafe extern "system" {
+                fn WSAPoll(fds: *mut PollFd, count: u32, timeout: i32) -> i32;
+            }
+            const POLLRDNORM: i16 = 0x0100;
+            let mut fd = PollFd {
+                fd: socket.as_raw_socket() as usize,
+                events: POLLRDNORM,
+                revents: 0,
+            };
+            let timeout = i32::try_from(wait.as_micros().div_ceil(1000)).unwrap_or(i32::MAX);
+            // SAFETY: one `WSAPOLLFD`, for a socket this player owns.
+            if unsafe { WSAPoll(&mut fd, 1, timeout) } == 0 {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+        }
+        #[cfg(not(windows))]
+        socket.set_read_timeout(Some(wait))?;
+        socket.recv_from(buffer)
+    }
+
     fn play(url: &str, stop: &AtomicBool, totals: &Totals) -> Seen {
         let mut seen = Seen::default();
         if let Err(error) = session(url, stop, totals, &mut seen) {
@@ -389,8 +430,7 @@ mod example {
             if !rtc.is_alive() {
                 break Err("the connection closed".into());
             }
-            let _ = socket.set_read_timeout(Some(wait.max(Duration::from_millis(1))));
-            match socket.recv_from(&mut buffer) {
+            match recv_within(&socket, &mut buffer, wait.max(Duration::from_millis(1))) {
                 Ok((length, source)) => {
                     if let Ok(contents) = buffer[..length].try_into() {
                         let _ = rtc.handle_input(Input::Receive(

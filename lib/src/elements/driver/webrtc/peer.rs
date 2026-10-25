@@ -26,6 +26,7 @@ use crate::{
 };
 
 use crate::core::bell::Bell;
+use crate::elements::udp;
 
 use super::{
     command::{Command, OpenTrack, TrackId, TrackOutState, WebRtcError},
@@ -860,12 +861,7 @@ impl Driver for WebRtcPeer {
                 .saturating_duration_since(Instant::now())
                 .min(POLL_INTERVAL)
                 .max(Duration::from_millis(1));
-            self.socket
-                .set_read_timeout(Some(wait))
-                .inspect_err(|error| pp_error!(self, "set_read_timeout failed: {error}"))
-                .map_err(WebRtcError::from)?;
-
-            match self.socket.recv_from(&mut buf) {
+            match udp::recv_within(&self.socket, &mut buf, wait) {
                 Ok((n, source)) => {
                     let Ok(contents) = buf[..n].try_into() else {
                         continue; // not a WebRTC datagram we recognize — ignore
@@ -890,12 +886,7 @@ impl Driver for WebRtcPeer {
                         })
                         .map_err(WebRtcError::from)?;
                 }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     // Nothing arrived, but str0m still needs to be told
                     // time has passed — its own internal clock only moves
                     // forward via `Input::Timeout`, and *that* is what

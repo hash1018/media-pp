@@ -26,6 +26,7 @@ use crate::elements::rtsp::depacketize::{Depacketizer, nal_units};
 use crate::elements::rtsp::dts::Dts;
 use crate::elements::rtsp::message::{self, Incoming, Request, Response};
 use crate::elements::rtsp::sdp::Announced;
+use crate::elements::udp;
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
 use super::RtspSourceError;
@@ -414,7 +415,6 @@ impl Reader {
             Media::Interleaved(channels) => (tracks, channels),
             Media::Udp(sockets) => {
                 for (index, (track, (rtp, rtcp))) in tracks.into_iter().zip(sockets).enumerate() {
-                    rtp.set_read_timeout(Some(POLL))?;
                     let (tx, stop, heard, pp_log) =
                         (tx.clone(), Arc::clone(&stop), heard.clone(), pp_log.clone());
                     threads.push(
@@ -669,8 +669,8 @@ fn udp(
     let mut buffer = vec![0u8; 64 * 1024];
     let mut order = Reorder::default();
     while !stop.load(Ordering::Acquire) {
-        let released = match socket.recv(&mut buffer) {
-            Ok(size) => {
+        let released = match udp::recv_within(socket, &mut buffer, POLL) {
+            Ok((size, _)) => {
                 heard.now();
                 order.push(&buffer[..size])
             }
