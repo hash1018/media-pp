@@ -37,6 +37,8 @@ pub use rtsp_server::{
     RtspDigest, RtspServer, RtspServerError, RtspServerHandle, RtspServerOptions, RtspServerPath,
     RtspSessionStats,
 };
+#[cfg(all(fuzzing, feature = "webrtc"))]
+pub(crate) use webrtc::fuzz as webrtc_fuzz;
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
     IceServer, SessionId, SessionRole, SessionStats, TrackId, WebRtcError, WebRtcHandle,

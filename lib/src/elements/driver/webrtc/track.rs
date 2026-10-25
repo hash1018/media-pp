@@ -99,7 +99,7 @@ fn carries_parameter_sets(nalus: &[&[u8]], codec: Codec) -> Option<bool> {
 /// exactly what a caller needs. Such a file keeps its parameter sets in the
 /// bitstream, and refusing the record would leave nothing to state the
 /// length prefix with — the packets are still length-prefixed either way.
-fn avcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+pub(super) fn avcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
     // configurationVersion(1) profile(3) lengthSizeMinusOne(1) numOfSPS(1),
     // then each parameter set as a 16-bit length and its bytes, SPS first.
     const HEADER: usize = 6;
@@ -136,7 +136,7 @@ fn avcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
 /// Reads an `HEVCDecoderConfigurationRecord` — HEVC's `avcC`, what an MP4
 /// demuxer puts in `extradata` — as Annex-B parameter sets plus the NAL
 /// length prefix size its packets use; `None` for anything else.
-fn hvcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+pub(super) fn hvcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
     // 22 bytes of profile and format, lengthSizeMinusOne in the low bits of
     // the last; then a count of arrays, each a type byte, a 16-bit count,
     // and that many 16-bit-length parameter sets.

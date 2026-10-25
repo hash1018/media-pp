@@ -83,8 +83,46 @@ pub fn rtp(data: &[u8]) {
         4 => Payload::Vp8,
         _ => Payload::Vp9,
     };
+    depacketize(payload, rest);
+}
+
+/// RTP packets of an H.264 track, each behind a two-byte length.
+pub fn rtp_h264(data: &[u8]) {
+    depacketize(Payload::H264, data);
+}
+
+/// Of an H.265 track.
+pub fn rtp_h265(data: &[u8]) {
+    depacketize(Payload::H265, data);
+}
+
+/// Of an AAC track: the first byte its AU headers' size and index lengths.
+pub fn rtp_aac(data: &[u8]) {
+    let [sizes, rest @ ..] = data else {
+        return;
+    };
+    let payload = Payload::Aac {
+        size_length: sizes >> 4,
+        index_length: sizes & 0x0f,
+    };
+    depacketize(payload, rest);
+}
+
+/// Of a VP8 track.
+pub fn rtp_vp8(data: &[u8]) {
+    depacketize(Payload::Vp8, data);
+}
+
+/// Of a VP9 track.
+pub fn rtp_vp9(data: &[u8]) {
+    depacketize(Payload::Vp9, data);
+}
+
+/// `data` as RTP packets of `payload`, each behind a two-byte length,
+/// taken apart and the units they make looked into.
+fn depacketize(payload: Payload, data: &[u8]) {
     let mut depacketizer = Depacketizer::new(payload);
-    let mut rest = rest;
+    let mut rest = data;
     while let [high, low, after @ ..] = rest {
         let length = usize::from(u16::from_be_bytes([*high, *low])).min(after.len());
         let (packet, more) = after.split_at(length);
@@ -114,3 +152,7 @@ pub fn parameter_sets(data: &[u8]) {
 
 #[cfg(feature = "rtmp-server")]
 pub use crate::elements::driver::rtmp_fuzz::rtmp;
+#[cfg(feature = "webrtc")]
+pub use crate::elements::driver::webrtc_fuzz::{
+    http as webrtc_http, publisher as webrtc_publisher, track as webrtc_track,
+};

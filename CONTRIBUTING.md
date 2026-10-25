@@ -88,8 +88,11 @@ token to reuse.
 ## Fuzzing
 
 The parsers that take bytes from the network — RTSP messages and header
-values, SDP, RTP depacketizing, H.264/H.265 parameter sets, RTMP chunks with
-their AMF and FLV — are fuzz targets in `lib/fuzz`, reached through
+values, SDP, RTP depacketizing (a target for each payload, and one choosing
+among them), H.264/H.265 parameter sets, RTMP chunks with their AMF and
+FLV, and what the WebRTC elements read themselves: WHIP and WHEP requests,
+a publisher's first pictures, `avcC`/`hvcC` and length-prefixed pictures —
+are fuzz targets in `lib/fuzz`, reached through
 `media_pp::fuzzing`, which only `cargo fuzz` builds (`--cfg fuzzing`). They
 need nightly and run best on Linux:
 

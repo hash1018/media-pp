@@ -12,7 +12,7 @@ cargo-fuzz = true
 #   cargo +nightly fuzz run rtsp_messages
 [dependencies]
 libfuzzer-sys = "0.4"
-media-pp = { path = "..", features = ["rtmp-server", "rtsp-server"] }
+media-pp = { path = "..", features = ["rtmp-server", "rtsp-server", "webrtc"] }
 
 # Its own workspace: the repository's does not build it, nor want nightly.
 [workspace]
@@ -56,6 +56,62 @@ bench = false
 [[bin]]
 name = "rtmp"
 path = "fuzz_targets/rtmp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_h264"
+path = "fuzz_targets/rtp_h264.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_h265"
+path = "fuzz_targets/rtp_h265.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_aac"
+path = "fuzz_targets/rtp_aac.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_vp8"
+path = "fuzz_targets/rtp_vp8.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_vp9"
+path = "fuzz_targets/rtp_vp9.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webrtc_http"
+path = "fuzz_targets/webrtc_http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webrtc_publisher"
+path = "fuzz_targets/webrtc_publisher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webrtc_track"
+path = "fuzz_targets/webrtc_track.rs"
 test = false
 doc = false
 bench = false

@@ -2,6 +2,8 @@
 //! [`WebRtcServer`].
 
 mod http;
+#[cfg(fuzzing)]
+pub(crate) use http::read_head;
 mod session;
 #[cfg(test)]
 mod tests;
