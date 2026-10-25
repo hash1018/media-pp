@@ -411,6 +411,15 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A peer cannot grow what a server holds of it without end.** A
+  `WebRtcServer`'s WHIP and WHEP endpoint read a request's line and each
+  header to its newline however long, so a client sending one without a
+  newline grew it without bound; a line is now at most 8 KiB and a request
+  has at most 100 headers, past which it is answered `431`. RTSP's blank
+  lines between messages were skipped but never taken, so an `RtspServer`'s
+  client — or the server an `RtspSource` reads — sending nothing else grew
+  what was held without end; they now count toward a header block's limit.
+
 - **What fuzzing found in the parsers of what comes over the network.**
   An `RtmpServer` that read a message header on a chunk stream in the
   middle of an unfinished message took the new message for the old one's

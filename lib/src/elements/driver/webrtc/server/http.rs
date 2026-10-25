@@ -15,6 +15,11 @@ use super::{IceServer, SessionId, WebRtcServerError, WebRtcServerHandle};
 /// The most an offer may take.
 const MAX_BODY: usize = 256 * 1024;
 
+/// The longest a request's line or a header may be, and the most headers
+/// it may have; one longer is answered `431`.
+const MAX_LINE: u64 = 8 * 1024;
+const MAX_HEADERS: usize = 100;
+
 /// How long a client may take to send its request.
 const READ_WITHIN: Duration = Duration::from_secs(10);
 
@@ -155,37 +160,67 @@ fn serve(listener: &TcpListener, server: &WebRtcServerHandle, stop: &AtomicBool)
 }
 
 /// One request, answered.
-fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> io::Result<()> {
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(READ_WITHIN))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let mut parts = line.split_whitespace();
-    let (method, target) = (
-        parts.next().unwrap_or("").to_owned(),
-        parts.next().unwrap_or("").to_owned(),
-    );
-    let mut length = 0;
-    let mut authorization = None;
-    loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
-            break;
-        }
+/// What a request says ahead of its body, as far as it is answered.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Head {
+    method: String,
+    target: String,
+    length: usize,
+    authorization: Option<String>,
+}
+
+/// Reads a request's line and headers: `None` for one past [`MAX_LINE`] a
+/// line or [`MAX_HEADERS`] headers. A line read to its end however long
+/// grew without bound for a client that sent one without a newline.
+pub(crate) fn read_head(reader: &mut impl BufRead) -> io::Result<Option<Head>> {
+    fn line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+        let mut line = String::new();
+        let read = Read::take(&mut *reader, MAX_LINE).read_line(&mut line)?;
+        Ok((read as u64 != MAX_LINE || line.ends_with('\n')).then_some(line))
+    }
+    let Some(first) = line(reader)? else {
+        return Ok(None);
+    };
+    let mut parts = first.split_whitespace();
+    let mut head = Head {
+        method: parts.next().unwrap_or("").to_owned(),
+        target: parts.next().unwrap_or("").to_owned(),
+        length: 0,
+        authorization: None,
+    };
+    for _ in 0..=MAX_HEADERS {
+        let Some(header) = line(reader)? else {
+            return Ok(None);
+        };
         let header = header.trim_end();
         if header.is_empty() {
-            break;
+            return Ok(Some(head));
         }
         if let Some((name, value)) = header.split_once(':') {
             let name = name.trim();
             if name.eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().unwrap_or(0);
+                head.length = value.trim().parse().unwrap_or(0);
             } else if name.eq_ignore_ascii_case("authorization") {
-                authorization = Some(value.trim().to_owned());
+                head.authorization = Some(value.trim().to_owned());
             }
         }
     }
+    Ok(None)
+}
+
+fn answer(stream: TcpStream, peer: SocketAddr, server: &WebRtcServerHandle) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(READ_WITHIN))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let Some(Head {
+        method,
+        target,
+        length,
+        authorization,
+    }) = read_head(&mut reader)?
+    else {
+        return respond(stream, 431, &[], "");
+    };
     if length > MAX_BODY {
         return respond(stream, 413, &[], "");
     }
@@ -452,6 +487,7 @@ fn respond(
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
         _ => "Service Unavailable",
     };
     let mut head = format!(
@@ -471,4 +507,56 @@ fn respond(
     stream.write_all(head.as_bytes())?;
     stream.write_all(body.as_bytes())?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn head(request: &[u8]) -> Option<Head> {
+        read_head(&mut &request[..]).unwrap()
+    }
+
+    #[test]
+    fn a_request_s_head_is_read_up_to_its_body() {
+        let mut request =
+            b"POST /cam/whep HTTP/1.1\r\nContent-Length: 4\r\nAuthorization: Bearer t\r\n\r\n"
+                .to_vec();
+        request.extend_from_slice(b"v=0\n");
+        let mut reader = &request[..];
+        let read = read_head(&mut reader).unwrap().expect("a whole head");
+        assert_eq!(
+            read,
+            Head {
+                method: "POST".into(),
+                target: "/cam/whep".into(),
+                length: 4,
+                authorization: Some("Bearer t".into()),
+            }
+        );
+        assert_eq!(reader, b"v=0\n", "the body is left to read");
+    }
+
+    /// A line without end, or headers without end, is refused once past
+    /// what may be: read to its end, a line grew without bound.
+    #[test]
+    fn a_head_past_its_limits_is_refused() {
+        let mut long = b"POST /".to_vec();
+        long.extend(std::iter::repeat_n(b'a', MAX_LINE as usize * 4));
+        assert_eq!(head(&long), None, "a request line without end");
+        let mut header = b"POST /cam/whip HTTP/1.1\r\nX: ".to_vec();
+        header.extend(std::iter::repeat_n(b'b', MAX_LINE as usize));
+        header.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(head(&header), None, "a header line too long");
+        let many = format!(
+            "POST /cam/whip HTTP/1.1\r\n{}\r\n",
+            "X: y\r\n".repeat(MAX_HEADERS + 1)
+        );
+        assert_eq!(head(many.as_bytes()), None, "too many headers");
+        let enough = format!(
+            "POST /cam/whip HTTP/1.1\r\n{}\r\n",
+            "X: y\r\n".repeat(MAX_HEADERS)
+        );
+        assert!(head(enough.as_bytes()).is_some(), "as many as may be");
+    }
 }

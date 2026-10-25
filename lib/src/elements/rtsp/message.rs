@@ -100,7 +100,9 @@ pub(crate) fn parse(buf: &[u8]) -> Result<Option<(Incoming, usize)>, Malformed> 
         .count();
     let buf = &buf[skipped..];
     let Some(end) = find(buf, b"\r\n\r\n") else {
-        if buf.len() > MAX_HEADERS {
+        // The blank lines counted too: skipped and never taken, a peer
+        // sending nothing else grew what was held without end.
+        if skipped + buf.len() > MAX_HEADERS {
             return Err(Malformed("header block too long"));
         }
         return Ok(None);
@@ -580,6 +582,17 @@ mod tests {
         assert!(parse(b"GET / HTTP/1.1\r\n\r\n").is_err());
         assert!(parse(b"nonsense\r\n\r\n").is_err());
         assert!(parse(&vec![b'a'; MAX_HEADERS + 1]).is_err());
+    }
+
+    /// Blank lines and nothing else, past what a header block may be, are
+    /// refused: skipped and never taken, they were held without end.
+    #[test]
+    fn blank_lines_without_end_are_refused() {
+        assert!(matches!(parse(b"\r\n\r\n"), Ok(None)), "a few are allowed");
+        assert!(parse(&b"\r\n".repeat(MAX_HEADERS / 2 + 1)).is_err());
+        let mut late = b"\r\n".repeat(8);
+        late.extend_from_slice(b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n");
+        assert!(matches!(parse(&late), Ok(Some(_))), "a request after some");
     }
 
     #[cfg(feature = "rtsp-server")]
