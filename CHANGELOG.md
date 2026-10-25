@@ -411,6 +411,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **What fuzzing found in the parsers of what comes over the network.**
+  An `RtmpServer` that read a message header on a chunk stream in the
+  middle of an unfinished message took the new message for the old one's
+  rest: a shorter one's length less what was read overflowed. A header now
+  begins a message, letting go of what was read of the other. An H.264
+  sequence parameter set — what a camera or a publisher sends in band —
+  whose sides each fit but whose picture in macroblocks did not, or whose
+  scaling list had a `delta_scale` out of its range, overflowed working
+  them out; the one is read, keeping no reordered pictures, the other is
+  refused. Each overflow panicked a debug build and wrapped in a release
+  one.
+
 - **On Windows, nothing that waits on a UDP socket loses a datagram that
   comes as the wait ends.** A receive with a read timeout drops a datagram
   arriving as the timeout runs out, which neither it nor the next receive

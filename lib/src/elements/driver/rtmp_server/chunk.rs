@@ -205,6 +205,10 @@ impl<R: Read> ChunkReader<R> {
             stream.extended = extended;
         }
         if !continuing {
+            // A header begins a message: what was read of one before it,
+            // left unfinished, is let go of — taken as this one's start,
+            // it was more than a shorter one's length.
+            stream.partial.clear();
             let field = extended_value.unwrap_or(header[0]);
             match format {
                 0 => {
@@ -361,6 +365,27 @@ mod tests {
         assert_eq!(reader.next().unwrap().timestamp, 1040);
         assert_eq!(reader.next().unwrap().timestamp, 1080);
         assert_eq!(reader.bytes_read, wire.len() as u64);
+    }
+
+    /// A header in the middle of a message begins another: the one left
+    /// unfinished is let go of, and the new one — shorter than what was read
+    /// of the old — is read whole. Taken for the old one's next chunk, its
+    /// length less what was read of the old overflowed (found fuzzing).
+    #[test]
+    fn a_message_begun_over_an_unfinished_one_is_read_whole() {
+        let mut wire = Vec::new();
+        wire.extend(chunk(0, 6, &full_header(1000, 300, VIDEO, 1), &[7; 128]));
+        let mut short = 10u32.to_be_bytes()[1..].to_vec();
+        short.splice(0..0, 40u32.to_be_bytes()[1..].iter().copied());
+        short.push(AUDIO);
+        wire.extend(chunk(1, 6, &short, &[1; 10]));
+        let mut reader = ChunkReader::new(&wire[..]);
+        let message = reader.next().unwrap();
+        assert_eq!(
+            (message.kind, message.timestamp, message.payload),
+            (AUDIO, 1040, vec![1; 10])
+        );
+        assert!(reader.next().is_err(), "nothing more: the stream ends");
     }
 
     #[test]

@@ -411,7 +411,14 @@ pub(crate) fn h264_sequence(sps: &[u8]) -> Option<H264Sequence> {
     let inferred = if profile == 66 || intra {
         0
     } else {
-        max_dpb_frames(level, width_in_mbs * height_in_map_units * frame_factor)
+        // Each side fits, which their product need not: as many as fit of
+        // a picture larger than any level holds is none.
+        max_dpb_frames(
+            level,
+            width_in_mbs
+                .saturating_mul(height_in_map_units)
+                .saturating_mul(frame_factor),
+        )
     };
     Some(H264Sequence {
         shape: Shape {
@@ -708,7 +715,13 @@ fn skip_scaling_list(bits: &mut BitReader<'_>, size: usize) -> Option<()> {
     let mut next_scale = 8i32;
     for _ in 0..size {
         if next_scale != 0 {
-            next_scale = (last_scale + bits.read_se()? + 256) % 256;
+            // `delta_scale` is from -128 to 127: one beyond is no
+            // sequence, and summed it overflowed.
+            let delta = bits.read_se()?;
+            if !(-128..=127).contains(&delta) {
+                return None;
+            }
+            next_scale = (last_scale + delta + 256) % 256;
         }
         if next_scale != 0 {
             last_scale = next_scale;
@@ -775,6 +788,36 @@ impl<'a> BitReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An H.264 sequence whose sides each fit but whose picture, in
+    /// macroblocks, is more than counts: read, rather than overflowing
+    /// where the reorder depth is worked out from it (found fuzzing).
+    #[test]
+    fn a_sequence_too_large_to_count_is_read_without_overflowing() {
+        const HUGE: &[u8] = &[
+            0x67, 0x27, 0xfe, 0xbe, 0x0d, 0x08, 0xf0, 0x00, 0x00, 0x03, 0x42, 0xc0, 0x1e, 0x00,
+            0x27, 0xfe, 0xbe, 0x0d, 0x01, 0x15, 0x00, 0x00, 0x03,
+        ];
+        if let Some(sequence) = h264_sequence(HUGE) {
+            assert_eq!(sequence.reorder, 0, "a picture no level holds keeps none");
+        }
+    }
+
+    /// A scaling list whose `delta_scale` is out of its range is no
+    /// sequence, rather than an overflow summing it (found fuzzing).
+    #[test]
+    fn a_scaling_list_out_of_range_is_refused_without_overflowing() {
+        const WILD: &[u8] = &[
+            0x67, 0x76, 0xc0, 0x1e, 0xff, 0xff, 0xa8, 0xff, 0xff, 0x32, 0x00, 0x00, 0x01, 0x87,
+            0x87, 0x87, 0x00, 0xa9, 0xff, 0x0e, 0x29, 0xff, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff,
+            0xff, 0xa8, 0x00, 0x00, 0x01, 0x87, 0x0e,
+        ];
+        assert!(h264_sequence(WILD).is_none());
+        let _ = h264_shape(WILD);
+        for unit in annex_b(WILD) {
+            let _ = h264_sequence(unit);
+        }
+    }
 
     /// One 1920x1080 picture's sequence parameter set, as NVENC wrote it
     /// for an RGB picture: the range extensions profile, 4:4:4, coding 1088
