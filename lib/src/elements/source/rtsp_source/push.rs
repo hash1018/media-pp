@@ -163,8 +163,7 @@ fn next_request(
             }
             None => None,
         };
-        connection.stream.set_read_timeout(left)?;
-        match connection.fill() {
+        match connection.fill(left) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(RtspSourceError::Io(io::Error::new(

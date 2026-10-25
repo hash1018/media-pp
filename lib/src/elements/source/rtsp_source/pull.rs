@@ -132,10 +132,7 @@ impl Client {
             if left.is_zero() {
                 return Err(RtspSourceError::NoAnswer(self.timeout));
             }
-            connection
-                .stream
-                .set_read_timeout(Some(left.max(Duration::from_millis(1))))?;
-            match connection.fill() {
+            match connection.fill(Some(left.max(Duration::from_millis(1)))) {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(RtspSourceError::Io(io::Error::new(

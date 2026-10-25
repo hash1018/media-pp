@@ -352,20 +352,19 @@ mod example {
         totals: &Totals,
         seen: &mut Seen,
     ) -> Result<(), String> {
+        // Not with a read timeout, which on Windows loses what arrives as it
+        // runs out — a write's worth of the stream now and then, counted as
+        // the server's loss: read without waiting, as `receive_udp` does.
         connection
-            .set_read_timeout(Some(Duration::from_millis(200)))
+            .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
         let mut chunk = vec![0u8; 256 * 1024];
         while !stop.load(Ordering::Relaxed) {
             let read = match connection.read(&mut chunk) {
                 Ok(0) => return Err("the server closed the connection".into()),
                 Ok(n) => n,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
                     continue;
                 }
                 Err(e) => return Err(format!("read: {e}")),
@@ -393,6 +392,9 @@ mod example {
             }
             buffer.drain(..at);
         }
+        connection
+            .set_nonblocking(false)
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

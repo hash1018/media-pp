@@ -25,7 +25,7 @@ use crate::driver::{Driver, StopReceiver};
 use crate::element::{Element, ElementType, element_pp_log};
 use crate::elements::driver::publishers::{self, Arrivals, OnDrop, Publishers};
 use crate::elements::driver::served::Served;
-use crate::elements::udp;
+use crate::elements::net;
 use crate::elements::{Authorize, Broadcast, BroadcastOptions, WebRtcMuxer, WebRtcSource};
 use crate::error::Result;
 use crate::pp_log::{PpLog, pp_info, pp_warn};
@@ -1060,7 +1060,7 @@ impl Shard {
             let mut first = true;
             loop {
                 let received = if first {
-                    udp::recv_within(&socket, &mut buffer, wait)
+                    net::recv_within(&socket, &mut buffer, wait)
                 } else {
                     socket.recv_from(&mut buffer)
                 };

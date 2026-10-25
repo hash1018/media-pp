@@ -173,7 +173,7 @@ impl Client {
                     }
                 }
             }
-            match crate::elements::udp::recv_within(
+            match crate::elements::net::recv_within(
                 &self.socket,
                 &mut buffer,
                 wait.max(Duration::from_millis(1)),

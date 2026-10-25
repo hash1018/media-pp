@@ -10,7 +10,7 @@
 //! loses what comes past that, and a picture track then goes on from its
 //! next keyframe rather than handing on pictures that cannot be decoded.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::mem::ManuallyDrop;
 use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
@@ -22,11 +22,11 @@ use crossbeam_channel::{SendTimeoutError, Sender, TrySendError};
 use ffmpeg_next as ffmpeg;
 
 use crate::core::bell::Bell;
+use crate::elements::net;
 use crate::elements::rtsp::depacketize::{Depacketizer, nal_units};
 use crate::elements::rtsp::dts::Dts;
 use crate::elements::rtsp::message::{self, Incoming, Request, Response};
 use crate::elements::rtsp::sdp::Announced;
-use crate::elements::udp;
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_warn};
 
 use super::RtspSourceError;
@@ -267,9 +267,10 @@ impl Connection {
         }
     }
 
-    /// Reads what the socket has, waiting as long as its read timeout:
-    /// `Ok(false)` once the peer has closed it.
-    pub(super) fn fill(&mut self) -> io::Result<bool> {
+    /// Reads what the socket has, waiting up to `wait` — without end where
+    /// `None` — through [`net::read_within`]: `Ok(false)` once the peer has
+    /// closed it.
+    pub(super) fn fill(&mut self, wait: Option<Duration>) -> io::Result<bool> {
         if self.start == self.end {
             (self.start, self.end) = (0, 0);
         } else if self.buffer.len() - self.end < READ_AHEAD / 4 {
@@ -281,7 +282,7 @@ impl Connection {
                 self.buffer.resize(self.buffer.len() * 2, 0);
             }
         }
-        let read = self.stream.read(&mut self.buffer[self.end..])?;
+        let read = net::read_within(&self.stream, &mut self.buffer[self.end..], wait)?;
         self.end += read;
         Ok(read > 0)
     }
@@ -429,7 +430,6 @@ impl Reader {
                 (Vec::new(), Vec::new())
             }
         };
-        connection.stream.set_read_timeout(Some(POLL))?;
         let control = Control {
             connection,
             peer,
@@ -546,7 +546,7 @@ impl Control {
             if self.heard.since() > self.silence.after {
                 return Some(Item::Failed((self.silence.error)(self.silence.after)));
             }
-            match self.connection.fill() {
+            match self.connection.fill(Some(POLL)) {
                 Ok(true) => {}
                 Ok(false) => {
                     pp_info!(pp_log: &self.pp_log, "the peer closed the connection");
@@ -669,7 +669,7 @@ fn udp(
     let mut buffer = vec![0u8; 64 * 1024];
     let mut order = Reorder::default();
     while !stop.load(Ordering::Acquire) {
-        let released = match udp::recv_within(socket, &mut buffer, POLL) {
+        let released = match net::recv_within(socket, &mut buffer, POLL) {
             Ok((size, _)) => {
                 heard.now();
                 order.push(&buffer[..size])

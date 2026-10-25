@@ -424,6 +424,14 @@ compile error with no explanation.
   has the datagram waiting. The `webrtc_load` example reads the same way,
   having counted the losses as the server's gaps.
 
+- **On Windows, an `RtspSource` over TCP loses none of its stream as a wait
+  ends.** A read timeout of a TCP stream drops what arrives as it runs out
+  too — a write's worth taken from the stream and never handed over, once
+  in some ten thousand waits — and an `RtspSource` read its connection that
+  way while it played, interleaved RTP and all, and while it waited for an
+  answer or a publisher. It waits as its UDP sockets do now. The
+  `rtsp_load` example reads TCP without waiting, as it read UDP.
+
 - **A live picture source keeps its time with the clock across dropped
   pictures.** A tick a slow downstream overran was dropped and the next
   picture stamped one after the last made, so every drop put the pictures

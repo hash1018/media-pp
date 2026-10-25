@@ -26,7 +26,7 @@ use crate::{
 };
 
 use crate::core::bell::Bell;
-use crate::elements::udp;
+use crate::elements::net;
 
 use super::{
     command::{Command, OpenTrack, TrackId, TrackOutState, WebRtcError},
@@ -861,7 +861,7 @@ impl Driver for WebRtcPeer {
                 .saturating_duration_since(Instant::now())
                 .min(POLL_INTERVAL)
                 .max(Duration::from_millis(1));
-            match udp::recv_within(&self.socket, &mut buf, wait) {
+            match net::recv_within(&self.socket, &mut buf, wait) {
                 Ok((n, source)) => {
                     let Ok(contents) = buf[..n].try_into() else {
                         continue; // not a WebRTC datagram we recognize — ignore
