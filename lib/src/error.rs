@@ -102,10 +102,11 @@ use crate::{
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
         AudioResamplerError, AudioTempoError, AudioVolumeError, AudioWaveformError, DashMuxerError,
-        FileDemuxerError, FileMuxerError, FrameRateLimiterError, HlsMuxerError, MuxerTrackError,
-        PacerError, RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError,
-        SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
-        SwTextLayerError, SwVideoCompositorError, SwVideoEffectError, VideoSynchronizerError,
+        FileDemuxerError, FileMuxerError, FrameRateLimiterError, HlsMuxerError, LlHlsMuxerError,
+        MuxerTrackError, PacerError, RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError,
+        SubmitError, SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError,
+        SwScalerError, SwTextLayerError, SwVideoCompositorError, SwVideoEffectError,
+        VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -656,6 +657,10 @@ pub enum Error {
     /// HLS muxing or option validation failed.
     #[error(transparent)]
     HlsMuxerError(#[from] HlsMuxerError),
+
+    /// Low-Latency HLS muxing or option validation failed.
+    #[error(transparent)]
+    LlHlsMuxerError(#[from] LlHlsMuxerError),
 
     /// MPEG-DASH muxing or option validation failed.
     #[error(transparent)]

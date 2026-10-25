@@ -1,6 +1,7 @@
 mod dash_muxer;
 mod file_muxer;
 mod hls_muxer;
+mod ll_hls;
 mod prune;
 mod replay_buffer;
 mod rtmp_muxer;
@@ -12,6 +13,9 @@ mod tracks;
 pub use dash_muxer::{DashMode, DashMuxer, DashMuxerError, DashOptions};
 pub use file_muxer::{FileMuxer, FileMuxerError, Mp4Layout};
 pub use hls_muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
+pub use ll_hls::{
+    LlHlsMuxer, LlHlsMuxerError, LlHlsOptions, LlHlsPlaylistError, LlHlsPosition, LlHlsStream,
+};
 pub use replay_buffer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use rtmp_muxer::{RtmpMuxer, RtmpMuxerError};
 pub use rtsp_muxer::{RtspMuxer, RtspMuxerError};

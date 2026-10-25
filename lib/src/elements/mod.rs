@@ -201,6 +201,7 @@ pub use filter::{
 pub use sink::{
     AppSink, CounterHandle, DashMode, DashMuxer, DashMuxerError, DashOptions, FileMuxer,
     FileMuxerError, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat,
+    LlHlsMuxer, LlHlsMuxerError, LlHlsOptions, LlHlsPlaylistError, LlHlsPosition, LlHlsStream,
     Mp4Layout, MuxerSinks, MuxerTrack, MuxerTrackError, PacketCounter, ReplayBuffer,
     ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError, RtspMuxer, RtspMuxerError,
     SegmentPolicy, SegmentedFileMuxer, SubmitError,

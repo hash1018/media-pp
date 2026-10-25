@@ -211,6 +211,20 @@ compile error with no explanation.
 
 ### Added
 
+- **Low-Latency HLS: `LlHlsStream` and `LlHlsMuxer`.** An `LlHlsStream` is
+  what a server hands its HLS players: fragmented MP4 cut into parts of a
+  fifth of a second as it is written, kept in memory for a window of whole
+  segments. `playlist(at)` answers a player's `_HLS_msn` and `_HLS_part`
+  once what it names is in, and `file(name)` hands out an init section, a
+  part or a segment — the part the playlist says is coming once it is in.
+  Each run of the stream — a camera's connection — is written by a muxer
+  `stream.muxer()` makes, with `add_stream` and `open` as the other muxers
+  here; one whose init section is the last run's goes on as the same
+  stream, its timestamps on from the last, with no discontinuity, so a
+  player plays on across a camera that dropped and came back. Both waits
+  may be awaited on any async runtime. `ElementType` has an `LlHlsMuxer`
+  variant.
+
 - **`WebRtcServerOptions::ice_servers`: STUN and TURN servers told to
   WHIP and WHEP clients.** As RFC 9725 tells them — a `Link` header each,
   with a TURN server's credentials — on the answer to an offer, and on the

@@ -371,6 +371,8 @@ pub enum ElementType {
     SubtitleEncoder,
     /// HTTP Live Streaming muxer sink.
     HlsMuxer,
+    /// Low-Latency HLS muxer sink, and the stream it writes.
+    LlHlsMuxer,
     /// MPEG-DASH muxer sink.
     DashMuxer,
     /// Container file muxer sink — the container is whichever one

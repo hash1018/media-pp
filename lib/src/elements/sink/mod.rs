@@ -31,6 +31,9 @@ pub(crate) use muxer::MuxerId;
 pub use muxer::{DashMode, DashMuxer, DashMuxerError, DashOptions};
 pub use muxer::{FileMuxer, FileMuxerError, Mp4Layout, SegmentPolicy, SegmentedFileMuxer};
 pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
+pub use muxer::{
+    LlHlsMuxer, LlHlsMuxerError, LlHlsOptions, LlHlsPlaylistError, LlHlsPosition, LlHlsStream,
+};
 pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError};
 pub use muxer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use muxer::{RtmpMuxer, RtmpMuxerError};
