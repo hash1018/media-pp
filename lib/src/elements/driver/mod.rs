@@ -26,6 +26,8 @@ mod webrtc;
 pub use access::{Access, AccessRequest, Authorize, Credentials};
 #[cfg(any(feature = "rtsp-server", feature = "rtmp-server", feature = "webrtc"))]
 pub use publishers::Publishers;
+#[cfg(all(fuzzing, feature = "rtmp-server"))]
+pub(crate) use rtmp_server::fuzz as rtmp_fuzz;
 #[cfg(feature = "rtmp-server")]
 pub use rtmp_server::{
     RtmpServer, RtmpServerError, RtmpServerHandle, RtmpServerOptions, RtmpSource,

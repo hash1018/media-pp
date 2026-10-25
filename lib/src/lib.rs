@@ -354,6 +354,9 @@ mod app;
 mod core;
 pub mod elements;
 pub mod error;
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing;
 mod platform;
 #[cfg(test)]
 mod test_support;

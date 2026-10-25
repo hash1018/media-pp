@@ -326,6 +326,11 @@ objc2-foundation = { version = "0.3", optional = true, default-features = false,
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 
+# `fuzzing` is what `cargo fuzz` sets, to build `media_pp::fuzzing` for the
+# targets in `fuzz/`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 # Opens real windows, which AppKit serves only from the main thread's event
 # loop — a loop the test harness does not run — so it has a `main` of its own.
 [[test]]

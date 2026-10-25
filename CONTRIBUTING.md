@@ -85,6 +85,24 @@ capture scenarios also need `MEDIA_PP_SOAK_RESTORE_TOKEN`, since the portal
 would otherwise show its picker; any run of `screen_record_software` prints a
 token to reuse.
 
+## Fuzzing
+
+The parsers that take bytes from the network — RTSP messages and header
+values, SDP, RTP depacketizing, H.264/H.265 parameter sets, RTMP chunks with
+their AMF and FLV — are fuzz targets in `lib/fuzz`, reached through
+`media_pp::fuzzing`, which only `cargo fuzz` builds (`--cfg fuzzing`). They
+need nightly and run best on Linux:
+
+```sh
+cd lib
+cargo +nightly fuzz run rtmp -- -max_total_time=1800
+```
+
+A finding is a file in `lib/fuzz/artifacts/<target>/`: fix what it shows,
+and keep its bytes as a regression test beside the parser. A change to one
+of these parsers runs its target for a while before it lands. Its corpus and
+findings are not checked in.
+
 ## Releasing
 
 1. Move `CHANGELOG.md`'s *Unreleased* to the new version, with a sentence

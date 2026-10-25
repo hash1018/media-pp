@@ -12,6 +12,24 @@ mod tests;
 
 pub use source::RtmpSource;
 
+/// The fuzz targets' way to this server's parsers — see `crate::fuzzing`.
+#[cfg(fuzzing)]
+pub(crate) mod fuzz {
+    /// What a publisher sends after the handshake, taken apart: chunks into
+    /// messages, a command's AMF, a picture's or a sound's FLV tag.
+    pub fn rtmp(data: &[u8]) {
+        let mut reader = super::chunk::ChunkReader::new(data);
+        while let Ok(message) = reader.next() {
+            let _ = super::amf::decode_all(&message.payload);
+            let _ = super::flv::video(&message.payload);
+            let _ = super::flv::audio(&message.payload);
+        }
+        let _ = super::amf::decode_all(data);
+        let _ = super::flv::video(data);
+        let _ = super::flv::audio(data);
+    }
+}
+
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};

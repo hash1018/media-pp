@@ -1,0 +1,61 @@
+[package]
+name = "media-pp-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# The parsers that take bytes from the network, through `media_pp::fuzzing`,
+# which only `cargo fuzz` builds. Run from `lib/`:
+#   cargo +nightly fuzz run rtsp_messages
+[dependencies]
+libfuzzer-sys = "0.4"
+media-pp = { path = "..", features = ["rtmp-server", "rtsp-server"] }
+
+# Its own workspace: the repository's does not build it, nor want nightly.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "rtsp_messages"
+path = "fuzz_targets/rtsp_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtsp_values"
+path = "fuzz_targets/rtsp_values.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdp"
+path = "fuzz_targets/sdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp"
+path = "fuzz_targets/rtp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parameter_sets"
+path = "fuzz_targets/parameter_sets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtmp"
+path = "fuzz_targets/rtmp.rs"
+test = false
+doc = false
+bench = false
