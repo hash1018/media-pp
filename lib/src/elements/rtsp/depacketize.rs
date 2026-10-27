@@ -386,7 +386,7 @@ fn stamped(data: &[u8], at: i64, key: bool) -> ffmpeg::Packet {
 }
 
 /// What a payload of `size` bytes is allocated as: the next of four sizes
-/// in each power of two, from 4 KiB — at most an eighth more than it
+/// in each power of two, from 4 KiB — under a quarter more than it
 /// holds. The heap hands a freed block of the same size straight back,
 /// where blocks of every size a camera's pictures come in — each held a
 /// second by a broadcast — had it searching: a hundred cameras' sources
