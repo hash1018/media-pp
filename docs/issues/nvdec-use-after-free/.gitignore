@@ -1,0 +1,4 @@
+# What README.md builds and run.sh writes, here.
+/nvdec_uaf
+/fence.so
+/run-*.log

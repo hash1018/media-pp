@@ -30,6 +30,15 @@ under *Unreleased* in [`CHANGELOG.md`](../CHANGELOG.md). The API pages and
 | API documentation | The [Windows], [macOS] and [Linux] API pages, each with everything on that platform; [docs.rs] for what every platform shares |
 | [`CHANGELOG.md`](../CHANGELOG.md) | What changed between versions, and what to write instead |
 
+## Known issues
+
+Faults found outside media-pp, with what was measured, a program that
+reproduces each, and what to do meanwhile.
+
+| | |
+|---|---|
+| [NVDEC reads a block it has freed](issues/nvdec-use-after-free/) | NVIDIA's `libnvcuvid` can fault on one of its own threads when a decoder is closed while another decodes |
+
 ## Building and contributing
 
 | | |

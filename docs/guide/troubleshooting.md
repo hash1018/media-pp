@@ -115,6 +115,13 @@ Run the doctor. An FFmpeg built without NVIDIA's `nvcodec` has no NVENC;
 the setup script includes it. `VideoEncodeBin::path()` says which
 encoder it opened.
 
+**The process dies with a segmentation fault inside `libnvcuvid.so`, on
+Linux, soon after a `CudaDecoder` is dropped.**
+NVIDIA's NVDEC library can read a block it has just freed when one decoder
+is closed while another decodes. It faults where that block was given back
+to the system, which a low glibc mmap threshold makes likely. See
+[NVDEC reads a block it has freed](../issues/nvdec-use-after-free/).
+
 **Detection on D3D12 is slow — tens of milliseconds a picture.**
 DirectML hands the operators of a model exported past ONNX opset 20 to the
 CPU, and the log says so when the detector is made. Export it again at
