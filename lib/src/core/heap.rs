@@ -103,12 +103,19 @@ mod tests {
         super::keep_small().expect("nothing to do");
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
-            let trimming = std::fs::read_dir("/proc/self/task")
-                .expect("this process's threads")
-                .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
-                .filter(|name| name.trim_end() == "heap-trim")
-                .count();
-            assert_eq!(trimming, 1);
+            let trimming = || {
+                std::fs::read_dir("/proc/self/task")
+                    .expect("this process's threads")
+                    .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+                    .filter(|name| name.trim_end() == "heap-trim")
+                    .count()
+            };
+            // A thread names itself once it runs, after spawn has returned.
+            let named = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while trimming() == 0 && std::time::Instant::now() < named {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(trimming(), 1);
         }
     }
 }
