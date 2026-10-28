@@ -108,6 +108,15 @@ NVENC work was in flight.
 - **Do not hold glibc's mmap threshold low** in a process that decodes on
   NVDEC, nor use an allocator that gives large blocks back on free, unless
   one decoder at most is ever open at a time.
+- **To keep a server's heap small, call
+  [`heap::keep_small`](../../../lib/src/core/heap.rs)** rather than lowering
+  the threshold: it holds it at 32 MB, past NVDEC's block, and what it
+  trims out of a thread's arena stays mapped. relay-pp ran with it for
+  three hours, converting HEVC and closing conversions throughout, then
+  in 24 fresh processes for two more, closing a decoder 144 times while
+  another decoded, without this fault. That is about as many closings as
+  the program below needs for one fault, so it shows little by itself;
+  what it rests on is that the block is never unmapped.
 - **Decode on Vulkan Video where CUDA frames are not needed.** It reaches
   the same NVDEC hardware through NVIDIA's Vulkan driver, without
   `libnvcuvid`.

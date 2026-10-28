@@ -115,6 +115,15 @@ Run the doctor. An FFmpeg built without NVIDIA's `nvcodec` has no NVENC;
 the setup script includes it. `VideoEncodeBin::path()` says which
 encoder it opened.
 
+**A server's memory climbs to gigabytes on Linux, and stays there with its
+pipelines gone.**
+glibc's malloc keeps what each thread's arena freed at its end — up to 14
+MB an arena, and there can be eight arenas a core. It is not in use, and
+not a leak. Call `media_pp::heap::keep_small()` first in `main`: relay-pp's
+soak went from 1.8 GB to about 550 MB with it. Not `MALLOC_ARENA_MAX=2`,
+which held it as well for half a core more processor, nor a low
+`M_MMAP_THRESHOLD`, which NVDEC crashes under (below).
+
 **The process dies with a segmentation fault inside `libnvcuvid.so`, on
 Linux, soon after a `CudaDecoder` is dropped.**
 NVIDIA's NVDEC library can read a block it has just freed when one decoder

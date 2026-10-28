@@ -30,6 +30,7 @@ pub mod driver;
 pub mod element;
 pub(crate) mod frame_size;
 pub mod graph;
+pub mod heap;
 pub mod orientation;
 pub mod pad;
 pub(crate) mod parking;

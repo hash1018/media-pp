@@ -211,6 +211,16 @@ compile error with no explanation.
 
 ### Added
 
+- **`heap::keep_small()`: glibc's heap held near what a server uses.** A
+  process running many pipelines has a thread or more for each, and glibc
+  an arena for each thread; left to itself it lets every arena keep 10 to
+  14 MB free at its end. relay-pp's soak came to 1.8 GB of heap with a
+  tenth of it in use; with this, called first in `main`, it held about
+  550 MB for 2% more processor. It holds glibc's mmap and trim thresholds
+  at 32 MB and 1 MB and trims every arena every ten seconds; it does
+  nothing off Linux or without glibc, and nothing in the crate calls it —
+  how a whole process allocates is the program's choice.
+
 - **Low-Latency HLS: `LlHlsStream` and `LlHlsMuxer`.** An `LlHlsStream` is
   what a server hands its HLS players: fragmented MP4 cut into parts of a
   fifth of a second as it is written, kept in memory for a window of whole
