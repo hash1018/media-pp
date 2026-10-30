@@ -447,6 +447,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A `VulkanEncoder` no longer reads a frames context that is gone.**
+  FFmpeg's Vulkan encoders keep only a picture's buffer once it is
+  submitted, until its packet is out, and not the frames context the
+  buffer goes back to. Where that context was let go of in between — a
+  `VulkanDecoder`'s, replaced when the stream changed size, or a
+  `VulkanUpload`'s, dropped before the encoder drained — the picture went
+  back to a pool whose context was freed, and read it. Most runs got away
+  with it; one whose freed memory was reused faulted in
+  `avcodec_send_frame` or at the end of the stream. Each picture handed to
+  the encoder now holds its frames context until the encoder lets go of
+  it.
+
 - **A peer cannot grow what a server holds of it without end.** A
   `WebRtcServer`'s WHIP and WHEP endpoint read a request's line and each
   header to its newline however long, so a client sending one without a

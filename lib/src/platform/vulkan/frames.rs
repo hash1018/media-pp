@@ -111,3 +111,77 @@ pub(crate) fn sw_format_of(
         Ok(ffmpeg::format::Pixel::from((*frames_ctx).sw_format))
     }
 }
+
+/// `errno`'s out-of-memory, as FFmpeg reports an allocation that failed.
+const ENOMEM: i32 = 12;
+
+/// What holds a picture handed to one of FFmpeg's Vulkan encoders: its
+/// buffer, and the frames context that buffer goes back to.
+struct HeldPicture {
+    // First, so dropped first: the picture goes back to its pool while the
+    // context the pool belongs to is still there.
+    buffer: AvBufferRef,
+    _frames_ctx: AvBufferRef,
+}
+
+/// Lets go of a [`HeldPicture`]: the picture's buffer, then its frames
+/// context.
+///
+/// # Safety
+///
+/// `opaque` is the `HeldPicture` [`holding_its_frames_ctx`] boxed, and
+/// FFmpeg calls this once, when the last reference to the buffer goes.
+unsafe extern "C" fn release_held(opaque: *mut std::ffi::c_void, _data: *mut u8) {
+    // SAFETY: this function's own contract — the box made for this buffer,
+    // given back exactly once.
+    drop(unsafe { Box::from_raw(opaque.cast::<HeldPicture>()) });
+}
+
+/// Makes whatever holds `frame`'s picture hold its frames context too, so
+/// the picture can go back to its pool however late it is let go of.
+///
+/// FFmpeg's Vulkan encoders keep only a picture's buffer once they have
+/// submitted it (`ff_vk_exec_add_dep_frame` refs `buf[0]`, and
+/// `vulkan_encode.c` frees the frame at once), until its packet comes out;
+/// the frame's reference to its frames context goes with the frame. A
+/// context let go of in between — a decoder's, replaced when the stream
+/// changes size, or an upload's, dropped before the encoder drained — is
+/// freed while one of its pictures is out, and that picture's return to the
+/// pool reads it after it is gone. So `frame`'s `buf[0]` is swapped for a
+/// buffer over the same picture that holds both, and lets go of them in
+/// that order.
+///
+/// A frame without a buffer or a frames context is left as it is.
+pub(crate) fn holding_its_frames_ctx(
+    frame: &mut ffmpeg::frame::Video,
+) -> Result<(), ffmpeg::Error> {
+    // SAFETY: `frame` is a live frame this caller owns, so its `buf[0]` and
+    // `hw_frames_ctx` are references it may take or give away; null ones are
+    // left alone. `buf[0]`'s reference moves into the `HeldPicture` and,
+    // where FFmpeg cannot make the buffer that owns it, back into the frame,
+    // so it is held exactly once on every path. The new buffer describes the
+    // same bytes as the one it replaces, and `release_held` is the matching
+    // inverse of the box made for it.
+    unsafe {
+        let raw = frame.as_mut_ptr();
+        let buffer = (*raw).buf[0];
+        if buffer.is_null() || (*raw).hw_frames_ctx.is_null() {
+            return Ok(());
+        }
+        let frames_ctx = AvBufferRef::from_raw(ffi::av_buffer_ref((*raw).hw_frames_ctx))
+            .ok_or(ffmpeg::Error::Other { errno: ENOMEM })?;
+        let (data, size) = ((*buffer).data, (*buffer).size);
+        let held = Box::into_raw(Box::new(HeldPicture {
+            buffer: AvBufferRef::from_raw(buffer).expect("checked non-null above"),
+            _frames_ctx: frames_ctx,
+        }));
+        let wrapper = ffi::av_buffer_create(data, size, Some(release_held), held.cast(), 0);
+        if wrapper.is_null() {
+            let held = Box::from_raw(held);
+            (*raw).buf[0] = held.buffer.into_raw();
+            return Err(ffmpeg::Error::Other { errno: ENOMEM });
+        }
+        (*raw).buf[0] = wrapper;
+    }
+    Ok(())
+}

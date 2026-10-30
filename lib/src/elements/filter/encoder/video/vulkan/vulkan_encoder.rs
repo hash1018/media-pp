@@ -14,7 +14,7 @@ use crate::{
     error::Result,
     platform::{
         ffmpeg::AvBufferRef,
-        vulkan::frames::{NotOurs, create_frames_ctx, sw_format_of},
+        vulkan::frames::{NotOurs, create_frames_ctx, holding_its_frames_ctx, sw_format_of},
     },
     transform::{FilterStage, filter_stage},
 };
@@ -399,8 +399,10 @@ impl Encoding {
         }
         let pts = shared::pts_in(frame, shared::TIME_BASE)
             .map_err(|shared::NoTimeBase| VulkanEncoderError::NoTimeBase)?;
-        let frame =
+        let mut frame =
             shared::restamped(frame, pts, shared::TIME_BASE).map_err(VulkanEncoderError::from)?;
+        // The encoder keeps the picture past the frame, and not its context.
+        holding_its_frames_ctx(&mut frame).map_err(VulkanEncoderError::from)?;
         self.encoder
             .send_frame(&frame)
             .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
@@ -658,6 +660,63 @@ mod tests {
             mean < 3.0,
             "the last picture decodes to what was sent: {mean}"
         );
+    }
+
+    /// A picture the encoder has submitted keeps the frames context it came
+    /// from until its packet is out, though everything else let go of that
+    /// context first: FFmpeg's encoder holds the picture alone, and the
+    /// picture's return to its pool reads the context.
+    #[test]
+    fn a_submitted_picture_keeps_its_frames_context() {
+        let Some(device) = try_vulkan_device() else {
+            return;
+        };
+        let _session = crate::test_support::encoder_session();
+        let (width, height) = (320u32, 240u32);
+        // Without B-frames the last picture sent is submitted at once, and
+        // with the encoder's two in flight its packet is not yet out.
+        let options = VulkanEncoderOptions {
+            max_b_frames: Some(0),
+            ..options(VulkanCodec::H264, width, height)
+        };
+        let mut encoder = match VulkanEncoder::new("encoder", &device, options) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: no Vulkan H.264 encoder here ({error})");
+                return;
+            }
+        };
+        let packets = capture(&mut encoder);
+        let mut upload = VulkanUpload::new("upload", &device);
+        let uploaded = capture(&mut upload);
+        let mut frames_ctx = None;
+        for index in 0..4 {
+            upload
+                .consume(MediaBuffer::video(ramp(width, height, index)))
+                .unwrap();
+            let frame = uploaded.lock().unwrap().remove(0);
+            let MediaBuffer::Video(picture) = &frame else {
+                unreachable!("an upload hands on video")
+            };
+            // SAFETY: a live Vulkan frame carries a reference to its frames
+            // context; another is taken, which `from_raw` owns.
+            frames_ctx = frames_ctx.or_else(|| unsafe {
+                AvBufferRef::from_raw(ffi::av_buffer_ref((*picture.as_ptr()).hw_frames_ctx))
+            });
+            encoder.consume(frame).expect("encode");
+        }
+        let frames_ctx = frames_ctx.expect("the upload's frames context");
+        drop(upload);
+        drop(uploaded);
+        // SAFETY: a live reference, only counted.
+        let holders = || unsafe { ffi::av_buffer_get_ref_count(frames_ctx.as_ptr()) };
+        assert!(
+            holders() > 1,
+            "the picture in flight holds its frames context"
+        );
+        crate::stream::deliver(&mut encoder, &crate::stream::StreamEvent::Eos).expect("eos");
+        assert_eq!(packets.lock().unwrap().len(), 4, "every packet is out");
+        assert_eq!(holders(), 1, "and lets go of it once its packet is");
     }
 
     /// A frame in system memory and one of another device are refused by
