@@ -318,6 +318,24 @@ mod tests {
         test_support::{capture, try_vulkan_device},
     };
 
+    /// A source on `device`, or `None` — with the reason — where the device
+    /// cannot import a DMA-BUF, as a software Vulkan cannot.
+    fn opened(
+        device: &VulkanDevice,
+        width: u32,
+        height: u32,
+        alpha: DmaBufAlpha,
+    ) -> Option<(VulkanDmaBufSource, VulkanDmaBufHandle)> {
+        match VulkanDmaBufSource::new("dmabuf", device, width, height, alpha, 1) {
+            Ok(opened) => Some(opened),
+            Err(VulkanDmaBufSourceError::NoImport) => {
+                eprintln!("skipping: this Vulkan device cannot import a DMA-BUF");
+                None
+            }
+            Err(error) => panic!("the source opens: {error}"),
+        }
+    }
+
     /// Pushes `pixels` — `width` x `height` packed BGRA, in a GBM buffer of
     /// `modifier` — through the source's copy, and brings the frame back to
     /// the CPU as rows of BGRA. `None` means skip.
@@ -331,8 +349,7 @@ mod tests {
         let device = try_vulkan_device()?;
         let (buffer, stride) =
             super::super::dmabuf::tests::gbm_buffer_with(pixels, width, height, modifier)?;
-        let (_source, handle) = VulkanDmaBufSource::new("dmabuf", &device, width, height, alpha, 1)
-            .expect("the source opens on a Vulkan machine");
+        let (_source, handle) = opened(&device, width, height, alpha)?;
         let dmabuf = DmaBuf {
             fd: buffer.as_raw_fd(),
             offset: 0,
@@ -441,9 +458,9 @@ mod tests {
         let Some(device) = try_vulkan_device() else {
             return;
         };
-        let (_source, handle) =
-            VulkanDmaBufSource::new("dmabuf", &device, 8, 8, DmaBufAlpha::Straight, 1)
-                .expect("the source opens");
+        let Some((_source, handle)) = opened(&device, 8, 8, DmaBufAlpha::Straight) else {
+            return;
+        };
         let error = handle
             .push(
                 &DmaBuf {
