@@ -1838,6 +1838,7 @@ fn run_pipewire(
                             .lock()
                             .map(|modifier| *modifier)
                             .unwrap_or_default(),
+                        fourcc: crate::platform::linux::dmabuf_cuda::DRM_FORMAT_XRGB8888,
                     };
                     match gpu.capture(plane, width, height) {
                         Ok(frame) => {

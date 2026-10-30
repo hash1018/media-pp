@@ -275,6 +275,8 @@ pub use source::{
 };
 #[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
 pub use source::{CoreAudioCaptureOptions, CoreAudioCaptureSource, CoreAudioCaptureSourceError};
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+pub use source::{CudaDmaBufHandle, CudaDmaBufSource, CudaDmaBufSourceError, DmaBuf, DmaBufAlpha};
 #[cfg(feature = "cuda")]
 pub use source::{
     CudaTextLayerHandle, CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,

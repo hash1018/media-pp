@@ -211,6 +211,18 @@ compile error with no explanation.
 
 ### Added
 
+- **`CudaDmaBufSource`: another process's DMA-BUFs as CUDA frames, on
+  Linux with `cuda`.** What `D3d11SharedTextureSource` is on Windows and
+  `MetalSharedTextureSource` on macOS: a pushed source whose producer hands
+  `CudaDmaBufHandle::push` (or `try_push`, for a thread that cannot wait) a
+  `DmaBuf` — one plane of BGRA, its stride, offset and modifier — per
+  picture, which is copied on the GPU, through OpenGL, into a BGRA frame of
+  the pipeline's own before the call returns. `DmaBufAlpha` says what the
+  fourth byte is: ignored, straight, or premultiplied, which is divided
+  back out. Linear buffers and NVIDIA's block-linear ones alike — the
+  second is what Chromium 156 hands over drawing a page off-screen on its
+  Wayland platform. `ElementType` has a `CudaDmaBufSource` variant.
+
 - **`heap::keep_small()`: glibc's heap held near what a server uses.** A
   process running many pipelines has a thread or more for each, and glibc
   an arena for each thread; left to itself it lets every arena keep 10 to

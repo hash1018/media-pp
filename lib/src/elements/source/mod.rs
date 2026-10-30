@@ -125,6 +125,10 @@ pub use render_mode::RenderMode;
 #[cfg(feature = "rtsp-server")]
 pub(crate) use rtsp_source::{PublishedItem, PublishedOutbox};
 pub use rtsp_source::{RtspListenOptions, RtspSource, RtspSourceError};
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+pub use shared_texture::{
+    CudaDmaBufHandle, CudaDmaBufSource, CudaDmaBufSourceError, DmaBuf, DmaBufAlpha,
+};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use shared_texture::{
     D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,

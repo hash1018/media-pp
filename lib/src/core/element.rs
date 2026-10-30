@@ -85,6 +85,8 @@ pub enum ElementType {
     /// macOS source for `IOSurface`s another producer shares in, copied
     /// with Metal.
     MetalSharedTextureSource,
+    /// Source for DMA-BUFs another process shares in, imported into CUDA.
+    CudaDmaBufSource,
     /// Linux V4L2 camera capture source.
     V4l2CaptureSource,
     /// Multi-input audio mixer source.

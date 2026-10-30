@@ -1,0 +1,727 @@
+use std::{
+    ffi::c_int,
+    sync::{Arc, Mutex, mpsc},
+    thread::JoinHandle,
+    time::Duration,
+};
+
+use ffmpeg_next as ffmpeg;
+use thiserror::Error as ThisError;
+
+use crate::{
+    buffer::MediaBuffer,
+    contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
+    element::{Element, ElementType, SourceStage},
+    elements::{AppSource, AppSourceHandle, source::app_source::Receiving},
+    ffmpeg::ffi,
+    platform::{
+        cuda::{CudaDevice, CudaFrameFormat, frame::create_hw_frames_ctx},
+        ffmpeg::AvBufferRef,
+        linux::dmabuf_cuda::{
+            CudaBgraSurface, DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DmaBufCudaError,
+            DmaBufCudaImporter, DmaBufPlane,
+        },
+    },
+    pool::UnboundObjectPool,
+    pp_log::pp_info,
+    produce::source_stage,
+};
+
+/// Errors specific to `CudaDmaBufSource`. Converts into the crate-wide
+/// `Error` via `?` (see [`crate::error::Error`]).
+#[derive(Debug, ThisError)]
+pub enum CudaDmaBufSourceError {
+    /// The DMA-BUF could not be read into CUDA: EGL would not import it, GL
+    /// would not read it, or CUDA would not take what GL read.
+    #[error(transparent)]
+    Import(#[from] DmaBufCudaError),
+
+    /// The pool the imported pictures land in could not be made or drawn
+    /// from.
+    #[error("the CUDA pool could not be used: {0}")]
+    Pool(String),
+
+    /// The thread that does the import is gone, which only happens when it
+    /// could not start or panicked.
+    #[error("the DMA-BUF import thread has stopped")]
+    ImportStopped,
+
+    /// A picture of another size than the source was made for.
+    #[error(
+        "a {width}x{height} DMA-BUF was pushed into a {expected_width}x{expected_height} source"
+    )]
+    WrongSize {
+        width: u32,
+        height: u32,
+        expected_width: u32,
+        expected_height: u32,
+    },
+
+    /// The source has ended — its `Pipeline` finished, or end-of-stream was
+    /// already submitted — so nothing more can be pushed into it.
+    #[error("CudaDmaBufSource has already ended")]
+    Closed,
+}
+
+/// What the fourth byte of each pixel in the pushed buffers is.
+///
+/// Fixed for a source, because it is a property of whoever produces the
+/// pictures rather than of any one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaBufAlpha {
+    /// Nothing: every picture is opaque, as a screen capture is. The byte is
+    /// read as `DRM_FORMAT_XRGB8888` and comes out as 255.
+    Ignored,
+    /// Alpha, with colour that has not been multiplied by it — what every
+    /// other BGRA frame in this crate carries.
+    Straight,
+    /// Alpha, with colour already multiplied by it — what a compositing
+    /// producer such as a browser engine hands over. The frames that come
+    /// out have it divided back out, so they are straight like every other
+    /// BGRA frame here: the CUDA compositor has no premultiplied blend, and
+    /// a filter keying on colour wants the colour itself.
+    Premultiplied,
+}
+
+/// One picture another process has drawn, as it hands it over: a single
+/// plane of packed BGRA or BGRx in a DMA-BUF.
+///
+/// Borrowed rather than owned — the file descriptor is the producer's, and
+/// it only has to stay open until [`CudaDmaBufHandle::push`] returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaBuf {
+    /// The DMA-BUF.
+    pub fd: c_int,
+    /// Where the plane starts in it, in bytes.
+    pub offset: u32,
+    /// Bytes per row, which is often more than four times the width.
+    pub stride: u32,
+    /// The DRM format modifier the buffer was allocated with —
+    /// `DRM_FORMAT_MOD_LINEAR` (zero) for plain rows of pixels, and else a
+    /// GPU's own tiled layout: NVIDIA's block-linear is what Chromium hands
+    /// over, drawing off-screen on its Wayland platform.
+    pub modifier: u64,
+    /// The picture's size in pixels.
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Brings another process's DMA-BUFs into this pipeline, as `Pixel::CUDA`
+/// BGRA frames on this pipeline's own device.
+///
+/// The Linux counterpart of `D3d11SharedTextureSource`, and in the same
+/// shape: a pushed source, built on [`AppSource`], whose producer calls
+/// [`CudaDmaBufHandle::push`] with a buffer per picture. It copies for the
+/// same reason that one does — the producer reuses its buffers — and the
+/// copy never leaves the GPU.
+///
+/// # How the copy is made
+///
+/// CUDA will not register an EGL image made from a DMA-BUF on desktop
+/// NVIDIA drivers, so the import goes through OpenGL: the buffer becomes a
+/// texture, GL reads it into a pixel buffer CUDA has registered, and CUDA
+/// copies that into a frame of its own — see
+/// `platform::linux::dmabuf_cuda`, which `PipeWireScreenCaptureSource` also
+/// uses. For [`DmaBufAlpha::Premultiplied`] the texture is first drawn
+/// through a shader that divides the alpha out.
+///
+/// All of that happens on a thread of this source's own, which owns the EGL
+/// and CUDA contexts it needs current: a push waits for it, so the buffer
+/// is still the producer's picture while it is read, but the producer's
+/// thread — a browser engine's, typically, with GL state of its own — never
+/// has another context made current on it.
+///
+/// # What it does not do
+///
+/// Resize, convert or pace, as `D3d11SharedTextureSource` does not. A
+/// buffer of another size is refused, and a multi-plane format is not
+/// something this can be given.
+pub struct CudaDmaBufSource(SourceStage<Receiving>);
+
+source_stage!(CudaDmaBufSource);
+
+/// Pushes another process's DMA-BUFs into a [`CudaDmaBufSource`].
+///
+/// Cheap to clone, and every clone feeds the same source. Push
+/// [`Self::finish`] when done, or drop every clone.
+///
+/// # Push while the buffer is still the producer's picture
+///
+/// [`Self::push`] imports before it returns, so it must be called while the
+/// producer still holds that picture — inside its paint callback, not
+/// queued for later.
+#[derive(Clone)]
+pub struct CudaDmaBufHandle {
+    pusher: AppSourceHandle,
+    import: Arc<ImportThread>,
+}
+
+/// The thread imports happen on, and the way to ask it for one.
+struct ImportThread {
+    requests: Mutex<Option<mpsc::Sender<Request>>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+    width: u32,
+    height: u32,
+    /// Reused for the small `AVFrame` wrapper only; the CUDA surface inside
+    /// is the pool's own and goes back to it when downstream lets go.
+    wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
+}
+
+struct Request {
+    buffer: DmaBuf,
+    reply: mpsc::Sender<std::result::Result<ffmpeg::frame::Video, CudaDmaBufSourceError>>,
+}
+
+/// How long a push waits for the import thread before giving up on the
+/// picture. An import is a few milliseconds; this only matters if the
+/// thread has hung, and then the producer loses a picture rather than its
+/// own thread.
+const IMPORT_WAIT: Duration = Duration::from_secs(2);
+
+impl CudaDmaBufSource {
+    /// `device` must be the [`CudaDevice`] every other CUDA element in this
+    /// pipeline was built from. `width`/`height` are what every pushed
+    /// buffer must be and what the frames coming out are. `capacity` bounds
+    /// how many frames may sit unconsumed, as [`AppSource::new`]'s does.
+    ///
+    /// Starts the import thread and makes its contexts before returning, so
+    /// a machine that cannot import at all — no EGL device for the GPU, a
+    /// driver without the DMA-BUF extensions — is an error here rather than
+    /// at the first picture.
+    pub fn new(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        width: u32,
+        height: u32,
+        alpha: DmaBufAlpha,
+        capacity: usize,
+    ) -> std::result::Result<(Self, CudaDmaBufHandle), CudaDmaBufSourceError> {
+        let (inner, pusher) = AppSource::receiving(
+            name,
+            capacity,
+            ElementType::CudaDmaBufSource,
+            OutputContract::Fixed(PortContract::frame(
+                MediaKind::VideoFrame,
+                MemoryDomain::Cuda,
+            )),
+            // Live, as `D3d11SharedTextureSource` is: what it emits is
+            // whatever the producer drew just now, and a paused pipeline
+            // cannot ask it for a first picture.
+            true,
+        );
+        let import = ImportThread::start(device.retain(), width, height, alpha)?;
+        pp_info!(pp_log: inner.pp_log(), "opened: {width}x{height}, alpha {alpha:?}");
+        Ok((
+            Self(inner),
+            CudaDmaBufHandle {
+                pusher,
+                import: Arc::new(import),
+            },
+        ))
+    }
+}
+
+impl CudaDmaBufHandle {
+    /// Imports `buffer` into this pipeline and pushes it downstream as one
+    /// frame, stamped `pts` (`None` leaves it unstamped, which is what a
+    /// compositor-driven graph wants).
+    ///
+    /// Blocks while the source's queue is full, as
+    /// [`AppSourceHandle::push`] does.
+    pub fn push(
+        &self,
+        buffer: &DmaBuf,
+        pts: Option<i64>,
+    ) -> std::result::Result<(), CudaDmaBufSourceError> {
+        let frame = self.import.import(buffer, pts)?;
+        self.pusher
+            .push(frame)
+            .map_err(|_| CudaDmaBufSourceError::Closed)
+    }
+
+    /// [`Self::push`] for a producer that cannot wait — a browser engine's
+    /// paint callback, which is that engine's one thread. `Ok(false)` means
+    /// the queue was full and this picture was dropped; `Err` means the
+    /// import failed or the source has ended. As with
+    /// `D3d11SharedTextureHandle::try_push`, the import still happens.
+    pub fn try_push(
+        &self,
+        buffer: &DmaBuf,
+        pts: Option<i64>,
+    ) -> std::result::Result<bool, CudaDmaBufSourceError> {
+        let frame = self.import.import(buffer, pts)?;
+        self.pusher
+            .try_push(frame)
+            .map_err(|_| CudaDmaBufSourceError::Closed)
+    }
+
+    /// Ends the stream, as [`AppSourceHandle::finish`] does.
+    pub fn finish(&self) -> std::result::Result<(), CudaDmaBufSourceError> {
+        self.pusher
+            .finish()
+            .map_err(|_| CudaDmaBufSourceError::Closed)
+    }
+}
+
+impl ImportThread {
+    fn start(
+        hw_device_ctx: Arc<AvBufferRef>,
+        width: u32,
+        height: u32,
+        alpha: DmaBufAlpha,
+    ) -> std::result::Result<Self, CudaDmaBufSourceError> {
+        let (requests, incoming) = mpsc::channel::<Request>();
+        let (ready_tx, ready) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("cuda-dmabuf-import".to_owned())
+            .spawn(move || {
+                let mut worker = match Worker::new(hw_device_ctx, width, height, alpha) {
+                    Ok(worker) => {
+                        let _ = ready_tx.send(Ok(()));
+                        worker
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                for request in incoming {
+                    let _ = request.reply.send(worker.import(request.buffer));
+                }
+            })
+            .map_err(|_| CudaDmaBufSourceError::ImportStopped)?;
+        match ready.recv() {
+            Ok(Ok(())) => Ok(Self {
+                requests: Mutex::new(Some(requests)),
+                thread: Mutex::new(Some(thread)),
+                width,
+                height,
+                wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+            }),
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(CudaDmaBufSourceError::ImportStopped)
+            }
+        }
+    }
+
+    fn import(
+        &self,
+        buffer: &DmaBuf,
+        pts: Option<i64>,
+    ) -> std::result::Result<MediaBuffer, CudaDmaBufSourceError> {
+        if (buffer.width, buffer.height) != (self.width, self.height) {
+            return Err(CudaDmaBufSourceError::WrongSize {
+                width: buffer.width,
+                height: buffer.height,
+                expected_width: self.width,
+                expected_height: self.height,
+            });
+        }
+        let (reply, answer) = mpsc::channel();
+        {
+            let requests = self
+                .requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            requests
+                .as_ref()
+                .ok_or(CudaDmaBufSourceError::ImportStopped)?
+                .send(Request {
+                    buffer: *buffer,
+                    reply,
+                })
+                .map_err(|_| CudaDmaBufSourceError::ImportStopped)?;
+        }
+        let mut frame = answer
+            .recv_timeout(IMPORT_WAIT)
+            .map_err(|_| CudaDmaBufSourceError::ImportStopped)??;
+        frame.set_pts(pts);
+        let mut slot = self.wrappers.get();
+        *slot = frame;
+        Ok(MediaBuffer::Video(Arc::new(slot).into()))
+    }
+}
+
+impl Drop for ImportThread {
+    fn drop(&mut self) {
+        // The sender first: the thread's loop ends when it goes, and it drops
+        // its contexts on its own way out.
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(thread) = self
+            .thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What lives on the import thread: the importer, whose contexts are
+/// current there, and the pool its pictures land in.
+struct Worker {
+    importer: DmaBufCudaImporter,
+    /// Held so the device outlives the pool made from it.
+    _hw_device_ctx: Arc<AvBufferRef>,
+    frames: AvBufferRef,
+    width: u32,
+    height: u32,
+    alpha: DmaBufAlpha,
+}
+
+impl Worker {
+    fn new(
+        hw_device_ctx: Arc<AvBufferRef>,
+        width: u32,
+        height: u32,
+        alpha: DmaBufAlpha,
+    ) -> std::result::Result<Self, CudaDmaBufSourceError> {
+        let importer = DmaBufCudaImporter::new()?;
+        // SAFETY: `create_hw_frames_ctx`'s contract is a live device context,
+        // which the owned `AvBufferRef` is.
+        let frames =
+            unsafe { create_hw_frames_ctx(&hw_device_ctx, CudaFrameFormat::Bgra, width, height) }
+                .map_err(|error| CudaDmaBufSourceError::Pool(error.to_string()))?;
+        Ok(Self {
+            importer,
+            _hw_device_ctx: hw_device_ctx,
+            frames,
+            width,
+            height,
+            alpha,
+        })
+    }
+
+    fn import(
+        &mut self,
+        buffer: DmaBuf,
+    ) -> std::result::Result<ffmpeg::frame::Video, CudaDmaBufSourceError> {
+        let mut frame = ffmpeg::frame::Video::empty();
+        // SAFETY: `self.frames` is this worker's own pool, and `frame` is the
+        // empty local the surface is being allocated into.
+        let code =
+            unsafe { ffi::av_hwframe_get_buffer(self.frames.as_ptr(), frame.as_mut_ptr(), 0) };
+        if code < 0 {
+            return Err(CudaDmaBufSourceError::Pool(format!(
+                "av_hwframe_get_buffer failed ({code})"
+            )));
+        }
+        let surface = CudaBgraSurface::from_frame(&frame)
+            .ok_or_else(|| CudaDmaBufSourceError::Pool("a surface with no memory".to_owned()))?;
+        let plane = DmaBufPlane {
+            fd: buffer.fd,
+            offset: buffer.offset,
+            stride: i32::try_from(buffer.stride).unwrap_or(i32::MAX),
+            modifier: buffer.modifier,
+            fourcc: match self.alpha {
+                DmaBufAlpha::Ignored => DRM_FORMAT_XRGB8888,
+                DmaBufAlpha::Straight | DmaBufAlpha::Premultiplied => DRM_FORMAT_ARGB8888,
+            },
+        };
+        // Drawn, whatever the alpha: a producer's buffer may be one the
+        // driver will only import as an external texture — on NVIDIA, every
+        // `DRM_FORMAT_MOD_LINEAR` buffer is — which cannot be read directly.
+        self.importer.draw_into(
+            plane,
+            self.width,
+            self.height,
+            surface,
+            self.alpha == DmaBufAlpha::Premultiplied,
+        )?;
+        frame.set_color_space(ffmpeg::color::Space::RGB);
+        frame.set_color_range(ffmpeg::color::Range::JPEG);
+        Ok(frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::c_void;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    use super::*;
+    use crate::{
+        element::RawSink,
+        elements::CudaDownload,
+        test_support::{capture, try_cuda_device},
+    };
+
+    unsafe extern "C" {
+        fn dlopen(file: *const std::ffi::c_char, mode: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, name: *const std::ffi::c_char) -> *mut c_void;
+    }
+
+    /// A buffer the way a GPU producer hands one over: allocated by the
+    /// driver's GBM with `DRM_FORMAT_MOD_LINEAR` — on NVIDIA, exactly what a
+    /// browser engine's are, down to the stride — and filled through the
+    /// CPU mapping GBM offers, so what it holds is known. Returns the
+    /// DMA-BUF and its stride, or `None` where GBM or a GPU is missing.
+    ///
+    /// Not `udmabuf`, which would need no GPU: on NVIDIA 595 its import
+    /// read other processes' memory as often as the buffer's own.
+    fn gbm_buffer_with(
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        modifier: u64,
+    ) -> Option<(OwnedFd, u32)> {
+        type Device = *mut c_void;
+        type Bo = *mut c_void;
+        const GBM_FORMAT_ARGB8888: u32 = 0x3432_5241;
+        const GBM_BO_USE_SCANOUT: u32 = 1;
+        const GBM_BO_TRANSFER_WRITE: u32 = 2;
+
+        let node = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/dri/renderD128")
+        {
+            Ok(node) => node,
+            Err(error) => {
+                eprintln!("skipping: no render node ({error})");
+                return None;
+            }
+        };
+        // SAFETY: `dlopen`/`dlsym` get NUL-terminated names, and each symbol
+        // is cast to its signature from `gbm.h`. The device and buffer are
+        // used only while `node` is open, a linear buffer's mapping is written
+        // within the `stride * height` bytes GBM maps — a tiled one is not
+        // mapped at all — and the buffer's DMA-BUF is a new fd owned by the
+        // returned `OwnedFd`. Neither the buffer nor the device
+        // is destroyed: the process ends with the test.
+        unsafe {
+            let library = dlopen(c"libgbm.so.1".as_ptr(), 2);
+            if library.is_null() {
+                eprintln!("skipping: libgbm.so.1 is missing");
+                return None;
+            }
+            let symbol = |name: &std::ffi::CStr| dlsym(library, name.as_ptr());
+            let create_device: unsafe extern "C" fn(c_int) -> Device =
+                std::mem::transmute(symbol(c"gbm_create_device"));
+            let create_bo: unsafe extern "C" fn(Device, u32, u32, u32, *const u64, u32, u32) -> Bo =
+                std::mem::transmute(symbol(c"gbm_bo_create_with_modifiers2"));
+            let map: unsafe extern "C" fn(
+                Bo,
+                u32,
+                u32,
+                u32,
+                u32,
+                u32,
+                *mut u32,
+                *mut *mut c_void,
+            ) -> *mut c_void = std::mem::transmute(symbol(c"gbm_bo_map"));
+            let unmap: unsafe extern "C" fn(Bo, *mut c_void) =
+                std::mem::transmute(symbol(c"gbm_bo_unmap"));
+            let get_fd: unsafe extern "C" fn(Bo) -> c_int =
+                std::mem::transmute(symbol(c"gbm_bo_get_fd"));
+            let get_stride: unsafe extern "C" fn(Bo) -> u32 =
+                std::mem::transmute(symbol(c"gbm_bo_get_stride"));
+
+            let device = create_device(node.as_raw_fd());
+            assert!(!device.is_null(), "gbm_create_device failed");
+            let modifiers = [modifier];
+            let bo = create_bo(
+                device,
+                width,
+                height,
+                GBM_FORMAT_ARGB8888,
+                modifiers.as_ptr(),
+                1,
+                GBM_BO_USE_SCANOUT,
+            );
+            if bo.is_null() {
+                eprintln!("skipping: this GPU's GBM allocates no buffer of modifier {modifier:#x}");
+                return None;
+            }
+            if modifier != 0 {
+                // A tiled layout the CPU cannot map: written through GL.
+                let stride = get_stride(bo);
+                let fd = get_fd(bo);
+                assert!(fd >= 0, "gbm_bo_get_fd failed");
+                let fd = OwnedFd::from_raw_fd(fd);
+                let mut importer = DmaBufCudaImporter::new().ok()?;
+                importer
+                    .write(
+                        DmaBufPlane {
+                            fd: fd.as_raw_fd(),
+                            offset: 0,
+                            stride: stride as i32,
+                            modifier,
+                            fourcc: DRM_FORMAT_ARGB8888,
+                        },
+                        width,
+                        height,
+                        pixels,
+                    )
+                    .expect("writing the tiled buffer through GL");
+                std::mem::forget(node);
+                return Some((fd, stride));
+            }
+            let (mut stride, mut data) = (0u32, std::ptr::null_mut());
+            let mapped = map(
+                bo,
+                0,
+                0,
+                width,
+                height,
+                GBM_BO_TRANSFER_WRITE,
+                &mut stride,
+                &mut data,
+            );
+            assert!(!mapped.is_null(), "gbm_bo_map failed");
+            let row = width as usize * 4;
+            for y in 0..height as usize {
+                std::ptr::copy_nonoverlapping(
+                    pixels[y * row..].as_ptr(),
+                    mapped.cast::<u8>().add(y * stride as usize),
+                    row,
+                );
+            }
+            unmap(bo, data);
+            let fd = get_fd(bo);
+            assert!(fd >= 0, "gbm_bo_get_fd failed");
+            std::mem::forget(node);
+            Some((OwnedFd::from_raw_fd(fd), stride))
+        }
+    }
+
+    /// Imports `pixels` — `width` x `height` packed BGRA — and brings the
+    /// imported frame back to the CPU as rows of BGRA. `None` means skip.
+    fn round_trip(
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        alpha: DmaBufAlpha,
+        modifier: u64,
+    ) -> Option<Vec<u8>> {
+        let (device, _cuda_lock) = try_cuda_device()?;
+        let (buffer, stride) = gbm_buffer_with(pixels, width, height, modifier)?;
+        let (_source, handle) =
+            match CudaDmaBufSource::new("dmabuf", &device, width, height, alpha, 1) {
+                Ok(built) => built,
+                Err(CudaDmaBufSourceError::Import(DmaBufCudaError::Library(library))) => {
+                    eprintln!("skipping: {library} is missing");
+                    return None;
+                }
+                Err(error) => panic!("the source did not build on a CUDA machine: {error}"),
+            };
+        let dmabuf = DmaBuf {
+            fd: buffer.as_raw_fd(),
+            offset: 0,
+            stride,
+            modifier,
+            width,
+            height,
+        };
+        let frame = match handle.import.import(&dmabuf, Some(5)) {
+            Ok(frame) => frame,
+            Err(error) => panic!("import failed: {error}"),
+        };
+
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Bgra);
+        let received = capture(&mut download);
+        download.consume(frame).expect("download");
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(frame) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(frame.pts(), Some(5), "the import dropped the pts");
+        let stride = frame.stride(0);
+        Some(
+            (0..height as usize)
+                .flat_map(|row| {
+                    frame.data(0)[row * stride..row * stride + width as usize * 4].to_vec()
+                })
+                .collect(),
+        )
+    }
+
+    /// Straight alpha comes through byte for byte — which also pins the row
+    /// order and the channel order, since every pixel differs from its
+    /// neighbours in both directions.
+    #[test]
+    fn a_straight_buffer_arrives_unchanged() {
+        let (width, height) = (64u32, 32u32);
+        let pixels: Vec<u8> = (0..height)
+            .flat_map(|row| {
+                (0..width).flat_map(move |column| {
+                    [
+                        column as u8 * 3,
+                        row as u8 * 7,
+                        200 - column as u8,
+                        255 - row as u8,
+                    ]
+                })
+            })
+            .collect();
+        let Some(out) = round_trip(&pixels, width, height, DmaBufAlpha::Straight, 0) else {
+            return;
+        };
+        assert_eq!(out, pixels);
+    }
+
+    /// Premultiplied colour is divided back out, rounding to nearest, and a
+    /// fully transparent pixel stays black rather than dividing by zero.
+    #[test]
+    fn a_premultiplied_buffer_arrives_straight() {
+        let (width, height) = (4u32, 1u32);
+        #[rustfmt::skip]
+        let pixels = [
+            100, 50, 25, 128,
+            255, 128, 0, 255,
+            0, 0, 0, 0,
+            64, 64, 64, 64,
+        ];
+        let Some(out) = round_trip(&pixels, width, height, DmaBufAlpha::Premultiplied, 0) else {
+            return;
+        };
+        #[rustfmt::skip]
+        let expected = [
+            199, 100, 50, 128,
+            255, 128, 0, 255,
+            0, 0, 0, 0,
+            255, 255, 255, 64,
+        ];
+        assert_eq!(out, expected);
+    }
+
+    /// A buffer laid out in NVIDIA's tiles — what Chromium 156 hands over
+    /// on its Wayland platform, `0x300000000606014` — comes through as the
+    /// linear one does.
+    #[test]
+    fn a_block_linear_buffer_arrives_unchanged() {
+        const NVIDIA_BLOCK_LINEAR: u64 = 0x0300_0000_0060_6014;
+        let (width, height) = (64u32, 32u32);
+        let pixels: Vec<u8> = (0..height)
+            .flat_map(|row| {
+                (0..width).flat_map(move |column| {
+                    [
+                        column as u8 * 3,
+                        row as u8 * 7,
+                        200 - column as u8,
+                        255 - row as u8,
+                    ]
+                })
+            })
+            .collect();
+        let Some(out) = round_trip(
+            &pixels,
+            width,
+            height,
+            DmaBufAlpha::Straight,
+            NVIDIA_BLOCK_LINEAR,
+        ) else {
+            return;
+        };
+        assert_eq!(out, pixels);
+    }
+}

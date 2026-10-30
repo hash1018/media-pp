@@ -1,5 +1,6 @@
-//! Imports a PipeWire DMA-BUF into a CUDA surface, for
-//! [`crate::elements::PipeWireScreenCaptureSource`]'s GPU capture mode.
+//! Imports a DMA-BUF into a CUDA surface, for
+//! [`crate::elements::PipeWireScreenCaptureSource`]'s GPU capture mode and
+//! for [`crate::elements::CudaDmaBufSource`].
 //!
 //! # Why this goes through OpenGL
 //!
@@ -23,6 +24,14 @@
 //!            -> cuMemcpy2D -> the CUDA surface of an AV_PIX_FMT_CUDA frame
 //! ```
 //!
+//! A buffer the driver can only import as `GL_TEXTURE_EXTERNAL_OES` — which
+//! on NVIDIA is every `DRM_FORMAT_MOD_LINEAR` one — cannot be attached to a
+//! framebuffer, so
+//! [`DmaBufCudaImporter::draw_into`] draws it first: a full-screen triangle
+//! sampling the external texture into a texture of its own, which is then
+//! read back the same way. The same draw is where premultiplied colour is
+//! divided back out.
+//!
 //! A plain GL texture as the copy destination (`glCopyTexSubImage2D` into
 //! `glTexStorage2D(GL_RGBA8)`) registers with CUDA but the copy itself raises
 //! `GL_INVALID_OPERATION`, so the pixel buffer is the destination that
@@ -34,16 +43,21 @@
 //! The EGL context is made current on the thread that constructs this and is
 //! never moved, so this type is deliberately **not** `Send`: it lives on
 //! `PipeWireScreenCaptureSource`'s PipeWire loop thread, which is the only
-//! thread that touches a captured buffer.
+//! thread that touches a captured buffer, or on `CudaDmaBufSource`'s import
+//! thread.
 
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
 
 use thiserror::Error as ThisError;
 
-/// `DRM_FORMAT_XRGB8888` / `DRM_FORMAT_ARGB8888` — the two fourccs that
-/// correspond to the `BGRx`/`BGRA` SPA video formats this crate's capture
-/// negotiates. Byte order is the same for both; the alpha byte is ignored.
-const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
+/// `DRM_FORMAT_XRGB8888` — what a screen capture is: the `BGRx`/`BGRA` SPA
+/// formats this crate's capture negotiates, read with the fourth byte
+/// ignored.
+pub(crate) const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
+
+/// `DRM_FORMAT_ARGB8888` — the same bytes with the fourth one kept as alpha,
+/// for a producer whose pictures have transparency in them.
+pub(crate) const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
 
 /// What can go wrong bringing a captured DMA-BUF into CUDA memory, through
 /// an EGL image on the NVIDIA driver's EGL device.
@@ -108,6 +122,9 @@ pub enum DmaBufCudaError {
     /// The named CUDA call failed, with its `CUresult`.
     #[error("{0} failed (CUresult {1})")]
     Cuda(&'static str, c_int),
+
+    #[error("the import shader did not build: {0}")]
+    Shader(String),
 }
 
 /// One PipeWire DMA-BUF plane, as `process` reads it off the buffer.
@@ -123,6 +140,9 @@ pub(crate) struct DmaBufPlane {
     /// The modifier the stream fixated on, which the import has to be told —
     /// the same buffer is uninterpretable without it.
     pub(crate) modifier: u64,
+    /// What the four bytes of a pixel are — [`DRM_FORMAT_XRGB8888`] or
+    /// [`DRM_FORMAT_ARGB8888`].
+    pub(crate) fourcc: u32,
 }
 
 /// The destination surface of an import: an `AV_PIX_FMT_CUDA` frame's
@@ -200,13 +220,63 @@ pub(crate) struct DmaBufCudaImporter {
     context: *mut c_void,
     /// The modifiers this driver will accept for XRGB8888, in the order EGL
     /// reported them — what the stream offers the compositor.
+    #[cfg_attr(not(feature = "pipewire-screen-capture"), allow(dead_code))]
     modifiers: Vec<u64>,
     texture: c_uint,
     framebuffer: c_uint,
     /// The CUDA-registered pixel buffer the readback lands in, sized to the
     /// current capture. `None` until the first frame fixes a size.
     pixel_buffer: Option<PixelBuffer>,
+    /// What [`DmaBufCudaImporter::draw_into`] draws with. `None` until it is
+    /// first called, which a screen capture never does.
+    drawing: Option<Drawing>,
 }
+
+/// The shader, and the two textures it draws from and into.
+struct Drawing {
+    program: c_uint,
+    /// Where the `unpremultiply` uniform is.
+    unpremultiply: c_int,
+    /// The imported buffer, bound as `GL_TEXTURE_EXTERNAL_OES`.
+    source: c_uint,
+    /// What the draw lands in: `GL_RGBA8`, `width` x `height`. Immutable
+    /// storage, so a new size is a new texture.
+    target: c_uint,
+    width: u32,
+    height: u32,
+}
+
+/// A triangle that covers the whole target, from no vertex data at all.
+const VERTEX_SHADER: &str = "#version 300 es
+void main() {
+    vec2 corner = vec2(float((gl_VertexID & 1) << 2), float((gl_VertexID & 2) << 1)) - 1.0;
+    gl_Position = vec4(corner, 0.0, 1.0);
+}
+";
+
+/// One texel of the buffer per pixel of the target, row 0 to row 0 — which,
+/// read back from the bottom of the target up, is the buffer's own row order.
+///
+/// Written out as BGRA, so an `GL_RGBA` readback — the one form every GLES
+/// implementation accepts — lands as the BGRA the CUDA frame holds.
+///
+/// Division rounds the way the exact integer form does: `round(c / a)` over
+/// normalized values is `round(C * 255 / A)`, and a colour above its own
+/// alpha — which premultiplied colour cannot be — saturates at 255.
+const FRAGMENT_SHADER: &str = "#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+uniform samplerExternalOES picture;
+uniform bool unpremultiply;
+out vec4 color;
+void main() {
+    vec4 texel = texture(picture, gl_FragCoord.xy / vec2(textureSize(picture, 0)));
+    if (unpremultiply) {
+        texel.rgb = texel.a > 0.0 ? texel.rgb / texel.a : vec3(0.0);
+    }
+    color = texel.bgra;
+}
+";
 
 /// The readback destination: a GL buffer object registered with CUDA once,
 /// then mapped per frame.
@@ -293,6 +363,7 @@ impl DmaBufCudaImporter {
             texture,
             framebuffer,
             pixel_buffer: None,
+            drawing: None,
         })
     }
 
@@ -300,12 +371,14 @@ impl DmaBufCudaImporter {
     ///
     /// An import of a buffer allocated with anything else would fail, so
     /// these are exactly what the stream may fixate on.
+    #[cfg_attr(not(feature = "pipewire-screen-capture"), allow(dead_code))]
     pub(crate) fn modifiers(&self) -> &[u64] {
         &self.modifiers
     }
 
     /// Copies one captured DMA-BUF into `destination`, which must be a
     /// `width` x `height` CUDA BGRA surface.
+    #[cfg_attr(not(feature = "pipewire-screen-capture"), allow(dead_code))]
     pub(crate) fn copy_into(
         &mut self,
         plane: DmaBufPlane,
@@ -322,6 +395,119 @@ impl DmaBufCudaImporter {
         let result = self.read_through(image, buffer, resource, width, height, destination);
         self.egl.destroy_image(self.display, image);
         result
+    }
+
+    /// [`Self::copy_into`] for a buffer that has to be drawn to be read: one
+    /// the driver imports only as an external texture, or one whose colour
+    /// is premultiplied, which `unpremultiply` divides back out.
+    ///
+    /// Costs a draw more than `copy_into`, and works for any buffer that
+    /// one does.
+    pub(crate) fn draw_into(
+        &mut self,
+        plane: DmaBufPlane,
+        width: u32,
+        height: u32,
+        destination: CudaBgraSurface,
+        unpremultiply: bool,
+    ) -> Result<(), DmaBufCudaError> {
+        let (buffer, resource) = self.ensure_pixel_buffer(width, height)?;
+        self.ensure_drawing(width, height)?;
+        let image = self
+            .egl
+            .create_dma_buf_image(self.display, plane, width, height)?;
+        let result = self
+            .draw(image, width, height, unpremultiply)
+            .and_then(|()| self.read_back(GL_RGBA, buffer, resource, width, height, destination));
+        self.unbind();
+        self.egl.destroy_image(self.display, image);
+        result
+    }
+
+    /// Draws `image` into the drawing's target and leaves that attached to
+    /// the framebuffer, for [`Self::read_back`].
+    fn draw(
+        &self,
+        image: EglImage,
+        width: u32,
+        height: u32,
+        unpremultiply: bool,
+    ) -> Result<(), DmaBufCudaError> {
+        let drawing = self.drawing.as_ref().expect("built by draw_into");
+        self.gl
+            .bind_texture(GL_TEXTURE_EXTERNAL_OES, drawing.source);
+        self.gl.image_target_texture(GL_TEXTURE_EXTERNAL_OES, image);
+        self.gl.check("glEGLImageTargetTexture2DOES")?;
+
+        self.gl.bind_framebuffer(GL_FRAMEBUFFER, self.framebuffer);
+        self.gl.framebuffer_texture_2d(
+            GL_FRAMEBUFFER,
+            GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D,
+            drawing.target,
+            0,
+        );
+        let status = self.gl.check_framebuffer_status(GL_FRAMEBUFFER);
+        if status != GL_FRAMEBUFFER_COMPLETE {
+            return Err(DmaBufCudaError::FramebufferIncomplete(status));
+        }
+
+        self.gl.use_program(drawing.program);
+        self.gl
+            .uniform_1i(drawing.unpremultiply, c_int::from(unpremultiply));
+        self.gl.viewport(0, 0, width as c_int, height as c_int);
+        self.gl.draw_arrays(GL_TRIANGLES, 0, 3);
+        self.gl.check("glDrawArrays")
+    }
+
+    /// Builds the shader the first time, and the target texture whenever the
+    /// size is not the one it has.
+    fn ensure_drawing(&mut self, width: u32, height: u32) -> Result<(), DmaBufCudaError> {
+        if self.drawing.is_none() {
+            let program = self.gl.build_program(VERTEX_SHADER, FRAGMENT_SHADER)?;
+            let unpremultiply = self.gl.uniform_location(program, c"unpremultiply");
+            let source = self.gl.gen_texture();
+            self.gl.bind_texture(GL_TEXTURE_EXTERNAL_OES, source);
+            // One texel per pixel, so nothing is ever between two of them —
+            // but the default is to blend, and exactly is cheaper to trust.
+            for filter in [GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER] {
+                self.gl
+                    .tex_parameter(GL_TEXTURE_EXTERNAL_OES, filter, GL_NEAREST as c_int);
+            }
+            self.gl.bind_texture(GL_TEXTURE_EXTERNAL_OES, 0);
+            // On by default in GLES, and a dithered picture is not the one
+            // that was handed over.
+            self.gl.disable(GL_DITHER);
+            self.drawing = Some(Drawing {
+                program,
+                unpremultiply,
+                source,
+                target: 0,
+                width: 0,
+                height: 0,
+            });
+        }
+        let drawing = self.drawing.as_mut().expect("built above");
+        if drawing.target != 0 && drawing.width == width && drawing.height == height {
+            return Ok(());
+        }
+        if drawing.target != 0 {
+            self.gl.delete_texture(drawing.target);
+            drawing.target = 0;
+        }
+        let target = self.gl.gen_texture();
+        self.gl.bind_texture(GL_TEXTURE_2D, target);
+        self.gl
+            .tex_storage_2d(GL_TEXTURE_2D, 1, GL_RGBA8, width as c_int, height as c_int);
+        self.gl.bind_texture(GL_TEXTURE_2D, 0);
+        if let Err(error) = self.gl.check("glTexStorage2D") {
+            self.gl.delete_texture(target);
+            return Err(error);
+        }
+        drawing.target = target;
+        drawing.width = width;
+        drawing.height = height;
+        Ok(())
     }
 
     /// Reads the desktop through `image` and lands it in `destination`.
@@ -357,7 +543,27 @@ impl DmaBufCudaImporter {
             self.unbind();
             return Err(DmaBufCudaError::FramebufferIncomplete(status));
         }
+        let result = self.read_back(GL_BGRA_EXT, buffer, resource, width, height, destination);
+        self.unbind();
+        result
+    }
 
+    /// Reads the framebuffer's picture into `buffer`, as `format`, and copies
+    /// that into `destination`. The caller unbinds.
+    ///
+    /// `format` is what gives BGRA bytes: `GL_BGRA_EXT` for an imported
+    /// buffer, and `GL_RGBA` for a drawn one — a texture of GL's own, which
+    /// reads as RGBA, and which the shader wrote in BGRA order.
+    #[allow(clippy::too_many_arguments)]
+    fn read_back(
+        &self,
+        format: c_uint,
+        buffer: c_uint,
+        resource: *mut c_void,
+        width: u32,
+        height: u32,
+        destination: CudaBgraSurface,
+    ) -> Result<(), DmaBufCudaError> {
         self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, buffer);
         // Reads bottom-up in window coordinates, which for an FBO-attached
         // texture is its first row first — the DMA-BUF's own row order, so
@@ -367,16 +573,13 @@ impl DmaBufCudaImporter {
             0,
             width as c_int,
             height as c_int,
-            GL_BGRA_EXT,
+            format,
             GL_UNSIGNED_BYTE,
             std::ptr::null_mut(),
         );
         let read_result = self.gl.check("glReadPixels");
         self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
-        if let Err(error) = read_result {
-            self.unbind();
-            return Err(error);
-        }
+        read_result?;
 
         // Mapping is the synchronization point: CUDA guarantees GL work
         // issued before it completes first, so no glFinish is needed.
@@ -392,15 +595,70 @@ impl DmaBufCudaImporter {
             )
         });
         let unmapped = self.cuda.unmap(resource);
-        self.unbind();
         result.and(unmapped)
     }
 
     /// Releases every GL binding this took, so the next frame starts from the
     /// same state regardless of which path returned.
+    /// Writes `pixels` — `width` x `height` packed BGRA — into the buffer
+    /// `plane` describes, through GL, and waits for the write to land: how a
+    /// test fills a buffer in a layout the CPU cannot map.
+    #[cfg(test)]
+    pub(crate) fn write(
+        &mut self,
+        plane: DmaBufPlane,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<(), DmaBufCudaError> {
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+        // As RGBA, the one upload format GLES takes into any four-byte
+        // texture: the buffer's own BGRA, swapped into it.
+        let pixels: Vec<u8> = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[blue, green, red, alpha]| [red, green, blue, alpha])
+            .collect();
+        let image = self
+            .egl
+            .create_dma_buf_image(self.display, plane, width, height)?;
+        self.gl.bind_texture(GL_TEXTURE_2D, self.texture);
+        self.gl.image_target_texture(GL_TEXTURE_2D, image);
+        let result = self
+            .gl
+            .check("glEGLImageTargetTexture2DOES")
+            .and_then(|()| {
+                // SAFETY: `pixels` is `width * height` four-byte pixels, read
+                // by the call and not kept; the texture bound is the image's.
+                unsafe {
+                    (self.gl.tex_sub_image_2d)(
+                        GL_TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        width as c_int,
+                        height as c_int,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        pixels.as_ptr().cast(),
+                    );
+                    (self.gl.finish)();
+                }
+                self.gl.check("glTexSubImage2D")
+            });
+        self.unbind();
+        self.egl.destroy_image(self.display, image);
+        result
+    }
+
     fn unbind(&self) {
         self.gl.bind_framebuffer(GL_FRAMEBUFFER, 0);
         self.gl.bind_texture(GL_TEXTURE_2D, 0);
+        if self.drawing.is_some() {
+            self.gl.bind_texture(GL_TEXTURE_EXTERNAL_OES, 0);
+            self.gl.use_program(0);
+        }
     }
 
     /// Returns the GL name and CUDA resource of a pixel buffer sized for
@@ -465,6 +723,13 @@ impl Drop for DmaBufCudaImporter {
             let _ = self.cuda.unregister(pbo.resource);
             self.gl.delete_buffer(pbo.buffer);
         }
+        if let Some(drawing) = self.drawing.take() {
+            self.gl.delete_program(drawing.program);
+            self.gl.delete_texture(drawing.source);
+            if drawing.target != 0 {
+                self.gl.delete_texture(drawing.target);
+            }
+        }
         self.gl.delete_framebuffer(self.framebuffer);
         self.gl.delete_texture(self.texture);
         self.egl.release_context(self.display, self.context);
@@ -520,6 +785,18 @@ const GL_STREAM_READ: c_uint = 0x88E1;
 const GL_BGRA_EXT: c_uint = 0x80E1;
 const GL_UNSIGNED_BYTE: c_uint = 0x1401;
 const GL_NO_ERROR: c_uint = 0;
+const GL_RGBA: c_uint = 0x1908;
+const GL_RGBA8: c_uint = 0x8058;
+const GL_TEXTURE_EXTERNAL_OES: c_uint = 0x8D65;
+const GL_TEXTURE_MIN_FILTER: c_uint = 0x2801;
+const GL_TEXTURE_MAG_FILTER: c_uint = 0x2800;
+const GL_NEAREST: c_uint = 0x2600;
+const GL_TRIANGLES: c_uint = 0x0004;
+const GL_DITHER: c_uint = 0x0BD0;
+const GL_VERTEX_SHADER: c_uint = 0x8B31;
+const GL_FRAGMENT_SHADER: c_uint = 0x8B30;
+const GL_COMPILE_STATUS: c_uint = 0x8B81;
+const GL_LINK_STATUS: c_uint = 0x8B82;
 
 /// `CU_MEMORYTYPE_DEVICE`.
 const CU_MEMORYTYPE_DEVICE: c_uint = 2;
@@ -773,7 +1050,7 @@ impl Egl {
             EGL_HEIGHT,
             height as EglAttrib,
             EGL_LINUX_DRM_FOURCC_EXT,
-            DRM_FORMAT_XRGB8888 as EglAttrib,
+            plane.fourcc as EglAttrib,
             EGL_DMA_BUF_PLANE0_FD_EXT,
             plane.fd as EglAttrib,
             EGL_DMA_BUF_PLANE0_OFFSET_EXT,
@@ -852,9 +1129,45 @@ struct Gl {
     buffer_data: unsafe extern "C" fn(c_uint, isize, *const c_void, c_uint),
     read_pixels: unsafe extern "C" fn(c_int, c_int, c_int, c_int, c_uint, c_uint, *mut c_void),
     get_error: unsafe extern "C" fn() -> c_uint,
+    tex_storage_2d: unsafe extern "C" fn(c_uint, c_int, c_uint, c_int, c_int),
+    tex_parameteri: unsafe extern "C" fn(c_uint, c_uint, c_int),
+    disable: unsafe extern "C" fn(c_uint),
+    viewport: unsafe extern "C" fn(c_int, c_int, c_int, c_int),
+    draw_arrays: unsafe extern "C" fn(c_uint, c_int, c_int),
+    create_shader: unsafe extern "C" fn(c_uint) -> c_uint,
+    shader_source: unsafe extern "C" fn(c_uint, c_int, *const *const c_char, *const c_int),
+    compile_shader: unsafe extern "C" fn(c_uint),
+    get_shaderiv: unsafe extern "C" fn(c_uint, c_uint, *mut c_int),
+    get_shader_info_log: unsafe extern "C" fn(c_uint, c_int, *mut c_int, *mut c_char),
+    delete_shader: unsafe extern "C" fn(c_uint),
+    create_program: unsafe extern "C" fn() -> c_uint,
+    attach_shader: unsafe extern "C" fn(c_uint, c_uint),
+    link_program: unsafe extern "C" fn(c_uint),
+    get_programiv: unsafe extern "C" fn(c_uint, c_uint, *mut c_int),
+    get_program_info_log: unsafe extern "C" fn(c_uint, c_int, *mut c_int, *mut c_char),
+    delete_program: unsafe extern "C" fn(c_uint),
+    use_program: unsafe extern "C" fn(c_uint),
+    get_uniform_location: unsafe extern "C" fn(c_uint, *const c_char) -> c_int,
+    uniform_1i: unsafe extern "C" fn(c_int, c_int),
     /// From `GL_OES_EGL_image`, resolved through `eglGetProcAddress` — this
     /// is the call that makes the imported DMA-BUF a GL texture.
     image_target_texture: unsafe extern "C" fn(c_uint, EglImage),
+    /// What a test fills a buffer through that the CPU cannot map: one in
+    /// a GPU's own tiled layout.
+    #[cfg(test)]
+    tex_sub_image_2d: unsafe extern "C" fn(
+        c_uint,
+        c_int,
+        c_int,
+        c_int,
+        c_int,
+        c_int,
+        c_uint,
+        c_uint,
+        *const c_void,
+    ),
+    #[cfg(test)]
+    finish: unsafe extern "C" fn(),
 }
 
 impl Gl {
@@ -895,7 +1208,31 @@ impl Gl {
                 buffer_data: cast(resolve("glBufferData")?),
                 read_pixels: cast(resolve("glReadPixels")?),
                 get_error: cast(resolve("glGetError")?),
+                tex_storage_2d: cast(resolve("glTexStorage2D")?),
+                tex_parameteri: cast(resolve("glTexParameteri")?),
+                disable: cast(resolve("glDisable")?),
+                viewport: cast(resolve("glViewport")?),
+                draw_arrays: cast(resolve("glDrawArrays")?),
+                create_shader: cast(resolve("glCreateShader")?),
+                shader_source: cast(resolve("glShaderSource")?),
+                compile_shader: cast(resolve("glCompileShader")?),
+                get_shaderiv: cast(resolve("glGetShaderiv")?),
+                get_shader_info_log: cast(resolve("glGetShaderInfoLog")?),
+                delete_shader: cast(resolve("glDeleteShader")?),
+                create_program: cast(resolve("glCreateProgram")?),
+                attach_shader: cast(resolve("glAttachShader")?),
+                link_program: cast(resolve("glLinkProgram")?),
+                get_programiv: cast(resolve("glGetProgramiv")?),
+                get_program_info_log: cast(resolve("glGetProgramInfoLog")?),
+                delete_program: cast(resolve("glDeleteProgram")?),
+                use_program: cast(resolve("glUseProgram")?),
+                get_uniform_location: cast(resolve("glGetUniformLocation")?),
+                uniform_1i: cast(resolve("glUniform1i")?),
                 image_target_texture: cast(image_target),
+                #[cfg(test)]
+                tex_sub_image_2d: cast(resolve("glTexSubImage2D")?),
+                #[cfg(test)]
+                finish: cast(resolve("glFinish")?),
             }
         })
     }
@@ -1027,11 +1364,133 @@ impl Gl {
     }
 
     fn image_target_texture(&self, target: c_uint, image: EglImage) {
-        // SAFETY: `image` is an EGLImage this module created and still holds in
-        // `images`; `copy_into` sizes the pixel buffer first, so nothing
-        // destroys it between `image_for` and this call.
+        // SAFETY: `image` is an EGLImage this module created, and both callers
+        // destroy it only after the import this binds it for is done.
         unsafe { (self.image_target_texture)(target, image) };
     }
+
+    fn tex_storage_2d(
+        &self,
+        target: c_uint,
+        levels: c_int,
+        format: c_uint,
+        width: c_int,
+        height: c_int,
+    ) {
+        // SAFETY: plain integers; allocates with nothing to read.
+        unsafe { (self.tex_storage_2d)(target, levels, format, width, height) };
+    }
+
+    fn tex_parameter(&self, target: c_uint, name: c_uint, value: c_int) {
+        // SAFETY: plain integers.
+        unsafe { (self.tex_parameteri)(target, name, value) };
+    }
+
+    fn disable(&self, capability: c_uint) {
+        // SAFETY: a plain integer.
+        unsafe { (self.disable)(capability) };
+    }
+
+    fn viewport(&self, x: c_int, y: c_int, width: c_int, height: c_int) {
+        // SAFETY: plain integers.
+        unsafe { (self.viewport)(x, y, width, height) };
+    }
+
+    fn draw_arrays(&self, mode: c_uint, first: c_int, count: c_int) {
+        // SAFETY: the program drawn with reads no vertex attributes — its
+        // positions come from `gl_VertexID` — so there is no array for this to
+        // read past.
+        unsafe { (self.draw_arrays)(mode, first, count) };
+    }
+
+    fn use_program(&self, program: c_uint) {
+        // SAFETY: a plain integer.
+        unsafe { (self.use_program)(program) };
+    }
+
+    fn delete_program(&self, program: c_uint) {
+        // SAFETY: a plain integer.
+        unsafe { (self.delete_program)(program) };
+    }
+
+    fn uniform_location(&self, program: c_uint, name: &std::ffi::CStr) -> c_int {
+        // SAFETY: `name` is NUL-terminated and outlives the call.
+        unsafe { (self.get_uniform_location)(program, name.as_ptr()) }
+    }
+
+    fn uniform_1i(&self, location: c_int, value: c_int) {
+        // SAFETY: plain integers; a location of -1 is ignored by GL.
+        unsafe { (self.uniform_1i)(location, value) };
+    }
+
+    /// Compiles and links a program from two sources, or says what the
+    /// driver said about them.
+    fn build_program(&self, vertex: &str, fragment: &str) -> Result<c_uint, DmaBufCudaError> {
+        let vertex = self.compile(GL_VERTEX_SHADER, vertex)?;
+        let fragment = match self.compile(GL_FRAGMENT_SHADER, fragment) {
+            Ok(fragment) => fragment,
+            Err(error) => {
+                // SAFETY: a shader name this just created.
+                unsafe { (self.delete_shader)(vertex) };
+                return Err(error);
+            }
+        };
+        // SAFETY: `program` and both shaders are names created here, on this
+        // context. The status out-param is a live local, and the log is read
+        // by `info_log`, which bounds it. Shaders are deleted once attached
+        // (GL keeps them alive for the program) and the program on failure.
+        unsafe {
+            let program = (self.create_program)();
+            (self.attach_shader)(program, vertex);
+            (self.attach_shader)(program, fragment);
+            (self.link_program)(program);
+            (self.delete_shader)(vertex);
+            (self.delete_shader)(fragment);
+            let mut linked = 0;
+            (self.get_programiv)(program, GL_LINK_STATUS, &mut linked);
+            if linked == 0 {
+                let log = info_log(|size, written, log| {
+                    (self.get_program_info_log)(program, size, written, log)
+                });
+                (self.delete_program)(program);
+                return Err(DmaBufCudaError::Shader(log));
+            }
+            Ok(program)
+        }
+    }
+
+    fn compile(&self, kind: c_uint, source: &str) -> Result<c_uint, DmaBufCudaError> {
+        let length = c_int::try_from(source.len())
+            .map_err(|_| DmaBufCudaError::Shader("a shader too long to pass".to_owned()))?;
+        // SAFETY: `source` is passed with its length, so it needs no NUL, and
+        // outlives the call; the one-element pointer and length arrays match the
+        // count of 1. The status out-param is a live local.
+        unsafe {
+            let shader = (self.create_shader)(kind);
+            (self.shader_source)(shader, 1, &source.as_ptr().cast(), &length);
+            (self.compile_shader)(shader);
+            let mut compiled = 0;
+            (self.get_shaderiv)(shader, GL_COMPILE_STATUS, &mut compiled);
+            if compiled == 0 {
+                let log = info_log(|size, written, log| {
+                    (self.get_shader_info_log)(shader, size, written, log)
+                });
+                (self.delete_shader)(shader);
+                return Err(DmaBufCudaError::Shader(log));
+            }
+            Ok(shader)
+        }
+    }
+}
+
+/// Reads a shader or program log through `read`, which is handed the size of
+/// a buffer, somewhere to say how much it wrote, and the buffer.
+fn info_log(read: impl FnOnce(c_int, *mut c_int, *mut c_char)) -> String {
+    let mut log = vec![0u8; 4096];
+    let mut written = 0;
+    read(log.len() as c_int, &mut written, log.as_mut_ptr().cast());
+    log.truncate(written.clamp(0, log.len() as c_int) as usize);
+    String::from_utf8_lossy(&log).trim().to_owned()
 }
 
 /// `CUDA_MEMCPY2D`, versioned by name (`cuMemcpy2D_v2`) and unchanged since
