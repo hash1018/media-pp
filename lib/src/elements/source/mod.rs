@@ -126,15 +126,17 @@ pub use render_mode::RenderMode;
 pub(crate) use rtsp_source::{PublishedItem, PublishedOutbox};
 pub use rtsp_source::{RtspListenOptions, RtspSource, RtspSourceError};
 #[cfg(all(target_os = "linux", feature = "cuda"))]
-pub use shared_texture::{
-    CudaDmaBufHandle, CudaDmaBufSource, CudaDmaBufSourceError, DmaBuf, DmaBufAlpha,
-};
+pub use shared_texture::{CudaDmaBufHandle, CudaDmaBufSource, CudaDmaBufSourceError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use shared_texture::{
     D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,
 };
+#[cfg(all(target_os = "linux", any(feature = "cuda", feature = "vulkan")))]
+pub use shared_texture::{DmaBuf, DmaBufAlpha};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use shared_texture::{
     MetalSharedTextureHandle, MetalSharedTextureSource, MetalSharedTextureSourceError,
 };
+#[cfg(all(target_os = "linux", feature = "vulkan"))]
+pub use shared_texture::{VulkanDmaBufHandle, VulkanDmaBufSource, VulkanDmaBufSourceError};
 pub use synthetic::{TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource};

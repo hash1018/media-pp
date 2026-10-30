@@ -87,6 +87,8 @@ pub enum ElementType {
     MetalSharedTextureSource,
     /// Source for DMA-BUFs another process shares in, imported into CUDA.
     CudaDmaBufSource,
+    /// Source for DMA-BUFs another process shares in, mapped into Vulkan.
+    VulkanDmaBufSource,
     /// Linux V4L2 camera capture source.
     V4l2CaptureSource,
     /// Multi-input audio mixer source.

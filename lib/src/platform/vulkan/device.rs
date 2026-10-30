@@ -132,6 +132,10 @@ pub(crate) struct DeviceShared {
     pub(crate) compute_family: u32,
     /// The device's own name, for a log line.
     pub(crate) name: String,
+    /// What imports a DMA-BUF, where FFmpeg turned on every extension that
+    /// takes — see [`super::gpu::DmaBufImage`].
+    #[cfg(target_os = "linux")]
+    pub(crate) dma_buf: Option<ash::khr::external_memory_fd::Device>,
 }
 
 // SAFETY: `ctx` is an FFmpeg reference to a device context that FFmpeg
@@ -227,6 +231,13 @@ impl VulkanDevice {
                 device: name.clone(),
             })?;
 
+        // SAFETY: FFmpeg fills in the list of extensions it enabled, and
+        // keeps it for as long as the device context lives; each entry is a
+        // NUL-terminated name.
+        #[cfg(target_os = "linux")]
+        let dma_buf = unsafe { enabled(hwctx) }
+            .then(|| ash::khr::external_memory_fd::Device::new(&instance, &device));
+
         Ok(Self {
             shared: Arc::new(DeviceShared {
                 ctx: Arc::new(ctx),
@@ -234,6 +245,8 @@ impl VulkanDevice {
                 memory_properties,
                 compute_family,
                 name,
+                #[cfg(target_os = "linux")]
+                dma_buf,
             }),
         })
     }
@@ -368,6 +381,37 @@ fn choose_device() -> Result<(usize, String), VulkanDeviceError> {
         instance.destroy_instance(None);
         chosen
     }
+}
+
+/// Whether FFmpeg enabled every extension importing a DMA-BUF as an image
+/// takes: its memory by file descriptor, as a DMA-BUF, laid out as a DRM
+/// format modifier says.
+///
+/// # Safety
+///
+/// `hwctx` must be a live device context FFmpeg made.
+#[cfg(target_os = "linux")]
+unsafe fn enabled(hwctx: &AVVulkanDeviceContext) -> bool {
+    let count = usize::try_from(hwctx.nb_enabled_dev_extensions).unwrap_or(0);
+    if hwctx.enabled_dev_extensions.is_null() || count == 0 {
+        return false;
+    }
+    // SAFETY: the function's own contract — FFmpeg's list, of that many
+    // NUL-terminated names.
+    let names: Vec<&std::ffi::CStr> = unsafe {
+        std::slice::from_raw_parts(hwctx.enabled_dev_extensions, count)
+            .iter()
+            .filter(|name| !name.is_null())
+            .map(|&name| std::ffi::CStr::from_ptr(name))
+            .collect()
+    };
+    [
+        ash::khr::external_memory_fd::NAME,
+        ash::ext::external_memory_dma_buf::NAME,
+        ash::ext::image_drm_format_modifier::NAME,
+    ]
+    .iter()
+    .all(|needed| names.contains(needed))
 }
 
 #[cfg(test)]

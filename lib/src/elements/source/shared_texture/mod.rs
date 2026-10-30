@@ -15,8 +15,8 @@ mod macos;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use macos::*;
 
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(target_os = "linux", any(feature = "cuda", feature = "vulkan")))]
 mod linux;
 
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(target_os = "linux", any(feature = "cuda", feature = "vulkan")))]
 pub use linux::*;

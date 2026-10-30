@@ -362,6 +362,9 @@ vulkan = [
     "dep:x11rb",
     "dep:bindgen",
     "dep:pkg-config",
+    # `poll` on a DMA-BUF another process drew into, before
+    # `VulkanDmaBufSource` reads it — see there.
+    "dep:libc",
 ]
 d3d12 = [
     "dep:windows",

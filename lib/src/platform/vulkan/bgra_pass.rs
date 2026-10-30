@@ -146,6 +146,77 @@ impl BgraPass {
             Err(NotOurs::ForeignDevice) => return Err(BgraPassError::ForeignDevice),
         }
         let (width, height) = (source.width(), source.height());
+        // SAFETY: validated above as a live Vulkan frame of this device.
+        let source_images = unsafe { images_of(source).images };
+        let source_views = plane_views(&self.gpu, &source_images, self.input == PassInput::Nv12)?;
+        let mut claims = Claim::default();
+        // SAFETY: a live frame of this device, the caller's.
+        unsafe {
+            claims.extend(claim(
+                source,
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_SAMPLED_READ,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ));
+        }
+        let views: Vec<vk::ImageView> = source_views.iter().map(|view| view.view).collect();
+        let mut output = self.through(claims, &views, [width, height], immediates)?;
+        drop(source_views);
+        // SAFETY: two distinct live frames; props are timing, colour and side
+        // data, not buffers.
+        unsafe {
+            ffi::av_frame_copy_props(output.as_mut_ptr(), source.as_ptr());
+        }
+        Ok(output)
+    }
+
+    /// Another process's DMA-BUF, imported as `image` and viewed as
+    /// `view`, through the kernel with `immediates`, into a new frame — of
+    /// a BGRA pass. The image is taken over from outside this device's
+    /// queues as it is read, and nothing else may be using it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn run_imported(
+        &mut self,
+        image: vk::Image,
+        view: vk::ImageView,
+        size: [u32; 2],
+        immediates: &[u8],
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, BgraPassError> {
+        // Taken over from the producer as it left it: in the general layout,
+        // which is all an image shared outside Vulkan can be in, and owned by
+        // no queue of this device's.
+        let acquire = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::NONE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+            .dst_queue_family_index(self.gpu.compute_family)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            );
+        let claims = Claim {
+            barriers: vec![acquire],
+            ..Claim::default()
+        };
+        self.through(claims, &[view], size, immediates)
+    }
+
+    /// The source `claims` describes and `source_views` view, `width` by
+    /// `height`, through the kernel into a new frame of this pass's pool,
+    /// waited for.
+    fn through(
+        &mut self,
+        mut claims: Claim,
+        source_views: &[vk::ImageView],
+        [width, height]: [u32; 2],
+        immediates: &[u8],
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, BgraPassError> {
         let (gpu, hw_device_ctx) = (&self.gpu, &self.hw_device_ctx);
         let frames = self
             .frames
@@ -196,22 +267,11 @@ impl BgraPass {
                 return Err(BgraPassError::FrameGet(code));
             }
         }
-        // SAFETY: both validated or made above as live Vulkan frames of this
-        // device.
-        let (source_images, output_image) =
-            unsafe { (images_of(source).images, images_of(&output).images[0].0) };
-        let source_views = plane_views(&self.gpu, &source_images, self.input == PassInput::Nv12)?;
-
-        let mut claims = Claim::default();
-        // SAFETY: two distinct live frames of this device — the source the
-        // caller's, the output this pass's own.
+        // SAFETY: made above as a live Vulkan frame of this device.
+        let output_image = unsafe { images_of(&output).images[0].0 };
+        // SAFETY: a live frame of this device, this pass's own and distinct
+        // from the source.
         unsafe {
-            claims.extend(claim(
-                source,
-                vk::PipelineStageFlags2::COMPUTE_SHADER,
-                vk::AccessFlags2::SHADER_SAMPLED_READ,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            ));
             claims.extend(claim(
                 &output,
                 vk::PipelineStageFlags2::COPY,
@@ -223,10 +283,7 @@ impl BgraPass {
             &claims,
             scratch,
             scratch_view,
-            &source_views
-                .iter()
-                .map(|view| view.view)
-                .collect::<Vec<_>>(),
+            source_views,
             output_image,
             [width, height],
             immediates,
@@ -237,14 +294,7 @@ impl BgraPass {
             abandon(&self.gpu.device, &claims);
             return Err(error.into());
         }
-        let waited = self.recording.wait();
-        drop(source_views);
-        waited?;
-        // SAFETY: two distinct live frames; props are timing, colour and side
-        // data, not buffers.
-        unsafe {
-            ffi::av_frame_copy_props(output.as_mut_ptr(), source.as_ptr());
-        }
+        self.recording.wait()?;
         Ok(output)
     }
 

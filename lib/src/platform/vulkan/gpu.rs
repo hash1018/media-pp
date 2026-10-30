@@ -302,6 +302,149 @@ impl Drop for View {
     }
 }
 
+/// Another process's DMA-BUF as an image of this device: its memory
+/// imported, not copied, and laid out as its DRM format modifier says —
+/// tiled or not. Destroyed with this value, which lets go of the memory;
+/// the buffer stays the producer's.
+#[cfg(target_os = "linux")]
+pub(crate) struct DmaBufImage {
+    shared: Arc<DeviceShared>,
+    pub(crate) image: vk::Image,
+    memory: vk::DeviceMemory,
+}
+
+/// Where one plane of a DMA-BUF is, and how it is laid out.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DmaBufPlane<'a> {
+    pub(crate) fd: std::os::fd::BorrowedFd<'a>,
+    pub(crate) offset: u32,
+    pub(crate) stride: u32,
+    pub(crate) modifier: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl DmaBufImage {
+    /// `plane`, `width` by `height` of `format`, as an image that can be
+    /// `usage`. `None` where the device was made without the extensions
+    /// that takes — see `DeviceShared::dma_buf`.
+    pub(crate) fn import(
+        shared: &Arc<DeviceShared>,
+        plane: DmaBufPlane<'_>,
+        format: vk::Format,
+        [width, height]: [u32; 2],
+        usage: vk::ImageUsageFlags,
+    ) -> Result<Option<Self>, VulkanError> {
+        use std::os::fd::IntoRawFd;
+
+        let Some(dma_buf) = &shared.dma_buf else {
+            return Ok(None);
+        };
+        let device = &shared.device;
+        let mut made = Self {
+            shared: Arc::clone(shared),
+            image: vk::Image::null(),
+            memory: vk::DeviceMemory::null(),
+        };
+        let layouts = [vk::SubresourceLayout::default()
+            .offset(u64::from(plane.offset))
+            .row_pitch(u64::from(plane.stride))];
+        let mut layout = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+            .drm_format_modifier(plane.modifier)
+            .plane_layouts(&layouts);
+        let mut external = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+        // The memory takes a descriptor of its own, which the allocation
+        // owns once it succeeds and which is closed here where it does not.
+        let fd = plane
+            .fd
+            .try_clone_to_owned()
+            .map_err(|_| VulkanError::Call {
+                call: "dup",
+                result: vk::Result::ERROR_INVALID_EXTERNAL_HANDLE,
+            })?;
+        // SAFETY: the create infos and the chains they carry outlive their
+        // calls; each handle is stored in `made` as soon as it exists, whose
+        // drop frees it on any later failure; `fd` is a live descriptor of
+        // the DMA-BUF, handed to Vulkan only by the allocation that takes it.
+        unsafe {
+            made.image = device
+                .create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(format)
+                        .extent(vk::Extent3D {
+                            width,
+                            height,
+                            depth: 1,
+                        })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+                        .usage(usage)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                        .initial_layout(vk::ImageLayout::UNDEFINED)
+                        .push_next(&mut external)
+                        .push_next(&mut layout),
+                    None,
+                )
+                .map_err(call("vkCreateImage"))?;
+            let mut properties = vk::MemoryFdPropertiesKHR::default();
+            dma_buf
+                .get_memory_fd_properties(
+                    vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                    std::os::fd::AsRawFd::as_raw_fd(&fd),
+                    &mut properties,
+                )
+                .map_err(call("vkGetMemoryFdPropertiesKHR"))?;
+            let requirements = device.get_image_memory_requirements(made.image);
+            let kind = shared
+                .memory_type(
+                    requirements.memory_type_bits & properties.memory_type_bits,
+                    vk::MemoryPropertyFlags::empty(),
+                )
+                .ok_or(VulkanError::NoMemoryType("DMA-BUF"))?;
+            let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(made.image);
+            let raw = fd.into_raw_fd();
+            let mut import = vk::ImportMemoryFdInfoKHR::default()
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                .fd(raw);
+            made.memory = match device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(requirements.size)
+                    .memory_type_index(kind)
+                    .push_next(&mut import)
+                    .push_next(&mut dedicated),
+                None,
+            ) {
+                Ok(memory) => memory,
+                Err(result) => {
+                    drop(<std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw));
+                    return Err(call("vkAllocateMemory")(result));
+                }
+            };
+            device
+                .bind_image_memory(made.image, made.memory, 0)
+                .map_err(call("vkBindImageMemory"))?;
+        }
+        Ok(Some(made))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DmaBufImage {
+    fn drop(&mut self) {
+        let device = &self.shared.device;
+        // SAFETY: made on this device, and no recording using it is still
+        // running — see the module docs.
+        unsafe {
+            device.destroy_image(self.image, None);
+            device.free_memory(self.memory, None);
+        }
+    }
+}
+
 /// A buffer in host-visible, coherent memory, mapped for as long as it
 /// lives: what bytes from the CPU are copied into an image from.
 pub(crate) struct HostBuffer {

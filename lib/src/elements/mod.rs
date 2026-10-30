@@ -276,7 +276,7 @@ pub use source::{
 #[cfg(all(target_os = "macos", feature = "coreaudio-capture"))]
 pub use source::{CoreAudioCaptureOptions, CoreAudioCaptureSource, CoreAudioCaptureSourceError};
 #[cfg(all(target_os = "linux", feature = "cuda"))]
-pub use source::{CudaDmaBufHandle, CudaDmaBufSource, CudaDmaBufSourceError, DmaBuf, DmaBufAlpha};
+pub use source::{CudaDmaBufHandle, CudaDmaBufSource, CudaDmaBufSourceError};
 #[cfg(feature = "cuda")]
 pub use source::{
     CudaTextLayerHandle, CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,
@@ -295,6 +295,8 @@ pub use source::{
     D3d12VideoCompositorHandle, D3d12VideoCompositorInput, D3d12VideoCompositorInputSink,
     D3d12VideoLayerHandle,
 };
+#[cfg(all(target_os = "linux", any(feature = "cuda", feature = "vulkan")))]
+pub use source::{DmaBuf, DmaBufAlpha};
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use source::{
     MetalSharedTextureHandle, MetalSharedTextureSource, MetalSharedTextureSourceError,
@@ -315,6 +317,8 @@ pub use source::{
 };
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 pub use source::{V4l2CaptureOptions, V4l2CaptureSource, V4l2CaptureSourceError};
+#[cfg(all(target_os = "linux", feature = "vulkan"))]
+pub use source::{VulkanDmaBufHandle, VulkanDmaBufSource, VulkanDmaBufSourceError};
 #[cfg(feature = "vulkan")]
 pub use source::{
     VulkanFrameFormat, VulkanTextLayerHandle, VulkanVideoCompositor, VulkanVideoCompositorError,

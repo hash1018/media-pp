@@ -223,6 +223,20 @@ compile error with no explanation.
   second is what Chromium 156 hands over drawing a page off-screen on its
   Wayland platform. `ElementType` has a `CudaDmaBufSource` variant.
 
+- **`VulkanDmaBufSource`: the same, as Vulkan frames, on Linux with
+  `vulkan`.** `VulkanDmaBufHandle::push` and `try_push` take the same
+  `DmaBuf` and `DmaBufAlpha`, which `vulkan` alone now brings too. The
+  buffer's memory is imported as an image laid out as its modifier says —
+  where FFmpeg made the device with `VK_EXT_external_memory_dma_buf`,
+  `VK_KHR_external_memory_fd` and `VK_EXT_image_drm_format_modifier`, and
+  else `new` says so with `NoImport` — polled until the producer has drawn
+  it, and copied by a compute kernel into a BGRA frame of the pipeline's
+  own before the push returns. Not FFmpeg's mapping of a `DRM_PRIME`
+  frame, which a build against kernel headers older than 6.0 makes without
+  waiting for the producer and warns of at every picture. `vulkan` now
+  takes `libc`, for that poll. `ElementType` has a `VulkanDmaBufSource`
+  variant.
+
 - **`heap::keep_small()`: glibc's heap held near what a server uses.** A
   process running many pipelines has a thread or more for each, and glibc
   an arena for each thread; left to itself it lets every arena keep 10 to
