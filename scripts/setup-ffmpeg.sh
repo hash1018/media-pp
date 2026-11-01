@@ -47,7 +47,7 @@ case "$(uname -s)" in
         triplet=x64-linux-dynamic
         libvar=LD_LIBRARY_PATH
         default=openh264,nvcodec
-        need="git curl zip unzip tar pkg-config make nasm autoconf automake libtool python3 clang"
+        need="git curl zip unzip tar pkg-config make nasm autoconf automake libtoolize python3 clang"
         hint="on Debian or Ubuntu: sudo apt install build-essential git curl zip unzip tar pkg-config nasm autoconf automake libtool python3 clang"
         ;;
     Darwin)
