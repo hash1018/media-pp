@@ -1026,7 +1026,15 @@ impl Shard {
         // than asking every session whether a datagram is its.
         let mut senders: HashMap<SocketAddr, SessionId> = HashMap::new();
         let mut buffer = vec![0u8; 65_536];
-        let local = self.local;
+        // str0m drops STUN sent to anything but a candidate. Which one a
+        // datagram was sent to cannot be told here — a socket on every
+        // interface does not say, and a router has rewritten it — and nothing
+        // depends on it, as replies go out through the one socket. So each is
+        // taken as sent to the first.
+        let destination = self
+            .candidates
+            .first()
+            .map_or(self.local, |candidate| candidate.addr());
         while !stop.is_stopped() {
             while let Ok(command) = self.commands.try_recv() {
                 self.command(command, &socket, &mut sessions, shared);
@@ -1078,7 +1086,7 @@ impl Shard {
                         Receive {
                             proto: Protocol::Udp,
                             source,
-                            destination: local,
+                            destination,
                             contents,
                         },
                     );

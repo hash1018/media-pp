@@ -442,6 +442,42 @@ fn binding_every_interface_needs_the_addresses_players_reach() {
     ));
 }
 
+/// The socket's own address is no candidate here, as behind a router or in
+/// a container, and the client may get through at any of them.
+#[test]
+fn a_player_connects_to_a_server_bound_to_every_interface() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (server, handle) = WebRtcServer::bind(
+        "server",
+        "0.0.0.0:0",
+        WebRtcServerOptions {
+            candidates: vec![
+                "127.0.0.2:0".parse().unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            ],
+            ..WebRtcServerOptions::default()
+        },
+    )
+    .unwrap();
+    let cam = serve(&handle, "cam");
+    let runner = DriverRunner::new(server);
+    runner.run().unwrap();
+    let camera = feed(&cam, &path);
+
+    let mut client = Client::new();
+    let (offer, pending, mids, _) = client.offer(&[MediaKind::Video], Direction::RecvOnly, None);
+    let (_, answer) = handle.play("cam", &offer).expect("the offer is answered");
+    client.accept(pending, &answer);
+    let enough = client.run_until(Duration::from_secs(20), |client| {
+        !client.received(mids[0]).is_empty()
+    });
+    assert!(enough, "connected: {}", client.connected());
+    camera.stop();
+    runner.stop();
+}
+
 /// A publisher's H.264, as an encoder for WebRTC sends it, is published
 /// into its path once its parameter sets have come, and played back to a
 /// player of that path.
