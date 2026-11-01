@@ -34,6 +34,11 @@ concurrency:
   group: api-docs-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
+# A date, so that a broken nightly does not fail this on a commit that has
+# nothing to do with it: 2026-11-01's reports a query cycle compiling zbus.
+env:
+  NIGHTLY: nightly-2026-10-30
+
 jobs:
   windows:
     runs-on: windows-2025
@@ -49,11 +54,11 @@ jobs:
       # so anything that fails before it is swallowed.
       - name: Install Rust toolchain
         shell: pwsh
-        run: rustup toolchain install nightly --profile minimal
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
 
       - name: Select Rust toolchain
         shell: pwsh
-        run: rustup default nightly
+        run: rustup default ${{ env.NIGHTLY }}
 
       # Shared with the CI workflow, which is also what keeps the FFmpeg cache
       # this restores alive: cache entries are readable from the default branch
@@ -116,10 +121,10 @@ jobs:
 
       # Nightly for `doc_cfg`, as on Windows.
       - name: Install Rust toolchain
-        run: rustup toolchain install nightly --profile minimal
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
 
       - name: Select Rust toolchain
-        run: rustup default nightly
+        run: rustup default ${{ env.NIGHTLY }}
 
       # No other workflow runs on macOS yet, so this one's own pushes to the
       # default branch are what keep this cache entry alive. `vulkan` is left
@@ -164,10 +169,10 @@ jobs:
 
       # Nightly for `doc_cfg`, as on Windows.
       - name: Install Rust toolchain
-        run: rustup toolchain install nightly --profile minimal
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
 
       - name: Select Rust toolchain
-        run: rustup default nightly
+        run: rustup default ${{ env.NIGHTLY }}
 
       # What the pipewire-* features build against, as in the CI workflow.
       - name: Install PipeWire development headers
