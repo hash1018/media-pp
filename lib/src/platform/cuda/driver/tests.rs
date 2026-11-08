@@ -873,6 +873,180 @@ fn a_picture_fitted_and_written_back_is_the_same_bytes() {
     }
 }
 
+/// A `width` by `height` P010 picture, BT.2020 limited range, of colours
+/// each block of four shares, its pixels brighter or darker by the same
+/// amount in every colour — so its chroma is exactly the block's — uploaded:
+/// and its ten-bit samples, luma then chroma, row by row.
+#[cfg(feature = "ort-cuda")]
+fn p010_blocks(
+    device: &crate::elements::CudaDevice,
+    width: u32,
+    height: u32,
+) -> (MediaBuffer, Vec<u16>, Vec<u16>) {
+    let write = crate::color::rgb_to_yuv_rows_of_depth(
+        ffmpeg::color::Space::BT2020NCL,
+        ffmpeg::color::Range::MPEG,
+        height,
+        10,
+    );
+    let code = |row: [f32; 4], [r, g, b]: [f32; 3]| {
+        ((row[0] * r + row[1] * g + row[2] * b + row[3]) * 1023.0).round() as u16
+    };
+    let base = |bx: u32, by: u32| {
+        [
+            0.2 + 0.6 * ((bx * 7 + by * 3) % 11) as f32 / 10.0,
+            0.2 + 0.6 * ((bx * 5 + by * 9) % 11) as f32 / 10.0,
+            0.2 + 0.6 * ((bx * 3 + by * 7) % 11) as f32 / 10.0,
+        ]
+    };
+    let mut luma = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let lift = 0.04 * ((x + 2 * y) % 5) as f32 / 4.0 - 0.02;
+            luma.push(code(write[0], base(x / 2, y / 2).map(|c| c + lift)));
+        }
+    }
+    let mut chroma = Vec::new();
+    for by in 0..height / 2 {
+        for bx in 0..width / 2 {
+            chroma.push(code(write[1], base(bx, by)));
+            chroma.push(code(write[2], base(bx, by)));
+        }
+    }
+    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::P010LE, width, height);
+    frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
+    frame.set_color_range(ffmpeg::color::Range::MPEG);
+    for (plane, samples, rows, across) in
+        [(0, &luma, height, width), (1, &chroma, height / 2, width)]
+    {
+        let stride = frame.stride(plane);
+        for y in 0..rows as usize {
+            for x in 0..across as usize {
+                let sample = samples[y * across as usize + x] << 6;
+                frame.data_mut(plane)[y * stride + x * 2..][..2]
+                    .copy_from_slice(&sample.to_le_bytes());
+            }
+        }
+    }
+    let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::P010);
+    let uploaded = capture(&mut upload);
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
+    let buf = uploaded.lock().unwrap().remove(0);
+    (buf, luma, chroma)
+}
+
+/// A P010 picture fitted at its own size and written back is the same
+/// ten-bit samples, to a step: luma pixel by pixel, chroma block by block,
+/// wherever the region is put.
+#[cfg(feature = "ort-cuda")]
+#[test]
+fn a_ten_bit_picture_fitted_and_written_back_is_the_same_samples() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let (width, height) = (40u32, 24u32);
+    let (source, luma, chroma) = p010_blocks(&device, width, height);
+    let MediaBuffer::Video(frame) = &source else {
+        panic!("a picture");
+    };
+    let driver = CudaDriver::retain_primary().expect("driver");
+    let kernels = driver.fit_kernels().expect("kernels");
+    let tensor = driver.batch_tensor(width, height, 1).expect("tensor");
+    let fit = Fit {
+        model: (width, height),
+        offset: (0, 0),
+        scaled: (width, height),
+        orientation: crate::orientation::Orientation::UPRIGHT,
+    };
+    driver
+        .fit_p010(
+            &kernels,
+            &tensor,
+            0,
+            fit,
+            Nv12Surface::from_frame(frame).expect("surface"),
+            (width, height),
+            &YuvToBgra::of_frame_at_depth(frame, 10),
+        )
+        .expect("fits");
+
+    let (out_w, out_h) = (48u32, 30u32);
+    let (target, _, _) = p010_blocks(&device, out_w, out_h);
+    let MediaBuffer::Video(out) = &target else {
+        panic!("a picture");
+    };
+    let rows = crate::color::rgb_to_yuv_rows_of_depth(
+        ffmpeg::color::Space::BT2020NCL,
+        ffmpeg::color::Range::MPEG,
+        height,
+        10,
+    );
+    let unfit = |region, at| Unfit {
+        plane: (width, height),
+        region,
+        at,
+        red: 0,
+        blue: 2,
+        mul: [1.0; 3],
+        add: [0.0; 3],
+    };
+    // SAFETY: the tensor holds three planes of `width` by `height` in this
+    // driver's context, fitted on its stream before this.
+    unsafe {
+        driver
+            .unfit_p010(
+                &kernels,
+                tensor.pointer(),
+                unfit((0, 0, width, height), (4, 2)),
+                Nv12Surface::from_frame(out).expect("surface"),
+                (out_w, out_h),
+                rows,
+            )
+            .expect("written");
+        // An odd place has no chroma sample of its own, and is refused.
+        assert!(matches!(
+            driver.unfit_p010(
+                &kernels,
+                tensor.pointer(),
+                unfit((0, 0, 8, 8), (3, 2)),
+                Nv12Surface::from_frame(out).expect("surface"),
+                (out_w, out_h),
+                rows,
+            ),
+            Err(CudaDriverError::KernelRejected(_))
+        ));
+    }
+    driver.synchronize().expect("ran");
+
+    let mut download = CudaDownload::new("download", &device, CudaFrameFormat::P010);
+    let received = capture(&mut download);
+    download.consume(target.clone()).expect("download");
+    let MediaBuffer::Video(back) = received.lock().unwrap().remove(0) else {
+        panic!("a picture");
+    };
+    let sample = |plane: usize, x: u32, y: u32| {
+        let at = y as usize * back.stride(plane) + x as usize * 2;
+        u16::from_le_bytes([back.data(plane)[at], back.data(plane)[at + 1]]) >> 6
+    };
+    let mut worst = 0;
+    for y in 0..height {
+        for x in 0..width {
+            let was = luma[(y * width + x) as usize];
+            worst = worst.max(sample(0, x + 4, y + 2).abs_diff(was));
+        }
+    }
+    for by in 0..height / 2 {
+        for bx in 0..width / 2 {
+            for c in 0..2 {
+                let was = chroma[((by * width / 2 + bx) * 2 + c) as usize];
+                let now = sample(1, (bx + 2) * 2 + c, by + 1);
+                worst = worst.max(now.abs_diff(was));
+            }
+        }
+    }
+    assert!(worst <= 1, "samples {worst} steps from what they were");
+}
+
 /// What the warp kernels read through `map` into a 12 by 10 input from a
 /// 40 by 30 picture whose luma — and, as BGRA, red — at pixel `(x, y)` is
 /// `pattern(x, y)`: the red plane, row by row.

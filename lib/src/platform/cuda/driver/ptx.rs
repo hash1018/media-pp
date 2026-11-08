@@ -1704,6 +1704,12 @@ BMDONE:
 /// byte, and written to a BGRA picture at a place, opaque. A byte fitted by
 /// `fit_bgra` at its own size comes back the same byte.
 ///
+/// `fit_p010` is `fit_nv12` for ten bits, each sample read from the top
+/// ten of its two bytes and as a share of 1023, made RGB by rows of the
+/// same depth; `unfit_p010` writes back to such a picture, a thread a 2x2
+/// block: each pixel's luma, and the block's chroma of its mean colour,
+/// by rows that undo those it was read by, each rounded to ten bits.
+///
 /// Kept apart from [`CONVERT_PTX`], and loaded by the detector alone: every
 /// other CUDA element would otherwise pay for its JIT at construction.
 #[cfg(feature = "ort-cuda")]
@@ -3037,6 +3043,426 @@ WARP_NV12_DONE:
     st.global.u8    [%rd11+3], %rs4;
 
 UNFIT_BGRA_DONE:
+    ret;
+}
+
+.visible .entry fit_p010(
+    .param .u64 dst,
+    .param .u32 model_w,
+    .param .u32 model_h,
+    .param .u32 offset_x,
+    .param .u32 offset_y,
+    .param .u32 scaled_w,
+    .param .u32 scaled_h,
+    .param .u64 luma,
+    .param .u32 luma_pitch,
+    .param .u64 chroma,
+    .param .u32 chroma_pitch,
+    .param .u32 src_w,
+    .param .u32 src_h,
+    .param .s32 x_of_x,
+    .param .s32 x_of_y,
+    .param .s32 x_0,
+    .param .s32 y_of_x,
+    .param .s32 y_of_y,
+    .param .s32 y_0,
+    .param .f32 red_y,
+    .param .f32 red_cb,
+    .param .f32 red_cr,
+    .param .f32 red_offset,
+    .param .f32 green_y,
+    .param .f32 green_cb,
+    .param .f32 green_cr,
+    .param .f32 green_offset,
+    .param .f32 blue_y,
+    .param .f32 blue_cb,
+    .param .f32 blue_cr,
+    .param .f32 blue_offset
+)
+{
+    .reg .pred  %p<6>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<48>;
+    .reg .f32   %f<32>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u32    %r1, [model_w];
+    ld.param.u32    %r2, [model_h];
+
+    mov.u32         %r6, %ctaid.x;
+    mov.u32         %r7, %ntid.x;
+    mov.u32         %r8, %tid.x;
+    mad.lo.s32      %r9, %r6, %r7, %r8;
+    mov.u32         %r10, %ctaid.y;
+    mov.u32         %r11, %ntid.y;
+    mov.u32         %r12, %tid.y;
+    mad.lo.s32      %r13, %r10, %r11, %r12;
+
+    setp.ge.u32     %p1, %r9, %r1;
+    @%p1 bra        FIT_P010_DONE;
+    setp.ge.u32     %p2, %r13, %r2;
+    @%p2 bra        FIT_P010_DONE;
+
+    // The margin's grey, unless the pixel is inside the picture.
+    mov.f32         %f4, 0f3EE4E4E5;
+    mov.f32         %f5, 0f3EE4E4E5;
+    mov.f32         %f6, 0f3EE4E4E5;
+
+    // dx, dy into the scaled picture; a pixel before its corner wraps round
+    // to a huge value, which the one comparison each also refuses.
+    ld.param.u32    %r3, [offset_x];
+    ld.param.u32    %r4, [offset_y];
+    ld.param.u32    %r5, [scaled_w];
+    ld.param.u32    %r14, [scaled_h];
+    sub.s32         %r15, %r9, %r3;
+    sub.s32         %r16, %r13, %r4;
+    setp.ge.u32     %p3, %r15, %r5;
+    @%p3 bra        FIT_P010_STORE;
+    setp.ge.u32     %p4, %r16, %r14;
+    @%p4 bra        FIT_P010_STORE;
+
+    // The source pixels the output pixel covers, [x0, x1) by [y0, y1):
+    // x0 = d * src / scaled, x1 = (d + 1) * src / scaled rounded up, at
+    // least one pixel and none past the edge. Averaged, so that a picture
+    // shrunk to a third is read from every pixel rather than one in nine.
+    ld.param.u32    %r17, [src_w];
+    ld.param.u32    %r18, [src_h];
+    mul.lo.s32      %r19, %r15, %r17;
+    div.u32         %r21, %r19, %r5;
+    add.s32         %r19, %r19, %r17;
+    add.s32         %r19, %r19, %r5;
+    sub.s32         %r19, %r19, 1;
+    div.u32         %r36, %r19, %r5;
+    min.u32         %r36, %r36, %r17;
+    add.s32         %r20, %r21, 1;
+    max.u32         %r36, %r36, %r20;
+    mul.lo.s32      %r22, %r16, %r18;
+    div.u32         %r24, %r22, %r14;
+    add.s32         %r22, %r22, %r18;
+    add.s32         %r22, %r22, %r14;
+    sub.s32         %r22, %r22, 1;
+    div.u32         %r37, %r22, %r14;
+    min.u32         %r37, %r37, %r18;
+    add.s32         %r23, %r24, 1;
+    max.u32         %r37, %r37, %r23;
+
+    ld.param.u64    %rd1, [luma];
+    ld.param.u32    %r25, [luma_pitch];
+    ld.param.u64    %rd2, [chroma];
+    ld.param.u32    %r26, [chroma_pitch];
+
+    // Where each pixel of the picture as shown is stored: x and y of it,
+    // each one of the shown x, the shown y, and a start.
+    ld.param.s32    %r40, [x_of_x];
+    ld.param.s32    %r41, [x_of_y];
+    ld.param.s32    %r42, [x_0];
+    ld.param.s32    %r43, [y_of_x];
+    ld.param.s32    %r44, [y_of_y];
+    ld.param.s32    %r45, [y_0];
+
+    // Sums of Y', Cb and Cr, each source pixel taking the chroma sample it
+    // shares with three others.
+    mov.f32         %f1, 0f00000000;
+    mov.f32         %f2, 0f00000000;
+    mov.f32         %f3, 0f00000000;
+    mov.u32         %r38, 0;
+    mov.u32         %r30, %r24;
+FIT_P010_ROW:
+    mov.u32         %r31, %r21;
+FIT_P010_PIXEL:
+    // The stored pixel (%r46, %r47) of shown pixel (%r31, %r30).
+    mul.lo.s32      %r46, %r40, %r31;
+    mad.lo.s32      %r46, %r41, %r30, %r46;
+    add.s32         %r46, %r46, %r42;
+    mul.lo.s32      %r47, %r43, %r31;
+    mad.lo.s32      %r47, %r44, %r30, %r47;
+    add.s32         %r47, %r47, %r45;
+    mul.lo.s32      %r27, %r47, %r25;
+    shr.u32         %r28, %r47, 1;
+    mul.lo.s32      %r29, %r28, %r26;
+    shl.b32         %r39, %r46, 1;
+    add.s32         %r32, %r27, %r39;
+    cvt.u64.u32     %rd3, %r32;
+    add.s64         %rd4, %rd1, %rd3;
+    ld.global.u16   %rs1, [%rd4];
+    shr.u16         %rs1, %rs1, 6;
+    shr.u32         %r33, %r46, 1;
+    shl.b32         %r33, %r33, 2;
+    add.s32         %r33, %r29, %r33;
+    cvt.u64.u32     %rd5, %r33;
+    add.s64         %rd6, %rd2, %rd5;
+    ld.global.u16   %rs2, [%rd6];
+    ld.global.u16   %rs3, [%rd6+2];
+    shr.u16         %rs2, %rs2, 6;
+    shr.u16         %rs3, %rs3, 6;
+    cvt.u32.u16     %r34, %rs1;
+    cvt.rn.f32.u32  %f7, %r34;
+    add.f32         %f1, %f1, %f7;
+    cvt.u32.u16     %r34, %rs2;
+    cvt.rn.f32.u32  %f7, %r34;
+    add.f32         %f2, %f2, %f7;
+    cvt.u32.u16     %r34, %rs3;
+    cvt.rn.f32.u32  %f7, %r34;
+    add.f32         %f3, %f3, %f7;
+    add.s32         %r38, %r38, 1;
+    add.s32         %r31, %r31, 1;
+    setp.lt.u32     %p5, %r31, %r36;
+    @%p5 bra        FIT_P010_PIXEL;
+    add.s32         %r30, %r30, 1;
+    setp.lt.u32     %p5, %r30, %r37;
+    @%p5 bra        FIT_P010_ROW;
+
+    // The means, 0 to 1: each sum over 1023 times the count.
+    cvt.rn.f32.u32  %f8, %r38;
+    mul.f32         %f8, %f8, 0f447FC000;
+    rcp.rn.f32      %f8, %f8;
+    mul.f32         %f1, %f1, %f8;
+    mul.f32         %f2, %f2, %f8;
+    mul.f32         %f3, %f3, %f8;
+
+    ld.param.f32    %f10, [red_y];
+    ld.param.f32    %f11, [red_cb];
+    ld.param.f32    %f12, [red_cr];
+    ld.param.f32    %f13, [red_offset];
+    ld.param.f32    %f14, [green_y];
+    ld.param.f32    %f15, [green_cb];
+    ld.param.f32    %f16, [green_cr];
+    ld.param.f32    %f17, [green_offset];
+    ld.param.f32    %f18, [blue_y];
+    ld.param.f32    %f19, [blue_cb];
+    ld.param.f32    %f20, [blue_cr];
+    ld.param.f32    %f21, [blue_offset];
+
+    fma.rn.f32      %f4, %f10, %f1, %f13;
+    fma.rn.f32      %f4, %f11, %f2, %f4;
+    fma.rn.f32      %f4, %f12, %f3, %f4;
+    fma.rn.f32      %f5, %f14, %f1, %f17;
+    fma.rn.f32      %f5, %f15, %f2, %f5;
+    fma.rn.f32      %f5, %f16, %f3, %f5;
+    fma.rn.f32      %f6, %f18, %f1, %f21;
+    fma.rn.f32      %f6, %f19, %f2, %f6;
+    fma.rn.f32      %f6, %f20, %f3, %f6;
+    add.sat.f32     %f4, %f4, 0f00000000;
+    add.sat.f32     %f5, %f5, 0f00000000;
+    add.sat.f32     %f6, %f6, 0f00000000;
+
+FIT_P010_STORE:
+    // R at y * model_w + x, G a plane later, B two.
+    ld.param.u64    %rd7, [dst];
+    mad.lo.s32      %r34, %r13, %r1, %r9;
+    mul.wide.u32    %rd8, %r34, 4;
+    add.s64         %rd9, %rd7, %rd8;
+    mul.lo.s32      %r35, %r1, %r2;
+    mul.wide.u32    %rd10, %r35, 4;
+    st.global.f32   [%rd9], %f4;
+    add.s64         %rd9, %rd9, %rd10;
+    st.global.f32   [%rd9], %f5;
+    add.s64         %rd9, %rd9, %rd10;
+    st.global.f32   [%rd9], %f6;
+
+FIT_P010_DONE:
+    ret;
+}
+
+// Each thread one 2x2 block of a region of a model's output picture,
+// written to a P010 picture: see the doc comment above.
+.visible .entry unfit_p010(
+    .param .u64 src,
+    .param .u32 plane_w,
+    .param .u32 plane_h,
+    .param .u32 region_x,
+    .param .u32 region_y,
+    .param .u32 region_w,
+    .param .u32 region_h,
+    .param .u64 luma,
+    .param .u32 luma_pitch,
+    .param .u64 chroma,
+    .param .u32 chroma_pitch,
+    .param .u32 dst_x,
+    .param .u32 dst_y,
+    .param .u32 red_plane,
+    .param .u32 blue_plane,
+    .param .f32 mul_r,
+    .param .f32 mul_g,
+    .param .f32 mul_b,
+    .param .f32 add_r,
+    .param .f32 add_g,
+    .param .f32 add_b,
+    .param .f32 y_r,
+    .param .f32 y_g,
+    .param .f32 y_b,
+    .param .f32 y_offset,
+    .param .f32 cb_r,
+    .param .f32 cb_g,
+    .param .f32 cb_b,
+    .param .f32 cb_offset,
+    .param .f32 cr_r,
+    .param .f32 cr_g,
+    .param .f32 cr_b,
+    .param .f32 cr_offset
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<48>;
+    .reg .f32   %f<40>;
+    .reg .b64   %rd<16>;
+
+    // The block (%r6, %r10): half the region across and down.
+    ld.param.u32    %r1, [region_w];
+    ld.param.u32    %r2, [region_h];
+    shr.u32         %r1, %r1, 1;
+    shr.u32         %r2, %r2, 1;
+    mov.u32         %r3, %ctaid.x;
+    mov.u32         %r4, %ntid.x;
+    mov.u32         %r5, %tid.x;
+    mad.lo.s32      %r6, %r3, %r4, %r5;
+    mov.u32         %r7, %ctaid.y;
+    mov.u32         %r8, %ntid.y;
+    mov.u32         %r9, %tid.y;
+    mad.lo.s32      %r10, %r7, %r8, %r9;
+    setp.ge.u32     %p1, %r6, %r1;
+    @%p1 bra        UNFIT_P010_DONE;
+    setp.ge.u32     %p2, %r10, %r2;
+    @%p2 bra        UNFIT_P010_DONE;
+
+    ld.param.u32    %r11, [plane_w];
+    ld.param.u32    %r12, [plane_h];
+    mul.lo.s32      %r18, %r11, %r12;
+    ld.param.u64    %rd1, [src];
+    ld.param.u32    %r19, [red_plane];
+    ld.param.u32    %r20, [blue_plane];
+    mul.lo.s32      %r21, %r19, %r18;
+    mul.lo.s32      %r22, %r20, %r18;
+    ld.param.u32    %r13, [region_x];
+    ld.param.u32    %r14, [region_y];
+    ld.param.u64    %rd8, [luma];
+    ld.param.u32    %r27, [luma_pitch];
+    ld.param.u32    %r28, [dst_x];
+    ld.param.u32    %r29, [dst_y];
+
+    ld.param.f32    %f4, [mul_r];
+    ld.param.f32    %f5, [mul_g];
+    ld.param.f32    %f6, [mul_b];
+    ld.param.f32    %f7, [add_r];
+    ld.param.f32    %f8, [add_g];
+    ld.param.f32    %f9, [add_b];
+    ld.param.f32    %f20, [y_r];
+    ld.param.f32    %f21, [y_g];
+    ld.param.f32    %f22, [y_b];
+    ld.param.f32    %f23, [y_offset];
+
+    // Red, green and blue summed over the block, for its chroma.
+    mov.f32         %f30, 0f00000000;
+    mov.f32         %f31, 0f00000000;
+    mov.f32         %f32, 0f00000000;
+
+    // The block's four pixels, %r30 = 0..3: across by its low bit, down
+    // by its high one.
+    mov.u32         %r30, 0;
+UNFIT_P010_PIXEL:
+    and.b32         %r31, %r30, 1;
+    shr.u32         %r32, %r30, 1;
+    shl.b32         %r33, %r6, 1;
+    add.s32         %r33, %r33, %r31;
+    shl.b32         %r34, %r10, 1;
+    add.s32         %r34, %r34, %r32;
+
+    // The pixel's floats, red from its plane, green from the middle one,
+    // blue from its own.
+    add.s32         %r15, %r13, %r33;
+    add.s32         %r16, %r14, %r34;
+    mad.lo.s32      %r17, %r16, %r11, %r15;
+    add.s32         %r23, %r21, %r17;
+    mul.wide.u32    %rd2, %r23, 4;
+    add.s64         %rd3, %rd1, %rd2;
+    ld.global.f32   %f1, [%rd3];
+    add.s32         %r24, %r18, %r17;
+    mul.wide.u32    %rd4, %r24, 4;
+    add.s64         %rd5, %rd1, %rd4;
+    ld.global.f32   %f2, [%rd5];
+    add.s32         %r25, %r22, %r17;
+    mul.wide.u32    %rd6, %r25, 4;
+    add.s64         %rd7, %rd1, %rd6;
+    ld.global.f32   %f3, [%rd7];
+
+    // Back to 0 to 1, held there (a NaN to 0).
+    fma.rn.f32      %f1, %f1, %f4, %f7;
+    fma.rn.f32      %f2, %f2, %f5, %f8;
+    fma.rn.f32      %f3, %f3, %f6, %f9;
+    add.sat.f32     %f1, %f1, 0f00000000;
+    add.sat.f32     %f2, %f2, 0f00000000;
+    add.sat.f32     %f3, %f3, 0f00000000;
+    add.f32         %f30, %f30, %f1;
+    add.f32         %f31, %f31, %f2;
+    add.f32         %f32, %f32, %f3;
+
+    // Its luma, a share of 1023 rounded to a sample, in the top ten bits.
+    fma.rn.f32      %f10, %f20, %f1, %f23;
+    fma.rn.f32      %f10, %f21, %f2, %f10;
+    fma.rn.f32      %f10, %f22, %f3, %f10;
+    add.sat.f32     %f10, %f10, 0f00000000;
+    mul.f32         %f10, %f10, 0f447FC000;
+    cvt.rni.u32.f32 %r35, %f10;
+    shl.b32         %r35, %r35, 6;
+    cvt.u16.u32     %rs1, %r35;
+    add.s32         %r36, %r28, %r33;
+    add.s32         %r37, %r29, %r34;
+    mul.wide.u32    %rd9, %r37, %r27;
+    mul.wide.u32    %rd10, %r36, 2;
+    add.s64         %rd11, %rd8, %rd9;
+    add.s64         %rd11, %rd11, %rd10;
+    st.global.u16   [%rd11], %rs1;
+
+    add.s32         %r30, %r30, 1;
+    setp.lt.u32     %p3, %r30, 4;
+    @%p3 bra        UNFIT_P010_PIXEL;
+
+    // The block's chroma, of its mean colour.
+    mul.f32         %f30, %f30, 0f3E800000;
+    mul.f32         %f31, %f31, 0f3E800000;
+    mul.f32         %f32, %f32, 0f3E800000;
+    ld.param.f32    %f24, [cb_r];
+    ld.param.f32    %f25, [cb_g];
+    ld.param.f32    %f26, [cb_b];
+    ld.param.f32    %f27, [cb_offset];
+    fma.rn.f32      %f11, %f24, %f30, %f27;
+    fma.rn.f32      %f11, %f25, %f31, %f11;
+    fma.rn.f32      %f11, %f26, %f32, %f11;
+    ld.param.f32    %f24, [cr_r];
+    ld.param.f32    %f25, [cr_g];
+    ld.param.f32    %f26, [cr_b];
+    ld.param.f32    %f27, [cr_offset];
+    fma.rn.f32      %f12, %f24, %f30, %f27;
+    fma.rn.f32      %f12, %f25, %f31, %f12;
+    fma.rn.f32      %f12, %f26, %f32, %f12;
+    add.sat.f32     %f11, %f11, 0f00000000;
+    add.sat.f32     %f12, %f12, 0f00000000;
+    mul.f32         %f11, %f11, 0f447FC000;
+    mul.f32         %f12, %f12, 0f447FC000;
+    cvt.rni.u32.f32 %r38, %f11;
+    cvt.rni.u32.f32 %r39, %f12;
+    shl.b32         %r38, %r38, 6;
+    shl.b32         %r39, %r39, 6;
+    cvt.u16.u32     %rs2, %r38;
+    cvt.u16.u32     %rs3, %r39;
+
+    // At the block's pair: a row of chroma for every two of luma, four
+    // bytes for every two pixels across.
+    ld.param.u64    %rd12, [chroma];
+    ld.param.u32    %r40, [chroma_pitch];
+    shr.u32         %r41, %r28, 1;
+    add.s32         %r41, %r41, %r6;
+    shr.u32         %r42, %r29, 1;
+    add.s32         %r42, %r42, %r10;
+    mul.wide.u32    %rd13, %r42, %r40;
+    mul.wide.u32    %rd14, %r41, 4;
+    add.s64         %rd15, %rd12, %rd13;
+    add.s64         %rd15, %rd15, %rd14;
+    st.global.u16   [%rd15], %rs2;
+    st.global.u16   [%rd15+2], %rs3;
+
+UNFIT_P010_DONE:
     ret;
 }
 "#;

@@ -288,7 +288,13 @@ pub(crate) fn yuv_to_rgb_rows(
     range: ffmpeg_next::color::Range,
     height: u32,
 ) -> [[f32; 4]; 3] {
-    let (kr, kb) = match matrix_of(space, height) {
+    yuv_to_rgb_rows_of_depth(space, range, height, 8)
+}
+
+/// The weights of red and blue in luma, `Kr` and `Kb`, of the matrix a
+/// picture `height` lines tall was made with — see [`matrix_of`].
+fn luma_weights(space: ffmpeg_next::color::Space, height: u32) -> (f32, f32) {
+    match matrix_of(space, height) {
         ffmpeg_next::color::Space::BT709 => (0.2126f32, 0.0722f32),
         ffmpeg_next::color::Space::BT2020NCL | ffmpeg_next::color::Space::BT2020CL => {
             (0.2627f32, 0.0593f32)
@@ -296,15 +302,41 @@ pub(crate) fn yuv_to_rgb_rows(
         ffmpeg_next::color::Space::FCC => (0.30f32, 0.11f32),
         ffmpeg_next::color::Space::SMPTE240M => (0.212f32, 0.087f32),
         _ => (0.299f32, 0.114f32),
-    };
+    }
+}
+
+/// Where a range puts black and neutral chroma, and how far luma and
+/// chroma reach, for samples of `depth` bits each read as a share of the
+/// largest, `2^depth - 1`: luma's offset and scale, chroma's offset and
+/// scale. Limited range is 16 to 235 and 16 to 240 at 8 bits, the same
+/// times four at 10.
+fn range_of_depth(range: ffmpeg_next::color::Range, depth: u32) -> (f32, f32, f32, f32) {
+    let largest = ((1u32 << depth) - 1) as f32;
+    let step = (1u32 << (depth - 8)) as f32;
+    let chroma_offset = 128.0 * step / largest;
+    match range {
+        ffmpeg_next::color::Range::JPEG => (0.0, 1.0, chroma_offset, 1.0),
+        ffmpeg_next::color::Range::MPEG | ffmpeg_next::color::Range::Unspecified => (
+            16.0 * step / largest,
+            largest / (219.0 * step),
+            chroma_offset,
+            largest / (224.0 * step),
+        ),
+    }
+}
+
+/// [`yuv_to_rgb_rows`] for samples of `depth` bits, each normalized as a
+/// share of `2^depth - 1`: a 10-bit sample `v` is `v / 1023`, its black
+/// 64 and its neutral chroma 512.
+pub(crate) fn yuv_to_rgb_rows_of_depth(
+    space: ffmpeg_next::color::Space,
+    range: ffmpeg_next::color::Range,
+    height: u32,
+    depth: u32,
+) -> [[f32; 4]; 3] {
+    let (kr, kb) = luma_weights(space, height);
     let kg = 1.0 - kr - kb;
-    let (y_offset, y_scale, chroma_scale) = match range {
-        ffmpeg_next::color::Range::JPEG => (0.0, 1.0, 1.0),
-        ffmpeg_next::color::Range::MPEG | ffmpeg_next::color::Range::Unspecified => {
-            (16.0 / 255.0, 255.0 / 219.0, 255.0 / 224.0)
-        }
-    };
-    let chroma_offset = 128.0 / 255.0;
+    let (y_offset, y_scale, chroma_offset, chroma_scale) = range_of_depth(range, depth);
     let red_cr = 2.0 * (1.0 - kr) * chroma_scale;
     let blue_cb = 2.0 * (1.0 - kb) * chroma_scale;
     let green_cb = -2.0 * kb * (1.0 - kb) / kg * chroma_scale;
@@ -315,6 +347,31 @@ pub(crate) fn yuv_to_rgb_rows(
         [y_scale, 0.0, red_cr, offset(0.0, red_cr)],
         [y_scale, green_cb, green_cr, offset(green_cb, green_cr)],
         [y_scale, blue_cb, 0.0, offset(blue_cb, 0.0)],
+    ]
+}
+
+/// The other way round from [`yuv_to_rgb_rows_of_depth`]: three affine
+/// rows that turn `(R', G', B', 1)`, each `0.0..=1.0`, into normalized
+/// Y', Cb and Cr of `depth` bits — what writing a picture back in the
+/// matrix and range it was read in multiplies by.
+#[cfg(feature = "ort-cuda")]
+pub(crate) fn rgb_to_yuv_rows_of_depth(
+    space: ffmpeg_next::color::Space,
+    range: ffmpeg_next::color::Range,
+    height: u32,
+    depth: u32,
+) -> [[f32; 4]; 3] {
+    let (kr, kb) = luma_weights(space, height);
+    let kg = 1.0 - kr - kb;
+    let (y_offset, y_scale, chroma_offset, chroma_scale) = range_of_depth(range, depth);
+    // Cb is (B' - Y') / (2 (1 - Kb)), Cr (R' - Y') / (2 (1 - Kr)), each then
+    // within the range's reach of neutral.
+    let cb = 1.0 / (2.0 * (1.0 - kb) * chroma_scale);
+    let cr = 1.0 / (2.0 * (1.0 - kr) * chroma_scale);
+    [
+        [kr / y_scale, kg / y_scale, kb / y_scale, y_offset],
+        [-kr * cb, -kg * cb, (1.0 - kb) * cb, chroma_offset],
+        [(1.0 - kr) * cr, -kg * cr, -kb * cr, chroma_offset],
     ]
 }
 
@@ -403,6 +460,43 @@ mod tests {
             full.yuv_to_rgb_rows(240)[0][0],
             1.0,
             "full range is not stretched"
+        );
+    }
+
+    /// Ten-bit limited range puts black at 64, white at 940 and neutral
+    /// chroma at 512; and writing undoes reading, for every matrix and
+    /// range, so a picture read and written back is the same samples.
+    #[cfg(feature = "ort-cuda")]
+    #[test]
+    fn ten_bit_rows_read_and_write_the_same_samples() {
+        let apply = |rows: [[f32; 4]; 3], [a, b, c]: [f32; 3]| {
+            rows.map(|[x, y, z, w]| x * a + y * b + z * c + w)
+        };
+        let codes = |values: [f32; 3]| values.map(|value| (value * 1023.0).round() as u32);
+        let read = yuv_to_rgb_rows_of_depth(Space::BT2020NCL, Range::MPEG, 2160, 10);
+        let write = rgb_to_yuv_rows_of_depth(Space::BT2020NCL, Range::MPEG, 2160, 10);
+        assert_eq!(codes(apply(write, [0.0; 3])), [64, 512, 512]);
+        assert_eq!(codes(apply(write, [1.0; 3])), [940, 512, 512]);
+        assert_eq!(
+            apply(read, [64.0 / 1023.0, 512.0 / 1023.0, 512.0 / 1023.0]).map(|v| v.abs() < 1e-5),
+            [true; 3],
+            "black reads as black"
+        );
+        for space in [Space::BT709, Space::BT2020NCL, Space::BT470BG] {
+            for range in [Range::MPEG, Range::JPEG] {
+                let read = yuv_to_rgb_rows_of_depth(space, range, 1080, 10);
+                let write = rgb_to_yuv_rows_of_depth(space, range, 1080, 10);
+                for sample in [[100u32, 400, 700], [500, 512, 512], [900, 300, 600]] {
+                    let normalized = sample.map(|code| code as f32 / 1023.0);
+                    let back = codes(apply(write, apply(read, normalized)));
+                    assert_eq!(back, sample, "{space:?} {range:?}");
+                }
+            }
+        }
+        // Eight bits are what they always were.
+        assert_eq!(
+            yuv_to_rgb_rows_of_depth(Space::BT709, Range::MPEG, 1080, 8),
+            yuv_to_rgb_rows(Space::BT709, Range::MPEG, 1080)
         );
     }
 }

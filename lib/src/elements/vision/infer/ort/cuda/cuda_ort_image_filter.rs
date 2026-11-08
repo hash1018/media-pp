@@ -36,29 +36,50 @@ use crate::{
 
 use super::super::{ChannelOrder, ModelInput, OrtError};
 
-/// The side of the square piece a model of open size is run on. A model
-/// enlarging four times makes 1024 by 1024 of it, which an 8 GB GPU holds
-/// for the models this is for; a whole 1080p picture at once does not.
+/// The side of the square piece a model of open size is run on. Real-ESRGAN
+/// x4plus made 1024 by 1024 of one in 2.1 GB of an RTX 3050's memory, and a
+/// 1080p picture in 27 s, against 33 s in its own 128 by 128 pieces, whose
+/// overlaps are a larger share of them.
 const TILE: u32 = 256;
 /// How far each piece reaches into its neighbours, in the picture's
 /// pixels: a model draws the edge of what it is given worst, and the edge
 /// of a piece is not the picture's, so only its middle is kept.
 const OVERLAP: u32 = 16;
-/// The most pieces run at once by a model that takes any number.
-const MOST_AT_ONCE: usize = 4;
+/// The most pieces run at once by a model that takes any number: one.
+/// Four of Real-ESRGAN x4plus's took all 8 GB of an RTX 3050 and spilled
+/// into the system's memory, a 1080p picture taking 339 s rather than 27.
+const MOST_AT_ONCE: usize = 1;
 
 /// How a [`CudaOrtImageFilter`] runs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CudaOrtImageFilterOptions {
     /// The order of the model's planes and how a value from 0 to 1 is
     /// scaled for it. Its output is read back the same way, undone: a
     /// model that takes RGB from -1 to 1 is taken to make RGB from -1 to 1.
     pub values: ModelInput,
+    /// What it makes: [`CudaFrameFormat::Bgra`], the default, of NV12, BGRA
+    /// or HDR P010 brought to SDR; or [`CudaFrameFormat::P010`] of P010
+    /// alone, in ten bits and the picture's own colour — HDR stays HDR, the
+    /// model handed its samples as they are coded. NV12 is refused:
+    /// [`CudaConverter`](crate::elements::CudaConverter) makes it of BGRA.
+    pub output: CudaFrameFormat,
     /// Where TensorRT keeps the engine it builds for this model and GPU,
     /// as [`CudaOrtDetectorOptions::engine_cache`](crate::elements::CudaOrtDetectorOptions::engine_cache)
     /// says; `None` is the user's cache directory.
     #[cfg(feature = "ort-tensorrt")]
     pub engine_cache: Option<std::path::PathBuf>,
+}
+
+impl Default for CudaOrtImageFilterOptions {
+    /// RGB from 0 to 1, made into BGRA.
+    fn default() -> Self {
+        Self {
+            values: ModelInput::default(),
+            output: CudaFrameFormat::Bgra,
+            #[cfg(feature = "ort-tensorrt")]
+            engine_cache: None,
+        }
+    }
 }
 
 /// Makes each CUDA picture into the picture an ONNX model makes of it — a
@@ -68,8 +89,10 @@ pub struct CudaOrtImageFilterOptions {
 /// Any model of one RGB picture in, `[batch, 3, height, width]` floats, and
 /// one out, the same or a whole number of times larger, is run the same
 /// way: the model file is what makes it one thing or another. Its output is
-/// BGRA, that many times the size of its input; [`CudaConverter`] makes it
-/// NV12 for an encoder that takes that. Needs the `ort-cuda` feature.
+/// that many times the size of its input, BGRA — which [`CudaConverter`]
+/// makes NV12 for an encoder that takes that — or, where
+/// [`CudaOrtImageFilterOptions::output`] says, P010 of P010 in ten bits.
+/// Needs the `ort-cuda` feature.
 ///
 /// [`CudaConverter`]: crate::elements::CudaConverter
 ///
@@ -103,21 +126,33 @@ pub struct CudaOrtImageFilterOptions {
 /// reaching 16 pixels into its neighbours, of which only the middle is
 /// kept, as Real-ESRGAN's own tiling does: a model draws the edge of what it
 /// is given worst. A picture smaller than a piece is run in one, the rest
-/// of it grey. Up to four pieces run at once where the model takes any
-/// number. Each is read into the model's input on the GPU, as the detectors
+/// of it grey. One piece runs at a time, unless the model takes a fixed
+/// number of them: what a model of this kind keeps while it runs grows
+/// with every piece, and four of Real-ESRGAN's fill an 8 GB GPU. Each is
+/// read into the model's input on the GPU, as the detectors
 /// read a picture, run there, and its output written into the picture
 /// where it came from. How many times larger the output is comes from the
 /// model's first run; one that is not a whole number of times larger, the
 /// same across and down, is refused.
 ///
-/// It takes NV12, BGRA or HDR P010 CUDA pictures from the same
+/// Making BGRA, it takes NV12, BGRA or HDR P010 CUDA pictures from the same
 /// [`CudaDevice`] as the rest of the pipeline. An NV12 picture is read as
 /// RGB by its own colour tags; an HDR one is brought to SDR first, as the
 /// detectors read it, and its output tagged BT.709. What it makes is
-/// full-range RGB, tagged so; its timestamps, its other side data and what
-/// the picture carried go on with it, and it is stored as the picture was,
-/// whichever way it is shown. The same picture handed again — a live
-/// source's repeat — is answered with what was made of it.
+/// full-range RGB, tagged so.
+///
+/// Making P010, it takes P010 alone, SDR or HDR, and is handed its samples
+/// as they are coded — PQ or HLG, BT.2020 — read to RGB by its own matrix
+/// and range in ten bits, and written back by the same, each block of four
+/// pixels the chroma of its mean colour: a picture the model leaves alone
+/// comes back the same samples, to a step. Its colour tags, HDR's among
+/// them, go on as they were. A model trained on SDR pictures is handed HDR
+/// as it was coded, not as light, which is what keeps it in ten bits.
+///
+/// Either way its timestamps, its other side data and what the picture
+/// carried go on with it, and it is stored as the picture was, whichever way
+/// it is shown. The same picture handed again — a live source's repeat — is
+/// answered with what was made of it.
 ///
 /// # Requirements
 ///
@@ -140,6 +175,8 @@ struct Filtering {
     input_name: String,
     output_name: String,
     values: ModelInput,
+    /// BGRA, or P010 of P010.
+    output: CudaFrameFormat,
     /// The size of a piece, the model's input.
     tile: (u32, u32),
     /// How many pieces `tensor` holds, and so run at once.
@@ -187,9 +224,10 @@ struct Piece {
 /// The pieces a side `length` long is run in, each `tile` long or the whole
 /// side where it is shorter, reaching `overlap` into its neighbours. Every
 /// pixel is kept from exactly one piece, at least `overlap` from that
-/// piece's edge wherever the picture goes on past it. Starts stay even
-/// where `tile` and `length` are, so an NV12 piece starts on a chroma
-/// sample.
+/// piece's edge wherever the picture goes on past it. Starts and the ends
+/// of what is kept stay even where `tile` and `length` are, so an NV12
+/// piece starts on a chroma sample and a P010 one is written whole blocks
+/// of it.
 fn pieces(length: u32, tile: u32, overlap: u32) -> Vec<Piece> {
     if length <= tile {
         return vec![Piece {
@@ -199,7 +237,10 @@ fn pieces(length: u32, tile: u32, overlap: u32) -> Vec<Piece> {
             keep_to: length,
         }];
     }
-    let stride = (tile - 2 * overlap.min(tile / 4)) & !1;
+    let overlap = overlap.min(tile / 4);
+    // Two short of twice the overlap, so that halfway into it, made even,
+    // is still the overlap from either piece's edge.
+    let stride = tile.saturating_sub(2 * overlap + 2) & !1;
     let mut starts = Vec::new();
     let mut start = 0;
     while start + tile < length {
@@ -212,7 +253,7 @@ fn pieces(length: u32, tile: u32, overlap: u32) -> Vec<Piece> {
     for (index, &start) in starts.iter().enumerate() {
         let keep_to = match starts.get(index + 1) {
             // Halfway into the overlap with the next, which keeps the rest.
-            Some(&next) => (next + start + tile) / 2,
+            Some(&next) => ((next + start + tile) / 2) & !1,
             None => length,
         };
         found.push(Piece {
@@ -245,6 +286,9 @@ impl CudaOrtImageFilter {
     ) -> Result<Self> {
         let identity = Identity::new(ElementType::CudaOrtImageFilter, name);
         let pp_log = identity.pp_log().clone();
+        if options.output == CudaFrameFormat::Nv12 {
+            return Err(OrtError::UnsupportedOutput(options.output).into());
+        }
         let path = model_path.as_ref().display().to_string();
         #[cfg(feature = "ort-tensorrt")]
         let engine_cache = options.engine_cache.as_deref();
@@ -307,11 +351,12 @@ impl CudaOrtImageFilter {
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
         pp_info!(
             pp_log: &pp_log,
-            "model loaded: path={path}, pieces of {}x{}, {} at once, {:?}, on {provider}; {linked}",
+            "model loaded: path={path}, pieces of {}x{}, {} at once, {:?}, making {:?}, on {provider}; {linked}",
             input.size.0,
             input.size.1,
             capacity,
-            options.values
+            options.values,
+            options.output
         );
         Ok(Self(FilterStage::new(
             identity,
@@ -321,6 +366,7 @@ impl CudaOrtImageFilter {
                 input_name,
                 output_name,
                 values: options.values,
+                output: options.output,
                 tile: input.size,
                 capacity,
                 open_batch: input.batch.is_none(),
@@ -344,6 +390,7 @@ impl CudaOrtImageFilter {
 #[derive(Clone, Copy)]
 enum Source {
     Nv12(Nv12Surface),
+    P010(Nv12Surface),
     Bgra(BgraSurface),
 }
 
@@ -360,14 +407,21 @@ impl Filtering {
         &mut self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, OrtError> {
+        let ten_bit = self.output == CudaFrameFormat::P010;
         let surface = frame::validate(
             frame,
             ElementType::CudaOrtImageFilter,
             self.device_ctx,
-            CudaSurfaces::NV12_BGRA_OR_P010,
+            if ten_bit {
+                CudaSurfaces::P010
+            } else {
+                CudaSurfaces::NV12_BGRA_OR_P010
+            },
         )?;
-        let hdr = surface.layout == ffmpeg::format::Pixel::P010LE;
-        let source = if hdr {
+        let hdr = !ten_bit && surface.layout == ffmpeg::format::Pixel::P010LE;
+        let source = if ten_bit {
+            Source::P010(Nv12Surface::from_frame(frame).ok_or(OrtError::MissingSurface)?)
+        } else if hdr {
             Source::Bgra(
                 self.sdr
                     .of(&self.driver, frame, ElementType::CudaOrtImageFilter)?,
@@ -377,7 +431,18 @@ impl Filtering {
         } else {
             Source::Bgra(BgraSurface::from_frame(frame).ok_or(OrtError::MissingSurface)?)
         };
-        let colour = YuvToBgra::of_frame(frame);
+        let colour = if ten_bit {
+            YuvToBgra::of_frame_at_depth(frame, 10)
+        } else {
+            YuvToBgra::of_frame(frame)
+        };
+        // Written back, ten bits are written as they were read.
+        let writing = crate::color::rgb_to_yuv_rows_of_depth(
+            frame.color_space(),
+            frame.color_range(),
+            frame.height(),
+            10,
+        );
         let size = (frame.width(), frame.height());
         let across = pieces(size.0, self.tile.0, OVERLAP);
         let down = pieces(size.1, self.tile.1, OVERLAP);
@@ -456,13 +521,18 @@ impl Filtering {
                         &self.pool,
                         &self.hw_device_ctx,
                         &self.pp_log,
+                        self.output,
                         out_size,
                     )?;
                     let (dst, _) = destination.insert((made, out_size));
                     (&*dst, out_size)
                 }
             };
-            let dst = BgraSurface::from_frame(dst).ok_or(OrtError::MissingSurface)?;
+            let dst = if ten_bit {
+                Source::P010(Nv12Surface::from_frame(dst).ok_or(OrtError::MissingSurface)?)
+            } else {
+                Source::Bgra(BgraSurface::from_frame(dst).ok_or(OrtError::MissingSurface)?)
+            };
             let out_tile = (self.tile.0 * factor, self.tile.1 * factor);
             for (slot, patch) in group.iter().enumerate() {
                 let (across, down) = (patch.across, patch.down);
@@ -489,8 +559,21 @@ impl Filtering {
                 // (`synchronize_outputs`) and kept by `outputs` until the
                 // synchronize below has returned.
                 unsafe {
-                    self.driver
-                        .unfit_bgra(&self.kernels, at, unfit, dst, out_size)?;
+                    match dst {
+                        Source::P010(dst) => self.driver.unfit_p010(
+                            &self.kernels,
+                            at,
+                            unfit,
+                            dst,
+                            out_size,
+                            writing,
+                        )?,
+                        Source::Bgra(dst) => {
+                            self.driver
+                                .unfit_bgra(&self.kernels, at, unfit, dst, out_size)?
+                        }
+                        Source::Nv12(_) => unreachable!("nothing is written as NV12"),
+                    }
                 }
             }
             // What was written is read on FFmpeg's stream next, and the
@@ -505,8 +588,12 @@ impl Filtering {
         unsafe {
             ffi::av_frame_copy_props(picture.as_mut_ptr(), frame.as_ptr());
         }
-        // What the model made is full-range RGB, whatever it was made of;
-        // an HDR picture was brought to SDR first.
+        // Ten bits are written in the picture's own colour, which its tags
+        // go on saying. Otherwise what the model made is full-range RGB,
+        // whatever it was made of; an HDR picture was brought to SDR first.
+        if ten_bit {
+            return Ok(picture);
+        }
         picture.set_color_space(ffmpeg::color::Space::RGB);
         picture.set_color_range(ffmpeg::color::Range::JPEG);
         if hdr {
@@ -542,6 +629,15 @@ impl Filtering {
                 };
                 self.driver
                     .fit_nv12(&self.kernels, &self.tensor, slot, fit, crop, cut, colour)?;
+            }
+            Source::P010(whole) => {
+                let crop = Nv12Surface {
+                    luma: whole.luma + y * whole.luma_pitch as u64 + x * 2,
+                    chroma: whole.chroma + (y / 2) * whole.chroma_pitch as u64 + x * 2,
+                    ..whole
+                };
+                self.driver
+                    .fit_p010(&self.kernels, &self.tensor, slot, fit, crop, cut, colour)?;
             }
             Source::Bgra(whole) => {
                 let crop = BgraSurface {
@@ -591,18 +687,22 @@ impl PerFrameTransform for Filtering {
 
 impl Filter for Filtering {
     /// Device-resident frames: NV12, BGRA, or P010 read through an SDR
-    /// copy.
+    /// copy — or P010 alone, made into P010.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
-            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                .with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda).with_layouts(match self
+                .output
+            {
+                CudaFrameFormat::P010 => crate::contract::PixelLayoutSet::P010,
+                _ => crate::contract::PixelLayoutSet::GPU_SCALABLE,
+            }),
         )
     }
 
     fn output_contract(&self) -> OutputContract {
         OutputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
-                .with_layouts(CudaFrameFormat::Bgra.layouts()),
+                .with_layouts(self.output.layouts()),
         )
     }
 
@@ -665,13 +765,14 @@ fn factor_of(
     Ok(factor)
 }
 
-/// A BGRA picture of `size` from `pool`, its surface from `frames`, made
-/// for that size on `device` where it is not.
+/// A picture of `format` and `size` from `pool`, its surface from `frames`,
+/// made for that size on `device` where it is not.
 fn picture(
     frames: &mut ForSize<AvBufferRef>,
     pool: &UnboundObjectPool<ffmpeg::frame::Video>,
     device: &AvBufferRef,
     pp_log: &PpLog,
+    format: CudaFrameFormat,
     size: (u32, u32),
 ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, OrtError> {
     let frames_ctx = frames
@@ -679,7 +780,7 @@ fn picture(
             pp_info!(pp_log: pp_log, "allocating a {width}x{height} pool");
             // SAFETY: `create_hw_frames_ctx`'s contract is a live device
             // context, which is what the owned `AvBufferRef` is.
-            unsafe { create_hw_frames_ctx(device, CudaFrameFormat::Bgra, width, height) }
+            unsafe { create_hw_frames_ctx(device, format, width, height) }
                 .map_err(CudaUploadError::from)
         })?
         .as_ptr();
@@ -727,6 +828,7 @@ mod tests {
                         "{length}: {found:?}"
                     );
                 }
+                assert!(piece.keep_to.is_multiple_of(2), "{length}: {found:?}");
                 kept = piece.keep_to;
             }
             assert_eq!(kept, length, "{length}: {found:?}");
@@ -1027,6 +1129,147 @@ mod tests {
         };
         assert!(!check_link(&made, &into(CudaFrameFormat::Nv12)).is_refused());
         assert!(check_link(&made, &into(CudaFrameFormat::Bgra)).is_refused());
+    }
+
+    /// Made into P010, an HDR picture stays HDR in ten bits: its tags go on
+    /// with it, and each pixel of a two-times enlargement is the ten-bit
+    /// samples of the one it was made of, across pieces. An 8-bit picture
+    /// is refused where ten bits are to be made, and NV12 is no output.
+    #[test]
+    fn ten_bits_come_out_as_they_went_in() {
+        use crate::element::RawSink;
+        let Some((device, _serial)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let model = ModelFile::new(&resize_model(2.0));
+        let options = CudaOrtImageFilterOptions {
+            output: CudaFrameFormat::P010,
+            ..CudaOrtImageFilterOptions::default()
+        };
+        let Ok(mut filter) = CudaOrtImageFilter::new("twice", &device, &model.0, options) else {
+            eprintln!("skipping: the CUDA runtime cannot be used here");
+            return;
+        };
+        assert!(matches!(
+            CudaOrtImageFilter::new(
+                "nv12",
+                &device,
+                &model.0,
+                CudaOrtImageFilterOptions {
+                    output: CudaFrameFormat::Nv12,
+                    ..CudaOrtImageFilterOptions::default()
+                }
+            ),
+            Err(crate::error::Error::OrtDetectorError(
+                OrtError::UnsupportedOutput(CudaFrameFormat::Nv12)
+            ))
+        ));
+
+        // Colours each block of four shares, its pixels lifted alike in
+        // every colour, so that its chroma is the block's exactly.
+        let (width, height) = (300u32, 200u32);
+        let write = crate::color::rgb_to_yuv_rows_of_depth(
+            ffmpeg::color::Space::BT2020NCL,
+            ffmpeg::color::Range::MPEG,
+            height,
+            10,
+        );
+        let code = |row: [f32; 4], [r, g, b]: [f32; 3]| {
+            ((row[0] * r + row[1] * g + row[2] * b + row[3]) * 1023.0).round() as u16
+        };
+        let base = |bx: u32, by: u32| {
+            [
+                0.2 + 0.6 * ((bx * 7 + by * 3) % 11) as f32 / 10.0,
+                0.2 + 0.6 * ((bx * 5 + by * 9) % 11) as f32 / 10.0,
+                0.2 + 0.6 * ((bx * 3 + by * 7) % 11) as f32 / 10.0,
+            ]
+        };
+        let luma = |x: u32, y: u32| {
+            let lift = 0.04 * ((x + 2 * y) % 5) as f32 / 4.0 - 0.02;
+            code(write[0], base(x / 2, y / 2).map(|c| c + lift))
+        };
+        let chroma = |bx: u32, by: u32, c: usize| code(write[1 + c], base(bx, by));
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::P010LE, width, height);
+        frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
+        frame.set_color_range(ffmpeg::color::Range::MPEG);
+        frame.set_color_primaries(ffmpeg::color::Primaries::BT2020);
+        frame.set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::SMPTE2084);
+        frame.set_pts(Some(42));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational(1, 30));
+        let stride = frame.stride(0);
+        for y in 0..height {
+            for x in 0..width {
+                frame.data_mut(0)[y as usize * stride + x as usize * 2..][..2]
+                    .copy_from_slice(&(luma(x, y) << 6).to_le_bytes());
+            }
+        }
+        let stride = frame.stride(1);
+        for by in 0..height / 2 {
+            for bx in 0..width / 2 {
+                for c in 0..2 {
+                    frame.data_mut(1)[by as usize * stride + (bx as usize * 2 + c) * 2..][..2]
+                        .copy_from_slice(&(chroma(bx, by, c) << 6).to_le_bytes());
+                }
+            }
+        }
+        let mut upload = crate::elements::CudaUpload::new("upload", &device, CudaFrameFormat::P010);
+        let received = crate::test_support::capture(&mut upload);
+        upload.consume(MediaBuffer::video(frame)).expect("uploads");
+        let picture = received.lock().unwrap().remove(0);
+
+        let made = filtered(&mut filter, picture).expect("filters");
+        let mut download =
+            crate::elements::CudaDownload::new("download", &device, CudaFrameFormat::P010);
+        let received = crate::test_support::capture(&mut download);
+        download.consume(made).expect("downloads");
+        let MediaBuffer::Video(out) = received.lock().unwrap().remove(0) else {
+            panic!("a picture");
+        };
+        assert_eq!((out.width(), out.height()), (width * 2, height * 2));
+        assert_eq!(out.format(), ffmpeg::format::Pixel::P010LE);
+        assert_eq!(
+            (
+                out.pts(),
+                out.color_space(),
+                out.color_transfer_characteristic()
+            ),
+            (
+                Some(42),
+                ffmpeg::color::Space::BT2020NCL,
+                ffmpeg::color::TransferCharacteristic::SMPTE2084
+            ),
+            "the picture's own colour, HDR and all"
+        );
+        let sample = |plane: usize, x: u32, y: u32| {
+            let at = y as usize * out.stride(plane) + x as usize * 2;
+            u16::from_le_bytes([out.data(plane)[at], out.data(plane)[at + 1]]) >> 6
+        };
+        let mut worst = 0;
+        for y in 0..height * 2 {
+            for x in 0..width * 2 {
+                worst = worst.max(sample(0, x, y).abs_diff(luma(x / 2, y / 2)));
+            }
+        }
+        // Each block of the output is one pixel of the input, four times:
+        // the chroma of that pixel's colour, which is its block's.
+        for by in 0..height {
+            for bx in 0..width {
+                for c in 0..2 {
+                    let now = sample(1, bx * 2 + c as u32, by);
+                    worst = worst.max(now.abs_diff(chroma(bx / 2, by / 2, c)));
+                }
+            }
+        }
+        assert!(
+            worst <= 1,
+            "samples {worst} steps from what they were made of"
+        );
+
+        let eight_bit = uploaded(&device, 64, 48, CudaFrameFormat::Nv12);
+        assert!(
+            filtered(&mut filter, eight_bit).is_err(),
+            "NV12 is not ten bits"
+        );
     }
 
     /// A model whose output is not a whole number of times larger is

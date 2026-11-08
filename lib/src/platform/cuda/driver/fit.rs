@@ -34,6 +34,8 @@ pub(crate) struct FitKernels {
     warp_nv12: CUfunction,
     warp_bgra: CUfunction,
     unfit: CUfunction,
+    p010: CUfunction,
+    unfit_p010: CUfunction,
 }
 
 // SAFETY: a module and two function handles in a context that is pushed
@@ -133,6 +135,8 @@ impl CudaDriver {
                     warp_nv12,
                     warp_bgra,
                     unfit,
+                    p010,
+                    unfit_p010,
                 ],
             ) = unsafe {
                 load_module(
@@ -147,6 +151,8 @@ impl CudaDriver {
                         "warp_nv12",
                         "warp_bgra",
                         "unfit_bgra",
+                        "fit_p010",
+                        "unfit_p010",
                     ],
                 )?
             };
@@ -162,6 +168,8 @@ impl CudaDriver {
                 warp_nv12,
                 warp_bgra,
                 unfit,
+                p010,
+                unfit_p010,
             })
         })
     }
@@ -211,6 +219,37 @@ impl CudaDriver {
         size: (u32, u32),
         colour: &YuvToBgra,
     ) -> Result<(), CudaDriverError> {
+        self.fit_yuv(kernels.nv12, tensor, slot, fit, source, size, colour)
+    }
+
+    /// [`Self::fit_nv12`] for a P010 picture, read by rows of ten bits —
+    /// [`YuvToBgra::of_frame_at_depth`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fit_p010(
+        &self,
+        kernels: &FitKernels,
+        tensor: &CudaTensor,
+        slot: usize,
+        fit: Fit,
+        source: Nv12Surface,
+        size: (u32, u32),
+        colour: &YuvToBgra,
+    ) -> Result<(), CudaDriverError> {
+        self.fit_yuv(kernels.p010, tensor, slot, fit, source, size, colour)
+    }
+
+    /// What `fit_nv12` and `fit_p010` share: their parameters are the same.
+    #[allow(clippy::too_many_arguments)]
+    fn fit_yuv(
+        &self,
+        kernel: CUfunction,
+        tensor: &CudaTensor,
+        slot: usize,
+        fit: Fit,
+        source: Nv12Surface,
+        size: (u32, u32),
+        colour: &YuvToBgra,
+    ) -> Result<(), CudaDriverError> {
         let (grid, block, mut dst) = grid(fit, tensor, slot)?;
         let (mut model_w, mut model_h) = fit.model;
         let (mut offset_x, mut offset_y) = fit.offset;
@@ -239,12 +278,12 @@ impl CudaDriver {
             ];
             params.extend(sampling.iter_mut().map(arg));
             params.extend(rows.iter_mut().flatten().map(arg));
-            // SAFETY: one pointer per parameter `fit_nv12` declares, in that
-            // order — thirteen buffer, size and placement values, six of
-            // sampling, then twelve row coefficients — each at a live local;
-            // the context is current
-            // inside `with_context`, and the kernel is this context's.
-            unsafe { launch(kernels.nv12, grid, block, &mut params) }
+            // SAFETY: one pointer per parameter `fit_nv12` and `fit_p010`
+            // declare, in that order — thirteen buffer, size and placement
+            // values, six of sampling, then twelve row coefficients — each at
+            // a live local; the context is current inside `with_context`,
+            // and the kernel is this context's.
+            unsafe { launch(kernel, grid, block, &mut params) }
         })
     }
 
@@ -489,6 +528,120 @@ impl CudaDriver {
             // which the checks above hold it to; the context is current
             // inside `with_context`, and the kernel is this context's.
             unsafe { launch(kernels.unfit, grid, BLOCK, &mut params) }
+        })
+    }
+}
+
+impl CudaDriver {
+    /// Writes `unfit`'s region of a model's output — three planes of
+    /// floats at `src` — to the P010 picture `dst`, `size` in pixels, by
+    /// `rows`: R'G'B' to normalized ten-bit Y', Cb and Cr, as
+    /// [`crate::color::rgb_to_yuv_rows_of_depth`] makes them. The region,
+    /// where it goes and the picture are even in every side, so that each
+    /// block of four pixels shares one chroma sample.
+    ///
+    /// Launches asynchronously, as the fits do.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::unfit_bgra`].
+    pub(crate) unsafe fn unfit_p010(
+        &self,
+        kernels: &FitKernels,
+        src: CUdeviceptr,
+        unfit: Unfit,
+        dst: Nv12Surface,
+        size: (u32, u32),
+        rows: [[f32; 4]; 3],
+    ) -> Result<(), CudaDriverError> {
+        const BLOCK: u32 = 16;
+        let Unfit {
+            plane: (plane_w, plane_h),
+            region: (region_x, region_y, region_w, region_h),
+            at: (dst_x, dst_y),
+            red,
+            blue,
+            mul,
+            add,
+        } = unfit;
+        let floats = 3 * u64::from(plane_w) * u64::from(plane_h);
+        let within = |start: u32, length: u32, side: u32| {
+            u64::from(start) + u64::from(length) <= u64::from(side)
+        };
+        let even = [region_w, region_h, dst_x, dst_y, size.0, size.1]
+            .iter()
+            .all(|side| side.is_multiple_of(2));
+        if floats > u64::from(u32::MAX)
+            || red > 2
+            || blue > 2
+            || !even
+            || !within(region_x, region_w, plane_w)
+            || !within(region_y, region_h, plane_h)
+            || !within(dst_x, region_w, size.0)
+            || !within(dst_y, region_h, size.1)
+            || dst.luma_pitch < size.0 as usize * 2
+            || dst.chroma_pitch < size.0 as usize * 2
+            || dst.luma_pitch > u32::MAX as usize
+            || dst.chroma_pitch > u32::MAX as usize
+        {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "a {region_w}x{region_h} region at {region_x},{region_y} of a \
+                 {plane_w}x{plane_h} output does not go at {dst_x},{dst_y} of a \
+                 {}x{} P010 picture, every side even",
+                size.0, size.1
+            )));
+        }
+        if region_w == 0 || region_h == 0 {
+            return Ok(());
+        }
+        let mut src = src;
+        let (mut luma, mut chroma) = (dst.luma, dst.chroma);
+        let (mut luma_pitch, mut chroma_pitch) = (dst.luma_pitch as u32, dst.chroma_pitch as u32);
+        let (mut plane_w, mut plane_h) = (plane_w, plane_h);
+        let (mut region_x, mut region_y) = (region_x, region_y);
+        let (mut region_w, mut region_h) = (region_w, region_h);
+        let (mut dst_x, mut dst_y) = (dst_x, dst_y);
+        let (mut red, mut blue) = (red, blue);
+        let [mut mul_r, mut mul_g, mut mul_b] = mul;
+        let [mut add_r, mut add_g, mut add_b] = add;
+        let mut rows = rows;
+        let grid = (
+            (region_w / 2).div_ceil(BLOCK),
+            (region_h / 2).div_ceil(BLOCK),
+        );
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut src),
+                arg(&mut plane_w),
+                arg(&mut plane_h),
+                arg(&mut region_x),
+                arg(&mut region_y),
+                arg(&mut region_w),
+                arg(&mut region_h),
+                arg(&mut luma),
+                arg(&mut luma_pitch),
+                arg(&mut chroma),
+                arg(&mut chroma_pitch),
+                arg(&mut dst_x),
+                arg(&mut dst_y),
+                arg(&mut red),
+                arg(&mut blue),
+                arg(&mut mul_r),
+                arg(&mut mul_g),
+                arg(&mut mul_b),
+                arg(&mut add_r),
+                arg(&mut add_g),
+                arg(&mut add_b),
+            ];
+            params.extend(rows.iter_mut().flatten().map(arg));
+            // SAFETY: one pointer per parameter `unfit_p010` declares, in
+            // that order — twenty-one buffer, place and value numbers, then
+            // twelve row coefficients — each at a live local. It reads three
+            // planes of `src` inside the region, the caller's promise and the
+            // checks above, and writes the region's samples inside `size` of
+            // `dst`, which the checks above hold it to; the context is current
+            // inside `with_context`, and the kernel is this context's.
+            unsafe { launch(kernels.unfit_p010, grid, BLOCK, &mut params) }
         })
     }
 }

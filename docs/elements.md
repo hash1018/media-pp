@@ -117,7 +117,7 @@ element after the detector can read it.
 | `ObjectAnalytics` | Counts the objects in zones of the picture and across lines |
 | **Cut detectors** — `SwCutDetector`, `CudaCutDetector`, `D3d12CutDetector`, `MetalCutDetector` | Mark the first picture of each shot of an edited video with a `SceneCut`, where a tracker starts over |
 | `StreamMux` | Gathers a picture of each of several streams into one batch for a model; the demux its handle makes splits them out again |
-| **Picture filters** — `CudaOrtImageFilter` | Make each picture into the one an ONNX model makes of it — enlarged, cleaned, brightened — whatever the model is, so long as it takes a picture and makes one the same or a whole number of times larger; run in overlapping pieces, its output BGRA |
+| **Picture filters** — `CudaOrtImageFilter` | Make each picture into the one an ONNX model makes of it — enlarged, cleaned, brightened — whatever the model is, so long as it takes a picture and makes one the same or a whole number of times larger; run in overlapping pieces, its output BGRA, or P010 of P010 in ten bits, HDR kept |
 | **Overlays** — `SwDetectionOverlay`, `CudaDetectionOverlay`, `D3d12DetectionOverlay`, `MetalDetectionOverlay` | Draw boxes and labels, and an `ObjectAnalytics`'s zones and lines with their counts, as `OverlayParts` says; or hide what was found — faces, number plates — with a mosaic, a blur or a fill, of the box or the ellipse inside it, hard-edged or faded, each class as its `ClassRule` says |
 
 ## Speech

@@ -290,6 +290,10 @@ pub enum OrtError {
     #[cfg(feature = "ort-cuda")]
     #[error(transparent)]
     CudaPicture(#[from] crate::elements::CudaUploadError),
+    /// A picture filter asked to make what it does not: BGRA or P010.
+    #[cfg(feature = "ort-cuda")]
+    #[error("a picture filter makes BGRA or P010, not {0:?}")]
+    UnsupportedOutput(crate::elements::CudaFrameFormat),
     /// A detector asked to take no pictures at a time.
     #[cfg(any(
         feature = "ort-cuda",

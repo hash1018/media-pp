@@ -2001,6 +2001,22 @@ impl YuvToBgra {
         Self::of(frame.color_space(), frame.color_range(), frame.height())
     }
 
+    /// For `frame`, by its own tags, its samples `depth` bits each — see
+    /// [`crate::color::yuv_to_rgb_rows_of_depth`]. Only its rows are read:
+    /// what reads by these keeps the picture's own primaries.
+    #[cfg(feature = "ort-cuda")]
+    pub(crate) fn of_frame_at_depth(frame: &ffmpeg_next::frame::Video, depth: u32) -> Self {
+        Self {
+            rows: crate::color::yuv_to_rgb_rows_of_depth(
+                frame.color_space(),
+                frame.color_range(),
+                frame.height(),
+                depth,
+            ),
+            gamut: None,
+        }
+    }
+
     /// What this crate's CUDA path writes: BT.709 limited range — see
     /// [`bt709_limited`].
     pub(crate) fn bt709_limited() -> Self {
