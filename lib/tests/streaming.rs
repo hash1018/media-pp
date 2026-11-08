@@ -34,9 +34,11 @@ const RATE: i32 = 15;
 /// seconds' worth, from a keyframe.
 const PICTURES: usize = 30;
 const WITHIN: Duration = Duration::from_secs(20);
-/// How long a recording runs before it is finished and read: some fifty
-/// pictures, from a keyframe.
-const RECORD_FOR: Duration = Duration::from_millis(3_500);
+/// How many pictures a recording is handed before it is finished and read:
+/// counted as its source hands them on, not waited for as a time — a loaded
+/// machine encoded 24 in three and a half seconds that a free one encodes
+/// fifty in.
+const RECORD_PICTURES: u64 = 50;
 
 /// The two encoders a live input is made with.
 struct Encoders {
@@ -541,10 +543,38 @@ impl Drop for Scratch {
 }
 
 /// Records for long enough to have `PICTURES`, then finishes the recording.
-fn recorded_for_a_while(recorder: &Pipeline, input: &Pipeline) {
-    std::thread::sleep(RECORD_FOR);
+fn recorded_for_a_while(recorder: &Pipeline, streams: &[StreamInfo], input: &Pipeline) {
+    until_recorded(recorder, streams);
     recorder.finish();
     input.stop();
+}
+
+/// Waits for the recorder's source to hand on [`RECORD_PICTURES`] of the
+/// pictures of `streams`, the tracks it records.
+fn until_recorded(recorder: &Pipeline, streams: &[StreamInfo]) {
+    let video = streams
+        .iter()
+        .position(|stream| stream.kind() == media::Type::Video)
+        .expect("a picture track");
+    let handed = || {
+        recorder
+            .stats()
+            .elements
+            .iter()
+            .find(|element| element.branch.is_none() && !element.pads.is_empty())
+            .and_then(|source| source.pads.get(video))
+            .map_or(0, |pad| pad.buffers)
+    };
+    let deadline = Instant::now() + 3 * WITHIN;
+    while handed() < RECORD_PICTURES {
+        assert!(
+            Instant::now() < deadline,
+            "{} pictures handed to the recording within {:?}",
+            handed(),
+            3 * WITHIN
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
@@ -653,7 +683,7 @@ fn whip_in_recorded() {
     let file = scratch.0.clone();
     let (source, streams) = BroadcastSource::new("recorder", &live_stream).unwrap();
     let recorder = record(source, &streams, &file);
-    recorded_for_a_while(&recorder, &input);
+    recorded_for_a_while(&recorder, &streams, &input);
 
     let (pictures, has_sound) = in_file(&file);
     assert!(pictures >= PICTURES, "{pictures} pictures recorded");
@@ -673,7 +703,7 @@ fn rtsp_in_recorded() {
     let file = scratch.0.clone();
     let (source, streams) = BroadcastSource::new("recorder", &camera).unwrap();
     let recorder = record(source, &streams, &file);
-    recorded_for_a_while(&recorder, &input);
+    recorded_for_a_while(&recorder, &streams, &input);
 
     let (pictures, has_sound) = in_file(&file);
     assert!(pictures >= PICTURES, "{pictures} pictures recorded");
@@ -700,7 +730,7 @@ fn whep_out_recorded() {
     )
     .unwrap();
     let recorder = record(source, &streams, &file);
-    recorded_for_a_while(&recorder, &input);
+    recorded_for_a_while(&recorder, &streams, &input);
 
     let (pictures, has_sound) = in_file(&file);
     assert!(pictures >= PICTURES, "{pictures} pictures recorded");
@@ -902,8 +932,8 @@ fn recorded_while_played_both_ways() {
     servers.until_live(&live_stream);
 
     let scratch = Scratch::new("both-ways-hls");
-    let (source, streams) = BroadcastSource::new("recorder", &live_stream).unwrap();
-    let recorder = record_hls(source, &streams, &scratch.0);
+    let (source, recorded) = BroadcastSource::new("recorder", &live_stream).unwrap();
+    let recorder = record_hls(source, &recorded, &scratch.0);
     let (source, streams) = WebRtcSource::open(
         "webrtc-player",
         &servers.http.whep_url("live"),
@@ -922,9 +952,9 @@ fn recorded_while_played_both_ways() {
     plays(&webrtc_player, sound);
     plays(&rtsp_player, sound);
     // A player joins with what the broadcast holds and catches up at
-    // once; the recording goes at the stream's own pace, so it is given
-    // its own time rather than the players'.
-    std::thread::sleep(RECORD_FOR);
+    // once; the recording goes at the stream's own pace, so it is waited
+    // for itself rather than through the players.
+    until_recorded(&recorder, &recorded);
     recorder.finish();
     let (pictures, has_sound) = in_file(&scratch.0.join("index.m3u8"));
     assert!(pictures >= PICTURES, "{pictures} pictures recorded");
@@ -1028,7 +1058,7 @@ mod rtmp {
         let scratch = Scratch::new("rtmp-hls");
         let (source, streams) = BroadcastSource::new("recorder", &studio).unwrap();
         let recorder = record_hls(source, &streams, &scratch.0);
-        recorded_for_a_while(&recorder, &input);
+        recorded_for_a_while(&recorder, &streams, &input);
         let (pictures, has_sound) = in_file(&scratch.0.join("index.m3u8"));
         assert!(pictures >= PICTURES, "{pictures} pictures recorded");
         assert!(has_sound, "AAC goes into the recording as it came");

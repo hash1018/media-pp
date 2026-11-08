@@ -741,19 +741,24 @@ fn play_into(broadcast: &Broadcast, path: &str) {
     })
     .expect("the input is wired");
     input.run().expect("the input runs");
-    wait_for_finished(&input);
+    wait_for_finished(&input, "input");
     input.stop();
 }
 
-fn wait_for_finished(pipeline: &Pipeline) {
+fn wait_for_finished(pipeline: &Pipeline, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match pipeline.bus().recv_timeout(left) {
             Ok(BusEvent::Finished) => return,
-            Ok(BusEvent::Error { error, .. }) => panic!("the pipeline failed: {error}"),
+            Ok(BusEvent::Error {
+                element_type,
+                name,
+                error,
+                ..
+            }) => panic!("the {what} failed at {element_type:?} {name}: {error}"),
             Ok(_) => {}
-            Err(_) => panic!("the pipeline did not finish in time"),
+            Err(_) => panic!("the {what} did not finish in time"),
         }
     }
 }
@@ -815,7 +820,7 @@ fn a_recording_through_a_broadcast_source_starts_at_a_keyframe_and_goes_on_acros
     std::thread::sleep(gap);
     play_into(&broadcast, &path);
     broadcast.close();
-    wait_for_finished(&recording);
+    wait_for_finished(&recording, "recording");
     recording.stop();
 
     let fixture = read_file(std::path::Path::new(&path));
