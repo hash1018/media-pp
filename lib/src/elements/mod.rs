@@ -374,7 +374,8 @@ pub use vision::{
 #[cfg(feature = "ort-cuda")]
 pub use vision::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
-    CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    CudaOrtEmbedderOptions, CudaOrtImageFilter, CudaOrtImageFilterOptions, CudaRuntime,
+    LibraryVersion, RuntimeShortfall,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use vision::{

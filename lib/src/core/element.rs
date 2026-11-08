@@ -321,6 +321,9 @@ pub enum ElementType {
     SwOrtEmbedder,
     /// ONNX Runtime embedder of detected objects on CUDA pictures.
     CudaOrtEmbedder,
+    /// ONNX Runtime model making each CUDA picture into another, one that
+    /// enlarges, cleans or brightens it.
+    CudaOrtImageFilter,
     /// ONNX Runtime object-detection filter on VideoToolbox pictures,
     /// through Core ML.
     MetalOrtDetector,

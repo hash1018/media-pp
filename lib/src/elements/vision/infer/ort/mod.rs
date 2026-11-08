@@ -39,7 +39,8 @@ pub use cuda::UseTensorRtPolicy;
 #[cfg(feature = "ort-cuda")]
 pub use cuda::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
-    CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    CudaOrtEmbedderOptions, CudaOrtImageFilter, CudaOrtImageFilterOptions, CudaRuntime,
+    LibraryVersion, RuntimeShortfall,
 };
 #[cfg(all(target_os = "windows", feature = "ort-directml"))]
 pub use d3d12::{D3d12OrtClassifier, D3d12OrtDetector, D3d12OrtDetectorOptions, D3d12OrtEmbedder};
@@ -284,6 +285,11 @@ pub enum OrtError {
     #[cfg(feature = "ort-cuda")]
     #[error("a CUDA picture has no surface")]
     MissingSurface,
+    /// A CUDA picture for a model's output could not be had from its pool,
+    /// or one made could not be handed on again.
+    #[cfg(feature = "ort-cuda")]
+    #[error(transparent)]
+    CudaPicture(#[from] crate::elements::CudaUploadError),
     /// A detector asked to take no pictures at a time.
     #[cfg(any(
         feature = "ort-cuda",

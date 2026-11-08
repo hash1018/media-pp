@@ -753,6 +753,126 @@ fn a_picture_is_fitted_from_every_pixel_it_is_shrunk_from() {
     }
 }
 
+/// A BGRA picture fitted at its own size and written back is the same
+/// bytes, wherever a region of it is put, and with red and blue swapped
+/// where their planes are; the values it reads are the model's, undone.
+#[cfg(feature = "ort-cuda")]
+#[test]
+fn a_picture_fitted_and_written_back_is_the_same_bytes() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let (width, height) = (40u32, 24u32);
+    let pixel = |x: u32, y: u32| {
+        [
+            ((x * 7 + y * 3) % 256) as u8,
+            ((x * 13 + y * 5) % 256) as u8,
+            ((x * 29 + y * 11) % 256) as u8,
+            255,
+        ]
+    };
+    let buf = cuda_bgra_surface(&device, width, height, pixel).expect("uploaded");
+    let MediaBuffer::Video(frame) = &buf else {
+        panic!("a picture");
+    };
+    let driver = CudaDriver::retain_primary().expect("driver");
+    let kernels = driver.fit_kernels().expect("kernels");
+    let tensor = driver.batch_tensor(width, height, 1).expect("tensor");
+    let fit = Fit {
+        model: (width, height),
+        offset: (0, 0),
+        scaled: (width, height),
+        orientation: crate::orientation::Orientation::UPRIGHT,
+    };
+    let source = BgraSurface::from_frame(frame).expect("surface");
+    driver
+        .fit_bgra(&kernels, &tensor, 0, fit, source, (width, height))
+        .expect("fits");
+    // Each value doubled less a half, as a model of -0.5 to 1.5 would
+    // have it, which the reading undoes.
+    driver
+        .scale_planes(&kernels, &tensor, (width, height), 1, [2.0; 3], [-0.5; 3])
+        .expect("scaled");
+    let (out_w, out_h) = (48u32, 30u32);
+    let out = driver.bgra_scratch(out_w, out_h).expect("scratch");
+    let unfit = |region, at, red, blue| Unfit {
+        plane: (width, height),
+        region,
+        at,
+        red,
+        blue,
+        mul: [0.5; 3],
+        add: [0.25; 3],
+    };
+    let written = |unfit: Unfit| {
+        // SAFETY: the tensor holds three planes of `width` by `height` in
+        // this driver's context, fitted on its stream before this.
+        unsafe {
+            driver
+                .unfit_bgra(
+                    &kernels,
+                    tensor.pointer(),
+                    unfit,
+                    out.surface(),
+                    (out_w, out_h),
+                )
+                .expect("written");
+        }
+        driver.synchronize().expect("ran");
+        let mut bytes = vec![0u8; (out_w * out_h * 4) as usize];
+        driver
+            .download_rect(
+                out.surface().pixels,
+                out.surface().pitch,
+                0,
+                0,
+                (out_w * 4) as usize,
+                out_h as usize,
+                &mut bytes,
+            )
+            .expect("read back");
+        bytes
+    };
+    let at = |bytes: &[u8], x: u32, y: u32| -> [u8; 4] {
+        bytes[((y * out_w + x) * 4) as usize..][..4]
+            .try_into()
+            .unwrap()
+    };
+
+    let whole = written(unfit((0, 0, width, height), (5, 3), 0, 2));
+    for y in 0..height {
+        for x in 0..width {
+            assert_eq!(at(&whole, x + 5, y + 3), pixel(x, y), "({x}, {y})");
+        }
+    }
+    let part = written(unfit((10, 4, 8, 6), (0, 0), 2, 0));
+    for y in 0..6 {
+        for x in 0..8 {
+            let [b, g, r, a] = pixel(x + 10, y + 4);
+            assert_eq!(at(&part, x, y), [r, g, b, a], "swapped, ({x}, {y})");
+        }
+    }
+    // A region past the output's planes, or the picture's edge, is refused.
+    // SAFETY: refused before anything is launched.
+    unsafe {
+        for unfit in [
+            unfit((0, 0, width + 1, height), (0, 0), 0, 2),
+            unfit((0, 0, width, height), (9, 0), 0, 2),
+        ] {
+            assert!(matches!(
+                driver.unfit_bgra(
+                    &kernels,
+                    tensor.pointer(),
+                    unfit,
+                    out.surface(),
+                    (out_w, out_h)
+                ),
+                Err(CudaDriverError::KernelRejected(_))
+            ));
+        }
+    }
+}
+
 /// What the warp kernels read through `map` into a 12 by 10 input from a
 /// 40 by 30 picture whose luma — and, as BGRA, red — at pixel `(x, y)` is
 /// `pattern(x, y)`: the red plane, row by row.

@@ -33,6 +33,7 @@ pub(crate) struct FitKernels {
     faces: CUfunction,
     warp_nv12: CUfunction,
     warp_bgra: CUfunction,
+    unfit: CUfunction,
 }
 
 // SAFETY: a module and two function handles in a context that is pushed
@@ -120,7 +121,20 @@ impl CudaDriver {
         self.with_context(|| {
             // SAFETY: the context is current inside `with_context`, which is
             // `load_module`'s whole contract.
-            let (module, [nv12, bgra, scale, swap, best, faces, warp_nv12, warp_bgra]) = unsafe {
+            let (
+                module,
+                [
+                    nv12,
+                    bgra,
+                    scale,
+                    swap,
+                    best,
+                    faces,
+                    warp_nv12,
+                    warp_bgra,
+                    unfit,
+                ],
+            ) = unsafe {
                 load_module(
                     FIT_PTX,
                     [
@@ -132,6 +146,7 @@ impl CudaDriver {
                         "keep_faces",
                         "warp_nv12",
                         "warp_bgra",
+                        "unfit_bgra",
                     ],
                 )?
             };
@@ -146,6 +161,7 @@ impl CudaDriver {
                 faces,
                 warp_nv12,
                 warp_bgra,
+                unfit,
             })
         })
     }
@@ -357,6 +373,122 @@ impl CudaDriver {
             // SAFETY: one pointer per parameter `warp_bgra` declares, in that
             // order, each at a live local; as `warp_nv12`.
             unsafe { launch(kernels.warp_bgra, grid, block, &mut params) }
+        })
+    }
+}
+
+/// What part of a model's output picture [`CudaDriver::unfit_bgra`] writes,
+/// where, and how its values are read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Unfit {
+    /// The size of each of the output's three planes.
+    pub(crate) plane: (u32, u32),
+    /// The corner and size of the part of them written.
+    pub(crate) region: (u32, u32, u32, u32),
+    /// Where in the picture that corner goes.
+    pub(crate) at: (u32, u32),
+    /// The planes red and blue are in; green is in the middle one.
+    pub(crate) red: u32,
+    pub(crate) blue: u32,
+    /// Red, green and blue each made `x · mul + add` — back to 0 to 1 —
+    /// before they are held there and made bytes.
+    pub(crate) mul: [f32; 3],
+    pub(crate) add: [f32; 3],
+}
+
+impl CudaDriver {
+    /// Writes `unfit`'s region of a model's output — three planes of
+    /// floats at `src` — to the BGRA picture `dst`, `size` in pixels, opaque.
+    ///
+    /// Launches asynchronously, as the fits do.
+    ///
+    /// # Safety
+    ///
+    /// `src` must hold three planes of `unfit.plane` in this driver's
+    /// context, written by work this call is ordered after, and stay
+    /// allocated until the next synchronous call on this context.
+    pub(crate) unsafe fn unfit_bgra(
+        &self,
+        kernels: &FitKernels,
+        src: CUdeviceptr,
+        unfit: Unfit,
+        dst: BgraSurface,
+        size: (u32, u32),
+    ) -> Result<(), CudaDriverError> {
+        const BLOCK: u32 = 16;
+        let Unfit {
+            plane: (plane_w, plane_h),
+            region: (region_x, region_y, region_w, region_h),
+            at: (dst_x, dst_y),
+            red,
+            blue,
+            mul,
+            add,
+        } = unfit;
+        let floats = 3 * u64::from(plane_w) * u64::from(plane_h);
+        let within = |start: u32, length: u32, side: u32| {
+            u64::from(start) + u64::from(length) <= u64::from(side)
+        };
+        if floats > u64::from(u32::MAX)
+            || red > 2
+            || blue > 2
+            || !within(region_x, region_w, plane_w)
+            || !within(region_y, region_h, plane_h)
+            || !within(dst_x, region_w, size.0)
+            || !within(dst_y, region_h, size.1)
+            || dst.pitch < size.0 as usize * 4
+            || dst.pitch > u32::MAX as usize
+        {
+            return Err(CudaDriverError::KernelRejected(format!(
+                "a {region_w}x{region_h} region at {region_x},{region_y} of a \
+                 {plane_w}x{plane_h} output does not go at {dst_x},{dst_y} of a \
+                 {}x{} picture",
+                size.0, size.1
+            )));
+        }
+        if region_w == 0 || region_h == 0 {
+            return Ok(());
+        }
+        let mut src = src;
+        let mut pixels = dst.pixels;
+        let mut pitch = dst.pitch as u32;
+        let (mut plane_w, mut plane_h) = (plane_w, plane_h);
+        let (mut region_x, mut region_y) = (region_x, region_y);
+        let (mut region_w, mut region_h) = (region_w, region_h);
+        let (mut dst_x, mut dst_y) = (dst_x, dst_y);
+        let (mut red, mut blue) = (red, blue);
+        let [mut mul_r, mut mul_g, mut mul_b] = mul;
+        let [mut add_r, mut add_g, mut add_b] = add;
+        let grid = (region_w.div_ceil(BLOCK), region_h.div_ceil(BLOCK));
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                arg(&mut src),
+                arg(&mut plane_w),
+                arg(&mut plane_h),
+                arg(&mut region_x),
+                arg(&mut region_y),
+                arg(&mut region_w),
+                arg(&mut region_h),
+                arg(&mut pixels),
+                arg(&mut pitch),
+                arg(&mut dst_x),
+                arg(&mut dst_y),
+                arg(&mut red),
+                arg(&mut blue),
+                arg(&mut mul_r),
+                arg(&mut mul_g),
+                arg(&mut mul_b),
+                arg(&mut add_r),
+                arg(&mut add_g),
+                arg(&mut add_b),
+            ];
+            // SAFETY: one pointer per parameter `unfit_bgra` declares, in
+            // that order, each at a live local. It reads three planes of
+            // `src` inside the region, the caller's promise and the checks
+            // above, and writes the region's pixels inside `size` of `dst`,
+            // which the checks above hold it to; the context is current
+            // inside `with_context`, and the kernel is this context's.
+            unsafe { launch(kernels.unfit, grid, BLOCK, &mut params) }
         })
     }
 }

@@ -1697,6 +1697,13 @@ BMDONE:
 /// made RGB by its rows, then darkened by how much of the four was outside,
 /// which is what mixing the RGB of each comes to.
 ///
+/// `unfit_bgra` goes the other way, for a model whose output is a picture:
+/// each thread one pixel of a region of its three float planes — red and
+/// blue in the planes it is told, green in the middle one — each made `x *
+/// mul + add` by its colour, back to 0 to 1, held there and rounded to a
+/// byte, and written to a BGRA picture at a place, opaque. A byte fitted by
+/// `fit_bgra` at its own size comes back the same byte.
+///
 /// Kept apart from [`CONVERT_PTX`], and loaded by the detector alone: every
 /// other CUDA element would otherwise pay for its JIT at construction.
 #[cfg(feature = "ort-cuda")]
@@ -2911,6 +2918,125 @@ WARP_NV12_STORE:
     st.global.f32   [%ad], %b;
 
 WARP_NV12_DONE:
+    ret;
+}
+
+// Each thread one pixel of a region of a model's output picture: see the
+// doc comment above.
+.visible .entry unfit_bgra(
+    .param .u64 src,
+    .param .u32 plane_w,
+    .param .u32 plane_h,
+    .param .u32 region_x,
+    .param .u32 region_y,
+    .param .u32 region_w,
+    .param .u32 region_h,
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u32 dst_x,
+    .param .u32 dst_y,
+    .param .u32 red_plane,
+    .param .u32 blue_plane,
+    .param .f32 mul_r,
+    .param .f32 mul_g,
+    .param .f32 mul_b,
+    .param .f32 add_r,
+    .param .f32 add_g,
+    .param .f32 add_b
+)
+{
+    .reg .pred  %p<3>;
+    .reg .b16   %rs<5>;
+    .reg .b32   %r<32>;
+    .reg .f32   %f<12>;
+    .reg .b64   %rd<12>;
+
+    ld.param.u32    %r1, [region_w];
+    ld.param.u32    %r2, [region_h];
+
+    mov.u32         %r3, %ctaid.x;
+    mov.u32         %r4, %ntid.x;
+    mov.u32         %r5, %tid.x;
+    mad.lo.s32      %r6, %r3, %r4, %r5;
+    mov.u32         %r7, %ctaid.y;
+    mov.u32         %r8, %ntid.y;
+    mov.u32         %r9, %tid.y;
+    mad.lo.s32      %r10, %r7, %r8, %r9;
+
+    setp.ge.u32     %p1, %r6, %r1;
+    @%p1 bra        UNFIT_BGRA_DONE;
+    setp.ge.u32     %p2, %r10, %r2;
+    @%p2 bra        UNFIT_BGRA_DONE;
+
+    // The pixel's place in a plane, and a plane's length, in floats.
+    ld.param.u32    %r11, [plane_w];
+    ld.param.u32    %r12, [plane_h];
+    ld.param.u32    %r13, [region_x];
+    ld.param.u32    %r14, [region_y];
+    add.s32         %r15, %r13, %r6;
+    add.s32         %r16, %r14, %r10;
+    mad.lo.s32      %r17, %r16, %r11, %r15;
+    mul.lo.s32      %r18, %r11, %r12;
+
+    // Red from its plane, green from the middle one, blue from its own.
+    ld.param.u64    %rd1, [src];
+    ld.param.u32    %r19, [red_plane];
+    ld.param.u32    %r20, [blue_plane];
+    mad.lo.s32      %r21, %r19, %r18, %r17;
+    mul.wide.u32    %rd2, %r21, 4;
+    add.s64         %rd3, %rd1, %rd2;
+    ld.global.f32   %f1, [%rd3];
+    add.s32         %r22, %r18, %r17;
+    mul.wide.u32    %rd4, %r22, 4;
+    add.s64         %rd5, %rd1, %rd4;
+    ld.global.f32   %f2, [%rd5];
+    mad.lo.s32      %r23, %r20, %r18, %r17;
+    mul.wide.u32    %rd6, %r23, 4;
+    add.s64         %rd7, %rd1, %rd6;
+    ld.global.f32   %f3, [%rd7];
+
+    // The model's values back to 0 to 1, held there (a NaN to 0), and
+    // made bytes, rounded to the nearest.
+    ld.param.f32    %f4, [mul_r];
+    ld.param.f32    %f5, [mul_g];
+    ld.param.f32    %f6, [mul_b];
+    ld.param.f32    %f7, [add_r];
+    ld.param.f32    %f8, [add_g];
+    ld.param.f32    %f9, [add_b];
+    fma.rn.f32      %f1, %f1, %f4, %f7;
+    fma.rn.f32      %f2, %f2, %f5, %f8;
+    fma.rn.f32      %f3, %f3, %f6, %f9;
+    add.sat.f32     %f1, %f1, 0f00000000;
+    add.sat.f32     %f2, %f2, 0f00000000;
+    add.sat.f32     %f3, %f3, 0f00000000;
+    mul.f32         %f1, %f1, 0f437F0000;
+    mul.f32         %f2, %f2, 0f437F0000;
+    mul.f32         %f3, %f3, 0f437F0000;
+    cvt.rni.u32.f32 %r24, %f1;
+    cvt.rni.u32.f32 %r25, %f2;
+    cvt.rni.u32.f32 %r26, %f3;
+
+    // B, G, R and an opaque alpha at the picture's pixel.
+    ld.param.u64    %rd8, [dst];
+    ld.param.u32    %r27, [dst_pitch];
+    ld.param.u32    %r28, [dst_x];
+    ld.param.u32    %r29, [dst_y];
+    add.s32         %r28, %r28, %r6;
+    add.s32         %r29, %r29, %r10;
+    mul.wide.u32    %rd9, %r29, %r27;
+    mul.wide.u32    %rd10, %r28, 4;
+    add.s64         %rd11, %rd8, %rd9;
+    add.s64         %rd11, %rd11, %rd10;
+    cvt.u16.u32     %rs1, %r26;
+    cvt.u16.u32     %rs2, %r25;
+    cvt.u16.u32     %rs3, %r24;
+    mov.u16         %rs4, 255;
+    st.global.u8    [%rd11], %rs1;
+    st.global.u8    [%rd11+1], %rs2;
+    st.global.u8    [%rd11+2], %rs3;
+    st.global.u8    [%rd11+3], %rs4;
+
+UNFIT_BGRA_DONE:
     ret;
 }
 "#;

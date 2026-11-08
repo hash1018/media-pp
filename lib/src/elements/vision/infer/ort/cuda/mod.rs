@@ -4,6 +4,7 @@
 mod cuda_ort_classifier;
 mod cuda_ort_detector;
 mod cuda_ort_embedder;
+mod cuda_ort_image_filter;
 mod runtime;
 
 pub use cuda_ort_classifier::CudaOrtClassifier;
@@ -11,6 +12,7 @@ pub use cuda_ort_classifier::CudaOrtClassifier;
 pub use cuda_ort_detector::UseTensorRtPolicy;
 pub use cuda_ort_detector::{CudaOrtDetector, CudaOrtDetectorOptions};
 pub use cuda_ort_embedder::{CudaOrtEmbedder, CudaOrtEmbedderOptions};
+pub use cuda_ort_image_filter::{CudaOrtImageFilter, CudaOrtImageFilterOptions};
 pub use runtime::{CudaRuntime, LibraryVersion, RuntimeShortfall};
 
 use crate::element::ElementType;

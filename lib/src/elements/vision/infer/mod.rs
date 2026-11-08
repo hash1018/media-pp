@@ -20,7 +20,8 @@ pub use self::ort::{
 #[cfg(feature = "ort-cuda")]
 pub use self::ort::{
     CudaOrtClassifier, CudaOrtDetector, CudaOrtDetectorOptions, CudaOrtEmbedder,
-    CudaOrtEmbedderOptions, CudaRuntime, LibraryVersion, RuntimeShortfall,
+    CudaOrtEmbedderOptions, CudaOrtImageFilter, CudaOrtImageFilterOptions, CudaRuntime,
+    LibraryVersion, RuntimeShortfall,
 };
 #[cfg(all(target_os = "windows", feature = "ort-directml"))]
 pub use self::ort::{
